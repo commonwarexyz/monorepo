@@ -1132,4 +1132,447 @@ mod tests {
         let state2 = test_store_operations_and_restart(100);
         assert_eq!(state1, state2);
     }
+
+    #[test_traced]
+    fn test_store_prune_basic() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 100, // Small blobs to test multiple blob handling
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            // Insert data across multiple blobs
+            let values = vec![
+                (0u64, FixedBytes::new([0u8; 32])),     // Blob 0
+                (50u64, FixedBytes::new([50u8; 32])),   // Blob 0
+                (100u64, FixedBytes::new([100u8; 32])), // Blob 1
+                (150u64, FixedBytes::new([150u8; 32])), // Blob 1
+                (200u64, FixedBytes::new([200u8; 32])), // Blob 2
+                (300u64, FixedBytes::new([44u8; 32])),  // Blob 3
+            ];
+
+            for (index, value) in &values {
+                store.put(*index, value.clone()).unwrap();
+            }
+            store.sync().await.unwrap();
+
+            // Verify all values exist
+            for (index, value) in &values {
+                assert_eq!(store.get(*index).await.unwrap().unwrap(), *value);
+            }
+
+            // Prune up to index 150 (should remove blobs 0 and 1)
+            let pruned_to = store.prune(150).await.unwrap();
+            assert_eq!(pruned_to, 100); // Prunes at blob boundary (blob 0, indices 0-99)
+            let buffer = context.encode();
+            assert!(buffer.contains("pruned_total 1"));
+
+            // Verify pruned data is gone
+            assert!(!store.has(0));
+            assert!(!store.has(50));
+            assert!(store.get(0).await.unwrap().is_none());
+            assert!(store.get(50).await.unwrap().is_none());
+
+            // Verify remaining data is still there
+            assert!(store.has(100));
+            assert!(store.has(150));
+            assert!(store.has(200));
+            assert!(store.has(300));
+            assert_eq!(store.get(100).await.unwrap().unwrap(), values[2].1);
+            assert_eq!(store.get(150).await.unwrap().unwrap(), values[3].1);
+            assert_eq!(store.get(200).await.unwrap().unwrap(), values[4].1);
+            assert_eq!(store.get(300).await.unwrap().unwrap(), values[5].1);
+
+            // Prune more aggressively - up to index 250 (should remove blob 1)
+            let pruned_to = store.prune(250).await.unwrap();
+            assert_eq!(pruned_to, 200); // Prunes at blob boundary (blob 1, indices 100-199)
+            let buffer = context.encode();
+            assert!(buffer.contains("pruned_total 2"));
+
+            // Verify more data is pruned
+            assert!(!store.has(100));
+            assert!(!store.has(150));
+            assert!(store.get(100).await.unwrap().is_none());
+            assert!(store.get(150).await.unwrap().is_none());
+
+            // Verify remaining data
+            assert!(store.has(200));
+            assert!(store.has(300));
+            assert_eq!(store.get(200).await.unwrap().unwrap(), values[4].1);
+            assert_eq!(store.get(300).await.unwrap().unwrap(), values[5].1);
+        });
+    }
+
+    #[test_traced]
+    fn test_store_prune_with_gaps() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 100,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            // Insert sparse data with gaps
+            store.put(5, FixedBytes::new([5u8; 32])).unwrap();
+            store.put(105, FixedBytes::new([105u8; 32])).unwrap();
+            store.put(305, FixedBytes::new([49u8; 32])).unwrap();
+            store.sync().await.unwrap();
+
+            // Check gaps before pruning
+            let (current_end, next_start) = store.next_gap(0);
+            assert!(current_end.is_none());
+            assert_eq!(next_start, Some(5));
+
+            let (current_end, next_start) = store.next_gap(5);
+            assert_eq!(current_end, Some(5));
+            assert_eq!(next_start, Some(105));
+
+            // Prune up to index 150 (should remove blob 0)
+            let pruned_to = store.prune(150).await.unwrap();
+            assert_eq!(pruned_to, 100);
+
+            // Verify pruned data is gone
+            assert!(!store.has(5));
+            assert!(store.get(5).await.unwrap().is_none());
+
+            // Verify remaining data and gaps
+            assert!(store.has(105));
+            assert!(store.has(305));
+
+            let (current_end, next_start) = store.next_gap(0);
+            assert!(current_end.is_none());
+            assert_eq!(next_start, Some(105));
+
+            let (current_end, next_start) = store.next_gap(105);
+            assert_eq!(current_end, Some(105));
+            assert_eq!(next_start, Some(305));
+        });
+    }
+
+    #[test_traced]
+    fn test_store_prune_with_pending() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 100,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            // Insert and sync some data
+            store.put(0, FixedBytes::new([0u8; 32])).unwrap();
+            store.put(100, FixedBytes::new([100u8; 32])).unwrap();
+            store.sync().await.unwrap();
+
+            // Add pending entries
+            store.put(50, FixedBytes::new([50u8; 32])).unwrap();
+            store.put(150, FixedBytes::new([150u8; 32])).unwrap();
+
+            // Verify pending entries are visible
+            assert!(store.has(50));
+            assert!(store.has(150));
+            assert_eq!(
+                store.get(50).await.unwrap().unwrap(),
+                FixedBytes::new([50u8; 32])
+            );
+            assert_eq!(
+                store.get(150).await.unwrap().unwrap(),
+                FixedBytes::new([150u8; 32])
+            );
+
+            // Prune up to index 75 (should remove blob 0 but keep pending data)
+            let pruned_to = store.prune(75).await.unwrap();
+            assert_eq!(pruned_to, 0); // Nothing pruned because pending entry at 50
+
+            // The pending entry at 50 should prevent pruning of blob 0
+            assert!(store.has(0));
+            assert!(store.has(50)); // Pending
+            assert!(store.has(100));
+            assert!(store.has(150)); // Pending
+
+            // Sync pending entries
+            store.sync().await.unwrap();
+
+            // Now prune again - this time it should work
+            let pruned_to = store.prune(75).await.unwrap();
+            assert_eq!(pruned_to, 0); // Still nothing pruned because 50 is now persisted
+
+            // Prune more aggressively
+            let pruned_to = store.prune(125).await.unwrap();
+            assert_eq!(pruned_to, 100); // Now blob 0 can be pruned
+
+            // Verify pruning worked
+            assert!(!store.has(0));
+            assert!(!store.has(50));
+            assert!(store.has(100));
+            assert!(store.has(150));
+        });
+    }
+
+    #[test_traced]
+    fn test_store_prune_no_op() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 100,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            // Insert data
+            store.put(100, FixedBytes::new([100u8; 32])).unwrap();
+            store.put(200, FixedBytes::new([200u8; 32])).unwrap();
+            store.sync().await.unwrap();
+
+            // Try to prune before any data - should be no-op
+            let pruned_to = store.prune(50).await.unwrap();
+            assert_eq!(pruned_to, 100); // Returns the start of the first blob
+
+            // Verify no data was actually pruned
+            assert!(store.has(100));
+            assert!(store.has(200));
+            let buffer = context.encode();
+            assert!(buffer.contains("pruned_total 0"));
+
+            // Try to prune exactly at blob boundary - should be no-op
+            let pruned_to = store.prune(100).await.unwrap();
+            assert_eq!(pruned_to, 100);
+
+            // Verify still no data pruned
+            assert!(store.has(100));
+            assert!(store.has(200));
+            let buffer = context.encode();
+            assert!(buffer.contains("pruned_total 0"));
+        });
+    }
+
+    #[test_traced]
+    fn test_store_prune_empty_store() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 100,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            // Try to prune empty store
+            let pruned_to = store.prune(1000).await.unwrap();
+            assert_eq!(pruned_to, 0);
+
+            // Store should still be functional
+            store.put(0, FixedBytes::new([0u8; 32])).unwrap();
+            assert!(store.has(0));
+        });
+    }
+
+    #[test_traced]
+    fn test_store_prune_after_restart() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 100,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            // Create store and add data
+            {
+                let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                store.put(0, FixedBytes::new([0u8; 32])).unwrap();
+                store.put(100, FixedBytes::new([100u8; 32])).unwrap();
+                store.put(200, FixedBytes::new([200u8; 32])).unwrap();
+                store.close().await.unwrap();
+            }
+
+            // Reopen and prune
+            {
+                let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Verify data is there
+                assert!(store.has(0));
+                assert!(store.has(100));
+                assert!(store.has(200));
+
+                // Prune up to index 150
+                let pruned_to = store.prune(150).await.unwrap();
+                assert_eq!(pruned_to, 100);
+
+                // Verify pruning worked
+                assert!(!store.has(0));
+                assert!(store.has(100));
+                assert!(store.has(200));
+
+                store.close().await.unwrap();
+            }
+
+            // Reopen again and verify pruning persisted
+            {
+                let store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                assert!(!store.has(0));
+                assert!(store.has(100));
+                assert!(store.has(200));
+
+                // Check gaps
+                let (current_end, next_start) = store.next_gap(0);
+                assert!(current_end.is_none());
+                assert_eq!(next_start, Some(100));
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_store_prune_multiple_operations() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 50, // Smaller blobs for more granular testing
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            // Insert data across many blobs
+            let mut values = Vec::new();
+            for i in 0..10 {
+                let index = i * 50 + 25; // Middle of each blob
+                let value = FixedBytes::new([i as u8; 32]);
+                store.put(index, value.clone()).unwrap();
+                values.push((index, value));
+            }
+            store.sync().await.unwrap();
+
+            // Prune incrementally
+            for i in 1..5 {
+                let prune_index = i * 50 + 10;
+                let pruned_to = store.prune(prune_index).await.unwrap();
+                assert_eq!(pruned_to, i * 50);
+
+                // Verify appropriate data is pruned
+                for (index, _) in &values {
+                    if *index < pruned_to {
+                        assert!(!store.has(*index), "Index {} should be pruned", index);
+                    } else {
+                        assert!(store.has(*index), "Index {} should not be pruned", index);
+                    }
+                }
+            }
+
+            // Check final state
+            let buffer = context.encode();
+            assert!(buffer.contains("pruned_total 4"));
+
+            // Verify remaining data
+            for i in 4..10 {
+                let index = i * 50 + 25;
+                assert!(store.has(index));
+                assert_eq!(
+                    store.get(index).await.unwrap().unwrap(),
+                    values[i as usize].1
+                );
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_store_prune_blob_boundaries() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 100,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            let mut store = Store::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            // Insert data at blob boundaries
+            store.put(0, FixedBytes::new([0u8; 32])).unwrap(); // Start of blob 0
+            store.put(99, FixedBytes::new([99u8; 32])).unwrap(); // End of blob 0
+            store.put(100, FixedBytes::new([100u8; 32])).unwrap(); // Start of blob 1
+            store.put(199, FixedBytes::new([199u8; 32])).unwrap(); // End of blob 1
+            store.put(200, FixedBytes::new([200u8; 32])).unwrap(); // Start of blob 2
+            store.sync().await.unwrap();
+
+            // Test various pruning points around boundaries
+
+            // Prune exactly at blob boundary (100) - should prune blob 0
+            let pruned_to = store.prune(100).await.unwrap();
+            assert_eq!(pruned_to, 100);
+            assert!(!store.has(0));
+            assert!(!store.has(99));
+            assert!(store.has(100));
+            assert!(store.has(199));
+            assert!(store.has(200));
+
+            // Prune just before next boundary (199) - should not prune blob 1
+            let pruned_to = store.prune(199).await.unwrap();
+            assert_eq!(pruned_to, 100); // No change
+            assert!(store.has(100));
+            assert!(store.has(199));
+            assert!(store.has(200));
+
+            // Prune exactly at next boundary (200) - should prune blob 1
+            let pruned_to = store.prune(200).await.unwrap();
+            assert_eq!(pruned_to, 200);
+            assert!(!store.has(100));
+            assert!(!store.has(199));
+            assert!(store.has(200));
+
+            let buffer = context.encode();
+            assert!(buffer.contains("pruned_total 2"));
+        });
+    }
 }

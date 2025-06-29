@@ -72,6 +72,7 @@ pub struct Store<E: Storage + Metrics + Clock, V: Array> {
     // Metrics
     puts: Counter,
     gets: Counter,
+    pruned: Counter,
 }
 
 impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
@@ -160,8 +161,10 @@ impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
         // Initialize metrics
         let puts = Counter::default();
         let gets = Counter::default();
+        let pruned = Counter::default();
         context.register("puts", "Number of puts performed", puts.clone());
         context.register("gets", "Number of gets performed", gets.clone());
+        context.register("pruned", "Number of blobs pruned", pruned.clone());
 
         Ok(Self {
             context,
@@ -171,6 +174,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
             pending: BTreeMap::new(),
             puts,
             gets,
+            pruned,
         })
     }
 
@@ -221,6 +225,51 @@ impl<E: Storage + Metrics + Clock, V: Array> Store<E, V> {
     /// Get the next gap information for backfill operations.
     pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
         self.intervals.next_gap(index)
+    }
+
+    /// Prune indices older than `min_index` by removing entire blobs. Returns the actual pruning point.
+    ///
+    /// Pruning is done at blob boundaries to avoid partial deletions. A blob is pruned only if
+    /// all possible indices in that blob are less than `min_index`.
+    pub async fn prune(&mut self, min_index: u64) -> Result<u64, Error> {
+        // Calculate section boundaries
+        let min_section = min_index / self.config.items_per_blob;
+
+        if self.blobs.is_empty() {
+            return Ok(0);
+        }
+
+        // Find oldest and newest sections
+        let oldest_section = *self.blobs.keys().next().unwrap();
+        let newest_section = *self.blobs.keys().last().unwrap();
+
+        // Don't prune beyond the point where we'd remove the newest section
+        let prune_up_to_section = std::cmp::min(min_section, newest_section);
+
+        if prune_up_to_section <= oldest_section {
+            // Nothing to prune
+            return Ok(oldest_section * self.config.items_per_blob);
+        }
+
+        // Remove blobs from oldest_section to prune_up_to_section (exclusive)
+        for section in oldest_section..prune_up_to_section {
+            if let Some(blob) = self.blobs.remove(&section) {
+                blob.close().await?;
+                self.context
+                    .remove(&self.config.partition, Some(&section.to_be_bytes()))
+                    .await?;
+
+                // Remove the corresponding index range from intervals
+                let start_index = section * self.config.items_per_blob;
+                let end_index = (section + 1) * self.config.items_per_blob - 1;
+                self.intervals.remove(start_index, end_index);
+
+                debug!(section, start_index, end_index, "pruned blob");
+                self.pruned.inc();
+            }
+        }
+
+        Ok(prune_up_to_section * self.config.items_per_blob)
     }
 
     /// Sync all pending entries to disk.
