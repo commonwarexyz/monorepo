@@ -1,11 +1,10 @@
 use crate::Error;
-use commonware_utils::{from_hex, hex, StableBuf};
-use std::{fs::File, io::SeekFrom, path::PathBuf, sync::Arc};
+use commonware_utils::{hex, StableBuf};
+use std::{io::SeekFrom, sync::Arc};
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::Mutex,
-    task,
 };
 
 #[derive(Clone)]
