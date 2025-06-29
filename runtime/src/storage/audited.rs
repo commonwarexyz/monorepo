@@ -85,13 +85,13 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.write_at(buf, offset).await
     }
 
-    async fn truncate(&self, len: u64) -> Result<(), Error> {
-        self.auditor.event(b"truncate", |hasher| {
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.auditor.event(b"resize", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
             hasher.update(&len.to_be_bytes());
         });
-        self.inner.truncate(len).await
+        self.inner.resize(len).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
@@ -177,13 +177,13 @@ mod tests {
             "Hashes do not match after read"
         );
 
-        // Truncate the blobs
-        blob1.truncate(5).await.unwrap();
-        blob2.truncate(5).await.unwrap();
+        // Resize the blobs
+        blob1.resize(5).await.unwrap();
+        blob2.resize(5).await.unwrap();
         assert_eq!(
             auditor1.state(),
             auditor2.state(),
-            "Hashes do not match after truncate"
+            "Hashes do not match after resize"
         );
 
         // Sync the blobs

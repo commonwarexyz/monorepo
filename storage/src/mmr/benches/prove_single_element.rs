@@ -36,18 +36,15 @@ fn bench_prove_single_element(c: &mut Criterion) {
                     },
                     |samples| {
                         block_on(async {
-                            let mut hasher = Standard::new();
+                            let mut hasher = Standard::<Sha256>::new();
                             for (pos, element) in samples {
                                 let proof = mmr.proof(pos).await.unwrap();
-                                assert!(proof
-                                    .verify_element_inclusion(
-                                        &mut hasher,
-                                        &element,
-                                        pos,
-                                        &root_digest,
-                                    )
-                                    .await
-                                    .unwrap());
+                                assert!(proof.verify_element_inclusion(
+                                    &mut hasher,
+                                    &element,
+                                    pos,
+                                    &root_digest,
+                                ));
                             }
                         });
                     },

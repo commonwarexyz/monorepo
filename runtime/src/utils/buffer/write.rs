@@ -290,11 +290,11 @@ impl<B: Blob> Blob for Write<B> {
         Ok(())
     }
 
-    async fn truncate(&self, len: u64) -> Result<(), Error> {
+    async fn resize(&self, len: u64) -> Result<(), Error> {
         // Acquire a write lock on the buffer.
         let mut buffer = self.buffer.write().await;
         if !buffer.truncate(len) {
-            self.blob.truncate(len).await?;
+            self.blob.resize(len).await?;
         }
 
         Ok(())

@@ -52,7 +52,7 @@ impl<T: Send> Pool<T> {
     /// Returns a futures that resolves to the next future in the pool that resolves.
     ///
     /// If the pool is empty, the future will never resolve.
-    pub fn next_completed(&mut self) -> SelectNextSome<FuturesUnordered<PooledFuture<T>>> {
+    pub fn next_completed(&mut self) -> SelectNextSome<'_, FuturesUnordered<PooledFuture<T>>> {
         self.pool.select_next_some()
     }
 
@@ -155,26 +155,29 @@ mod tests {
         block_on(async move {
             let mut pool = Pool::<i32>::default();
 
-            // Futures resolve in order of completion time, not addition order
+            // Futures resolve in order of completion, not addition order
+            let (finisher_1, finished_1) = oneshot::channel();
+            let (finisher_3, finished_3) = oneshot::channel();
             pool.push(async move {
-                delay(Duration::from_millis(100)).await;
+                finished_1.await.unwrap();
+                finisher_3.send(()).unwrap();
                 1
             });
             pool.push(async move {
-                delay(Duration::from_millis(50)).await;
+                finisher_1.send(()).unwrap();
                 2
             });
             pool.push(async move {
-                delay(Duration::from_millis(150)).await;
+                finished_3.await.unwrap();
                 3
             });
 
             let first = pool.next_completed().await;
-            assert_eq!(first, 2, "First resolved should be 2 (50ms)");
+            assert_eq!(first, 2, "First resolved should be 2");
             let second = pool.next_completed().await;
-            assert_eq!(second, 1, "Second resolved should be 1 (100ms)");
+            assert_eq!(second, 1, "Second resolved should be 1");
             let third = pool.next_completed().await;
-            assert_eq!(third, 3, "Third resolved should be 3 (150ms)");
+            assert_eq!(third, 3, "Third resolved should be 3");
             assert!(pool.is_empty(),);
         });
     }
@@ -186,20 +189,24 @@ mod tests {
             let flag_clone = flag.clone();
             let mut pool = Pool::<i32>::default();
 
+            // Push a future that will set the flag to true when it resolves.
+            let (finisher, finished) = oneshot::channel();
             pool.push(async move {
-                delay(Duration::from_millis(100)).await;
+                finished.await.unwrap();
                 flag_clone.store(true, Ordering::SeqCst);
                 42
             });
             assert_eq!(pool.len(), 1);
 
+            // Cancel all futures.
             pool.cancel_all();
             assert!(pool.is_empty());
-
-            delay(Duration::from_millis(150)).await; // Wait longer than future’s delay
             assert!(!flag.load(Ordering::SeqCst));
 
-            // Stream should not resolve future after cancellation
+            // Send the finisher signal (should be ignored).
+            let _ = finisher.send(());
+
+            // Stream should not resolve future after cancellation.
             let stream_future = pool.next_completed();
             let timeout_future = async {
                 delay(Duration::from_millis(100)).await;
@@ -210,11 +217,12 @@ mod tests {
             match result {
                 Either::Left((_, _)) => panic!("Stream resolved after cancellation"),
                 Either::Right((_, _)) => {
-                    // Timeout occurred, which is expected
+                    // Wait for the timeout to trigger.
                 }
             }
+            assert!(!flag.load(Ordering::SeqCst));
 
-            // Push and await a new future
+            // Push and await a new future.
             pool.push(future::ready(42));
             assert_eq!(pool.len(), 1);
             let result = pool.next_completed().await;

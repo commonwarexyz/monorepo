@@ -2,16 +2,12 @@ use super::{Config, Error};
 use bytes::BufMut;
 use commonware_codec::{FixedSize, ReadExt};
 use commonware_runtime::{Blob, Clock, Metrics, Storage};
-use commonware_utils::{Array, SystemTimeExt as _};
+use commonware_utils::Array;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::{
-    collections::BTreeMap,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
-use tracing::{debug, trace, warn};
+use std::collections::BTreeMap;
+use tracing::{debug, warn};
 
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
-const SECONDS_IN_NANOSECONDS: u128 = 1_000_000_000;
 
 /// Implementation of `Metadata` storage.
 pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
@@ -21,7 +17,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
     data: BTreeMap<K, Vec<u8>>,
     cursor: usize,
     partition: String,
-    blobs: [(E::Blob, u64, u128); 2],
+    blobs: [(E::Blob, u64, u64); 2],
 
     syncs: Counter,
     keys: Gauge,
@@ -39,23 +35,23 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         let right_result = Self::load(1, &right_blob, right_len).await?;
 
         // Set checksums
-        let mut left_timestamp = 0;
+        let mut left_version = 0;
         let mut left_data = BTreeMap::new();
-        if let Some((timestamp, data)) = left_result {
-            left_timestamp = timestamp;
+        if let Some((version, data)) = left_result {
+            left_version = version;
             left_data = data;
         }
-        let mut right_timestamp = 0;
+        let mut right_version = 0;
         let mut right_data = BTreeMap::new();
-        if let Some((timestamp, data)) = right_result {
-            right_timestamp = timestamp;
+        if let Some((version, data)) = right_result {
+            right_version = version;
             right_data = data;
         }
 
         // Choose latest blob
         let mut data = left_data;
         let mut cursor = 0;
-        if right_timestamp > left_timestamp {
+        if right_version > left_version {
             cursor = 1;
             data = right_data;
         }
@@ -75,8 +71,8 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             cursor,
             partition: cfg.partition,
             blobs: [
-                (left_blob, left_len, left_timestamp),
-                (right_blob, right_len, right_timestamp),
+                (left_blob, left_len, left_version),
+                (right_blob, right_len, right_version),
             ],
 
             syncs,
@@ -88,7 +84,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         index: usize,
         blob: &E::Blob,
         len: u64,
-    ) -> Result<Option<(u128, BTreeMap<K, Vec<u8>>)>, Error<K>> {
+    ) -> Result<Option<(u64, BTreeMap<K, Vec<u8>>)>, Error<K>> {
         // Get blob length
         if len == 0 {
             // Empty blob
@@ -99,15 +95,17 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         let len = len.try_into().map_err(|_| Error::BlobTooLarge(len))?;
         let buf = blob.read_at(vec![0u8; len], 0).await?;
 
-        // Verify integrity
-        if buf.len() < 20 {
+        // Verify integrity.
+        //
+        // 8 bytes for version + 4 bytes for checksum.
+        if buf.len() < 12 {
             // Truncate and return none
             warn!(
                 blob = index,
                 len = buf.len(),
                 "blob is too short: truncating"
             );
-            blob.truncate(0).await?;
+            blob.resize(0).await?;
             blob.sync().await?;
             return Ok(None);
         }
@@ -125,20 +123,20 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
                 computed = computed_checksum,
                 "checksum mismatch: truncating"
             );
-            blob.truncate(0).await?;
+            blob.resize(0).await?;
             blob.sync().await?;
             return Ok(None);
         }
 
         // Get parent
-        let timestamp = u128::from_be_bytes(buf.as_ref()[..16].try_into().unwrap());
+        let version = u64::from_be_bytes(buf.as_ref()[..8].try_into().unwrap());
 
         // Extract data
         //
         // If the checksum is correct, we assume data is correctly packed and we don't perform
         // length checks on the cursor.
         let mut data = BTreeMap::new();
-        let mut cursor = u128::SIZE;
+        let mut cursor = u64::SIZE;
         while cursor < checksum_index {
             // Read key
             let next_cursor = cursor + K::SIZE;
@@ -159,7 +157,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         }
 
         // Return info
-        Ok(Some((timestamp, data)))
+        Ok(Some((version, data)))
     }
 
     /// Get a value from `Metadata` (if it exists).
@@ -189,43 +187,18 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         self.keys.set(self.data.len() as i64);
     }
 
-    /// Get the timestamp of the last update to `Metadata` (if a previous
-    /// update exists).
-    pub fn last_update(&self) -> Option<SystemTime> {
-        let timestamp = self.blobs[self.cursor].2;
-        if timestamp == 0 {
-            return None;
-        }
-        let timestamp = Duration::new(
-            (timestamp / SECONDS_IN_NANOSECONDS) as u64,
-            (timestamp % SECONDS_IN_NANOSECONDS) as u32,
-        );
-        Some(UNIX_EPOCH + timestamp)
-    }
-
     /// Atomically commit the current state of `Metadata`.
     pub async fn sync(&mut self) -> Result<(), Error<K>> {
-        // Compute next timestamp
-        let past_timestamp = &self.blobs[self.cursor].2;
-        let mut next_timestamp = self.context.current().epoch().as_nanos();
-        if next_timestamp <= *past_timestamp {
-            // While it is possible that extremely high-frequency updates to `Metadata` (more than
-            // one update per nanosecond) could cause an eventual overflow of the timestamp, this
-            // is not treated as a serious concern (as any call to `sync` will take longer than this).
-            //
-            // The nice benefit of this is that we also can provide the caller with some timestamp
-            // of the last update, which can be useful for a variety of things.
-            trace!(
-                past = *past_timestamp,
-                next = next_timestamp,
-                "timestamps are not monotonically increasing: adjusting next"
-            );
-            next_timestamp = *past_timestamp + 1;
-        }
+        // Compute next version.
+        //
+        // While it is possible that extremely high-frequency updates to `Metadata` could cause an eventual
+        // overflow of version, syncing once per millisecond would overflow in 584,942,417 years.
+        let past_version = &self.blobs[self.cursor].2;
+        let next_version = past_version.checked_add(1).expect("version overflow");
 
         // Create buffer
         let mut buf = Vec::new();
-        buf.put_u128(next_timestamp);
+        buf.put_u64(next_version);
         for (key, value) in &self.data {
             buf.put_slice(key.as_ref());
             let value_len = value
@@ -245,10 +218,10 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         // Write and truncate blob
         let buf_len = buf.len() as u64;
         next_blob.0.write_at(buf, 0).await?;
-        next_blob.0.truncate(buf_len).await?;
+        next_blob.0.resize(buf_len).await?;
         next_blob.0.sync().await?;
         next_blob.1 = buf_len;
-        next_blob.2 = next_timestamp;
+        next_blob.2 = next_version;
 
         // Switch blobs
         self.cursor = next_cursor;
