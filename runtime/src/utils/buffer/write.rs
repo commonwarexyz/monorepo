@@ -290,29 +290,16 @@ impl<B: Blob> Blob for Write<B> {
         // Acquire a write lock on the inner state
         let mut inner = self.inner.write().await;
 
-        // Determine the current buffer boundaries
-        let buffer_start = inner.position;
-        let buffer_end = buffer_start + inner.buffer.len() as u64;
+        // Flush any pending writes to the underlying blob
+        inner.flush().await?;
 
-        // Adjust buffer content based on truncation point
-        if len <= buffer_start {
-            // Truncation point is before or at the start of the buffer.
-            //
-            // All buffered data is now beyond the new length and should be discarded.
-            inner.buffer.clear();
-            inner.blob.resize(len).await?;
-            inner.position = len;
-        } else if len < buffer_end {
-            // Truncation point is within the buffer.
-            //
-            // Keep only the portion of the buffer up to the truncation point.
-            let new_buffer_len = (len - buffer_start) as usize;
-            inner.buffer.truncate(new_buffer_len);
-        } else {
-            // Truncation point is at or after the end of the buffer.
-            //
-            // No changes needed to the buffer content.
-        }
+        // Resize the underlying blob
+        inner.blob.resize(len).await?;
+
+        // Update the buffer's position to the new logical end of the blob.
+        // The buffer is empty after the flush.
+        inner.position = len;
+
         Ok(())
     }
 
