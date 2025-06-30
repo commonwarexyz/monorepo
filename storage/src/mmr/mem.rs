@@ -101,7 +101,7 @@ impl<H: CHasher> Mmr<H> {
     // Computes the digest to use as the `self.dirty_digest` placeholder. The specific value is
     // unimportant so we simply use the empty hash.
     fn dirty_digest() -> H::Digest {
-        H::new().finalize()
+        H::empty()
     }
 
     /// Return an [Mmr] initialized with the given `config`.
