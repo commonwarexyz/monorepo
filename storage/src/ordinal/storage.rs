@@ -268,7 +268,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         Ok(min_section * self.config.items_per_blob)
     }
 
-    /// Sync all pending entries to disk.
+    /// Write all pending entries and sync all modified [Blob]s.
     pub async fn sync(&mut self) -> Result<(), Error> {
         // Check if there is anything to sync
         if self.pending.is_empty() {
@@ -308,7 +308,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         Ok(())
     }
 
-    /// Close the store.
+    /// Sync all pending entries and close all [Blob]s.
     pub async fn close(mut self) -> Result<(), Error> {
         // Sync any pending entries
         self.sync().await?;
@@ -320,7 +320,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         Ok(())
     }
 
-    /// Destroy the store and remove all data.
+    /// Destroy [Ordinal] and remove all data.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
             blob.close().await?;
