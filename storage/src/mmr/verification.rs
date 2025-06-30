@@ -668,8 +668,8 @@ mod tests {
                 );
             }
             // bad element range should cause verification to fail
-            for i in 0..elements.len() {
-                for j in 0..elements.len() {
+            for (i, _) in elements.iter().enumerate() {
+                for (j, _) in elements.iter().enumerate() {
                     let start_pos2 = element_positions[i];
                     if start_pos2 == start_pos {
                         continue;
