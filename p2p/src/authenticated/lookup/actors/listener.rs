@@ -106,7 +106,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
 
         // Attempt to claim the connection
         let Some(reservation) = tracker.listen(peer.clone()).await else {
-            debug!(?peer, "unable to reserve connection to peer");
+            debug!(?peer, ?address, "unable to reserve connection to peer");
             return;
         };
         debug!(?peer, ?address, "reserved connection");
