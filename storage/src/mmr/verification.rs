@@ -78,6 +78,8 @@ impl<D: Digest> Read for Proof<D> {
 }
 
 impl<D: Digest> Default for Proof<D> {
+    /// Create an empty proof. The empty proof will verify only against the root hash of an empty
+    /// (`size == 0`) MMR.
     fn default() -> Self {
         Self {
             size: 0,
