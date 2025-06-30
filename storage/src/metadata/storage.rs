@@ -231,7 +231,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         let (target_blob, target_data, target_version) = &mut self.blobs[target_cursor];
 
         // Compute byte-level diff and only write changed segments
-        let mut i = 0usize;
+        let mut i = 0;
         let mut skipped = 0;
         let mut writes = Vec::new();
         while i < next_data.len() {
