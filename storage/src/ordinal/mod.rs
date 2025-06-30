@@ -59,9 +59,8 @@
 //!
 //! # Recovery
 //!
-//! Each record includes a CRC32 checksum. On restart, the store validates all records
-//! and rebuilds the in-memory [crate::rmap::RMap]. Invalid records (corrupted or empty) are
-//! excluded from the rebuilt index.
+//! On restart, [Ordinal] validates all records using their CRC32 and rebuilds the in-memory
+//! [crate::rmap::RMap]. Invalid records (corrupted or empty) are excluded from the rebuilt index.
 //!
 //! # Example
 //!
