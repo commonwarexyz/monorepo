@@ -13,7 +13,6 @@ enum MetadataOperation {
     Remove { key: u64 },
     Clear,
     Sync,
-    LastUpdate,
     Close,
     Destroy,
     // Add operations that test edge cases
@@ -37,7 +36,7 @@ fn fuzz(input: FuzzInput) {
         };
         let mut metadata = match Metadata::init(context.clone(), cfg).await {
             Ok(m) => Some(m),
-            Err(err) => panic!("Unable to init metadata {err:?}"),
+            Err(_) => panic!("Unable to init metadata"),
         };
 
         for op in input.operations.iter() {
@@ -75,26 +74,25 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MetadataOperation::Sync => {
-                    // Panic on sync errors to find bugs
-                    metadata_ref.sync().await.unwrap();
-                }
-
-                MetadataOperation::LastUpdate => {
-                    metadata_ref.last_update();
+                    if metadata_ref.sync().await.is_err() {
+                        panic!("Sync failed");
+                    }
                 }
 
                 MetadataOperation::Close => {
-                    // Close metadata (takes ownership) - panic on errors
                     if let Some(m) = metadata.take() {
-                        m.close().await.unwrap();
+                        if m.close().await.is_err() {
+                            panic!("close failed");
+                        }
                         return;
                     }
                 }
 
                 MetadataOperation::Destroy => {
-                    // Destroy metadata (takes ownership) - panic on errors
                     if let Some(m) = metadata.take() {
-                        m.destroy().await.unwrap();
+                        if m.destroy().await.is_err() {
+                            panic!("destroy failed");
+                        }
                         return;
                     }
                 }
@@ -113,17 +111,20 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MetadataOperation::MultipleSyncs => {
-                    // Test multiple rapid syncs to find race conditions
-                    metadata_ref.sync().await.unwrap();
-                    metadata_ref.sync().await.unwrap();
-                    metadata_ref.sync().await.unwrap();
+                    for i in 0..3 {
+                        if metadata_ref.sync().await.is_err() {
+                            panic!("MultipleSync failed at iteration {i}");
+                        }
+                    }
                 }
             }
         }
 
         // Clean up if metadata still exists - panic on cleanup errors
         if let Some(m) = metadata.take() {
-            m.destroy().await.unwrap();
+            if m.destroy().await.is_err() {
+                panic!("final destroy failed");
+            }
         }
     });
 }

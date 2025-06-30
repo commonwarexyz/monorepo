@@ -303,17 +303,11 @@ fn fuzz(input: FuzzInput) {
                                 // Verify the proof with the actual data we stored
                                 let root = mmr.root(&mut hasher);
                                 let leaf_data = &reference.leaf_data[idx];
-                                match proof.verify_element_inclusion(&mut hasher, leaf_data, pos, &root) {
-                                    Ok(is_valid) => {
-                                        assert!(
-                                            is_valid,
-                                            "Operation {op_idx}: Proof verification failed for leaf at pos {pos}",
-                                        );
-                                    }
-                                    Err(e) => {
-                                        panic!("Proof verification error for pos {pos}: {e:?}");
-                                    }
-                                }
+                                let is_valid = proof.verify_element_inclusion(&mut hasher, leaf_data, pos, &root);
+                                assert!(
+                                    is_valid,
+                                    "Operation {op_idx}: Proof verification failed for leaf at pos {pos}",
+                                );
                             }
                             Err(e) => {
                                 // Expected error for pruned elements

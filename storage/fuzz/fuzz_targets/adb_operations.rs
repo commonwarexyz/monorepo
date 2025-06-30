@@ -139,7 +139,6 @@ fn fuzz(data: FuzzInput) {
                                 &log,
                                 &current_root
                             )
-                            .expect("verify proof should not fail")
                         );
                     }
                 }
