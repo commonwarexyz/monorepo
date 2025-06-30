@@ -18,10 +18,6 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
     data: BTreeMap<K, Vec<u8>>,
     cursor: usize,
     partition: String,
-    // Each entry contains:
-    // 0. The blob handle.
-    // 1. The last serialized bytes that reside on disk (in-memory copy) for diffing.
-    // 2. The version stored in the blob.
     blobs: [(E::Blob, Vec<u8>, u64); 2],
 
     syncs: Counter,

@@ -522,7 +522,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_diff_optimization() {
+    fn test_diffs() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -539,173 +539,55 @@ mod tests {
             }
 
             // First sync - should write everything to the first blob
+            //
+            // 100 keys * (8 bytes for key + 4 bytes for len + 100 bytes for value) + 8 bytes for version + 4 bytes for checksum
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("skipped_total 0"), "{}", buffer);
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 11212"),
+                "{}",
+                buffer
+            );
 
             // Modify just one key
-            metadata.put(U64::new(50), vec![0xff; 100]);
+            metadata.put(U64::new(51), vec![0xff; 100]);
 
             // Sync again - should write everything to the second blob
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("skipped_total 0"), "{}", buffer);
-
-            // Modify another key
-            metadata.put(U64::new(51), vec![0xff; 100]);
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 22424"),
+                "{}",
+                buffer
+            );
 
             // Sync again - should write only diff from the first blob
+            //
+            // 100 bytes for value + 1 byte for version (first 7 bytes are same) + 4 bytes for checksum
             metadata.sync().await.unwrap();
             let buffer = context.encode();
-            assert!(buffer.contains("skipped_total 11007"), "{}", buffer);
+            assert!(buffer.contains("skipped_total 11107"), "{}", buffer);
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 22529"),
+                "{}",
+                buffer
+            );
+
+            // Sync again - should write only diff from the second blob
+            //
+            // 1 byte for version (first 7 bytes are same) + 4 bytes for checksum
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("skipped_total 22314"), "{}", buffer);
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 22534"),
+                "{}",
+                buffer
+            );
 
             // Clean up
-            metadata.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_diff_edge_cases() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Test edge case 1: Empty metadata sync
-            let cfg = Config {
-                partition: "test1".to_string(),
-            };
-            let mut metadata: Metadata<_, U64> =
-                Metadata::init(context.clone(), cfg).await.unwrap();
-            metadata.sync().await.unwrap();
-
-            let buffer = context.encode();
-            assert!(
-                buffer.contains("bytes_written_total 12"),
-                "Expected bytes_written_total to be 12 for empty sync"
-            );
-
-            metadata.sync().await.unwrap(); // Second sync with no changes
-            let buffer_after_noop = context.encode();
-            let bytes_written_line = buffer_after_noop
-                .lines()
-                .find(|line| line.contains("bytes_written_total"))
-                .expect("bytes_written_total metric not found");
-            let bytes_after_noop: u64 = bytes_written_line
-                .split_whitespace()
-                .last()
-                .expect("Invalid metric format")
-                .parse()
-                .expect("Failed to parse bytes_written value");
-            // Only version should change, so we write 8 bytes (version changed)
-            // But in practice, the entire 12 bytes might be rewritten due to checksum
-            assert!(
-                bytes_after_noop - 12 <= 12,
-                "No-op sync wrote too many bytes: {}",
-                bytes_after_noop - 12
-            );
-
-            metadata.close().await.unwrap();
-
-            // Test edge case 2: Single small key
-            let cfg = Config {
-                partition: "test2".to_string(),
-            };
-            let mut metadata: Metadata<_, U64> =
-                Metadata::init(context.clone(), cfg).await.unwrap();
-            metadata.put(U64::new(1), vec![42]);
-            metadata.sync().await.unwrap();
-
-            // Reset counter to track from this point
-            let buffer_before = context.encode();
-            let bytes_written_line = buffer_before
-                .lines()
-                .find(|line| line.contains("bytes_written_total"))
-                .expect("bytes_written_total metric not found");
-            let bytes_before_update: u64 = bytes_written_line
-                .split_whitespace()
-                .last()
-                .expect("Invalid metric format")
-                .parse()
-                .expect("Failed to parse bytes_written value");
-
-            // Update the same key with different value
-            metadata.put(U64::new(1), vec![43]);
-            metadata.sync().await.unwrap();
-
-            let buffer_after = context.encode();
-            let bytes_written_line = buffer_after
-                .lines()
-                .find(|line| line.contains("bytes_written_total"))
-                .expect("bytes_written_total metric not found");
-            let bytes_after_update: u64 = bytes_written_line
-                .split_whitespace()
-                .last()
-                .expect("Invalid metric format")
-                .parse()
-                .expect("Failed to parse bytes_written value");
-            let update_bytes = bytes_after_update - bytes_before_update;
-
-            // Should only write the changed byte in value, plus version change
-            // In practice, might write a small segment including version, value, and checksum
-            assert!(
-                update_bytes < 50,
-                "Single byte update wrote too many bytes: {}",
-                update_bytes
-            );
-
-            metadata.close().await.unwrap();
-
-            // Test edge case 3: Large number of small updates
-            let cfg = Config {
-                partition: "test3".to_string(),
-            };
-            let mut metadata: Metadata<_, U64> =
-                Metadata::init(context.clone(), cfg).await.unwrap();
-
-            // Add 1000 small keys
-            for i in 0..1000 {
-                metadata.put(U64::new(i), vec![i as u8]);
-            }
-            metadata.sync().await.unwrap();
-
-            let buffer_before = context.encode();
-            let bytes_written_line = buffer_before
-                .lines()
-                .find(|line| line.contains("bytes_written_total"))
-                .expect("bytes_written_total metric not found");
-            let bytes_before_sparse: u64 = bytes_written_line
-                .split_whitespace()
-                .last()
-                .expect("Invalid metric format")
-                .parse()
-                .expect("Failed to parse bytes_written value");
-
-            // Update every 100th key
-            for i in (0..1000).step_by(100) {
-                metadata.put(U64::new(i), vec![(i as u8).wrapping_add(1)]);
-            }
-            metadata.sync().await.unwrap();
-
-            let buffer_after = context.encode();
-            let bytes_written_line = buffer_after
-                .lines()
-                .find(|line| line.contains("bytes_written_total"))
-                .expect("bytes_written_total metric not found");
-            let bytes_after_sparse: u64 = bytes_written_line
-                .split_whitespace()
-                .last()
-                .expect("Invalid metric format")
-                .parse()
-                .expect("Failed to parse bytes_written value");
-            let sparse_update_bytes = bytes_after_sparse - bytes_before_sparse;
-
-            // Full rewrite would be ~17000 bytes (1000 * (8 + 4 + 1) + 8 + 4)
-            // Sparse update of 10 keys should be much less
-            assert!(
-                sparse_update_bytes < 5000,
-                "Sparse update wrote too many bytes: {}",
-                sparse_update_bytes
-            );
-
             metadata.destroy().await.unwrap();
         });
     }
