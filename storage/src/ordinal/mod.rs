@@ -41,7 +41,14 @@
 //! - **Next Gap**: O(log n) - in-memory range query (via [crate::rmap::RMap])
 //! - **Restart**: O(n) where n is the number of existing records (to rebuild [crate::rmap::RMap])
 //!
-//! # Crash Consistency
+//! # Atomicity
+//!
+//! [Ordinal] stages all writes in memory until [Ordinal::sync] is called. While this ensures
+//! that [Ordinal] can be updated after some other store has been synced, it does not guarantee
+//! all items written during [Ordinal::sync] are atomically persisted and only some of the items
+//! cached may be written.
+//!
+//! # Recovery
 //!
 //! Each record includes a CRC32 checksum. On restart, the store validates all records
 //! and rebuilds the in-memory [crate::rmap::RMap]. Invalid records (corrupted or empty) are
