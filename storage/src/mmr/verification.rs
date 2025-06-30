@@ -959,11 +959,7 @@ mod tests {
                         let extract_result = proof.extract_pinned_nodes(start_pos, end_pos);
                         assert!(
                             extract_result.is_ok(),
-                            "Failed to extract pinned nodes for {} elements, boundary={}, range=[{}, {}]",
-                            num_elements,
-                            start_pos,
-                            start_pos,
-                            end_pos
+                            "Failed to extract pinned nodes for {num_elements} elements, boundary={start_pos}, range=[{start_pos}, {end_pos}]"
                         );
 
                         let pinned_nodes = extract_result.unwrap();
@@ -973,11 +969,7 @@ mod tests {
                         assert_eq!(
                             pinned_nodes.len(),
                             expected_pinned.len(),
-                            "Pinned node count mismatch for {} elements, boundary={}, range=[{}, {}]",
-                            num_elements,
-                            start_pos,
-                            start_pos,
-                            end_pos
+                            "Pinned node count mismatch for {num_elements} elements, boundary={start_pos}, range=[{start_pos}, {end_pos}]"
                         );
 
                         // Verify extracted hashes match actual node values
@@ -987,13 +979,7 @@ mod tests {
                             let actual_hash = mmr.get_node(expected_pos).unwrap();
                             assert_eq!(
                                 extracted_hash, actual_hash,
-                                "Hash mismatch at position {} (index {}) for {} elements, boundary={}, range=[{}, {}]",
-                                expected_pos,
-                                i,
-                                num_elements,
-                                start_pos,
-                                start_pos,
-                                end_pos
+                                "Hash mismatch at position {expected_pos} (index {i}) for {num_elements} elements, boundary={start_pos}, range=[{start_pos}, {end_pos}]"
                             );
                         }
                     }
