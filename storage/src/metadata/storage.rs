@@ -8,9 +8,43 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::BTreeMap;
 use tracing::{debug, warn};
 
+/// The names of the two blobs that store metadata.
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 
-/// Implementation of `Metadata` storage.
+/// The size of the block to fast-forward over.
+///
+/// This is set to the native word size for optimal performance on the target architecture.
+const BLOCK_SIZE: usize = std::mem::size_of::<usize>();
+
+/// One of the two wrappers that store metadata.
+struct Wrapper<B: Blob> {
+    blob: B,
+
+    version: u64,
+    data: Vec<u8>,
+}
+
+impl<B: Blob> Wrapper<B> {
+    /// Create a new wrapper with the given data.
+    fn new(blob: B, version: u64, data: Vec<u8>) -> Self {
+        Self {
+            blob,
+            version,
+            data,
+        }
+    }
+
+    /// Create a new empty wrapper.
+    fn empty(blob: B) -> Self {
+        Self {
+            blob,
+            version: 0,
+            data: Vec::new(),
+        }
+    }
+}
+
+/// Implementation of [Metadata] storage.
 pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
     context: E,
 
@@ -18,7 +52,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
     map: BTreeMap<K, Vec<u8>>,
     cursor: usize,
     partition: String,
-    blobs: [(E::Blob, u64, Vec<u8>); 2],
+    blobs: [Wrapper<E::Blob>; 2],
 
     syncs: Counter,
     keys: Gauge,
@@ -26,38 +60,20 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
 }
 
 impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
-    /// Initialize a new `Metadata` instance.
+    /// Initialize a new [Metadata] instance.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error<K>> {
         // Open dedicated blobs
         let (left_blob, left_len) = context.open(&cfg.partition, BLOB_NAMES[0]).await?;
         let (right_blob, right_len) = context.open(&cfg.partition, BLOB_NAMES[1]).await?;
 
         // Find latest blob (check which includes a hash of the other)
-        let left_result = Self::load(0, &left_blob, left_len).await?;
-        let right_result = Self::load(1, &right_blob, right_len).await?;
-
-        // Set checksums
-        let mut left_version = 0;
-        let mut left_map = BTreeMap::new();
-        let mut left_data = Vec::new();
-        if let Some((version, map, data)) = left_result {
-            left_version = version;
-            left_map = map;
-            left_data = data;
-        }
-        let mut right_version = 0;
-        let mut right_map = BTreeMap::new();
-        let mut right_data = Vec::new();
-        if let Some((version, map, data)) = right_result {
-            right_version = version;
-            right_map = map;
-            right_data = data;
-        }
+        let (left_map, left_wrapper) = Self::load(0, left_blob, left_len).await?;
+        let (right_map, right_wrapper) = Self::load(1, right_blob, right_len).await?;
 
         // Choose latest blob
         let mut map = left_map;
         let mut cursor = 0;
-        if right_version > left_version {
+        if right_wrapper.version > left_wrapper.version {
             cursor = 1;
             map = right_map;
         }
@@ -70,7 +86,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         context.register("keys", "number of tracked keys", keys.clone());
         context.register(
             "skipped",
-            "total bytes not written to disk",
+            "duplicate bytes not written to disk",
             skipped.clone(),
         );
 
@@ -82,10 +98,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             map,
             cursor,
             partition: cfg.partition,
-            blobs: [
-                (left_blob, left_version, left_data),
-                (right_blob, right_version, right_data),
-            ],
+            blobs: [left_wrapper, right_wrapper],
 
             syncs,
             keys,
@@ -95,13 +108,13 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
     async fn load(
         index: usize,
-        blob: &E::Blob,
+        blob: E::Blob,
         len: u64,
-    ) -> Result<Option<(u64, BTreeMap<K, Vec<u8>>, Vec<u8>)>, Error<K>> {
+    ) -> Result<(BTreeMap<K, Vec<u8>>, Wrapper<E::Blob>), Error<K>> {
         // Get blob length
         if len == 0 {
             // Empty blob
-            return Ok(None);
+            return Ok((BTreeMap::new(), Wrapper::empty(blob)));
         }
 
         // Read blob
@@ -120,7 +133,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             );
             blob.resize(0).await?;
             blob.sync().await?;
-            return Ok(None);
+            return Ok((BTreeMap::new(), Wrapper::empty(blob)));
         }
 
         // Extract checksum
@@ -138,7 +151,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             );
             blob.resize(0).await?;
             blob.sync().await?;
-            return Ok(None);
+            return Ok((BTreeMap::new(), Wrapper::empty(blob)));
         }
 
         // Get parent
@@ -170,45 +183,45 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         }
 
         // Return info
-        Ok(Some((version, data, buf.into())))
+        Ok((data, Wrapper::new(blob, version, buf.into())))
     }
 
-    /// Get a value from `Metadata` (if it exists).
+    /// Get a value from [Metadata] (if it exists).
     pub fn get(&self, key: &K) -> Option<&Vec<u8>> {
         self.map.get(key)
     }
 
-    /// Clear all values from `Metadata`. The new state will not be persisted until `sync` is
+    /// Clear all values from [Metadata]. The new state will not be persisted until [Self::sync] is
     /// called.
     pub fn clear(&mut self) {
         self.map.clear();
         self.keys.set(0);
     }
 
-    /// Put a value into `Metadata`.
+    /// Put a value into [Metadata].
     ///
     /// If the key already exists, the value will be overwritten. The
-    /// value stored will not be persisted until `sync` is called.
+    /// value stored will not be persisted until [Self::sync] is called.
     pub fn put(&mut self, key: K, value: Vec<u8>) {
         self.map.insert(key, value);
         self.keys.set(self.map.len() as i64);
     }
 
-    /// Remove a value from `Metadata` (if it exists).
+    /// Remove a value from [Metadata] (if it exists).
     pub fn remove(&mut self, key: &K) {
         self.map.remove(key);
         self.keys.set(self.map.len() as i64);
     }
 
-    /// Atomically commit the current state of `Metadata`.
+    /// Atomically commit the current state of [Metadata].
     pub async fn sync(&mut self) -> Result<(), Error<K>> {
         self.syncs.inc();
 
         // Compute next version.
         //
-        // While it is possible that extremely high-frequency updates to `Metadata` could cause an eventual
+        // While it is possible that extremely high-frequency updates to metadata could cause an eventual
         // overflow of version, syncing once per millisecond would overflow in 584,942,417 years.
-        let past_version = self.blobs[self.cursor].1;
+        let past_version = self.blobs[self.cursor].version;
         let next_version = past_version.checked_add(1).expect("version overflow");
 
         // Create buffer
@@ -228,61 +241,83 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
         // Get target blob (the one we will overwrite)
         let target_cursor = 1 - self.cursor;
-        let (target_blob, target_version, target_data) = &mut self.blobs[target_cursor];
+        let target = &mut self.blobs[target_cursor];
 
         // Compute byte-level diff and only write changed segments
         let mut i = 0;
         let mut skipped = 0;
         let mut writes = Vec::new();
         while i < next_data.len() {
-            // Skip equal bytes
-            while i < next_data.len() && i < target_data.len() && next_data[i] == target_data[i] {
+            // Fast-forward over identical blocks
+            while i + BLOCK_SIZE <= next_data.len()
+                && i + BLOCK_SIZE <= target.data.len()
+                && next_data[i..i + BLOCK_SIZE] == target.data[i..i + BLOCK_SIZE]
+            {
+                i += BLOCK_SIZE;
+                skipped += BLOCK_SIZE as u64;
+            }
+
+            // Skip identical bytes
+            while i < next_data.len() && i < target.data.len() && next_data[i] == target.data[i] {
                 i += 1;
                 skipped += 1;
             }
+
+            // Reached end of new data
             if i >= next_data.len() {
                 break;
             }
 
-            // Write differing segments
-            let start = i;
-            while i < next_data.len() && (i >= target_data.len() || next_data[i] != target_data[i])
-            {
+            // Find end of differing segment
+            let diff_start = i;
+            while i < next_data.len() {
+                if i >= target.data.len() {
+                    i = next_data.len();
+                    break;
+                }
+                if next_data[i] == target.data[i] {
+                    break;
+                }
                 i += 1;
             }
-            let end = i;
-            writes.push(target_blob.write_at(next_data[start..end].to_vec(), start as u64));
+
+            // Write the differing segment
+            writes.push(
+                target
+                    .blob
+                    .write_at(next_data[diff_start..i].to_vec(), diff_start as u64),
+            );
         }
         try_join_all(writes).await?;
         self.skipped.inc_by(skipped);
 
         // If the new file is shorter, truncate; if longer, resize was implicitly handled by write_at
-        if next_data.len() < target_data.len() {
-            target_blob.resize(next_data.len() as u64).await?;
+        if next_data.len() < target.data.len() {
+            target.blob.resize(next_data.len() as u64).await?;
         }
-        target_blob.sync().await?;
+        target.blob.sync().await?;
 
         // Update state
         self.cursor = target_cursor;
-        *target_version = next_version;
-        *target_data = next_data;
+        target.version = next_version;
+        target.data = next_data;
         Ok(())
     }
 
-    /// Sync outstanding data and close `Metadata`.
+    /// Sync outstanding data and close [Metadata].
     pub async fn close(mut self) -> Result<(), Error<K>> {
         // Sync and close blobs
         self.sync().await?;
-        for (blob, _, _) in self.blobs.into_iter() {
-            blob.close().await?;
+        for wrapper in self.blobs.into_iter() {
+            wrapper.blob.close().await?;
         }
         Ok(())
     }
 
     /// Close and remove the underlying blobs.
     pub async fn destroy(self) -> Result<(), Error<K>> {
-        for (i, (blob, _, _)) in self.blobs.into_iter().enumerate() {
-            blob.close().await?;
+        for (i, wrapper) in self.blobs.into_iter().enumerate() {
+            wrapper.blob.close().await?;
             self.context
                 .remove(&self.partition, Some(BLOB_NAMES[i]))
                 .await?;
