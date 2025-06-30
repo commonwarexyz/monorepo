@@ -517,6 +517,13 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 .remove(&self.cfg.partition, Some(&i.to_be_bytes()))
                 .await?;
         }
+        match self.context.remove(&self.cfg.partition, None).await {
+            Ok(()) => {}
+            Err(RError::PartitionMissing(_)) => {
+                // Partition already removed or never existed.
+            }
+            Err(err) => return Err(Error::Runtime(err)),
+        }
         Ok(())
     }
 }

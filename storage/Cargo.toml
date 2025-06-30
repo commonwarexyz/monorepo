@@ -66,6 +66,11 @@ harness = false
 path = "src/mmr/benches/bench.rs"
 
 [[bench]]
+name="ordinal"
+harness = false
+path = "src/ordinal/benches/bench.rs"
+
+[[bench]]
 name="rmap"
 harness = false
 path = "src/rmap/benches/bench.rs"
