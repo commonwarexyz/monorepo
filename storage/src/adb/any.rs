@@ -1499,14 +1499,15 @@ mod test {
                 .await
                 .unwrap();
             // Verify proof (not really part of this test but doesn't hurt).
-            Any::<Context, Digest, Digest, Sha256, EightCap>::verify_proof(
-                &mut hasher,
-                &proof,
-                source_db.inactivity_floor_loc,
-                &ops,
-                &source_root,
-            )
-            .unwrap();
+            assert!(
+                Any::<Context, Digest, Digest, Sha256, EightCap>::verify_proof(
+                    &mut hasher,
+                    &proof,
+                    source_db.inactivity_floor_loc,
+                    &ops,
+                    &source_root,
+                )
+            );
             assert_eq!(ops.len(), need_ops as usize);
             let pinned_nodes = source_db.ops.get_pinned_nodes();
 
@@ -1569,14 +1570,15 @@ mod test {
                 .await
                 .unwrap();
             let synced_db_hash = synced_db.root(&mut hasher);
-            Any::<Context, Digest, Digest, Sha256, EightCap>::verify_proof(
-                &mut hasher,
-                &proof,
-                synced_db.inactivity_floor_loc,
-                &ops,
-                &synced_db_hash,
-            )
-            .unwrap();
+            assert!(
+                Any::<Context, Digest, Digest, Sha256, EightCap>::verify_proof(
+                    &mut hasher,
+                    &proof,
+                    synced_db.inactivity_floor_loc,
+                    &ops,
+                    &synced_db_hash,
+                )
+            );
             assert_eq!(
                 ops.len(),
                 (synced_db.op_count() - synced_db.inactivity_floor_loc) as usize
