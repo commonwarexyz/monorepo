@@ -27,10 +27,10 @@
 //!
 //! To provide support for atomic updates, [Metadata] maintains two blobs: a "left" and a "right"
 //! blob. When a new update is committed, it is written to the "older" of the two blobs (indicated
-//! by the version persisted). Writes to `Storage` are not atomic and may only complete partially,
-//! so we only overwrite the "newer" blob once the "older" blob has been synced (otherwise, we would
-//! not be guaranteed to recover the latest complete state from disk on restart as half of a blob
-//! could be old data and half new data).
+//! by the version persisted). Writes to [commonware_runtime::Blob] are not atomic and may only
+//! complete partially, so we only overwrite the "newer" blob once the "older" blob has been synced
+//! (otherwise, we would not be guaranteed to recover the latest complete state from disk on
+//! restart as half of a blob could be old data and half new data).
 //!
 //! # Efficient Writes
 //!
@@ -86,8 +86,7 @@ pub enum Error<K: Array> {
 /// Configuration for [Metadata] storage.
 #[derive(Clone)]
 pub struct Config {
-    /// The `commonware_runtime::Storage` partition to
-    /// use for storing metadata.
+    /// The [commonware_runtime::Storage] partition to use for storing metadata.
     pub partition: String,
 }
 

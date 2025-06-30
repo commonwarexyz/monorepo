@@ -18,7 +18,7 @@ struct Wrapper<E: Clock + Storage + Metrics> {
     data: Vec<u8>,
 }
 
-/// Implementation of `Metadata` storage.
+/// Implementation of [Metadata] storage.
 pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
     context: E,
 
@@ -34,7 +34,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
 }
 
 impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
-    /// Initialize a new `Metadata` instance.
+    /// Initialize a new [Metadata] instance.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error<K>> {
         // Open dedicated blobs
         let (left_blob, left_len) = context.open(&cfg.partition, BLOB_NAMES[0]).await?;
@@ -188,40 +188,40 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         ))
     }
 
-    /// Get a value from `Metadata` (if it exists).
+    /// Get a value from [Metadata] (if it exists).
     pub fn get(&self, key: &K) -> Option<&Vec<u8>> {
         self.map.get(key)
     }
 
-    /// Clear all values from `Metadata`. The new state will not be persisted until `sync` is
+    /// Clear all values from [Metadata]. The new state will not be persisted until [Self::sync] is
     /// called.
     pub fn clear(&mut self) {
         self.map.clear();
         self.keys.set(0);
     }
 
-    /// Put a value into `Metadata`.
+    /// Put a value into [Metadata].
     ///
     /// If the key already exists, the value will be overwritten. The
-    /// value stored will not be persisted until `sync` is called.
+    /// value stored will not be persisted until [Self::sync] is called.
     pub fn put(&mut self, key: K, value: Vec<u8>) {
         self.map.insert(key, value);
         self.keys.set(self.map.len() as i64);
     }
 
-    /// Remove a value from `Metadata` (if it exists).
+    /// Remove a value from [Metadata] (if it exists).
     pub fn remove(&mut self, key: &K) {
         self.map.remove(key);
         self.keys.set(self.map.len() as i64);
     }
 
-    /// Atomically commit the current state of `Metadata`.
+    /// Atomically commit the current state of [Metadata].
     pub async fn sync(&mut self) -> Result<(), Error<K>> {
         self.syncs.inc();
 
         // Compute next version.
         //
-        // While it is possible that extremely high-frequency updates to `Metadata` could cause an eventual
+        // While it is possible that extremely high-frequency updates to metadata could cause an eventual
         // overflow of version, syncing once per millisecond would overflow in 584,942,417 years.
         let past_version = self.blobs[self.cursor].version;
         let next_version = past_version.checked_add(1).expect("version overflow");
@@ -288,7 +288,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         Ok(())
     }
 
-    /// Sync outstanding data and close `Metadata`.
+    /// Sync outstanding data and close [Metadata].
     pub async fn close(mut self) -> Result<(), Error<K>> {
         // Sync and close blobs
         self.sync().await?;
