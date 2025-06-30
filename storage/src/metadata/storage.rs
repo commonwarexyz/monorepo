@@ -165,7 +165,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         }
 
         // Return info
-        Ok(Some((version, data, buf)))
+        Ok(Some((version, data, buf.as_ref().to_vec())))
     }
 
     /// Get a value from `Metadata` (if it exists).

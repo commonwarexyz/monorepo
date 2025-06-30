@@ -515,4 +515,144 @@ mod tests {
             metadata.destroy().await.unwrap();
         });
     }
+
+    #[test_traced]
+    fn test_diff_optimization() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a metadata store
+            let cfg = Config {
+                partition: "test".to_string(),
+            };
+            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Put initial keys with large values
+            for i in 0..50 {
+                metadata.put(U64::new(i), vec![i as u8; 1000]);
+            }
+
+            // First sync - writes everything
+            metadata.sync().await.unwrap();
+
+            // Test 1: No changes sync - should still write due to version increment
+            metadata.sync().await.unwrap();
+
+            // Test 2: Modify one key in the middle
+            metadata.put(U64::new(25), vec![255u8; 1000]);
+            metadata.sync().await.unwrap();
+
+            // Test 3: Add a new key at the end
+            metadata.put(U64::new(50), vec![200u8; 1000]);
+            metadata.sync().await.unwrap();
+
+            // Test 4: Remove a key in the middle
+            metadata.remove(&U64::new(25));
+            metadata.sync().await.unwrap();
+
+            // Test 5: Modify multiple scattered keys
+            metadata.put(U64::new(5), vec![100u8; 1000]);
+            metadata.put(U64::new(20), vec![101u8; 1000]);
+            metadata.put(U64::new(35), vec![102u8; 1000]);
+            metadata.sync().await.unwrap();
+
+            // Close and reopen to verify data integrity
+            metadata.close().await.unwrap();
+            let cfg = Config {
+                partition: "test".to_string(),
+            };
+            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Verify final state
+            assert!(metadata.get(&U64::new(25)).is_none());
+            assert_eq!(metadata.get(&U64::new(5)).unwrap(), &vec![100u8; 1000]);
+            assert_eq!(metadata.get(&U64::new(20)).unwrap(), &vec![101u8; 1000]);
+            assert_eq!(metadata.get(&U64::new(35)).unwrap(), &vec![102u8; 1000]);
+            assert_eq!(metadata.get(&U64::new(50)).unwrap(), &vec![200u8; 1000]);
+
+            // Verify keys that shouldn't have changed
+            assert_eq!(metadata.get(&U64::new(0)).unwrap(), &vec![0u8; 1000]);
+            assert_eq!(metadata.get(&U64::new(49)).unwrap(), &vec![49u8; 1000]);
+
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_diff_edge_cases() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Test edge case 1: Empty metadata sync
+            let cfg = Config {
+                partition: "test1".to_string(),
+            };
+            let mut metadata: Metadata<_, U64> =
+                Metadata::init(context.clone(), cfg).await.unwrap();
+            metadata.sync().await.unwrap();
+            metadata.sync().await.unwrap(); // Second sync with no changes
+            metadata.close().await.unwrap();
+
+            // Test edge case 2: Single key metadata
+            let cfg = Config {
+                partition: "test2".to_string(),
+            };
+            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            metadata.put(U64::new(0), vec![42u8; 10]);
+            metadata.sync().await.unwrap();
+
+            // Change the single key
+            metadata.put(U64::new(0), vec![43u8; 10]);
+            metadata.sync().await.unwrap();
+
+            metadata.destroy().await.unwrap();
+
+            // Test edge case 3: Keys with varying sizes
+            let cfg = Config {
+                partition: "test3".to_string(),
+            };
+            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Add keys with different sizes
+            metadata.put(U64::new(0), vec![0u8; 10]);
+            metadata.put(U64::new(1), vec![1u8; 100]);
+            metadata.put(U64::new(2), vec![2u8; 1000]);
+            metadata.sync().await.unwrap();
+
+            // Change middle key to different size
+            metadata.put(U64::new(1), vec![1u8; 50]);
+            metadata.sync().await.unwrap();
+
+            // Verify data integrity
+            metadata.close().await.unwrap();
+            let cfg = Config {
+                partition: "test3".to_string(),
+            };
+            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            assert_eq!(metadata.get(&U64::new(0)).unwrap(), &vec![0u8; 10]);
+            assert_eq!(metadata.get(&U64::new(1)).unwrap(), &vec![1u8; 50]);
+            assert_eq!(metadata.get(&U64::new(2)).unwrap(), &vec![2u8; 1000]);
+
+            metadata.destroy().await.unwrap();
+
+            // Test edge case 4: Alternating blob writes
+            let cfg = Config {
+                partition: "test4".to_string(),
+            };
+            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Multiple syncs to test alternating blob usage
+            for i in 0..5 {
+                metadata.put(U64::new(i), vec![i as u8; 100]);
+                metadata.sync().await.unwrap();
+            }
+
+            // Verify all data is preserved
+            for i in 0..5 {
+                assert_eq!(metadata.get(&U64::new(i)).unwrap(), &vec![i as u8; 100]);
+            }
+
+            metadata.destroy().await.unwrap();
+        });
+    }
 }
