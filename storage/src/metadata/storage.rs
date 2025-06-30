@@ -47,7 +47,6 @@ impl<B: Blob> Wrapper<B> {
 /// Implementation of [Metadata] storage.
 pub struct Metadata<E: Clock + Storage + Metrics, K: Array, V: Codec> {
     context: E,
-    codec_config: V::Cfg,
 
     // Data is stored in a BTreeMap to enable deterministic serialization.
     map: BTreeMap<K, V>,
@@ -97,7 +96,6 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         keys.set(map.len() as i64);
         Ok(Self {
             context,
-            codec_config: cfg.codec_config,
 
             map,
             cursor,
@@ -184,7 +182,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             let next_cursor = cursor + value_len;
             let value = V::read_cfg(
                 &mut buf.as_ref()[cursor..next_cursor].as_ref(),
-                &codec_config,
+                codec_config,
             )
             .unwrap();
             cursor = next_cursor;

@@ -129,8 +129,10 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     ) -> Result<Self, Error> {
         let metadata_cfg = MConfig {
             partition: partition.to_string(),
+            codec_config: ((0..).into(), ()),
         };
-        let metadata = Metadata::init(context.with_label("metadata"), metadata_cfg).await?;
+        let metadata =
+            Metadata::<_, U64, Vec<u8>>::init(context.with_label("metadata"), metadata_cfg).await?;
 
         let key: U64 = U64::new(PRUNED_CHUNKS_PREFIX, 0);
         let pruned_chunks = match metadata.get(&key) {
@@ -196,8 +198,10 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     ) -> Result<(), Error> {
         let metadata_cfg = MConfig {
             partition: partition.to_string(),
+            codec_config: ((0..).into(), ()),
         };
-        let mut metadata = Metadata::init(context.with_label("metadata"), metadata_cfg).await?;
+        let mut metadata =
+            Metadata::<_, U64, Vec<u8>>::init(context.with_label("metadata"), metadata_cfg).await?;
         metadata.clear();
 
         // Write the number of pruned chunks.
