@@ -1,12 +1,9 @@
 use super::{Config, Error};
 use crate::rmap::RMap;
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    derive::{Encode, Read},
-    Encode as _, FixedSize, Read as _, ReadExt, Write as CodecWrite,
-};
+use commonware_codec::{Encode as _, FixedSize, Read as CodecRead, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
-    buffer::{Read as ReadBuffer, Write},
+    buffer::{Read, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
 };
 use commonware_utils::{hex, Array};
@@ -20,28 +17,30 @@ use tracing::{debug, warn};
 
 const PARITY_BIT: u32 = 1 << 31;
 const CRC_MASK: u32 = 0x7FFF_FFFF;
-const HEADER_SIZE: u64 = 16;
 
 /// Header stored at the beginning of each blob.
-#[derive(Debug, Clone, Copy, Encode, Read)]
-#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 struct Header {
-    committed_parity: u8,
-    #[codec(with = commonware_codec::unsafe_as_array)]
-    _padding: [u8; 15],
+    parity: u8,
+}
+
+impl CodecRead for Header {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let parity = u8::read(buf)?;
+        Ok(Self { parity })
+    }
+}
+
+impl CodecWrite for Header {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.parity.write(buf);
+    }
 }
 
 impl FixedSize for Header {
-    const SIZE: usize = 16;
-}
-
-impl Default for Header {
-    fn default() -> Self {
-        Self {
-            committed_parity: 0,
-            _padding: [0; 15],
-        }
-    }
+    const SIZE: usize = u8::SIZE;
 }
 
 /// Value stored in the index file.
@@ -79,7 +78,7 @@ impl<V: Array> CodecWrite for Record<V> {
     }
 }
 
-impl<V: Array> Read for Record<V> {
+impl<V: Array> CodecRead for Record<V> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -184,7 +183,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
 
             // Initialize read buffer
             let size = blob.size().await;
-            let mut replay_blob = ReadBuffer::new(blob.clone(), size, config.replay_buffer);
+            let mut replay_blob = Read::new(blob.clone(), size, config.replay_buffer);
 
             // Iterate over all records in the blob
             let mut offset = HEADER_SIZE;
