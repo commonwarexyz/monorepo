@@ -12,7 +12,9 @@ use tracing::{debug, warn};
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 
 /// The size of the block to fast-forward over.
-const BLOCK_SIZE: usize = 8;
+///
+/// This is set to the native word size for optimal performance on the target architecture.
+const BLOCK_SIZE: usize = std::mem::size_of::<usize>();
 
 /// One of the two wrappers that store metadata.
 struct Wrapper<E: Clock + Storage + Metrics> {
