@@ -52,7 +52,7 @@ pub struct Metrics {
 }
 
 /// Client that syncs an [adb::any::Any] database.
-enum Client<E, K, V, H, T, R>
+pub(super) enum Client<E, K, V, H, T, R>
 where
     E: Storage + Clock + MetricsTrait,
     K: Array,
@@ -245,16 +245,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{resolver::LocalResolver, sync};
+    use crate::sync;
     use commonware_cryptography::{sha256::Digest, Digest as _, Sha256};
     use commonware_runtime::{
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_storage::{
-        adb::any::{Any, Config},
-        index,
-    };
+    use commonware_storage::{adb::any::Any, index};
     use commonware_utils::NZU64;
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
     use test_case::test_case;
@@ -264,22 +261,24 @@ mod tests {
     type TestValue = Digest;
     type TestTranslator = index::translator::TwoCap;
     type TestAny = Any<Context, TestKey, TestValue, TestHash, TestTranslator>;
-    type TestResolver = LocalResolver<Context, TestKey, TestValue, TestHash, TestTranslator>;
 
-    /// Create a test database with unique partition names
-    async fn create_test_db(mut context: Context) -> TestAny {
-        let n = context.next_u64();
-        let config = Config {
-            mmr_journal_partition: format!("mmr_journal_{n}"),
-            mmr_metadata_partition: format!("mmr_metadata_{n}"),
+    fn create_test_config(seed: u64) -> adb::any::Config<TestTranslator> {
+        adb::any::Config {
+            mmr_journal_partition: format!("mmr_journal_{seed}"),
+            mmr_metadata_partition: format!("mmr_metadata_{seed}"),
             mmr_items_per_blob: 1024,
             mmr_write_buffer: 64,
-            log_journal_partition: format!("log_journal_{n}"),
+            log_journal_partition: format!("log_journal_{seed}"),
             log_items_per_blob: 1024,
             log_write_buffer: 64,
             translator: TestTranslator::default(),
             pool: None,
-        };
+        }
+    }
+    /// Create a test database with unique partition names
+    async fn create_test_db(mut context: Context) -> TestAny {
+        let seed = context.next_u64();
+        let config = create_test_config(seed);
         TestAny::init(context, config).await.unwrap()
     }
 
@@ -339,37 +338,39 @@ mod tests {
     //     });
     // }
 
-    // #[test_case(0, 1, NZU64!(1))]
-    // #[test_case(0, 1, NZU64!(10))]
-    // #[test_case(1, 2, NZU64!(1))]
-    // #[test_case(1, 2, NZU64!(10))]
-    // #[test_case(0, 100, NZU64!(1))]
-    // #[test_case(0, 100, NZU64!(10))]
-    // #[test_case(5, 100, NZU64!(1))]
-    // #[test_case(5, 100, NZU64!(10))]
-    // #[test_case(99, 100, NZU64!(1))]
-    // #[test_case(99, 100, NZU64!(10))]
-    // fn test_sync(sync_db_ops: usize, target_db_ops: usize, max_ops_per_batch: NonZeroU64) {
-    //     let executor = deterministic::Runner::default();
-    //     executor.start(|context| async move {
-    //         let target_db = create_test_db(context.clone()).await;
-    //         let mut target_db = apply_test_ops(target_db, target_db_ops).await;
-    //         target_db.commit().await.unwrap();
-    //         let target_ops = target_db.op_count();
-    //         let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
-    //         let target_hash = target_db.root(&mut hasher);
-    //         let resolver = TestResolver::_new(target_db);
-    //         let sync_db = create_test_db(context).await;
-    //         let sync_db = apply_test_ops(sync_db, sync_db_ops).await;
-    //         let config = ClientConfig { max_ops_per_batch };
+    #[test_case(1, NZU64!(1))]
+    #[test_case(100, NZU64!(1))]
+    #[test_case(100, NZU64!(10))]
+    #[test_case(100, NZU64!(100))]
+    #[test_case(100, NZU64!(1000))]
 
-    //         let result = sync(sync_db, resolver, target_ops, target_hash, config)
-    //             .await
-    //             .unwrap();
-    //         assert_eq!(result.root(&mut hasher), target_hash);
-    //         assert_eq!(result.op_count(), target_ops);
-    //     });
-    // }
+    fn test_sync(target_db_ops: usize, max_ops_per_batch: NonZeroU64) {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let target_db = create_test_db(context.clone()).await;
+            let mut target_db = apply_test_ops(target_db, target_db_ops).await;
+            target_db.commit().await.unwrap();
+            let target_ops = target_db.op_count();
+            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+            let target_hash = target_db.root(&mut hasher);
+
+            let config = Config {
+                db_config: create_test_config(context.next_u64()),
+                max_ops_per_batch,
+                max_retries: 0,
+                target_hash,
+                target_ops,
+                context,
+                resolver: target_db,
+                hasher,
+                _phantom: PhantomData,
+            };
+            let result = sync(config).await.unwrap();
+            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+            assert_eq!(result.root(&mut hasher), target_hash);
+            assert_eq!(result.op_count(), target_ops);
+        });
+    }
 
     // #[test]
     // fn test_delete_me() {

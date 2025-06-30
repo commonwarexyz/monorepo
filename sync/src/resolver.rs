@@ -20,33 +20,7 @@ pub trait Resolver<H: Hasher, K: Array, V: Array> {
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error>;
 }
 
-/// A resolver that wraps a local database for syncing from a local source
-pub struct LocalResolver<E, K, V, H, T>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-{
-    db: Any<E, K, V, H, T>,
-}
-
-impl<E, K, V, H, T> LocalResolver<E, K, V, H, T>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-{
-    /// Create a new local resolver wrapping the given database
-    pub fn _new(db: Any<E, K, V, H, T>) -> Self {
-        Self { db }
-    }
-}
-
-impl<E, K, V, H, T> Resolver<H, K, V> for LocalResolver<E, K, V, H, T>
+impl<E, K, V, H, T> Resolver<H, K, V> for Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -59,9 +33,7 @@ where
         start_index: u64,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        // Get proof and operations from the database
-        self.db
-            .proof(start_index, max_ops.get())
+        self.proof(start_index, max_ops.get())
             .await
             .map_err(Error::GetProofFailed)
     }
@@ -79,14 +51,12 @@ mod tests {
         adb::any::{Any, Config},
         index,
     };
-    use commonware_utils::NZU64;
 
     type TestHash = Sha256;
     type TestKey = Digest;
     type TestValue = Digest;
     type TestTranslator = index::translator::TwoCap;
     type TestAny = Any<Context, TestKey, TestValue, TestHash, TestTranslator>;
-    type TestResolver = LocalResolver<Context, TestKey, TestValue, TestHash, TestTranslator>;
 
     async fn create_test_db(context: Context) -> TestAny {
         let config = Config {
@@ -139,8 +109,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::_new(source_db);
-            let (proof, returned_ops) = resolver.get_proof(0, NZU64!(5)).await.unwrap();
+            let (proof, returned_ops) = source_db.proof(0, 5).await.unwrap();
 
             assert_eq!(returned_ops.len(), 5);
 
@@ -174,8 +143,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::_new(source_db);
-            let (proof, returned_ops) = resolver.get_proof(0, NZU64!(1000)).await.unwrap();
+            let (proof, returned_ops) = source_db.proof(0, 1000).await.unwrap();
 
             // Should return all available operations
             assert!(returned_ops.len() >= 15);
@@ -210,8 +178,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::_new(source_db);
-            let (proof, returned_ops) = resolver.get_proof(5, NZU64!(10)).await.unwrap();
+            let (proof, returned_ops) = source_db.proof(5, 10).await.unwrap();
 
             assert!(returned_ops.len() <= 10);
             assert!(!returned_ops.is_empty());
@@ -249,8 +216,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::_new(source_db);
-            let (proof, returned_ops) = resolver.get_proof(0, NZU64!(1)).await.unwrap();
+            let (proof, returned_ops) = source_db.proof(0, 1).await.unwrap();
 
             assert_eq!(returned_ops.len(), 1);
             match &returned_ops[0] {
@@ -280,8 +246,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::_new(source_db);
-            let (proof, returned_ops) = resolver.get_proof(0, NZU64!(3)).await.unwrap();
+            let (proof, returned_ops) = source_db.proof(0, 3).await.unwrap();
 
             assert!(returned_ops.len() <= 3);
             assert!(!returned_ops.is_empty());
@@ -301,9 +266,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let source_db = create_test_db(context.clone()).await;
-            let mut resolver = TestResolver::_new(source_db);
 
-            let result = resolver.get_proof(0, NZU64!(10)).await;
+            let result = source_db.proof(0, 10).await;
             assert!(result.is_err());
         });
     }
@@ -315,9 +279,8 @@ mod tests {
         executor.start(|context| async move {
             let mut source_db = create_test_db(context.clone()).await;
             populate_db_with_operations(&mut source_db, 5).await;
-            let mut resolver = TestResolver::_new(source_db);
 
-            let result = resolver.get_proof(100, NZU64!(10)).await;
+            let result = source_db.proof(100, 10).await;
 
             assert!(result.is_err());
         });
@@ -347,8 +310,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::_new(source_db);
-            let (proof, returned_ops) = resolver.get_proof(0, NZU64!(20)).await.unwrap();
+            let (proof, returned_ops) = source_db.proof(0, 20).await.unwrap();
 
             // Should have at least the operations we created
             assert!(returned_ops.len() >= 5);
@@ -406,8 +368,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::_new(source_db);
-            let (proof, returned_ops) = resolver.get_proof(0, NZU64!(20)).await.unwrap();
+            let (proof, returned_ops) = source_db.proof(0, 20).await.unwrap();
 
             // Should contain both updates and deletes
             let update_count = returned_ops
@@ -441,11 +402,10 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::_new(source_db);
             // This should handle the edge case gracefully
             // The current implementation may have issues with max_ops = 0
             // so we test with a minimal request instead
-            let (proof, returned_ops) = resolver.get_proof(5, NZU64!(1)).await.unwrap();
+            let (proof, returned_ops) = source_db.proof(5, 1).await.unwrap();
 
             assert!(returned_ops.len() <= 1);
 
@@ -469,8 +429,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::_new(source_db);
-            let (proof, returned_ops) = resolver.get_proof(0, NZU64!(30)).await.unwrap();
+            let (proof, returned_ops) = source_db.proof(0, 30).await.unwrap();
 
             assert!(returned_ops.len() <= 30);
             assert!(returned_ops.len() >= 10); // Should have substantial operations
@@ -505,12 +464,10 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::_new(source_db);
-
             // Make consecutive requests
-            let (proof1, ops1) = resolver.get_proof(0, NZU64!(10)).await.unwrap();
-            let (proof2, ops2) = resolver.get_proof(10, NZU64!(10)).await.unwrap();
-            let (proof3, ops3) = resolver.get_proof(20, NZU64!(10)).await.unwrap();
+            let (proof1, ops1) = source_db.proof(0, 10).await.unwrap();
+            let (proof2, ops2) = source_db.proof(10, 10).await.unwrap();
+            let (proof3, ops3) = source_db.proof(20, 10).await.unwrap();
 
             assert!(ops1.len() <= 10);
             assert!(ops2.len() <= 10);
@@ -550,8 +507,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::_new(source_db);
-            let (proof, returned_ops) = resolver.get_proof(0, NZU64!(20)).await.unwrap();
+            let (proof, returned_ops) = source_db.proof(0, 20).await.unwrap();
 
             // Should have multiple operations for the same key
             let update_count = returned_ops
@@ -583,8 +539,7 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::_new(source_db);
-            let (proof, returned_ops) = resolver.get_proof(0, NZU64!(5)).await.unwrap();
+            let (proof, returned_ops) = source_db.proof(0, 5).await.unwrap();
 
             // Verify the proof is structurally valid
             assert!(!proof.digests.is_empty());
@@ -608,16 +563,14 @@ mod tests {
             let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
-            let mut resolver = TestResolver::_new(source_db);
-
             // Test different ranges
-            let ranges = [(0, NZU64!(3)), (5, NZU64!(5)), (10, NZU64!(8))];
+            let ranges = [(0, 3), (5, 5), (10, 8)];
 
             for (start, count) in ranges {
-                let (proof, returned_ops) = resolver.get_proof(start, count).await.unwrap();
+                let (proof, returned_ops) = source_db.proof(start, count).await.unwrap();
 
                 assert!(!proof.digests.is_empty());
-                assert!(returned_ops.len() <= count.get() as usize);
+                assert!(returned_ops.len() <= count as usize);
                 assert!(
                     TestAny::verify_proof(&mut hasher, &proof, start, &returned_ops, &root_hash),
                     "Proof verification should succeed for range {}:{}",
