@@ -14,45 +14,38 @@
 //! # File Organization
 //!
 //! Records are grouped into blobs to avoid having too many files:
+//!
 //! ```text
-//! Blob 0: indices 0-999 (items_per_blob = 1000)
+//! Blob 0: indices 0-999
 //! Blob 1: indices 1000-1999
 //! ...
 //! ```
 //!
-//! Each blob is named with the starting index encoded as big-endian bytes.
-//!
 //! # Format
 //!
-//! Each record in a blob:
+//! [Ordinal] stores values in the following format:
+//!
 //! ```text
-//! +-------------------+--------+
-//! | Value (fixed size)| CRC32  |
-//! +-------------------+--------+
-//! |     V bytes       | 4 bytes|
-//! +-------------------+--------+
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |12 |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! |          Value (Fixed Size)       |     CRC32     |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+
 //! ```
-//!
-//! # Memory Usage
-//!
-//! The store maintains minimal in-memory state:
-//! - An RMap for tracking which indices exist (for efficient `has` and `next_gap` queries)
-//! - A map of open blob handles
-//! - Pending writes buffer (cleared on sync)
 //!
 //! # Performance Characteristics
 //!
 //! - **Writes**: O(1) - direct offset calculation
 //! - **Reads**: O(1) - direct offset calculation
-//! - **Has**: O(1) - in-memory RMap lookup
-//! - **Next Gap**: O(log n) - RMap range query
-//! - **Restart**: O(n) where n is the number of existing records (to rebuild RMap)
+//! - **Has**: O(1) - in-memory lookup (via [crate::rmap::RMap])
+//! - **Next Gap**: O(log n) - in-memory range query (via [crate::rmap::RMap])
+//! - **Restart**: O(n) where n is the number of existing records (to rebuild [crate::rmap::RMap])
 //!
 //! # Crash Consistency
 //!
 //! Each record includes a CRC32 checksum. On restart, the store validates all records
-//! and rebuilds the in-memory RMap. Invalid records (corrupted or empty) are detected
-//! and excluded from the index.
+//! and rebuilds the in-memory [crate::rmap::RMap]. Invalid records (corrupted or empty) are
+//! excluded from the rebuilt index.
 //!
 //! # Example
 //!
