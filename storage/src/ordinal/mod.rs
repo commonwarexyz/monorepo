@@ -45,17 +45,17 @@
 //!
 //! [Ordinal] stages all writes in memory until [Ordinal::sync] is called. While this ensures
 //! that [Ordinal] will only be updated after some other store has been synced, it does not guarantee
-//! all items written during [Ordinal::sync] are atomically persisted and only some of the items
-//! cached may be written.
+//! all items written during [Ordinal::sync] are atomically persisted and only some cached items
+//! may be written.
 //!
-//! _If you want atomicity, pair [crate::journal::fixed::Journal] and [crate::metadata::Metadata] with
-//! [Ordinal] (storing a log of writes and updating metadata when writes are consistently applied). This
-//! is much more efficient than storing a version on each record._
+//! _If you want atomicity for sparse writes, pair [crate::journal::fixed::Journal] and
+//! [crate::metadata::Metadata] with [Ordinal] (storing a log of writes and updating metadata
+//! when writes are consistently applied)._
 //!
 //! # Updates
 //!
-//! [Ordinal] supports index updates but they are not recommended. If there is an unclean shutdown, partial
-//! writes may result in an updated record that is half-written (that will be skipped entirely on restart).
+//! [Ordinal] supports index updates but they should be used with caution. If there is an unclean shutdown,
+//! partial writes may lead to an updated record being half-written (that will be skipped entirely on restart).
 //!
 //! # Recovery
 //!
