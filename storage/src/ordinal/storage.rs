@@ -7,9 +7,10 @@ use commonware_runtime::{
     Blob, Clock, Error as RError, Metrics, Storage,
 };
 use commonware_utils::{hex, Array};
+use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{btree_map::Entry, BTreeMap},
     mem::take,
 };
 use tracing::{debug, warn};
@@ -66,8 +67,8 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
     // RMap for interval tracking
     intervals: RMap,
 
-    // Pending index entries to be synced
-    pending: BTreeMap<u64, V>,
+    // Pending index entries to be synced, grouped by section
+    pending: BTreeMap<u64, BTreeMap<u64, V>>,
 
     // Metrics
     puts: Counter,
@@ -189,7 +190,11 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
     /// Add a value at the specified index (pending until sync).
     pub fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
         self.puts.inc();
-        self.pending.insert(index, value);
+        let section = index / self.config.items_per_blob;
+        self.pending
+            .entry(section)
+            .or_default()
+            .insert(index, value);
         self.intervals.insert(index);
 
         Ok(())
@@ -205,8 +210,11 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         }
 
         // Check pending entries first
-        if let Some(value) = self.pending.get(&index) {
-            return Ok(Some(value.clone()));
+        let section = index / self.config.items_per_blob;
+        if let Some(writes) = self.pending.get(&section) {
+            if let Some(value) = writes.get(&index) {
+                return Ok(Some(value.clone()));
+            }
         }
 
         // Read from disk
@@ -271,8 +279,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         }
 
         // Clean pending entries that fall into pruned sections.
-        self.pending
-            .retain(|&index, _| (index / self.config.items_per_blob) >= min_section);
+        self.pending.retain(|&section, _| section >= min_section);
 
         Ok(())
     }
@@ -281,36 +288,41 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.syncs.inc();
 
-        // Write all pending entries to disk
-        let mut modified = BTreeSet::new();
-        for (index, value) in take(&mut self.pending) {
-            // Prepare record
-            let section = index / self.config.items_per_blob;
-            let offset = (index % self.config.items_per_blob) * Record::<V>::SIZE as u64;
-            let record = Record::new(value);
+        // Take the pending writes, which are already grouped by section.
+        let pending = take(&mut self.pending);
 
-            // If blob doesn't exist, create it
-            let mut blob = self.blobs.get(&section);
-            if blob.is_none() {
+        // Ensure all necessary blobs are created.
+        let modified: Vec<u64> = pending.keys().copied().collect();
+        for &section in &modified {
+            if let Entry::Vacant(entry) = self.blobs.entry(section) {
                 let (new, len) = self
                     .context
                     .open(&self.config.partition, &section.to_be_bytes())
                     .await?;
-                self.blobs
-                    .insert(section, Write::new(new, len, self.config.write_buffer));
-                blob = self.blobs.get(&section);
+                entry.insert(Write::new(new, len, self.config.write_buffer));
                 debug!(section, "created blob");
             }
-
-            // Write record to blob
-            blob.unwrap().write_at(record.encode(), offset).await?;
-            modified.insert(section);
         }
 
-        // Sync the blobs
-        for section in modified {
-            self.blobs.get(&section).unwrap().sync().await?;
+        // Write all pending entries to disk.
+        let mut futures = Vec::new();
+        for (section, writes) in pending {
+            let blob = self.blobs.get(&section).unwrap();
+            for (index, value) in writes {
+                let offset = (index % self.config.items_per_blob) * Record::<V>::SIZE as u64;
+                let record = Record::new(value);
+                futures.push(blob.write_at(record.encode(), offset));
+            }
         }
+        try_join_all(futures).await?;
+
+        // Sync the modified blobs.
+        let mut futures = Vec::with_capacity(modified.len());
+        for &section in &modified {
+            futures.push(self.blobs.get(&section).unwrap().sync());
+        }
+        try_join_all(futures).await?;
+
         Ok(())
     }
 
