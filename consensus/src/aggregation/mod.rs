@@ -223,7 +223,7 @@ mod tests {
                     partition: format!("aggregation/{}/", validator),
                     journal_write_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
                     journal_replay_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
-                    journal_heights_per_section: std::num::NonZeroU64::new(100).unwrap(),
+                    journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                     journal_compression: Some(3),
                 },
             );
@@ -408,8 +408,7 @@ mod tests {
                                 partition: format!("unclean_shutdown_test/{}/", validator),
                                 journal_write_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
                                 journal_replay_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
-                                journal_heights_per_section: std::num::NonZeroU64::new(100)
-                                    .unwrap(),
+                                journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                                 journal_compression: Some(3),
                             },
                         );

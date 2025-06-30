@@ -488,28 +488,28 @@ impl<
     /// Handles a threshold signature.
     async fn handle_threshold(&mut self, item: Item<D>, threshold: V::Signature) {
         // Check if we already have the threshold
-        if self.confirmed.contains_key(&item.index) {
+        let index = item.index;
+        if self.confirmed.contains_key(&index) {
             return;
         }
 
         // Store the threshold
-        self.confirmed.insert(item.index, (item.digest, threshold));
+        self.confirmed.insert(index, (item.digest, threshold));
+
+        // Journal and notify the automaton
+        let lock = Activity::Lock(item, threshold);
+        self.journal_append(lock.clone()).await;
+        self.journal_sync(index).await;
+        self.reporter.report(lock).await;
 
         // Increase the tip if needed
-        if item.index == self.tip {
-            let mut new_tip = item.index.checked_add(1).unwrap();
+        if index == self.tip {
+            let mut new_tip = index.checked_add(1).unwrap();
             while self.confirmed.contains_key(&new_tip) {
                 new_tip = new_tip.checked_add(1).unwrap();
             }
             self.fast_forward_tip(new_tip).await;
         }
-
-        // Journal and notify the automaton
-        let index = item.index;
-        let lock = Activity::Lock(item, threshold);
-        self.journal_append(lock.clone()).await;
-        self.journal_sync(index).await;
-        self.reporter.report(lock).await;
     }
 
     /// Handles a rebroadcast request for the given index.
@@ -700,6 +700,11 @@ impl<
         self.journal_append(Activity::Tip(tip)).await;
         self.reporter.report(Activity::Tip(tip)).await;
 
+        // Prune journal, ignoring errors
+        let section = self.get_journal_section(tip);
+        let journal = self.journal.as_mut().expect("journal must be initialized");
+        let _ = journal.prune(section).await;
+
         // Update the tip
         self.tip = tip;
     }
@@ -782,17 +787,10 @@ impl<
             .expect("unable to append to journal");
     }
 
-    /// Syncs (ensures all data is written to disk) and prunes the journal.
+    /// Syncs (ensures all data is written to disk).
     async fn journal_sync(&mut self, index: Index) {
         let section = self.get_journal_section(index);
-
-        // Get journal
         let journal = self.journal.as_mut().expect("journal must be initialized");
-
-        // Sync journal
         journal.sync(section).await.expect("unable to sync journal");
-
-        // Prune journal, ignoring errors
-        let _ = journal.prune(self.tip).await;
     }
 }
