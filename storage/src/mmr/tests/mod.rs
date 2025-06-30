@@ -17,7 +17,7 @@ pub async fn build_and_check_test_roots_mmr(mmr: &mut impl Builder<Sha256>) {
         let element = hasher.inner().finalize();
         let root = mmr.root(&mut hasher);
         let expected_root = ROOTS[i as usize];
-        assert_eq!(hex(&root), expected_root, "at: {}", i);
+        assert_eq!(hex(&root), expected_root, "at: {i}");
         mmr.add(&mut hasher, &element).await.unwrap();
     }
     assert_eq!(

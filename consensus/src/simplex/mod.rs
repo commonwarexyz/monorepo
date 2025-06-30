@@ -370,7 +370,7 @@ mod tests {
                             continue;
                         };
                         if payloads.len() > 1 {
-                            panic!("view: {}", view);
+                            panic!("view: {view}");
                         }
                         let (digest, notarizers) = payloads.iter().next().unwrap();
                         notarized.insert(view, *digest);
@@ -378,7 +378,7 @@ mod tests {
                         if notarizers.len() < threshold as usize {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
-                            panic!("view: {}", view);
+                            panic!("view: {view}");
                         }
                         if notarizers.len() != n as usize {
                             exceptions += 1;
@@ -409,7 +409,7 @@ mod tests {
                             continue;
                         };
                         if payloads.len() > 1 {
-                            panic!("view: {}", view);
+                            panic!("view: {view}");
                         }
                         let (digest, finalizers) = payloads.iter().next().unwrap();
                         finalized.insert(view, *digest);
@@ -423,7 +423,7 @@ mod tests {
                         if finalizers.len() < threshold as usize {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
-                            panic!("view: {}", view);
+                            panic!("view: {view}");
                         }
                         if finalizers.len() != n as usize {
                             exceptions += 1;
@@ -1016,7 +1016,7 @@ mod tests {
                     for (view, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(offline) {
-                                panic!("view: {}", view);
+                                panic!("view: {view}");
                             }
                         }
                     }
@@ -1025,7 +1025,7 @@ mod tests {
                     let nullifies = supervisor.nullifies.lock().unwrap();
                     for (view, participants) in nullifies.iter() {
                         if participants.contains(offline) {
-                            panic!("view: {}", view);
+                            panic!("view: {view}");
                         }
                     }
                 }
@@ -1034,7 +1034,7 @@ mod tests {
                     for (view, payloads) in finalizes.iter() {
                         for (_, finalizers) in payloads.iter() {
                             if finalizers.contains(offline) {
-                                panic!("view: {}", view);
+                                panic!("view: {view}");
                             }
                         }
                     }
@@ -1058,7 +1058,7 @@ mod tests {
                     for view in offline_views.iter() {
                         let nullifies = nullifies.get(view).unwrap();
                         if nullifies.len() < threshold as usize {
-                            panic!("view: {}", view);
+                            panic!("view: {view}");
                         }
                     }
                 }
@@ -1242,7 +1242,7 @@ mod tests {
                     for (view, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(slow) {
-                                panic!("view: {}", view);
+                                panic!("view: {view}");
                             }
                         }
                     }
@@ -1252,7 +1252,7 @@ mod tests {
                     for (view, participants) in nullifies.iter() {
                         // Start checking once all are online (leader may never have proposed)
                         if *view > 10 && participants.contains(slow) {
-                            panic!("view: {}", view);
+                            panic!("view: {view}");
                         }
                     }
                 }
@@ -1261,7 +1261,7 @@ mod tests {
                     for (view, payloads) in finalizes.iter() {
                         for (_, finalizers) in payloads.iter() {
                             if finalizers.contains(slow) {
-                                panic!("view: {}", view);
+                                panic!("view: {view}");
                             }
                         }
                     }
@@ -1449,7 +1449,7 @@ mod tests {
                             found += 1;
                         }
                     }
-                    assert!(found >= activity_timeout - 2, "found: {}", found);
+                    assert!(found >= activity_timeout - 2, "found: {found}");
                 }
             }
         });
@@ -1934,7 +1934,7 @@ mod tests {
                                 Activity::ConflictingFinalize(_) => {
                                     count_conflicting_finalize += 1;
                                 }
-                                _ => panic!("unexpected fault: {:?}", fault),
+                                _ => panic!("unexpected fault: {fault:?}"),
                             }
                         }
                     }
@@ -2098,7 +2098,7 @@ mod tests {
                                 Activity::NullifyFinalize(_) => {
                                     count_nullify_and_finalize += 1;
                                 }
-                                _ => panic!("unexpected fault: {:?}", fault),
+                                _ => panic!("unexpected fault: {fault:?}"),
                             }
                         }
                     }

@@ -530,8 +530,7 @@ mod tests {
             assert_eq!(
                 buf.len(),
                 calculated_size,
-                "Size mismatch for u16 value {}",
-                value
+                "Size mismatch for u16 value {value}",
             );
 
             // Also verify UInt wrapper
@@ -539,8 +538,7 @@ mod tests {
             assert_eq!(
                 uint.encode_size(),
                 buf.len(),
-                "UInt encode_size mismatch for value {}",
-                value
+                "UInt encode_size mismatch for value {value}",
             );
         }
     }
@@ -558,8 +556,7 @@ mod tests {
             assert_eq!(
                 buf.len(),
                 calculated_size,
-                "Size mismatch for i16 value {}",
-                value
+                "Size mismatch for i16 value {value}",
             );
 
             // Also verify SInt wrapper
@@ -567,18 +564,16 @@ mod tests {
             assert_eq!(
                 sint.encode_size(),
                 buf.len(),
-                "SInt encode_size mismatch for value {}",
-                value
+                "SInt encode_size mismatch for value {value}",
             );
 
             // Verify we can decode it back correctly
             let mut slice = &buf[..];
             let decoded: i16 = read_signed(&mut slice).unwrap();
-            assert_eq!(decoded, value, "Decode mismatch for value {}", value);
+            assert_eq!(decoded, value, "Decode mismatch for value {value}");
             assert!(
                 slice.is_empty(),
-                "Buffer not fully consumed for value {}",
-                value
+                "Buffer not fully consumed for value {value}",
             );
         }
     }
@@ -604,8 +599,7 @@ mod tests {
                 let calculated_size = size(value);
                 assert_eq!(
                     calculated_size, expected_size,
-                    "Size calculation wrong for {} with {} bits",
-                    val, bits
+                    "Size calculation wrong for {val} with {bits} bits",
                 );
 
                 // Compare encoded size
@@ -614,9 +608,7 @@ mod tests {
                 assert_eq!(
                     buf.len(),
                     expected_size,
-                    "Encoded size wrong for {} with {} bits",
-                    val,
-                    bits
+                    "Encoded size wrong for {val} with {bits} bits",
                 );
             }
         }
@@ -643,8 +635,7 @@ mod tests {
                 let calculated_size = size(value);
                 assert_eq!(
                     calculated_size, expected_size,
-                    "Size wrong for 1<<{} = {}",
-                    bit_pos, val
+                    "Size wrong for 1<<{bit_pos} = {val}",
                 );
 
                 // Compare encoded size
@@ -653,9 +644,7 @@ mod tests {
                 assert_eq!(
                     buf.len(),
                     expected_size,
-                    "Encoded size wrong for 1<<{} = {}",
-                    bit_pos,
-                    val
+                    "Encoded size wrong for 1<<{bit_pos} = {val}",
                 );
             }
         }

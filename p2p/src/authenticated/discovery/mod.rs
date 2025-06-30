@@ -249,8 +249,7 @@ mod tests {
         let metrics = context.encode();
         assert!(
             !metrics.contains("messages_rate_limited_total{"),
-            "no messages should be rate limited: {}",
-            metrics
+            "no messages should be rate limited: {metrics}"
         );
     }
 
@@ -276,7 +275,7 @@ mod tests {
         let (complete_sender, mut complete_receiver) = mpsc::channel(peers.len());
         for (i, peer) in peers.iter().enumerate() {
             // Create peer context
-            let context = context.with_label(&format!("peer-{}", i));
+            let context = context.with_label(&format!("peer-{i}"));
 
             // Derive port
             let port = base_port + i as u16;
@@ -530,7 +529,7 @@ mod tests {
             let mut waiters = Vec::new();
             for (i, peer) in peers.iter().enumerate() {
                 // Create peer context
-                let context = context.with_label(&format!("peer-{}", i));
+                let context = context.with_label(&format!("peer-{i}"));
 
                 // Derive port
                 let port = base_port + i as u16;

@@ -57,6 +57,6 @@ fn main() {
     println!("public: {}", poly::public::<MinSig>(&public));
     for share in shares {
         let validator = validators[share.index as usize].0;
-        println!("validator={}: {}", validator, share,);
+        println!("validator={validator}: {share}");
     }
 }

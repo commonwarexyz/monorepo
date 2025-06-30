@@ -227,24 +227,18 @@ pub fn install_monitoring_cmd(
     tempo_version: &str,
 ) -> String {
     let prometheus_url = format!(
-    "https://github.com/prometheus/prometheus/releases/download/v{}/prometheus-{}.linux-arm64.tar.gz",
-    prometheus_version, prometheus_version
+    "https://github.com/prometheus/prometheus/releases/download/v{prometheus_version}/prometheus-{prometheus_version}.linux-arm64.tar.gz",
 );
-    let grafana_url = format!(
-        "https://dl.grafana.com/oss/release/grafana_{}_arm64.deb",
-        grafana_version
-    );
+    let grafana_url =
+        format!("https://dl.grafana.com/oss/release/grafana_{grafana_version}_arm64.deb");
     let loki_url = format!(
-        "https://github.com/grafana/loki/releases/download/v{}/loki-linux-arm64.zip",
-        loki_version
+        "https://github.com/grafana/loki/releases/download/v{loki_version}/loki-linux-arm64.zip",
     );
     let pyroscope_url = format!(
-      "https://github.com/grafana/pyroscope/releases/download/v{}/pyroscope_{}_linux_arm64.tar.gz",
-      pyroscope_version, pyroscope_version
-  );
+        "https://github.com/grafana/pyroscope/releases/download/v{pyroscope_version}/pyroscope_{pyroscope_version}_linux_arm64.tar.gz",
+    );
     let tempo_url = format!(
-        "https://github.com/grafana/tempo/releases/download/v{}/tempo_{}_linux_arm64.tar.gz",
-        tempo_version, tempo_version
+        "https://github.com/grafana/tempo/releases/download/v{tempo_version}/tempo_{tempo_version}_linux_arm64.tar.gz",
     );
     format!(
         r#"
@@ -253,31 +247,31 @@ sudo apt-get install -y wget curl unzip adduser libfontconfig1
 
 # Download Prometheus with retries
 for i in {{1..5}}; do
-  wget -O /home/ubuntu/prometheus.tar.gz {} && break
+  wget -O /home/ubuntu/prometheus.tar.gz {prometheus_url} && break
   sleep 10
 done
 
 # Download Grafana with retries
 for i in {{1..5}}; do
-  wget -O /home/ubuntu/grafana.deb {} && break
+  wget -O /home/ubuntu/grafana.deb {grafana_url} && break
   sleep 10
 done
 
 # Download Loki with retries
 for i in {{1..5}}; do
-  wget -O /home/ubuntu/loki.zip {} && break
+  wget -O /home/ubuntu/loki.zip {loki_url} && break
   sleep 10
 done
 
 # Download Pyroscope with retries
 for i in {{1..5}}; do
-  wget -O /home/ubuntu/pyroscope.tar.gz {} && break
+  wget -O /home/ubuntu/pyroscope.tar.gz {pyroscope_url} && break
   sleep 10
 done
 
 # Download Tempo with retries
 for i in {{1..5}}; do
-  wget -O /home/ubuntu/tempo.tar.gz {} && break
+  wget -O /home/ubuntu/tempo.tar.gz {tempo_url} && break
   sleep 10
 done
 
@@ -285,8 +279,8 @@ done
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
 sudo chown -R ubuntu:ubuntu /opt/prometheus
 tar xvfz /home/ubuntu/prometheus.tar.gz -C /home/ubuntu
-sudo mv /home/ubuntu/prometheus-{}.linux-arm64 /opt/prometheus/prometheus-{}.linux-arm64
-sudo ln -s /opt/prometheus/prometheus-{}.linux-arm64/prometheus /opt/prometheus/prometheus
+sudo mv /home/ubuntu/prometheus-{prometheus_version}.linux-arm64 /opt/prometheus/prometheus-{prometheus_version}.linux-arm64
+sudo ln -s /opt/prometheus/prometheus-{prometheus_version}.linux-arm64/prometheus /opt/prometheus/prometheus
 sudo chmod +x /opt/prometheus/prometheus
 
 # Install Grafana
@@ -356,15 +350,7 @@ sudo systemctl start tempo
 sudo systemctl enable tempo
 sudo systemctl restart grafana-server
 sudo systemctl enable grafana-server
-"#,
-        prometheus_url,
-        grafana_url,
-        loki_url,
-        pyroscope_url,
-        tempo_url,
-        prometheus_version,
-        prometheus_version,
-        prometheus_version
+"#
     )
 }
 
@@ -414,8 +400,7 @@ sudo systemctl enable --now memleak-agent
 /// Command to set up Promtail on binary instances
 pub fn setup_promtail_cmd(promtail_version: &str) -> String {
     let promtail_url = format!(
-        "https://github.com/grafana/loki/releases/download/v{}/promtail-linux-arm64.zip",
-        promtail_version
+        "https://github.com/grafana/loki/releases/download/v{promtail_version}/promtail-linux-arm64.zip",
     );
     format!(
         r#"
@@ -424,7 +409,7 @@ sudo apt-get install -y wget unzip
 
 # Download Promtail with retries
 for i in {{1..5}}; do
-  wget -O /home/ubuntu/promtail.zip {} && break
+  wget -O /home/ubuntu/promtail.zip {promtail_url} && break
   sleep 10
 done
 
@@ -442,8 +427,7 @@ sudo chown root:root /etc/promtail/promtail.yml
 sudo systemctl daemon-reload
 sudo systemctl start promtail
 sudo systemctl enable promtail
-"#,
-        promtail_url
+"#
     )
 }
 
@@ -462,28 +446,26 @@ server:
 positions:
   filename: /tmp/positions.yaml
 clients:
-  - url: http://{}:3100/loki/api/v1/push
+  - url: http://{monitoring_private_ip}:3100/loki/api/v1/push
 scrape_configs:
   - job_name: binary_logs
     static_configs:
       - targets:
           - localhost
         labels:
-          deployer_name: {}
-          deployer_ip: {}
-          deployer_region: {}
+          deployer_name: {instance_name}
+          deployer_ip: {ip}
+          deployer_region: {region}
           __path__: /var/log/binary.log
-      "#,
-        monitoring_private_ip, instance_name, ip, region
+"#
     )
 }
 
 /// Command to install Node Exporter on instances
 pub fn setup_node_exporter_cmd(node_exporter_version: &str) -> String {
     let node_exporter_url = format!(
-      "https://github.com/prometheus/node_exporter/releases/download/v{}/node_exporter-{}.linux-arm64.tar.gz",
-      node_exporter_version, node_exporter_version
-  );
+        "https://github.com/prometheus/node_exporter/releases/download/v{node_exporter_version}/node_exporter-{node_exporter_version}.linux-arm64.tar.gz",
+    );
     format!(
         r#"
 sudo apt-get update -y
@@ -491,15 +473,15 @@ sudo apt-get install -y wget tar
 
 # Download Node Exporter with retries
 for i in {{1..5}}; do
-  wget -O /home/ubuntu/node_exporter.tar.gz {} && break
+  wget -O /home/ubuntu/node_exporter.tar.gz {node_exporter_url} && break
   sleep 10
 done
 
 # Install Node Exporter
 sudo mkdir -p /opt/node_exporter
 tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
-sudo mv /home/ubuntu/node_exporter-{}.linux-arm64 /opt/node_exporter/node_exporter-{}.linux-arm64
-sudo ln -s /opt/node_exporter/node_exporter-{}.linux-arm64/node_exporter /opt/node_exporter/node_exporter
+sudo mv /home/ubuntu/node_exporter-{node_exporter_version}.linux-arm64 /opt/node_exporter/node_exporter-{node_exporter_version}.linux-arm64
+sudo ln -s /opt/node_exporter/node_exporter-{node_exporter_version}.linux-arm64/node_exporter /opt/node_exporter/node_exporter
 sudo chmod +x /opt/node_exporter/node_exporter
 sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.service
 
@@ -507,8 +489,7 @@ sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.ser
 sudo systemctl daemon-reload
 sudo systemctl start node_exporter
 sudo systemctl enable node_exporter
-"#,
-        node_exporter_url, node_exporter_version, node_exporter_version, node_exporter_version
+"#
     )
 }
 
@@ -544,29 +525,28 @@ scrape_configs:
     for (name, ip, region) in instances {
         config.push_str(&format!(
             r#"
-  - job_name: '{}_binary'
+  - job_name: '{name}_binary'
     static_configs:
-      - targets: ['{}:9090']
+      - targets: ['{ip}:9090']
         labels:
-          deployer_name: '{}'
-          deployer_ip: '{}'
-          deployer_region: '{}'
-  - job_name: '{}_system'
+          deployer_name: '{name}'
+          deployer_ip: '{ip}'
+          deployer_region: '{region}'
+  - job_name: '{name}_system'
     static_configs:
-      - targets: ['{}:9100']
+      - targets: ['{ip}:9100']
         labels:
-          deployer_name: '{}'
-          deployer_ip: '{}'
-          deployer_region: '{}'
-  - job_name: '{}_memleak'
+          deployer_name: '{name}'
+          deployer_ip: '{ip}'
+          deployer_region: '{region}'
+  - job_name: '{name}_memleak'
     static_configs:
-      - targets: ['{}:9200']
+      - targets: ['{ip}:9200']
         labels:
-          deployer_name: '{}'
-          deployer_ip: '{}'
-          deployer_region: '{}'
-"#,
-            name, ip, name, ip, region, name, ip, name, ip, region, name, ip, name, ip, region
+          deployer_name: '{name}'
+          deployer_ip: '{ip}'
+          deployer_region: '{region}'
+"#
         ));
     }
     config

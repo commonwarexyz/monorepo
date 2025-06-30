@@ -64,9 +64,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     info!(ip = deployer_ip.as_str(), "recovered public IP");
 
     // Generate SSH key pair
-    let key_name = format!("deployer-{}", tag);
-    let private_key_path = tag_directory.join(format!("id_rsa_{}", tag));
-    let public_key_path = tag_directory.join(format!("id_rsa_{}.pub", tag));
+    let key_name = format!("deployer-{tag}");
+    let private_key_path = tag_directory.join(format!("id_rsa_{tag}"));
+    let public_key_path = tag_directory.join(format!("id_rsa_{tag}.pub"));
     let output = Command::new("ssh-keygen")
         .arg("-t")
         .arg("rsa")
@@ -127,7 +127,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         );
 
         // Create VPC, IGW, route table, subnet, security groups, and key pair
-        let vpc_cidr = format!("10.{}.0.0/16", idx);
+        let vpc_cidr = format!("10.{idx}.0.0/16");
         vpc_cidrs.insert(region.clone(), vpc_cidr.clone());
         let vpc_id = create_vpc(&ec2_clients[region], &vpc_cidr, tag).await?;
         info!(
@@ -150,7 +150,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             region = region.as_str(),
             "created route table"
         );
-        let subnet_cidr = format!("10.{}.1.0/24", idx);
+        let subnet_cidr = format!("10.{idx}.1.0/24");
         subnet_cidrs.insert(region.clone(), subnet_cidr.clone());
         let subnet_id = create_subnet(
             &ec2_clients[region],

@@ -465,7 +465,7 @@ mod tests {
                     for view in 1..latest_complete {
                         // Ensure seed for every view
                         if !seeds.contains_key(&view) {
-                            panic!("view: {}", view);
+                            panic!("view: {view}");
                         }
                     }
                 }
@@ -481,7 +481,7 @@ mod tests {
                             continue;
                         };
                         if payloads.len() > 1 {
-                            panic!("view: {}", view);
+                            panic!("view: {view}");
                         }
                         let (digest, notarizers) = payloads.iter().next().unwrap();
                         notarized.insert(view, *digest);
@@ -489,7 +489,7 @@ mod tests {
                         if notarizers.len() < threshold as usize {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
-                            panic!("view: {}", view);
+                            panic!("view: {view}");
                         }
                     }
                 }
@@ -514,7 +514,7 @@ mod tests {
                             continue;
                         };
                         if payloads.len() > 1 {
-                            panic!("view: {}", view);
+                            panic!("view: {view}");
                         }
                         let (digest, finalizers) = payloads.iter().next().unwrap();
                         finalized.insert(view, *digest);
@@ -528,7 +528,7 @@ mod tests {
                         if finalizers.len() < threshold as usize {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
-                            panic!("view: {}", view);
+                            panic!("view: {view}");
                         }
 
                         // Ensure no nullifies for any finalizers
@@ -933,7 +933,7 @@ mod tests {
             // Configure engine for first peer
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
-            let context = context.with_label(&format!("validator-{}", validator));
+            let context = context.with_label(&format!("validator-{validator}"));
 
             // Link first peer to all (except second)
             link_validators(
@@ -1195,7 +1195,7 @@ mod tests {
                     for (view, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(offline) {
-                                panic!("view: {}", view);
+                                panic!("view: {view}");
                             }
                         }
                     }
@@ -1204,7 +1204,7 @@ mod tests {
                     let nullifies = supervisor.nullifies.lock().unwrap();
                     for (view, participants) in nullifies.iter() {
                         if participants.contains(offline) {
-                            panic!("view: {}", view);
+                            panic!("view: {view}");
                         }
                     }
                 }
@@ -1213,7 +1213,7 @@ mod tests {
                     for (view, payloads) in finalizes.iter() {
                         for (_, finalizers) in payloads.iter() {
                             if finalizers.contains(offline) {
-                                panic!("view: {}", view);
+                                panic!("view: {view}");
                             }
                         }
                     }
@@ -1458,7 +1458,7 @@ mod tests {
                     for (view, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(slow) {
-                                panic!("view: {}", view);
+                                panic!("view: {view}");
                             }
                         }
                     }
@@ -1468,7 +1468,7 @@ mod tests {
                     for (view, payloads) in finalizes.iter() {
                         for (_, finalizers) in payloads.iter() {
                             if finalizers.contains(slow) {
-                                panic!("view: {}", view);
+                                panic!("view: {view}");
                             }
                         }
                     }
@@ -1681,7 +1681,7 @@ mod tests {
                             found += 1;
                         }
                     }
-                    assert!(found >= activity_timeout - 2, "found: {}", found);
+                    assert!(found >= activity_timeout - 2, "found: {found}");
                 }
             }
 
@@ -2235,7 +2235,7 @@ mod tests {
                                 Activity::ConflictingFinalize(_) => {
                                     count_conflicting += 1;
                                 }
-                                _ => panic!("unexpected fault: {:?}", fault),
+                                _ => panic!("unexpected fault: {fault:?}"),
                             }
                         }
                     }
@@ -2776,7 +2776,7 @@ mod tests {
                                 Activity::NullifyFinalize(_) => {
                                     count_nullify_and_finalize += 1;
                                 }
-                                _ => panic!("unexpected fault: {:?}", fault),
+                                _ => panic!("unexpected fault: {fault:?}"),
                             }
                         }
                     }

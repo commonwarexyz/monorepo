@@ -145,9 +145,9 @@ impl<K: Array, V: Array> Read for Operation<K, V> {
 impl<K: Array, V: Array> Display for Operation<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Operation::Deleted(key) => write!(f, "[key:{} <deleted>]", key),
-            Operation::Update(key, value) => write!(f, "[key:{} value:{}]", key, value),
-            Operation::Commit(loc) => write!(f, "[commit with inactivity floor: {}]", loc),
+            Operation::Deleted(key) => write!(f, "[key:{key} <deleted>]"),
+            Operation::Update(key, value) => write!(f, "[key:{key} value:{value}]"),
+            Operation::Commit(loc) => write!(f, "[commit with inactivity floor: {loc}]"),
         }
     }
 }
@@ -242,17 +242,11 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
         let update_op = Operation::Update(key.clone(), value.clone());
-        assert_eq!(
-            format!("{}", update_op),
-            format!("[key:{} value:{}]", key, value)
-        );
+        assert_eq!(format!("{update_op}"), format!("[key:{key} value:{value}]"));
 
         let key2 = U64::new(42);
         let delete_op = Operation::<U64, U64>::Deleted(key2.clone());
-        assert_eq!(
-            format!("{}", delete_op),
-            format!("[key:{} <deleted>]", key2)
-        );
+        assert_eq!(format!("{delete_op}"), format!("[key:{key2} <deleted>]"));
     }
 
     #[test]
