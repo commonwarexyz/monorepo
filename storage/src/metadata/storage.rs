@@ -254,6 +254,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             writes.push(target_blob.write_at(next_data[start..end].to_vec(), start as u64));
         }
         try_join_all(writes).await?;
+        self.skipped.inc_by(skipped);
 
         // If the new file is shorter, truncate; if longer, resize was implicitly handled by write_at
         if next_data.len() < target_data.len() {
@@ -265,7 +266,6 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         *target_data = next_data;
         *target_version = next_version;
         self.cursor = target_cursor;
-        self.skipped.inc_by(skipped);
         Ok(())
     }
 
