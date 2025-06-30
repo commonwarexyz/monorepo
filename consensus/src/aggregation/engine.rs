@@ -497,10 +497,10 @@ impl<
         self.confirmed.insert(index, (item.digest, threshold));
 
         // Journal and notify the automaton
-        let lock = Activity::Lock(item, threshold);
-        self.journal_append(lock.clone()).await;
+        let recovered = Activity::Recovered(item, threshold);
+        self.journal_append(recovered.clone()).await;
         self.journal_sync(index).await;
-        self.reporter.report(lock).await;
+        self.reporter.report(recovered).await;
 
         // Increase the tip if needed
         if index == self.tip {
@@ -719,7 +719,7 @@ impl<
     /// Replays the journal, updating the state of the engine.
     async fn journal_replay(&mut self, journal: &Journal<E, Activity<V, D>>) {
         let mut tip = Index::default();
-        let mut locks = Vec::new();
+        let mut recovered = Vec::new();
         let mut acks = Vec::new();
         let stream = journal
             .replay(self.journal_replay_buffer)
@@ -732,8 +732,8 @@ impl<
                 Activity::Tip(index) => {
                     tip = max(tip, index);
                 }
-                Activity::Lock(item, signature) => {
-                    locks.push((item, signature));
+                Activity::Recovered(item, signature) => {
+                    recovered.push((item, signature));
                 }
                 Activity::Ack(ack) => {
                     acks.push(ack);
@@ -741,8 +741,8 @@ impl<
             }
         }
         self.tip = tip;
-        // Add locks
-        locks
+        // Add recovered signatures
+        recovered
             .iter()
             .filter(|(item, _)| item.index > tip)
             .for_each(|(item, signature)| {
@@ -775,7 +775,7 @@ impl<
     async fn journal_append(&mut self, activity: Activity<V, D>) {
         let index = match activity {
             Activity::Ack(ref ack) => ack.item.index,
-            Activity::Lock(ref item, _) => item.index,
+            Activity::Recovered(ref item, _) => item.index,
             Activity::Tip(index) => index,
         };
         let section = self.get_journal_section(index);

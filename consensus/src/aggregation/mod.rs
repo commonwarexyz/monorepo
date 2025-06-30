@@ -1,4 +1,4 @@
-//! Threshold signature aggregation for agreeing on externally-finalized hashes.
+//! Recover threshold signatures over an externally synchronized stream of digests.
 //!
 //! Validators use this module to agree on a chain of externally-finalized hashes by aggregating
 //! their partial signatures into threshold signatures. For example, validators can agree on the
@@ -10,7 +10,7 @@
 //! - Requesting external hashes
 //! - Signing hashes with partial BLS signatures
 //! - Multicasting partial signatures to other validators
-//! - Aggregating sufficient partial signatures into threshold signatures
+//! - Recovering sufficient partial signatures into threshold signatures
 //! - Tracking agreement progress and notifying the application layer
 //!
 //! The engine interacts with four main components:
@@ -25,12 +25,14 @@
 //!
 //! The engine does not try to "fill gaps" when missing threshold signatures. When validators
 //! fall behind or miss signatures for certain indices, the tip may skip ahead and those
-//! signatures may never be emitted by the local engine. This design is intentional to prioritize
-//! the creation of threshold signatures as fast as possible. By advancing the tip, honest validators
-//! can continue producing threshold signatures for new indices rather than getting stuck trying to
-//! backfill missing signatures. Validators who are online and honest can maintain consensus even
-//! when others fall behind or go offline. Backfilling missing signatures is left to other parts of
-//! the application that can implement appropriate recovery strategies.
+//! signatures may never be emitted by the local engine. Before skipping ahead, we ensure that
+//! at-least-one honest validator has the threshold signature for any skipped index. This design
+//! is intentional to prioritize the creation of threshold signatures as fast as possible. By
+//! advancing the tip, honest validators can continue producing threshold signatures for new
+//! indices rather than getting stuck trying to backfill missing signatures. Validators who are
+//! online and honest can maintain consensus even when others fall behind or go offline.
+//! Backfilling missing signatures is left to other parts of the application that can implement
+//! appropriate recovery strategies.
 
 pub mod types;
 pub mod wire;
@@ -1136,7 +1138,7 @@ mod tests {
                 partial_sigs.push(partial_sig);
             }
 
-            // Aggregate partial signatures into threshold signature using recovery
+            // Recover partial signatures into threshold signature
             let threshold_sig = poly::Signature::<V>::recover(quorum, &partial_sigs).expect(
                 "Should be able to recover threshold signature from sufficient partial signatures",
             );
@@ -1167,7 +1169,7 @@ mod tests {
 
             assert!(
                 insufficient_result.is_err(),
-                "Should not be able to aggregate insufficient partial signatures"
+                "Should not be able to recover threshold signature with insufficient partial signatures"
             );
 
             tracing::debug!("Manual threshold signature verification completed successfully");

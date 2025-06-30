@@ -16,7 +16,7 @@ use std::collections::{btree_map::Entry, BTreeMap, HashSet};
 #[allow(clippy::large_enum_variant)]
 enum Message<V: Variant, D: Digest> {
     Ack(Ack<V, D>),
-    Locked(Item<D>, V::Signature),
+    Recovered(Item<D>, V::Signature),
     Tip(Index),
     GetTip(oneshot::Sender<Option<(Index, Epoch)>>),
     GetContiguousTip(oneshot::Sender<Option<Index>>),
@@ -85,11 +85,11 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                     // Store the ack
                     self.acks.insert((ack.item.index, ack.epoch));
                 }
-                Message::Locked(item, signature) => {
+                Message::Recovered(item, signature) => {
                     tracing::debug!(
                         index = item.index,
                         current_epoch = self.current_epoch,
-                        "Reporter received Lock activity"
+                        "Reporter received Recovered activity"
                     );
                     // Verify threshold signature
                     use commonware_cryptography::bls12381::primitives::{ops, poly};
@@ -155,8 +155,8 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                     }
 
                     // Update the contiguous tip if necessary;
-                    // An individual validator may have missed constructing a lock, but a majority
-                    // of the rest of the network has constructed a lock.
+                    // An individual validator may have missed constructing a signature, but a
+                    // majority of the rest of the network has constructed a signature.
                     if self.contiguous.is_none_or(|c| index > c) {
                         self.contiguous = Some(index);
                     }
@@ -192,11 +192,11 @@ impl<V: Variant, D: Digest> Z for Mailbox<V, D> {
                     .await
                     .expect("Failed to send ack");
             }
-            Activity::Lock(item, signature) => {
+            Activity::Recovered(item, signature) => {
                 self.sender
-                    .send(Message::Locked(item, signature))
+                    .send(Message::Recovered(item, signature))
                     .await
-                    .expect("Failed to send locked");
+                    .expect("Failed to send recovered signature");
             }
             Activity::Tip(index) => {
                 self.sender

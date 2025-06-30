@@ -125,7 +125,7 @@ impl<D: Digest> EncodeSize for Item<D> {
 }
 
 /// Acknowledgment (ack) represents a validator's partial signature on an item.
-/// Multiple acks can be aggregated into a threshold signature for consensus.
+/// Multiple acks can be recovered into a threshold signature for consensus.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Ack<V: Variant, D: Digest> {
     /// The item being acknowledged
@@ -210,8 +210,8 @@ pub enum Activity<V: Variant, D: Digest> {
     /// Received an ack from a participant.
     Ack(Ack<V, D>),
 
-    /// Created a threshold signature.
-    Lock(Item<D>, V::Signature),
+    /// Recovered a threshold signature.
+    Recovered(Item<D>, V::Signature),
 
     /// Moved the tip to a new index.
     Tip(Index),
