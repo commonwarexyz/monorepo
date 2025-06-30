@@ -17,16 +17,16 @@ const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 const BLOCK_SIZE: usize = std::mem::size_of::<usize>();
 
 /// One of the two wrappers that store metadata.
-struct Wrapper<E: Clock + Storage + Metrics> {
-    blob: E::Blob,
+struct Wrapper<B: Blob> {
+    blob: B,
 
     version: u64,
     data: Vec<u8>,
 }
 
-impl<E: Clock + Storage + Metrics> Wrapper<E> {
+impl<B: Blob> Wrapper<B> {
     /// Create a new wrapper with the given data.
-    fn new(blob: E::Blob, version: u64, data: Vec<u8>) -> Self {
+    fn new(blob: B, version: u64, data: Vec<u8>) -> Self {
         Self {
             blob,
             version,
@@ -35,7 +35,7 @@ impl<E: Clock + Storage + Metrics> Wrapper<E> {
     }
 
     /// Create a new empty wrapper.
-    fn empty(blob: E::Blob) -> Self {
+    fn empty(blob: B) -> Self {
         Self {
             blob,
             version: 0,
@@ -52,7 +52,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
     map: BTreeMap<K, Vec<u8>>,
     cursor: usize,
     partition: String,
-    blobs: [Wrapper<E>; 2],
+    blobs: [Wrapper<E::Blob>; 2],
 
     syncs: Counter,
     keys: Gauge,
@@ -110,7 +110,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         index: usize,
         blob: E::Blob,
         len: u64,
-    ) -> Result<(BTreeMap<K, Vec<u8>>, Wrapper<E>), Error<K>> {
+    ) -> Result<(BTreeMap<K, Vec<u8>>, Wrapper<E::Blob>), Error<K>> {
         // Get blob length
         if len == 0 {
             // Empty blob
