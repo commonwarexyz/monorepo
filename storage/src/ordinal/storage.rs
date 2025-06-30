@@ -232,11 +232,6 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
     /// Pruning is done at blob boundaries to avoid partial deletions. A blob is pruned only if
     /// all possible indices in that blob are less than `min`.
     pub async fn prune(&mut self, min: u64) -> Result<u64, Error> {
-        // If there are no blobs, there is nothing to prune
-        if self.blobs.is_empty() {
-            return Ok(0);
-        }
-
         // Collect sections to remove
         let min_section = min / self.config.items_per_blob;
         let sections_to_remove: Vec<u64> = self
@@ -265,16 +260,14 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
             }
         }
 
+        // Clean pending entries
+        self.pending.retain(|&index, _| index >= min);
+
         Ok(min_section * self.config.items_per_blob)
     }
 
     /// Write all pending entries and sync all modified [Blob]s.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        // Check if there is anything to sync
-        if self.pending.is_empty() {
-            return Ok(());
-        }
-
         // Write all pending entries to disk
         let mut modified = BTreeSet::new();
         for (index, value) in take(&mut self.pending) {
