@@ -119,7 +119,7 @@ mod tests {
                     Operation::Update(_, _) => {
                         // Valid update operation
                     }
-                    _ => panic!("Expected update operation at index {}", i),
+                    _ => panic!("Expected update operation at index {i}"),
                 }
             }
 
@@ -155,8 +155,7 @@ mod tests {
                 .count();
             assert!(
                 update_count >= 15,
-                "Expected at least 15 updates, got {}",
-                update_count
+                "Expected at least 15 updates, got {update_count}"
             );
 
             // Verify proof is valid
@@ -327,13 +326,11 @@ mod tests {
 
             assert!(
                 update_count >= 3,
-                "Expected at least 3 updates, got {}",
-                update_count
+                "Expected at least 3 updates, got {update_count}"
             );
             assert!(
                 delete_count >= 2,
-                "Expected at least 2 deletes, got {}",
-                delete_count
+                "Expected at least 2 deletes, got {delete_count}"
             );
 
             // Verify proof is valid
@@ -573,9 +570,7 @@ mod tests {
                 assert!(returned_ops.len() <= count as usize);
                 assert!(
                     TestAny::verify_proof(&mut hasher, &proof, start, &returned_ops, &root_hash),
-                    "Proof verification should succeed for range {}:{}",
-                    start,
-                    count
+                    "Proof verification should succeed for range {start}:{count}"
                 );
             }
         });
