@@ -17,7 +17,11 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
     data: BTreeMap<K, Vec<u8>>,
     cursor: usize,
     partition: String,
-    blobs: [(E::Blob, u64, u64); 2],
+    // Each entry contains:
+    // 0. The blob handle.
+    // 1. The last serialized bytes that reside on disk (in-memory copy) for diffing.
+    // 2. The version stored in the blob.
+    blobs: [(E::Blob, Vec<u8>, u64); 2],
 
     syncs: Counter,
     keys: Gauge,
@@ -37,15 +41,19 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         // Set checksums
         let mut left_version = 0;
         let mut left_data = BTreeMap::new();
-        if let Some((version, data)) = left_result {
+        let mut left_bytes = Vec::new();
+        if let Some((version, data, bytes)) = left_result {
             left_version = version;
             left_data = data;
+            left_bytes = bytes;
         }
         let mut right_version = 0;
         let mut right_data = BTreeMap::new();
-        if let Some((version, data)) = right_result {
+        let mut right_bytes = Vec::new();
+        if let Some((version, data, bytes)) = right_result {
             right_version = version;
             right_data = data;
+            right_bytes = bytes;
         }
 
         // Choose latest blob
@@ -71,8 +79,8 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             cursor,
             partition: cfg.partition,
             blobs: [
-                (left_blob, left_len, left_version),
-                (right_blob, right_len, right_version),
+                (left_blob, left_bytes, left_version),
+                (right_blob, right_bytes, right_version),
             ],
 
             syncs,
@@ -84,7 +92,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         index: usize,
         blob: &E::Blob,
         len: u64,
-    ) -> Result<Option<(u64, BTreeMap<K, Vec<u8>>)>, Error<K>> {
+    ) -> Result<Option<(u64, BTreeMap<K, Vec<u8>>, Vec<u8>)>, Error<K>> {
         // Get blob length
         if len == 0 {
             // Empty blob
@@ -157,7 +165,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         }
 
         // Return info
-        Ok(Some((version, data)))
+        Ok(Some((version, data, buf)))
     }
 
     /// Get a value from `Metadata` (if it exists).
@@ -211,17 +219,44 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         let checksum = crc32fast::hash(&buf[..]);
         buf.put_u32(checksum);
 
-        // Get next blob
+        // Get next blob (the one we will overwrite)
         let next_cursor = 1 - self.cursor;
-        let next_blob = &mut self.blobs[next_cursor];
+        let (blob, old_bytes, version) = &mut self.blobs[next_cursor];
 
-        // Write and truncate blob
-        let buf_len = buf.len() as u64;
-        next_blob.0.write_at(buf, 0).await?;
-        next_blob.0.resize(buf_len).await?;
-        next_blob.0.sync().await?;
-        next_blob.1 = buf_len;
-        next_blob.2 = next_version;
+        // Compute byte-level diff and only write changed segments.
+        let new_bytes = &buf;
+        let mut i = 0usize;
+        while i < new_bytes.len() {
+            // Skip equal bytes
+            while i < new_bytes.len() && i < old_bytes.len() && new_bytes[i] == old_bytes[i] {
+                i += 1;
+            }
+
+            if i >= new_bytes.len() {
+                break;
+            }
+
+            // Start of differing segment
+            let start = i;
+            while i < new_bytes.len() && (i >= old_bytes.len() || new_bytes[i] != old_bytes[i]) {
+                i += 1;
+            }
+            let end = i;
+
+            blob.write_at(new_bytes[start..end].to_vec(), start as u64)
+                .await?;
+        }
+
+        // If the new file is shorter, truncate; if longer, resize was implicitly handled by write_at
+        if new_bytes.len() < old_bytes.len() {
+            blob.resize(new_bytes.len() as u64).await?;
+        }
+
+        blob.sync().await?;
+
+        // Update in-memory bookkeeping
+        *old_bytes = new_bytes.clone();
+        *version = next_version;
 
         // Switch blobs
         self.cursor = next_cursor;
