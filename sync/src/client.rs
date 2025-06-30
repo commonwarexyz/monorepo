@@ -48,8 +48,8 @@ pub struct Metrics {
     invalid_batches_received: u64,
 }
 
-/// Current state of the sync client
-enum ClientState<E, K, V, H, T, R>
+/// Client that syncs an [adb::any::Any] database.
+enum Client<E, K, V, H, T, R>
 where
     E: Storage + Clock + MetricsTrait,
     K: Array,
@@ -79,17 +79,17 @@ where
 }
 
 /// Sync client for Any ADB
-pub(crate) struct Client<E, K, V, H, T, R>
-where
-    E: Storage + Clock + MetricsTrait,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-    R: Resolver<H, K, V>,
-{
-    state: Option<ClientState<E, K, V, H, T, R>>,
-}
+// pub(crate) struct Client<E, K, V, H, T, R>
+// where
+//     E: Storage + Clock + MetricsTrait,
+//     K: Array,
+//     V: Array,
+//     H: Hasher,
+//     T: Translator,
+//     R: Resolver<H, K, V>,
+// {
+//     state: Option<ClientState<E, K, V, H, T, R>>,
+// }
 
 impl<E, K, V, H, T, R> Client<E, K, V, H, T, R>
 where
@@ -102,23 +102,20 @@ where
 {
     /// Create a new sync client
     pub(crate) fn new(config: Config<E, K, V, H, T, R>) -> Result<Self, Error> {
-        let state = ClientState::FetchData {
+        Ok(Client::FetchData {
             config,
             operations: vec![],
             metrics: Metrics {
                 valid_batches_received: 0,
                 invalid_batches_received: 0,
             },
-        };
-        Ok(Self { state: Some(state) })
+        })
     }
 
     /// Process the next step in the sync process
-    async fn step(mut self) -> Result<Self, Error> {
-        let current_state = self.state.take().ok_or(Error::InvalidState)?;
-
-        match current_state {
-            ClientState::FetchData {
+    async fn step(self) -> Result<Self, Error> {
+        match self {
+            Client::FetchData {
                 mut config,
                 mut operations,
                 mut metrics,
@@ -146,11 +143,12 @@ where
                 // Validate that we didn't get more operations than requested
                 if new_operations.len() as u64 > batch_size.get() {
                     metrics.invalid_batches_received += 1;
-                    return Err(Error::InvalidResolver(format!(
-                        "Resolver returned {} operations but only {} were requested",
-                        new_operations.len(),
-                        batch_size.get()
-                    )));
+                    // TODO danlaine: add max retry logic
+                    return Ok(Client::FetchData {
+                        config,
+                        operations,
+                        metrics,
+                    });
                 }
 
                 debug!(
@@ -168,33 +166,32 @@ where
                     debug!("Proof verification failed, retrying");
                     metrics.invalid_batches_received += 1;
                     // TODO danlaine: add max retry logic
-                    self.state = Some(ClientState::FetchData {
+                    return Ok(Client::FetchData {
                         config,
                         operations,
                         metrics,
                     });
-                    return Ok(self);
                 }
                 operations.extend(new_operations);
 
                 metrics.valid_batches_received += 1;
-                if operations.len() as u64 >= config.target_ops {
-                    self.state = Some(ClientState::ApplyData {
+                let next_state = if operations.len() as u64 >= config.target_ops {
+                    Client::ApplyData {
                         config,
                         operations,
                         metrics,
-                    });
+                    }
                 } else {
-                    self.state = Some(ClientState::FetchData {
+                    Client::FetchData {
                         config,
                         operations,
                         metrics,
-                    });
-                }
-                Ok(self)
+                    }
+                };
+                Ok(next_state)
             }
 
-            ClientState::ApplyData {
+            Client::ApplyData {
                 config,
                 operations,
                 metrics,
@@ -211,11 +208,10 @@ where
                 .await
                 .map_err(|e| Error::InvalidResolver(e.to_string()))?; // TODO danlaine: handle this error
 
-                self.state = Some(ClientState::Done { db, metrics });
-                Ok(self)
+                Ok(Client::Done { db, metrics })
             }
 
-            ClientState::Done { .. } => Err(Error::AlreadyComplete),
+            Client::Done { .. } => Err(Error::AlreadyComplete),
         }
     }
 
@@ -225,7 +221,7 @@ where
 
         loop {
             self = self.step().await?;
-            if let Some(ClientState::Done { db, metrics }) = self.state {
+            if let Client::Done { db, metrics } = self {
                 info!(
                     valid_batches_received = metrics.valid_batches_received,
                     invalid_batches_received = metrics.invalid_batches_received,
