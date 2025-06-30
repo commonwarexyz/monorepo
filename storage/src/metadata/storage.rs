@@ -202,6 +202,8 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
     /// Atomically commit the current state of `Metadata`.
     pub async fn sync(&mut self) -> Result<(), Error<K>> {
+        self.syncs.inc();
+
         // Compute next version.
         //
         // While it is possible that extremely high-frequency updates to `Metadata` could cause an eventual
@@ -251,19 +253,18 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             writes.push(next_blob.write_at(buf[start..end].to_vec(), start as u64));
         }
         try_join_all(writes).await?;
-        self.skipped.inc_by(skipped);
 
         // If the new file is shorter, truncate; if longer, resize was implicitly handled by write_at
         if buf.len() < old_bytes.len() {
             next_blob.resize(buf.len() as u64).await?;
         }
         next_blob.sync().await?;
-        self.syncs.inc();
 
         // Update state
         *old_bytes = buf;
         *old_version = next_version;
         self.cursor = next_cursor;
+        self.skipped.inc_by(skipped);
 
         Ok(())
     }
