@@ -4,7 +4,10 @@ use crate::{
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_storage::{adb::any::Any, index::Translator};
+use commonware_storage::{
+    adb::{any::Any, operation::Operation},
+    index::Translator,
+};
 use commonware_utils::Array;
 use std::fmt;
 
@@ -13,23 +16,23 @@ mod resolver;
 
 /// Progress information for sync operations
 #[derive(Debug, Clone)]
-pub struct SyncProgress {
-    pub current_ops: u64,
+pub struct SyncProgress<K: Array, V: Array> {
+    pub operations: Vec<Operation<K, V>>,
     pub target_ops: u64,
-    pub operations_applied: u64,
-    pub batches_received: u64,
+    pub valid_batches_received: u64,
+    pub invalid_batches_received: u64,
 }
 
-impl SyncProgress {
+impl<K: Array, V: Array> SyncProgress<K, V> {
     pub fn completion_percentage(&self) -> f64 {
         if self.target_ops == 0 {
             return 100.0;
         }
-        (self.current_ops as f64 / self.target_ops as f64 * 100.0).min(100.0)
+        (self.operations.len() as f64 / self.target_ops as f64 * 100.0).min(100.0)
     }
 
     pub fn is_complete(&self) -> bool {
-        self.current_ops >= self.target_ops
+        self.operations.len() as u64 >= self.target_ops
     }
 }
 
@@ -70,9 +73,8 @@ pub enum Error {
     ExceededTarget { target: u64, actual: u64 },
 }
 
-/// Sync `db` to the given `target_ops` and `target_hash` using the given `resolver`.
+/// Sync to the given `target_ops` and `target_hash` using the given `resolver`.
 pub async fn sync<E, K, V, H, T, R>(
-    db: Any<E, K, V, H, T>,
     resolver: R,
     target_ops: u64,
     target_hash: H::Digest,
@@ -86,7 +88,7 @@ where
     T: Translator,
     R: Resolver<H, K, V>,
 {
-    Client::new(db, resolver, config, target_ops, target_hash)?
+    Client::new(resolver, config, target_ops, target_hash)?
         .sync()
         .await
 }
