@@ -1168,8 +1168,7 @@ mod tests {
             }
 
             // Prune up to index 150 (should remove blobs 0 and 1)
-            let pruned_to = store.prune(150).await.unwrap();
-            assert_eq!(pruned_to, 100); // Prunes at blob boundary (blob 0, indices 0-99)
+            store.prune(150).await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("pruned_total 1"));
 
@@ -1190,8 +1189,7 @@ mod tests {
             assert_eq!(store.get(300).await.unwrap().unwrap(), values[5].1);
 
             // Prune more aggressively - up to index 250 (should remove blob 1)
-            let pruned_to = store.prune(250).await.unwrap();
-            assert_eq!(pruned_to, 200); // Prunes at blob boundary (blob 1, indices 100-199)
+            store.prune(250).await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("pruned_total 2"));
 
@@ -1241,8 +1239,7 @@ mod tests {
             assert_eq!(next_start, Some(105));
 
             // Prune up to index 150 (should remove blob 0)
-            let pruned_to = store.prune(150).await.unwrap();
-            assert_eq!(pruned_to, 100);
+            store.prune(150).await.unwrap();
 
             // Verify pruned data is gone
             assert!(!store.has(5));
@@ -1300,8 +1297,7 @@ mod tests {
             );
 
             // Prune up to index 75 (should remove blob 0 but keep pending data)
-            let pruned_to = store.prune(75).await.unwrap();
-            assert_eq!(pruned_to, 0); // Nothing pruned because pending entry at 50
+            store.prune(75).await.unwrap();
 
             // The pending entry at 50 should prevent pruning of blob 0
             assert!(store.has(0));
@@ -1313,12 +1309,10 @@ mod tests {
             store.sync().await.unwrap();
 
             // Now prune again - this time it should work
-            let pruned_to = store.prune(75).await.unwrap();
-            assert_eq!(pruned_to, 0); // Still nothing pruned because 50 is now persisted
+            store.prune(75).await.unwrap();
 
             // Prune more aggressively
-            let pruned_to = store.prune(125).await.unwrap();
-            assert_eq!(pruned_to, 100); // Now blob 0 can be pruned
+            store.prune(125).await.unwrap();
 
             // Verify pruning worked
             assert!(!store.has(0));
@@ -1350,8 +1344,7 @@ mod tests {
             store.sync().await.unwrap();
 
             // Try to prune before any data - should be no-op
-            let pruned_to = store.prune(50).await.unwrap();
-            assert_eq!(pruned_to, 100); // Returns the start of the first blob
+            store.prune(50).await.unwrap();
 
             // Verify no data was actually pruned
             assert!(store.has(100));
@@ -1360,8 +1353,7 @@ mod tests {
             assert!(buffer.contains("pruned_total 0"));
 
             // Try to prune exactly at blob boundary - should be no-op
-            let pruned_to = store.prune(100).await.unwrap();
-            assert_eq!(pruned_to, 100);
+            store.prune(100).await.unwrap();
 
             // Verify still no data pruned
             assert!(store.has(100));
@@ -1388,8 +1380,7 @@ mod tests {
                 .expect("Failed to initialize store");
 
             // Try to prune empty store
-            let pruned_to = store.prune(1000).await.unwrap();
-            assert_eq!(pruned_to, 0);
+            store.prune(1000).await.unwrap();
 
             // Store should still be functional
             store.put(0, FixedBytes::new([0u8; 32])).unwrap();
@@ -1433,8 +1424,7 @@ mod tests {
                 assert!(store.has(200));
 
                 // Prune up to index 150
-                let pruned_to = store.prune(150).await.unwrap();
-                assert_eq!(pruned_to, 100);
+                store.prune(150).await.unwrap();
 
                 // Verify pruning worked
                 assert!(!store.has(0));
@@ -1491,12 +1481,11 @@ mod tests {
             // Prune incrementally
             for i in 1..5 {
                 let prune_index = i * 50 + 10;
-                let pruned_to = store.prune(prune_index).await.unwrap();
-                assert_eq!(pruned_to, i * 50);
+                store.prune(prune_index).await.unwrap();
 
                 // Verify appropriate data is pruned
                 for (index, _) in &values {
-                    if *index < pruned_to {
+                    if *index < prune_index {
                         assert!(!store.has(*index), "Index {} should be pruned", index);
                     } else {
                         assert!(store.has(*index), "Index {} should not be pruned", index);
@@ -1547,8 +1536,7 @@ mod tests {
             // Test various pruning points around boundaries
 
             // Prune exactly at blob boundary (100) - should prune blob 0
-            let pruned_to = store.prune(100).await.unwrap();
-            assert_eq!(pruned_to, 100);
+            store.prune(100).await.unwrap();
             assert!(!store.has(0));
             assert!(!store.has(99));
             assert!(store.has(100));
@@ -1556,15 +1544,13 @@ mod tests {
             assert!(store.has(200));
 
             // Prune just before next boundary (199) - should not prune blob 1
-            let pruned_to = store.prune(199).await.unwrap();
-            assert_eq!(pruned_to, 100); // No change
+            store.prune(199).await.unwrap();
             assert!(store.has(100));
             assert!(store.has(199));
             assert!(store.has(200));
 
             // Prune exactly at next boundary (200) - should prune blob 1
-            let pruned_to = store.prune(200).await.unwrap();
-            assert_eq!(pruned_to, 200);
+            store.prune(200).await.unwrap();
             assert!(!store.has(100));
             assert!(!store.has(199));
             assert!(store.has(200));
@@ -1604,8 +1590,7 @@ mod tests {
             assert!(store.has(750));
 
             // Prune up to section 3 (index 300) - should remove sections 0 and 2
-            let pruned_to = store.prune(300).await.unwrap();
-            assert_eq!(pruned_to, 300);
+            store.prune(300).await.unwrap();
 
             // Verify correct data was pruned
             assert!(!store.has(0)); // Section 0 pruned
@@ -1617,8 +1602,7 @@ mod tests {
             assert!(buffer.contains("pruned_total 2"));
 
             // Prune up to section 6 (index 600) - should remove section 5
-            let pruned_to = store.prune(600).await.unwrap();
-            assert_eq!(pruned_to, 600);
+            store.prune(600).await.unwrap();
 
             // Verify section 5 was pruned
             assert!(!store.has(500)); // Section 5 pruned
@@ -1628,8 +1612,7 @@ mod tests {
             assert!(buffer.contains("pruned_total 3"));
 
             // Prune everything - should remove section 7
-            let pruned_to = store.prune(1000).await.unwrap();
-            assert_eq!(pruned_to, 1000); // Prunes up to section 10
+            store.prune(1000).await.unwrap();
 
             // Verify all data is gone
             assert!(!store.has(750)); // Section 7 pruned
