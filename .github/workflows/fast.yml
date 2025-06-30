@@ -11,6 +11,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   UDEPS_VERSION: 0.1.50
+  FUZZ_VERSION: 0.12.0
 
 jobs:
   Lint:
