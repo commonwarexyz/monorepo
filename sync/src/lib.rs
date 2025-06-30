@@ -4,10 +4,7 @@ use crate::{
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_storage::{
-    adb::{any::Any, operation::Operation},
-    index::Translator,
-};
+use commonware_storage::{adb::any::Any, index::Translator};
 use commonware_utils::Array;
 use std::fmt;
 
@@ -53,9 +50,7 @@ pub enum Error {
 
 /// Sync to the given database.
 pub async fn sync<E, K, V, H, T, R>(
-    context: E,
-    resolver: R,
-    config: Config<T, H::Digest>,
+    config: Config<E, K, V, H, T, R>,
 ) -> Result<Any<E, K, V, H, T>, Error>
 where
     E: Storage + Clock + Metrics,
@@ -65,5 +60,5 @@ where
     T: Translator,
     R: Resolver<H, K, V>,
 {
-    Client::new(context, resolver, config)?.sync().await
+    Client::new(config)?.sync().await
 }

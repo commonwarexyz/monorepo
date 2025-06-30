@@ -1,28 +1,46 @@
 use crate::{resolver::Resolver, Error};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics as MetricsTrait, Storage};
 use commonware_storage::{
     adb::{self, operation::Operation},
     index::Translator,
 };
 use commonware_utils::Array;
-use std::num::NonZeroU64;
+use std::{marker::PhantomData, num::NonZeroU64};
 use tracing::{debug, info};
 
 /// Configuration for the sync client
-#[derive(Debug, Clone)]
-pub struct Config<T: Translator, D: Digest> {
-    /// Database configuration
+pub struct Config<E, K, V, H, T, R>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<H, K, V>,
+{
+    /// Database configuration.
     pub db_config: adb::any::Config<T>,
 
-    /// Maximum operations to fetch per batch
+    /// Maximum operations to fetch per batch.
     pub max_ops_per_batch: NonZeroU64,
 
-    /// Target hash of the database
-    pub target_hash: D,
+    /// Target hash of the database.
+    pub target_hash: H::Digest,
 
-    /// Target operations to sync
+    /// Target operations to sync.
     pub target_ops: u64,
+
+    /// Context for the database.
+    pub context: E,
+
+    /// Resolves requests for proofs and operations.
+    pub resolver: R,
+
+    /// Hasher for root hashes.
+    pub hasher: commonware_storage::mmr::hasher::Standard<H>,
+
+    _phantom: PhantomData<(K, V)>,
 }
 
 pub struct Metrics {
@@ -31,22 +49,29 @@ pub struct Metrics {
 }
 
 /// Current state of the sync client
-enum ClientState<E: Storage + Clock + MetricsTrait, K: Array, V: Array, H: Hasher, T: Translator> {
-    /// Requesting proof and operations from server
-    FetchOps {
-        context: E,
-        config: Config<T, H::Digest>,
+enum ClientState<E, K, V, H, T, R>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<H, K, V>,
+{
+    /// The next step is to fetch data.
+    FetchData {
+        config: Config<E, K, V, H, T, R>,
         operations: Vec<Operation<K, V>>,
         metrics: Metrics,
     },
-    /// Applying received operations to local database
-    ApplyOps {
-        context: E,
-        config: Config<T, H::Digest>,
+    /// We're done fetching data.
+    /// The next step is to apply the fetched data to the local database.
+    ApplyData {
+        config: Config<E, K, V, H, T, R>,
         operations: Vec<Operation<K, V>>,
         metrics: Metrics,
     },
-    /// Sync completed successfully
+    /// We're done syncing.
     Done {
         db: adb::any::Any<E, K, V, H, T>,
         metrics: Metrics,
@@ -63,9 +88,7 @@ where
     T: Translator,
     R: Resolver<H, K, V>,
 {
-    state: Option<ClientState<E, K, V, H, T>>,
-    resolver: R,
-    hasher: commonware_storage::mmr::hasher::Standard<H>,
+    state: Option<ClientState<E, K, V, H, T, R>>,
 }
 
 impl<E, K, V, H, T, R> Client<E, K, V, H, T, R>
@@ -78,13 +101,8 @@ where
     R: Resolver<H, K, V>,
 {
     /// Create a new sync client
-    pub(crate) fn new(
-        context: E,
-        resolver: R,
-        config: Config<T, H::Digest>,
-    ) -> Result<Self, Error> {
-        let state = ClientState::FetchOps {
-            context,
+    pub(crate) fn new(config: Config<E, K, V, H, T, R>) -> Result<Self, Error> {
+        let state = ClientState::FetchData {
             config,
             operations: vec![],
             metrics: Metrics {
@@ -92,11 +110,7 @@ where
                 invalid_batches_received: 0,
             },
         };
-        Ok(Self {
-            state: Some(state),
-            resolver,
-            hasher: commonware_storage::mmr::hasher::Standard::<H>::new(),
-        })
+        Ok(Self { state: Some(state) })
     }
 
     /// Process the next step in the sync process
@@ -104,9 +118,8 @@ where
         let current_state = self.state.take().ok_or(Error::InvalidState)?;
 
         match current_state {
-            ClientState::FetchOps {
-                context,
-                config,
+            ClientState::FetchData {
+                mut config,
                 mut operations,
                 mut metrics,
             } => {
@@ -128,7 +141,7 @@ where
                 );
 
                 let (proof, new_operations) =
-                    self.resolver.get_proof(current_ops, batch_size).await?;
+                    config.resolver.get_proof(current_ops, batch_size).await?;
 
                 // Validate that we didn't get more operations than requested
                 if new_operations.len() as u64 > batch_size.get() {
@@ -146,7 +159,7 @@ where
                 );
 
                 if !adb::any::Any::<E, K, V, H, T>::verify_proof(
-                    &mut self.hasher,
+                    &mut config.hasher,
                     &proof,
                     current_ops,
                     &new_operations,
@@ -155,8 +168,7 @@ where
                     debug!("Proof verification failed, retrying");
                     metrics.invalid_batches_received += 1;
                     // TODO danlaine: add max retry logic
-                    self.state = Some(ClientState::FetchOps {
-                        context,
+                    self.state = Some(ClientState::FetchData {
                         config,
                         operations,
                         metrics,
@@ -167,15 +179,13 @@ where
 
                 metrics.valid_batches_received += 1;
                 if operations.len() as u64 >= config.target_ops {
-                    self.state = Some(ClientState::ApplyOps {
-                        context,
+                    self.state = Some(ClientState::ApplyData {
                         config,
                         operations,
                         metrics,
                     });
                 } else {
-                    self.state = Some(ClientState::FetchOps {
-                        context,
+                    self.state = Some(ClientState::FetchData {
                         config,
                         operations,
                         metrics,
@@ -184,14 +194,13 @@ where
                 Ok(self)
             }
 
-            ClientState::ApplyOps {
-                context,
+            ClientState::ApplyData {
                 config,
                 operations,
                 metrics,
             } => {
                 let db = adb::any::Any::<E, K, V, H, T>::init_sync(
-                    context,
+                    config.context,
                     adb::any::SyncConfig {
                         config: config.db_config,
                         mmr_pinned_nodes: Default::default(), // TODO danlaine: support pruning
