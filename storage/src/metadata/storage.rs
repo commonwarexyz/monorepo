@@ -227,8 +227,8 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         buf.put_u32(checksum);
 
         // Get next blob (the one we will overwrite)
-        let next_cursor = 1 - self.cursor;
-        let (next_blob, old_bytes, old_version) = &mut self.blobs[next_cursor];
+        let old_cursor = 1 - self.cursor;
+        let (old_blob, old_bytes, old_version) = &mut self.blobs[old_cursor];
 
         // Compute byte-level diff and only write changed segments.
         let mut i = 0usize;
@@ -250,20 +250,20 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
                 i += 1;
             }
             let end = i;
-            writes.push(next_blob.write_at(buf[start..end].to_vec(), start as u64));
+            writes.push(old_blob.write_at(buf[start..end].to_vec(), start as u64));
         }
         try_join_all(writes).await?;
 
         // If the new file is shorter, truncate; if longer, resize was implicitly handled by write_at
         if buf.len() < old_bytes.len() {
-            next_blob.resize(buf.len() as u64).await?;
+            old_blob.resize(buf.len() as u64).await?;
         }
-        next_blob.sync().await?;
+        old_blob.sync().await?;
 
         // Update state
         *old_bytes = buf;
         *old_version = next_version;
-        self.cursor = next_cursor;
+        self.cursor = old_cursor;
         self.skipped.inc_by(skipped);
         Ok(())
     }
