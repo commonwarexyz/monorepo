@@ -52,6 +52,11 @@
 //! [Ordinal] (storing a log of writes and updating metadata when writes are consistently applied). This
 //! is much more efficient than storing a version on each record._
 //!
+//! # Updates
+//!
+//! [Ordinal] supports index updates but they are not recommended. If there is an unclean shutdown, partial
+//! writes may result in an updated record that is half-written (that will be skipped entirely on restart).
+//!
 //! # Recovery
 //!
 //! Each record includes a CRC32 checksum. On restart, the store validates all records
