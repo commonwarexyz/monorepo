@@ -35,8 +35,8 @@
 //! # Efficient Writes
 //!
 //! When an update is committed, only updated bytes are actually written to disk. This makes `Metadata`
-//! a great choice for maintaining even large collections of data (as there is no overhead to maintaining
-//! keys that aren't updated as long as new keys don't change the order of keys written).
+//! a great choice for maintaining even large collections of data (there is only overhead to maintaining
+//! keys that aren't updated if the order of keys is unstable).
 //!
 //! # Example
 //!
