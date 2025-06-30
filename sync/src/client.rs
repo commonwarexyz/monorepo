@@ -1,9 +1,10 @@
-use crate::resolver::Resolver;
-use crate::{Error, SyncProgress};
+use crate::{resolver::Resolver, Error, SyncProgress};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
-    adb::any::Any, adb::operation::Operation, index::Translator, mmr::verification::Proof,
+    adb::{any::Any, operation::Operation},
+    index::Translator,
+    mmr::verification::Proof,
 };
 use commonware_utils::Array;
 use std::num::NonZeroU64;
@@ -144,10 +145,10 @@ where
                     // Already at exact target
                     let root_hash = db.root(&mut self.hasher);
                     if root_hash != target_hash {
-                        return Err(Error::HashMismatch {
+                        Err(Error::HashMismatch {
                             expected: Box::new(target_hash),
                             actual: Box::new(root_hash),
-                        });
+                        })
                     } else {
                         self.state = Some(ClientState::Done {
                             db,
@@ -239,19 +240,15 @@ where
                     )));
                 }
 
-                match Any::<E, K, V, H, T>::verify_proof(
+                if !Any::<E, K, V, H, T>::verify_proof(
                     &mut self.hasher,
                     &proof,
                     op_count,
                     &operations,
                     &target_hash,
                 ) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        // TODO add retry logic
-                        return Err(Error::ProofVerificationFailed);
-                    }
-                    Err(e) => return Err(Error::ProofVerificationError(e)),
+                    // TODO add retry logic
+                    return Err(Error::ProofVerificationFailed);
                 }
 
                 // Apply operations in batch
@@ -341,23 +338,21 @@ where
 
         loop {
             self = self.step().await?;
-            match self.state {
-                Some(ClientState::Done {
-                    db,
-                    progress,
-                    root_hash,
-                }) => {
-                    info!(
-                        final_ops = progress.current_ops,
-                        operations_applied = progress.operations_applied,
-                        batches_processed = progress.batches_received,
-                        root_hash = root_hash.to_string(),
-                        "Sync completed successfully"
-                    );
+            if let Some(ClientState::Done {
+                db,
+                progress,
+                root_hash,
+            }) = self.state
+            {
+                info!(
+                    final_ops = progress.current_ops,
+                    operations_applied = progress.operations_applied,
+                    batches_processed = progress.batches_received,
+                    root_hash = root_hash.to_string(),
+                    "Sync completed successfully"
+                );
 
-                    return Ok(db);
-                }
-                _ => {}
+                return Ok(db);
             }
         }
     }

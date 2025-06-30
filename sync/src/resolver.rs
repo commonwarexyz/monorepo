@@ -2,7 +2,9 @@ use crate::Error;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
-    adb::any::Any, adb::operation::Operation, index::Translator, mmr::verification::Proof,
+    adb::{any::Any, operation::Operation},
+    index::Translator,
+    mmr::verification::Proof,
 };
 use commonware_utils::Array;
 use std::num::NonZeroU64;
@@ -154,9 +156,10 @@ mod tests {
 
             // Verify proof is valid
             assert!(!proof.digests.is_empty());
-            let verification_result =
-                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash).unwrap();
-            assert!(verification_result, "Proof verification should succeed");
+            assert!(
+                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash),
+                "Proof verification should succeed"
+            );
         });
     }
 
@@ -189,9 +192,10 @@ mod tests {
             );
 
             // Verify proof is valid
-            let verification_result =
-                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash).unwrap();
-            assert!(verification_result, "Proof verification should succeed");
+            assert!(
+                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash),
+                "Proof verification should succeed"
+            );
         });
     }
 
@@ -224,9 +228,10 @@ mod tests {
 
             // Verify proof is valid
             assert!(!proof.digests.is_empty());
-            let verification_result =
-                TestAny::verify_proof(&mut hasher, &proof, 5, &returned_ops, &root_hash).unwrap();
-            assert!(verification_result, "Proof verification should succeed");
+            assert!(
+                TestAny::verify_proof(&mut hasher, &proof, 5, &returned_ops, &root_hash),
+                "Proof verification should succeed"
+            );
         });
     }
 
@@ -257,9 +262,10 @@ mod tests {
 
             // Verify proof is valid
             assert!(!proof.digests.is_empty());
-            let verification_result =
-                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash).unwrap();
-            assert!(verification_result, "Proof verification should succeed");
+            assert!(
+                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash),
+                "Proof verification should succeed"
+            );
         });
     }
 
@@ -282,9 +288,10 @@ mod tests {
 
             // Verify proof is valid
             assert!(!proof.digests.is_empty());
-            let verification_result =
-                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash).unwrap();
-            assert!(verification_result, "Proof verification should succeed");
+            assert!(
+                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash),
+                "Proof verification should succeed"
+            );
         });
     }
 
@@ -368,10 +375,8 @@ mod tests {
             );
 
             // Verify proof is valid
-            let verification_result =
-                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash).unwrap();
             assert!(
-                verification_result,
+                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash),
                 "Proof verification should succeed for mixed operations"
             );
         });
@@ -418,10 +423,8 @@ mod tests {
             assert!(delete_count >= 2, "Expected at least 2 deletes");
 
             // Verify proof is valid
-            let verification_result =
-                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash).unwrap();
             assert!(
-                verification_result,
+                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash),
                 "Proof verification should succeed for delete operations"
             );
         });
@@ -448,9 +451,10 @@ mod tests {
 
             // Verify proof is valid
             assert!(!proof.digests.is_empty());
-            let verification_result =
-                TestAny::verify_proof(&mut hasher, &proof, 5, &returned_ops, &root_hash).unwrap();
-            assert!(verification_result, "Proof verification should succeed");
+            assert!(
+                TestAny::verify_proof(&mut hasher, &proof, 5, &returned_ops, &root_hash),
+                "Proof verification should succeed"
+            );
         });
     }
 
@@ -483,10 +487,8 @@ mod tests {
 
             // Verify proof is valid
             assert!(!proof.digests.is_empty());
-            let verification_result =
-                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash).unwrap();
             assert!(
-                verification_result,
+                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash),
                 "Proof verification should succeed for large batch"
             );
         });
@@ -520,12 +522,9 @@ mod tests {
             assert!(!ops3.is_empty());
 
             // Verify all proofs are valid
-            let verification1 =
-                TestAny::verify_proof(&mut hasher, &proof1, 0, &ops1, &root_hash).unwrap();
-            let verification2 =
-                TestAny::verify_proof(&mut hasher, &proof2, 10, &ops2, &root_hash).unwrap();
-            let verification3 =
-                TestAny::verify_proof(&mut hasher, &proof3, 20, &ops3, &root_hash).unwrap();
+            let verification1 = TestAny::verify_proof(&mut hasher, &proof1, 0, &ops1, &root_hash);
+            let verification2 = TestAny::verify_proof(&mut hasher, &proof2, 10, &ops2, &root_hash);
+            let verification3 = TestAny::verify_proof(&mut hasher, &proof3, 20, &ops3, &root_hash);
 
             assert!(verification1, "First proof verification should succeed");
             assert!(verification2, "Second proof verification should succeed");
@@ -566,10 +565,8 @@ mod tests {
             );
 
             // Verify proof is valid
-            let verification_result =
-                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash).unwrap();
             assert!(
-                verification_result,
+                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash),
                 "Proof verification should succeed for key conflicts"
             );
         });
@@ -593,10 +590,10 @@ mod tests {
             assert!(!proof.digests.is_empty());
 
             // Verify the proof cryptographically
-            let verification_result =
-                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash).unwrap();
-
-            assert!(verification_result, "Proof verification should succeed");
+            assert!(
+                TestAny::verify_proof(&mut hasher, &proof, 0, &returned_ops, &root_hash),
+                "Proof verification should succeed"
+            );
         });
     }
 
@@ -621,15 +618,11 @@ mod tests {
 
                 assert!(!proof.digests.is_empty());
                 assert!(returned_ops.len() <= count.get() as usize);
-
-                let verification_result =
-                    TestAny::verify_proof(&mut hasher, &proof, start, &returned_ops, &root_hash)
-                        .unwrap();
-
                 assert!(
-                    verification_result,
+                    TestAny::verify_proof(&mut hasher, &proof, start, &returned_ops, &root_hash),
                     "Proof verification should succeed for range {}:{}",
-                    start, count
+                    start,
+                    count
                 );
             }
         });

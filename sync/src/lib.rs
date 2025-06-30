@@ -1,5 +1,7 @@
-use crate::client::{Client, ClientConfig};
-use crate::resolver::Resolver;
+use crate::{
+    client::{Client, ClientConfig},
+    resolver::Resolver,
+};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{adb::any::Any, index::Translator};
