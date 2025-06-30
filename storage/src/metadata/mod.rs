@@ -10,11 +10,11 @@
 //! "left" or "right" blob:
 //!
 //! ```text
-//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-//! | 0 | 1 |    ...    |15 |16 |17 |18 |19 |20 |21 |22 |23 |24 |  ...  |50 |...|90 |91 |92 |93 |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-//! |   Timestamp (u128)    |  Key1 (u32)   | Len(V1) (u32) |    Value1     |...|  CRC32(u32)   |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! | 0 | 1 |    ...    | 8 | 9 |10 |11 |12 |13 |14 |15 |16 |  ...  |50 |...|90 |91 |92 |93 |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! |    Version (u64)  |  Key1 (u32)   | Len(V1) (u32) |    Value1     |...|  CRC32(u32)   |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 //!
 //! Len(V1) = Length of Value1
 //! ... = Other key-value pairs (Key2|VLen2|Value2, Key3|VLen3|Value3, ...)
@@ -23,15 +23,11 @@
 //! _To ensure the integrity of the data, a CRC32 checksum is appended to the end of the blob.
 //! This ensures that partial writes are detected before any data is relied on._
 //!
-//! _In the unlikely event that the current timestamp since the last `sync` is unchanged (as measured
-//! in nanoseconds), the timestamp is incremented by one to ensure that the latest update is always
-//! considered the most recent on restart._
-//!
 //! # Atomic Updates
 //!
 //! To provide support for atomic updates, `Metadata` maintains two blobs: a "left" and a "right"
 //! blob. When a new update is committed, it is written to the "older" of the two blobs (indicated
-//! by the timestamp persisted). Writes to `Storage` are not atomic and may only complete partially,
+//! by the version persisted). Writes to `Storage` are not atomic and may only complete partially,
 //! so we only overwrite the "newer" blob once the "older" blob has been synced (otherwise, we would
 //! not be guaranteed to recover the latest complete state from disk on restart as half of a blob
 //! could be old data and half new data).
@@ -95,7 +91,6 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::U64;
-    use std::time::UNIX_EPOCH;
 
     #[test_traced]
     fn test_put_get_clear() {
@@ -107,10 +102,6 @@ mod tests {
                 partition: "test".to_string(),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
-
-            // Check last update
-            let last_update = metadata.last_update();
-            assert!(last_update.is_none());
 
             // Get a key that doesn't exist
             let key = U64::new(42);
@@ -148,13 +139,6 @@ mod tests {
                 partition: "test".to_string(),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
-
-            // Check last update (increment by 1 over the previous)
-            let last_update = metadata.last_update().unwrap();
-            assert_eq!(
-                last_update.duration_since(UNIX_EPOCH).unwrap().as_nanos(),
-                1
-            );
 
             // Check metrics
             let buffer = context.encode();
@@ -197,11 +181,6 @@ mod tests {
 
             // Sync the metadata store
             metadata.sync().await.unwrap();
-            let last_update = metadata.last_update().unwrap();
-            assert_eq!(
-                last_update.duration_since(UNIX_EPOCH).unwrap().as_nanos(),
-                1
-            );
 
             // Check metrics
             let buffer = context.encode();
@@ -245,11 +224,6 @@ mod tests {
 
             // Sync the metadata store
             metadata.sync().await.unwrap();
-            let last_update = metadata.last_update().unwrap();
-            assert_eq!(
-                last_update.duration_since(UNIX_EPOCH).unwrap().as_nanos(),
-                3 // Incremented by 1 during call to close
-            );
 
             // Check metrics
             let buffer = context.encode();
@@ -415,7 +389,7 @@ mod tests {
 
             // Corrupt the metadata store
             let (blob, len) = context.open("test", b"left").await.unwrap();
-            blob.truncate(len - 8).await.unwrap();
+            blob.resize(len - 8).await.unwrap();
             blob.close().await.unwrap();
 
             // Reopen the metadata store
@@ -463,7 +437,7 @@ mod tests {
 
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
-            blob.truncate(5).await.unwrap();
+            blob.resize(5).await.unwrap();
             blob.close().await.unwrap();
 
             // Reopen the metadata store

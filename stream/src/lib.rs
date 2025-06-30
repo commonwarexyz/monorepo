@@ -12,18 +12,35 @@ use thiserror::Error;
 /// Errors that can occur when interacting with a stream.
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("unable to decode: {0}")]
-    UnableToDecode(CodecError),
+    // Handshake errors
     #[error("handshake not for us")]
     HandshakeNotForUs,
     #[error("handshake uses our public key")]
     HandshakeUsesOurKey,
     #[error("handshake timeout")]
     HandshakeTimeout,
-    #[error("cannot dial self")]
-    DialSelf,
     #[error("invalid signature")]
     InvalidSignature,
+    #[error("timestamp too old: {0}")]
+    InvalidTimestampOld(u64),
+    #[error("timestamp too future: {0}")]
+    InvalidTimestampFuture(u64),
+
+    // Cipher errors
+    #[error("shared secret was not contributory")]
+    SharedSecretNotContributory,
+    #[error("cipher creation failed")]
+    CipherCreation,
+    #[error("HKDF expansion failed")]
+    HKDFExpansion,
+    #[error("key confirmation failed")]
+    KeyConfirmationFailed,
+    #[error("invalid key confirmation")]
+    InvalidKeyConfirmation,
+
+    // Connection errors
+    #[error("cannot dial self")]
+    DialSelf,
     #[error("wrong peer")]
     WrongPeer,
     #[error("recv failed")]
@@ -38,22 +55,18 @@ pub enum Error {
     SendTooLarge(usize),
     #[error("connection closed")]
     StreamClosed,
-    #[error("shared secret was not contributory")]
-    SharedSecretNotContributory,
-    #[error("cipher creation failed")]
-    CipherCreation,
-    #[error("HKDF expansion failed")]
-    HKDFExpansion,
+
+    // Encryption errors
     #[error("nonce overflow")]
     NonceOverflow,
     #[error("encryption failed")]
     EncryptionFailed,
     #[error("decryption failed")]
     DecryptionFailed,
-    #[error("timestamp too old: {0}")]
-    InvalidTimestampOld(u64),
-    #[error("timestamp too future: {0}")]
-    InvalidTimestampFuture(u64),
+
+    // Codec errors
+    #[error("unable to decode: {0}")]
+    UnableToDecode(CodecError),
 }
 
 /// A trait for sending messages.
