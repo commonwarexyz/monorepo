@@ -41,31 +41,13 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         let (right_blob, right_len) = context.open(&cfg.partition, BLOB_NAMES[1]).await?;
 
         // Find latest blob (check which includes a hash of the other)
-        let left_result = Self::load(0, &left_blob, left_len).await?;
-        let right_result = Self::load(1, &right_blob, right_len).await?;
-
-        // Set checksums
-        let mut left_version = 0;
-        let mut left_map = BTreeMap::new();
-        let mut left_data = Vec::new();
-        if let Some((version, map, data)) = left_result {
-            left_version = version;
-            left_map = map;
-            left_data = data;
-        }
-        let mut right_version = 0;
-        let mut right_map = BTreeMap::new();
-        let mut right_data = Vec::new();
-        if let Some((version, map, data)) = right_result {
-            right_version = version;
-            right_map = map;
-            right_data = data;
-        }
+        let (left_map, left_wrapper) = Self::load(0, left_blob, left_len).await?;
+        let (right_map, right_wrapper) = Self::load(1, right_blob, right_len).await?;
 
         // Choose latest blob
         let mut map = left_map;
         let mut cursor = 0;
-        if right_version > left_version {
+        if right_wrapper.version > left_wrapper.version {
             cursor = 1;
             map = right_map;
         }
@@ -90,18 +72,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             map,
             cursor,
             partition: cfg.partition,
-            blobs: [
-                Wrapper {
-                    blob: left_blob,
-                    version: left_version,
-                    data: left_data,
-                },
-                Wrapper {
-                    blob: right_blob,
-                    version: right_version,
-                    data: right_data,
-                },
-            ],
+            blobs: [left_wrapper, right_wrapper],
 
             syncs,
             keys,
@@ -111,13 +82,20 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
     async fn load(
         index: usize,
-        blob: &E::Blob,
+        blob: E::Blob,
         len: u64,
-    ) -> Result<Option<(u64, BTreeMap<K, Vec<u8>>, Vec<u8>)>, Error<K>> {
+    ) -> Result<(BTreeMap<K, Vec<u8>>, Wrapper<E>), Error<K>> {
         // Get blob length
         if len == 0 {
             // Empty blob
-            return Ok(None);
+            return Ok((
+                BTreeMap::new(),
+                Wrapper {
+                    blob,
+                    version: 0,
+                    data: Vec::new(),
+                },
+            ));
         }
 
         // Read blob
@@ -136,7 +114,14 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             );
             blob.resize(0).await?;
             blob.sync().await?;
-            return Ok(None);
+            return Ok((
+                BTreeMap::new(),
+                Wrapper {
+                    blob,
+                    version: 0,
+                    data: Vec::new(),
+                },
+            ));
         }
 
         // Extract checksum
@@ -154,7 +139,14 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             );
             blob.resize(0).await?;
             blob.sync().await?;
-            return Ok(None);
+            return Ok((
+                BTreeMap::new(),
+                Wrapper {
+                    blob,
+                    version: 0,
+                    data: Vec::new(),
+                },
+            ));
         }
 
         // Get parent
@@ -186,7 +178,14 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         }
 
         // Return info
-        Ok(Some((version, data, buf.into())))
+        Ok((
+            data,
+            Wrapper {
+                blob,
+                version,
+                data: buf.into(),
+            },
+        ))
     }
 
     /// Get a value from `Metadata` (if it exists).
