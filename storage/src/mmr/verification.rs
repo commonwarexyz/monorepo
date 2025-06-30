@@ -19,6 +19,8 @@ pub(crate) enum ReconstructionError {
     MissingDigests,
     #[error("extra digests in proof")]
     ExtraDigests,
+    #[error("start position is not a leaf")]
+    InvalidStartPos,
 }
 
 /// Contains the information necessary for proving the inclusion of an element, or some range of
@@ -119,24 +121,7 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        if elements.is_empty() {
-            if start_element_pos == 0 {
-                return root_digest == &hasher.root_digest(self.size, self.digests.iter());
-            }
-            debug!("empty range");
-            return false;
-        }
-        let Some(start_leaf) = leaf_pos_to_num(start_element_pos) else {
-            debug!(pos = start_element_pos, "start pos is not a leaf");
-            return false;
-        };
-        let end_element_pos = if elements.len() == 1 {
-            start_element_pos
-        } else {
-            leaf_num_to_pos(start_leaf + elements.len() as u64 - 1)
-        };
-
-        match self.reconstruct_root(hasher, elements, start_element_pos, end_element_pos) {
+        match self.reconstruct_root(hasher, elements, start_element_pos) {
             Ok(reconstructed_root) => *root_digest == reconstructed_root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");
@@ -152,15 +137,13 @@ impl<D: Digest> Proof<D> {
         hasher: &mut H,
         elements: &[E],
         start_element_pos: u64,
-        end_element_pos: u64,
     ) -> Result<D, ReconstructionError>
     where
         I: CHasher<Digest = D>,
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        let peak_digests =
-            self.reconstruct_peak_digests(hasher, elements, start_element_pos, end_element_pos)?;
+        let peak_digests = self.reconstruct_peak_digests(hasher, elements, start_element_pos)?;
 
         Ok(hasher.root_digest(self.size, peak_digests.iter()))
     }
@@ -174,13 +157,28 @@ impl<D: Digest> Proof<D> {
         hasher: &mut H,
         elements: &[E],
         start_element_pos: u64,
-        end_element_pos: u64,
     ) -> Result<Vec<D>, ReconstructionError>
     where
         I: CHasher<Digest = D>,
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
+        if elements.is_empty() {
+            if start_element_pos == 0 {
+                return Ok(vec![]);
+            }
+            return Err(ReconstructionError::MissingDigests);
+        }
+        let Some(start_leaf) = leaf_pos_to_num(start_element_pos) else {
+            debug!(pos = start_element_pos, "start pos is not a leaf");
+            return Err(ReconstructionError::InvalidStartPos);
+        };
+        let end_element_pos = if elements.len() == 1 {
+            start_element_pos
+        } else {
+            leaf_num_to_pos(start_leaf + elements.len() as u64 - 1)
+        };
+
         let mut proof_digests_iter = self.digests.iter();
         let mut siblings_iter = self.digests.iter().rev();
 
