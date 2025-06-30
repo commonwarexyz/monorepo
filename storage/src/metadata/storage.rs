@@ -60,7 +60,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         context.register("keys", "number of tracked keys", keys.clone());
         context.register(
             "skipped",
-            "total bytes not written to disk",
+            "duplicate bytes not written to disk",
             skipped.clone(),
         );
 
