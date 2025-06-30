@@ -3,6 +3,7 @@ use bytes::BufMut;
 use commonware_codec::{FixedSize, ReadExt};
 use commonware_runtime::{Blob, Clock, Metrics, Storage};
 use commonware_utils::Array;
+use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::BTreeMap;
 use tracing::{debug, warn};
@@ -229,69 +230,45 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
         // Get next blob (the one we will overwrite)
         let next_cursor = 1 - self.cursor;
-        let (blob, old_bytes, version) = &mut self.blobs[next_cursor];
-
-        // If the blob we're about to write to has a different version than what we're basing on,
-        // it means its old_bytes is stale. Update it to enable proper diffing.
-        if *version != past_version {
-            // Need to regenerate old_bytes to match current state
-            let mut current_buf = Vec::new();
-            current_buf.put_u64(past_version);
-            for (key, value) in &self.data {
-                current_buf.put_slice(key.as_ref());
-                let value_len = value.len() as u32;
-                current_buf.put_u32(value_len);
-                current_buf.put(&value[..]);
-            }
-            let current_checksum = crc32fast::hash(&current_buf[..]);
-            current_buf.put_u32(current_checksum);
-            *old_bytes = current_buf;
-        }
+        let (next_blob, old_bytes, old_version) = &mut self.blobs[next_cursor];
 
         // Compute byte-level diff and only write changed segments.
-        let new_bytes = &buf;
         let mut i = 0usize;
-        let mut total_bytes_written = 0u64;
-        while i < new_bytes.len() {
+        let mut skipped = 0;
+        let mut writes = Vec::new();
+        while i < buf.len() {
             // Skip equal bytes
-            while i < new_bytes.len() && i < old_bytes.len() && new_bytes[i] == old_bytes[i] {
+            while i < buf.len() && i < old_bytes.len() && buf[i] == old_bytes[i] {
                 i += 1;
+                skipped += 1;
             }
-
-            if i >= new_bytes.len() {
+            if i >= buf.len() {
                 break;
             }
 
-            // Start of differing segment
+            // Write differing segments
             let start = i;
-            while i < new_bytes.len() && (i >= old_bytes.len() || new_bytes[i] != old_bytes[i]) {
+            while i < buf.len() && (i >= old_bytes.len() || buf[i] != old_bytes[i]) {
                 i += 1;
             }
             let end = i;
-
-            let segment = new_bytes[start..end].to_vec();
-            let segment_len = segment.len() as u64;
-            blob.write_at(segment, start as u64).await?;
-            total_bytes_written += segment_len;
+            writes.push(next_blob.write_at(buf[start..end].to_vec(), start as u64));
         }
+        try_join_all(writes).await?;
+        self.skipped.inc_by(skipped);
 
         // If the new file is shorter, truncate; if longer, resize was implicitly handled by write_at
-        if new_bytes.len() < old_bytes.len() {
-            blob.resize(new_bytes.len() as u64).await?;
+        if buf.len() < old_bytes.len() {
+            next_blob.resize(buf.len() as u64).await?;
         }
-
-        blob.sync().await?;
-
-        // Update metrics
-        self.bytes_written.inc_by(total_bytes_written);
-
-        // Update in-memory bookkeeping for the blob we just wrote to
-        *old_bytes = new_bytes.clone();
-        *version = next_version;
-
-        // Switch blobs
-        self.cursor = next_cursor;
+        next_blob.sync().await?;
         self.syncs.inc();
+
+        // Update state
+        *old_bytes = buf;
+        *old_version = next_version;
+        self.cursor = next_cursor;
+
         Ok(())
     }
 
