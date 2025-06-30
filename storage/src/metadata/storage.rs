@@ -25,7 +25,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
 
     syncs: Counter,
     keys: Gauge,
-    bytes_written: Counter,
+    skipped: Counter,
 }
 
 impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
@@ -68,13 +68,13 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         // Create metrics
         let syncs = Counter::default();
         let keys = Gauge::default();
-        let bytes_written = Counter::default();
+        let skipped = Counter::default();
         context.register("syncs", "number of syncs of data to disk", syncs.clone());
         context.register("keys", "number of tracked keys", keys.clone());
         context.register(
-            "bytes_written",
-            "total bytes written to disk",
-            bytes_written.clone(),
+            "skipped",
+            "total bytes not written to disk",
+            skipped.clone(),
         );
 
         // Return metadata
@@ -92,7 +92,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
             syncs,
             keys,
-            bytes_written,
+            skipped,
         })
     }
 
@@ -173,7 +173,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         }
 
         // Return info
-        Ok(Some((version, data, buf.as_ref().to_vec())))
+        Ok(Some((version, data, buf.into())))
     }
 
     /// Get a value from `Metadata` (if it exists).
