@@ -206,7 +206,7 @@ mod tests {
                     loop {
                         let index = context.gen_range(0..keys.len());
                         let sender = keys[index];
-                        let msg = format!("hello from {:?}", sender);
+                        let msg = format!("hello from {sender:?}");
                         let msg = Bytes::from(msg);
                         let mut message_sender = agents.get(sender).unwrap().clone();
                         let sent = message_sender

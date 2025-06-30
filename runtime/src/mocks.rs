@@ -280,7 +280,7 @@ mod tests {
         executor.start(|context| async move {
             select! {
                 v = stream.recv(vec![0;5]) => {
-                    panic!("unexpected value: {:?}", v);
+                    panic!("unexpected value: {v:?}");
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {
                     "timeout"

@@ -85,25 +85,31 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
                 return;
             }
         };
-
-        // Attempt to claim the connection
-        //
-        // Reserve also checks if the peer is authorized.
         let peer = incoming.peer();
-        let Some(reservation) = tracker.listen(peer.clone()).await else {
-            debug!("unable to reserve connection to peer");
+        debug!(?peer, ?address, "verified handshake");
+
+        // Check if the peer is listenable
+        if !tracker.listenable(peer.clone()).await {
+            debug!(?peer, ?address, "peer not listenable");
             return;
-        };
+        }
 
         // Perform handshake
         let stream = match Connection::upgrade_listener(context, incoming).await {
             Ok(connection) => connection,
             Err(err) => {
-                debug!(?err, "failed to upgrade connection");
+                debug!(?err, ?peer, ?address, "failed to upgrade connection");
                 return;
             }
         };
-        debug!(?peer, ?address, "upgraded connection");
+        debug!(?peer, ?address, "completed handshake");
+
+        // Attempt to claim the connection
+        let Some(reservation) = tracker.listen(peer.clone()).await else {
+            debug!(?peer, ?address, "unable to reserve connection to peer");
+            return;
+        };
+        debug!(?peer, ?address, "reserved connection");
 
         // Start peer to handle messages
         supervisor.spawn(stream, reservation).await;

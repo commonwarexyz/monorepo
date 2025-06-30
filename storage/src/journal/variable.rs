@@ -750,7 +750,7 @@ mod tests {
             while let Some(result) = stream.next().await {
                 match result {
                     Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                    Err(err) => panic!("Failed to read item: {}", err),
+                    Err(err) => panic!("Failed to read item: {err}"),
                 }
             }
 
@@ -816,7 +816,7 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {}", err),
+                        Err(err) => panic!("Failed to read item: {err}"),
                     }
                 }
             }
@@ -900,7 +900,7 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {}", err),
+                        Err(err) => panic!("Failed to read item: {err}"),
                     }
                 }
             }
@@ -1003,7 +1003,7 @@ mod tests {
             while let Some(result) = stream.next().await {
                 match result {
                     Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                    Err(err) => panic!("Failed to read item: {}", err),
+                    Err(err) => panic!("Failed to read item: {err}"),
                 }
             }
             assert!(items.is_empty());
@@ -1056,7 +1056,7 @@ mod tests {
             while let Some(result) = stream.next().await {
                 match result {
                     Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                    Err(err) => panic!("Failed to read item: {}", err),
+                    Err(err) => panic!("Failed to read item: {err}"),
                 }
             }
             assert!(items.is_empty());
@@ -1119,7 +1119,7 @@ mod tests {
             while let Some(result) = stream.next().await {
                 match result {
                     Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                    Err(err) => panic!("Failed to read item: {}", err),
+                    Err(err) => panic!("Failed to read item: {err}"),
                 }
             }
             assert!(items.is_empty());
@@ -1187,7 +1187,7 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {}", err),
+                        Err(err) => panic!("Failed to read item: {err}"),
                     }
                 }
                 assert!(items.is_empty());
@@ -1262,7 +1262,7 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {}", err),
+                        Err(err) => panic!("Failed to read item: {err}"),
                     }
                 }
             }
@@ -1297,7 +1297,7 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {}", err),
+                        Err(err) => panic!("Failed to read item: {err}"),
                     }
                 }
             }
@@ -1346,7 +1346,7 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {}", err),
+                        Err(err) => panic!("Failed to read item: {err}"),
                     }
                 }
             }
@@ -1423,7 +1423,7 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {}", err),
+                        Err(err) => panic!("Failed to read item: {err}"),
                     }
                 }
             }
@@ -1472,7 +1472,7 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                        Err(err) => panic!("Failed to read item: {}", err),
+                        Err(err) => panic!("Failed to read item: {err}"),
                     }
                 }
             }
@@ -1549,7 +1549,7 @@ mod tests {
             while let Some(result) = stream.next().await {
                 match result {
                     Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
-                    Err(err) => panic!("Failed to read item: {}", err),
+                    Err(err) => panic!("Failed to read item: {err}"),
                 }
             }
         });

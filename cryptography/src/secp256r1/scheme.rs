@@ -401,7 +401,7 @@ mod tests {
 
     fn padding_odd_length_hex(value: &str) -> String {
         if value.len() % 2 != 0 {
-            return format!("0{}", value);
+            return format!("0{value}");
         }
         value.to_string()
     }
@@ -651,12 +651,7 @@ mod tests {
         for (n, test) in cases.iter() {
             let (public_key, exp_valid) = test;
             let res = PublicKey::decode(public_key.as_ref());
-            assert_eq!(
-                *exp_valid,
-                res.is_ok(),
-                "vector_public_key_validation_{}",
-                n
-            );
+            assert_eq!(*exp_valid, res.is_ok(), "vector_public_key_validation_{n}");
         }
     }
 

@@ -305,7 +305,7 @@ impl crate::Blob for Blob {
                 return Err(Error::BlobSyncFailed(
                     self.partition.clone(),
                     hex(&self.name),
-                    IoError::other(format!("error code: {}", return_value)),
+                    IoError::other(format!("error code: {return_value}")),
                 ));
             }
 

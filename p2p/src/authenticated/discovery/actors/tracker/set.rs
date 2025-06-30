@@ -103,9 +103,7 @@ mod tests {
             assert_eq!(
                 set.order.get(peer),
                 Some(&i),
-                "Peer {} should map to index {}",
-                peer,
-                i
+                "Peer {peer} should map to index {i}"
             );
         }
         assert_eq!(

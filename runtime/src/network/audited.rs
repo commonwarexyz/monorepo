@@ -234,8 +234,7 @@ mod tests {
             assert_eq!(
                 auditors[0].state(),
                 auditors[1].state(),
-                "Auditor states differ: {}",
-                msg
+                "Auditor states differ: {msg}"
             );
         };
 
