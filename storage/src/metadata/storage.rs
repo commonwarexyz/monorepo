@@ -212,56 +212,57 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         let next_version = past_version.checked_add(1).expect("version overflow");
 
         // Create buffer
-        let mut buf = Vec::new();
-        buf.put_u64(next_version);
+        let mut next_data = Vec::new();
+        next_data.put_u64(next_version);
         for (key, value) in &self.map {
-            buf.put_slice(key.as_ref());
+            next_data.put_slice(key.as_ref());
             let value_len = value
                 .len()
                 .try_into()
                 .map_err(|_| Error::ValueTooBig(key.clone()))?;
-            buf.put_u32(value_len);
-            buf.put(&value[..]);
+            next_data.put_u32(value_len);
+            next_data.put(&value[..]);
         }
-        let checksum = crc32fast::hash(&buf[..]);
-        buf.put_u32(checksum);
+        let checksum = crc32fast::hash(&next_data[..]);
+        next_data.put_u32(checksum);
 
         // Get target blob (the one we will overwrite)
         let target_cursor = 1 - self.cursor;
-        let (target_blob, target_bytes, target_version) = &mut self.blobs[target_cursor];
+        let (target_blob, target_data, target_version) = &mut self.blobs[target_cursor];
 
         // Compute byte-level diff and only write changed segments
         let mut i = 0usize;
         let mut skipped = 0;
         let mut writes = Vec::new();
-        while i < buf.len() {
+        while i < next_data.len() {
             // Skip equal bytes
-            while i < buf.len() && i < target_bytes.len() && buf[i] == target_bytes[i] {
+            while i < next_data.len() && i < target_data.len() && next_data[i] == target_data[i] {
                 i += 1;
                 skipped += 1;
             }
-            if i >= buf.len() {
+            if i >= next_data.len() {
                 break;
             }
 
             // Write differing segments
             let start = i;
-            while i < buf.len() && (i >= target_bytes.len() || buf[i] != target_bytes[i]) {
+            while i < next_data.len() && (i >= target_data.len() || next_data[i] != target_data[i])
+            {
                 i += 1;
             }
             let end = i;
-            writes.push(target_blob.write_at(buf[start..end].to_vec(), start as u64));
+            writes.push(target_blob.write_at(next_data[start..end].to_vec(), start as u64));
         }
         try_join_all(writes).await?;
 
         // If the new file is shorter, truncate; if longer, resize was implicitly handled by write_at
-        if buf.len() < target_bytes.len() {
-            target_blob.resize(buf.len() as u64).await?;
+        if next_data.len() < target_data.len() {
+            target_blob.resize(next_data.len() as u64).await?;
         }
         target_blob.sync().await?;
 
         // Update state
-        *target_bytes = buf;
+        *target_data = next_data;
         *target_version = next_version;
         self.cursor = target_cursor;
         self.skipped.inc_by(skipped);
