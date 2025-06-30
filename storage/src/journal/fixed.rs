@@ -1670,7 +1670,7 @@ mod tests {
                             if items.len() < 3 {
                                 continue; // Skip expected errors for positions without data
                             }
-                            panic!("Unexpected error during replay: {}", err);
+                            panic!("Unexpected error during replay: {err}");
                         }
                     }
                 }

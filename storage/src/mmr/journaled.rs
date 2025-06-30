@@ -1195,14 +1195,12 @@ mod tests {
                     assert_eq!(
                         Some(expected),
                         synced_node.as_ref(),
-                        "Node at position {} doesn't match",
-                        i
+                        "Node at position {i} doesn't match",
                     );
                 } else {
                     assert_eq!(
                         None, synced_node,
-                        "Expected no node at position {} but found one",
-                        i
+                        "Expected no node at position {i} but found one",
                     );
                 }
             }
