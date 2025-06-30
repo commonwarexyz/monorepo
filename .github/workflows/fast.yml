@@ -62,12 +62,12 @@ jobs:
           - os: macos-latest
             flags: ""
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Run setup
-        uses: ./.github/actions/setup
-      - name: Run tests
-        run: cargo test ${{ matrix.flags }} --verbose
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Run tests
+      run: cargo test ${{ matrix.flags }} --verbose
 
   Dependencies:
     runs-on: ubuntu-latest
