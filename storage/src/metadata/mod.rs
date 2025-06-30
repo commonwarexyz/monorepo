@@ -85,9 +85,12 @@ pub enum Error<K: Array> {
 
 /// Configuration for [Metadata] storage.
 #[derive(Clone)]
-pub struct Config {
+pub struct Config<C> {
     /// The [commonware_runtime::Storage] partition to use for storing metadata.
     pub partition: String,
+
+    /// The codec configuration to use for the value stored in the metadata.
+    pub codec_config: C,
 }
 
 #[cfg(test)]
@@ -105,8 +108,11 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get a key that doesn't exist
             let key = U64::new(42);
@@ -142,8 +148,11 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Check metrics
             let buffer = context.encode();
@@ -176,8 +185,11 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -210,8 +222,11 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Check metrics
             let buffer = context.encode();
@@ -241,8 +256,11 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Check metrics
             let buffer = context.encode();
@@ -267,8 +285,11 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -296,8 +317,11 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key).unwrap();
@@ -315,8 +339,11 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -347,8 +374,11 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key);
@@ -371,6 +401,7 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
@@ -400,8 +431,11 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key).unwrap();
@@ -419,6 +453,7 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
@@ -448,8 +483,11 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key).unwrap();
@@ -470,6 +508,7 @@ mod tests {
                 // Create a metadata store
                 let cfg = Config {
                     partition: "test".to_string(),
+                    codec_config: ((0..).into(), ()),
                 };
                 let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
@@ -482,8 +521,11 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get the key
             let value = metadata.get(&key);
@@ -506,6 +548,7 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
@@ -529,9 +572,9 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let mut metadata: Metadata<_, U64> =
-                Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
             // Put initial keys
             for i in 0..100 {
