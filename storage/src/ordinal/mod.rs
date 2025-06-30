@@ -1622,4 +1622,57 @@ mod tests {
             assert!(buffer.contains("pruned_total 4"));
         });
     }
+
+    #[test_traced]
+    fn test_store_prune_removes_correct_pending() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 100,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+            };
+
+            let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            // Insert and sync some data in blob 0
+            store.put(5, FixedBytes::new([5u8; 32])).unwrap();
+            store.sync().await.unwrap();
+
+            // Add pending entries to blob 0 and blob 1
+            store.put(10, FixedBytes::new([10u8; 32])).unwrap(); // blob 0
+            store.put(110, FixedBytes::new([110u8; 32])).unwrap(); // blob 1
+
+            // Verify all data is visible before pruning
+            assert!(store.has(5));
+            assert!(store.has(10));
+            assert!(store.has(110));
+
+            // Prune up to index 100, which should remove blob 0 (indices 0-99).
+            store.prune(150).await.unwrap();
+
+            // Verify that synced and pending entries in blob 0 are removed.
+            assert!(!store.has(5));
+            assert!(!store.has(10));
+
+            // Verify that the pending entry in blob 1 remains.
+            assert!(store.has(110));
+            assert_eq!(
+                store.get(110).await.unwrap().unwrap(),
+                FixedBytes::new([110u8; 32])
+            );
+
+            // Sync the remaining pending entry and verify it's still there.
+            store.sync().await.unwrap();
+            assert!(store.has(110));
+            assert_eq!(
+                store.get(110).await.unwrap().unwrap(),
+                FixedBytes::new([110u8; 32])
+            );
+        });
+    }
 }
