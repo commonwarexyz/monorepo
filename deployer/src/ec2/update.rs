@@ -33,7 +33,7 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
     }
 
     // Construct private key path (assumes it exists from create command)
-    let private_key_path = tag_directory.join(format!("id_rsa_{}", tag));
+    let private_key_path = tag_directory.join(format!("id_rsa_{tag}"));
     if !private_key_path.exists() {
         return Err(Error::PrivateKeyNotFound);
     }

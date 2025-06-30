@@ -161,7 +161,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                     // Panic since there is no way to recover from this.
                     let len = peers.len();
                     let max = self.max_peer_set_size;
-                    assert!(len <= max, "peer set too large: {} > {}", len, max);
+                    assert!(len <= max, "peer set too large: {len} > {max}");
 
                     self.directory.add_set(index, peers);
                 }

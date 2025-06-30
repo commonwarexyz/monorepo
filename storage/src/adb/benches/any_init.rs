@@ -28,11 +28,11 @@ const THREADS: usize = 8;
 
 fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
     AConfig::<EightCap> {
-        mmr_journal_partition: format!("journal_{}", PARTITION_SUFFIX),
-        mmr_metadata_partition: format!("metadata_{}", PARTITION_SUFFIX),
+        mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
+        mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: 1024,
-        log_journal_partition: format!("log_journal_{}", PARTITION_SUFFIX),
+        log_journal_partition: format!("log_journal_{PARTITION_SUFFIX}"),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: 1024,
         translator: EightCap,

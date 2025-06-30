@@ -15,7 +15,7 @@ pub fn ok(span: &Span) {
 /// If `error` is provided, it will be recorded as an attribute on the span.
 pub fn error(span: &Span, status: &str, error: Option<&dyn Debug>) {
     if let Some(error) = error {
-        span.record("error", format!("{:?}", error));
+        span.record("error", format!("{error:?}"));
     }
     span.set_status(Status::error(status.to_string()));
 }

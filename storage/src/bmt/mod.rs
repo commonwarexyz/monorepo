@@ -319,9 +319,7 @@ mod tests {
             let proof = tree.proof(i as u32).unwrap();
             assert!(
                 proof.verify(&mut hasher, leaf, i as u32, &root).is_ok(),
-                "correct fail for size={} leaf={}",
-                n,
-                i
+                "correct fail for size={n} leaf={i}"
             );
 
             // Serialize and deserialize the proof
@@ -331,9 +329,7 @@ mod tests {
                 deserialized
                     .verify(&mut hasher, leaf, i as u32, &root)
                     .is_ok(),
-                "deserialize fail for size={} leaf={}",
-                n,
-                i
+                "deserialize fail for size={n} leaf={i}"
             );
 
             // Modify a sibling hash and ensure the proof fails
@@ -344,9 +340,7 @@ mod tests {
                     update_tamper
                         .verify(&mut hasher, leaf, i as u32, &root)
                         .is_err(),
-                    "modify fail for size={} leaf={}",
-                    n,
-                    i
+                    "modify fail for size={n} leaf={i}"
                 );
             }
 
@@ -357,9 +351,7 @@ mod tests {
                 add_tamper
                     .verify(&mut hasher, leaf, i as u32, &root)
                     .is_err(),
-                "add fail for size={} leaf={}",
-                n,
-                i
+                "add fail for size={n} leaf={i}"
             );
 
             // Remove a sibling hash and ensure the proof fails
@@ -370,9 +362,7 @@ mod tests {
                     remove_tamper
                         .verify(&mut hasher, leaf, i as u32, &root)
                         .is_err(),
-                    "remove fail for size={} leaf={}",
-                    n,
-                    i
+                    "remove fail for size={n} leaf={i}"
                 );
             }
         }

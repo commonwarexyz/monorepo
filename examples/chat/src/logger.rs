@@ -24,7 +24,7 @@ impl Writer {
             && key != "target"
             && key != "message"
         {
-            log_message.push_str(&format!("{}={} ", key, value));
+            log_message.push_str(&format!("{key}={value} "));
         }
     }
 }
