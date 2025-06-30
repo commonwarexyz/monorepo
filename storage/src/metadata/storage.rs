@@ -18,7 +18,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
     map: BTreeMap<K, Vec<u8>>,
     cursor: usize,
     partition: String,
-    blobs: [(E::Blob, Vec<u8>, u64); 2],
+    blobs: [(E::Blob, u64, Vec<u8>); 2],
 
     syncs: Counter,
     keys: Gauge,
@@ -83,8 +83,8 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             cursor,
             partition: cfg.partition,
             blobs: [
-                (left_blob, left_data, left_version),
-                (right_blob, right_data, right_version),
+                (left_blob, left_version, left_data),
+                (right_blob, right_version, right_data),
             ],
 
             syncs,
@@ -208,7 +208,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         //
         // While it is possible that extremely high-frequency updates to `Metadata` could cause an eventual
         // overflow of version, syncing once per millisecond would overflow in 584,942,417 years.
-        let past_version = self.blobs[self.cursor].2;
+        let past_version = self.blobs[self.cursor].1;
         let next_version = past_version.checked_add(1).expect("version overflow");
 
         // Create buffer
@@ -228,7 +228,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
         // Get target blob (the one we will overwrite)
         let target_cursor = 1 - self.cursor;
-        let (target_blob, target_data, target_version) = &mut self.blobs[target_cursor];
+        let (target_blob, target_version, target_data) = &mut self.blobs[target_cursor];
 
         // Compute byte-level diff and only write changed segments
         let mut i = 0;
@@ -263,9 +263,9 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         target_blob.sync().await?;
 
         // Update state
-        *target_data = next_data;
-        *target_version = next_version;
         self.cursor = target_cursor;
+        *target_version = next_version;
+        *target_data = next_data;
         Ok(())
     }
 
