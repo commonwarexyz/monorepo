@@ -227,7 +227,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         self.intervals.next_gap(index)
     }
 
-    /// Prune indices older than `min` by removing entire blobs. Returns the actual pruning point.
+    /// Prune indices older than `min` by removing entire blobs.
     ///
     /// Pruning is done at blob boundaries to avoid partial deletions. A blob is pruned only if
     /// all possible indices in that blob are less than `min`.

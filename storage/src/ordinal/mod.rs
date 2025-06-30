@@ -1167,7 +1167,7 @@ mod tests {
                 assert_eq!(store.get(*index).await.unwrap().unwrap(), *value);
             }
 
-            // Prune up to index 150 (should remove blobs 0 and 1)
+            // Prune up to index 150 (should remove blob 0 only)
             store.prune(150).await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("pruned_total 1"));
@@ -1296,10 +1296,11 @@ mod tests {
                 FixedBytes::new([150u8; 32])
             );
 
-            // Prune up to index 75 (should remove blob 0 but keep pending data)
+            // Prune up to index 75 - blob 0 (indices 0-99) won't be pruned because
+            // it's not entirely before index 75
             store.prune(75).await.unwrap();
 
-            // The pending entry at 50 should prevent pruning of blob 0
+            // Blob 0 should not be pruned (it contains indices 0-99)
             assert!(store.has(0));
             assert!(store.has(50)); // Pending
             assert!(store.has(100));
@@ -1308,10 +1309,10 @@ mod tests {
             // Sync pending entries
             store.sync().await.unwrap();
 
-            // Now prune again - this time it should work
+            // Prune again to 75 - still no-op, blob 0 is not entirely before 75
             store.prune(75).await.unwrap();
 
-            // Prune more aggressively
+            // Prune to 125 - this removes blob 0 (indices 0-99)
             store.prune(125).await.unwrap();
 
             // Verify pruning worked
