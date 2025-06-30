@@ -132,10 +132,10 @@ impl crate::Blob for Blob {
         Ok(())
     }
 
-    async fn truncate(&self, len: u64) -> Result<(), crate::Error> {
+    async fn resize(&self, len: u64) -> Result<(), crate::Error> {
         let len = len.try_into().map_err(|_| crate::Error::OffsetOverflow)?;
         let mut content = self.content.write().unwrap();
-        content.truncate(len);
+        content.resize(len, 0);
         Ok(())
     }
 

@@ -1,10 +1,14 @@
 //! Operations over handshake messages.
 
-use super::x25519;
+use super::{x25519, AUTHENTICATION_TAG_LENGTH};
 use crate::Error;
 use bytes::{Buf, BufMut};
+use chacha20poly1305::{
+    aead::{AeadMutInPlace, Tag},
+    ChaCha20Poly1305, Nonce,
+};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+    varint::UInt, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
 use commonware_cryptography::{PublicKey, Signer};
 use commonware_runtime::Clock;
@@ -195,6 +199,125 @@ impl<C: PublicKey> Read for Signed<C> {
 impl<C: PublicKey> EncodeSize for Signed<C> {
     fn encode_size(&self) -> usize {
         self.info.encode_size() + self.signer.encode_size() + self.signature.encode_size()
+    }
+}
+
+/// Key confirmation message used during the handshake process.
+///
+/// This struct contains cryptographic proof that a party can correctly derive
+/// the shared secret from the Diffie-Hellman exchange. It prevents attacks where
+/// an adversary might forward handshake messages without actually knowing the
+/// corresponding private keys.
+pub struct KeyConfirmation {
+    /// AEAD tag of the encrypted proof demonstrating knowledge of the shared secret.
+    tag: Tag<ChaCha20Poly1305>,
+}
+
+impl KeyConfirmation {
+    /// Create a new key confirmation using the provided cipher and handshake transcript.
+    ///
+    /// The confirmation encrypts the handshake transcript to demonstrate knowledge of the shared
+    /// secret and bind the confirmation to the entire handshake exchange.
+    ///
+    /// # Security
+    ///
+    /// To prevent nonce-reuse, the cipher should **not** be the same cipher used for future
+    /// encrypted messages, but should be generated from the same shared secret. The function takes
+    /// ownership of the cipher to help prevent this.
+    pub fn create(mut cipher: ChaCha20Poly1305, transcript: &[u8]) -> Result<Self, Error> {
+        // Encrypt the confirmation using the transcript as associated data
+        let tag = cipher
+            .encrypt_in_place_detached(&Nonce::default(), transcript, &mut [])
+            .map_err(|_| Error::KeyConfirmationFailed)?;
+
+        Ok(Self { tag })
+    }
+
+    /// Verify the key confirmation using the provided cipher and handshake transcript.
+    ///
+    /// Returns Ok(()) if the confirmation is valid, otherwise returns an error.
+    pub fn verify(&self, mut cipher: ChaCha20Poly1305, transcript: &[u8]) -> Result<(), Error> {
+        // Decrypt the confirmation using the transcript as associated data
+        cipher
+            .decrypt_in_place_detached(&Nonce::default(), transcript, &mut [], &self.tag)
+            .map_err(|_| Error::InvalidKeyConfirmation)?;
+        Ok(())
+    }
+}
+
+impl Write for KeyConfirmation {
+    fn write(&self, buf: &mut impl BufMut) {
+        let tag_bytes: [u8; AUTHENTICATION_TAG_LENGTH] = self.tag.into();
+        tag_bytes.write(buf);
+    }
+}
+
+impl Read for KeyConfirmation {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let tag = <[u8; AUTHENTICATION_TAG_LENGTH]>::read_cfg(buf, &())?;
+        Ok(Self { tag: tag.into() })
+    }
+}
+
+impl FixedSize for KeyConfirmation {
+    const SIZE: usize = AUTHENTICATION_TAG_LENGTH;
+}
+
+/// Message 2 in the 3-message handshake protocol: Listener's response with key confirmation.
+///
+/// The listener sends their signed handshake along with a confirmation that they can
+/// derive the correct shared secret.
+pub struct ListenerResponse<C: PublicKey> {
+    /// The signed handshake from the listener
+    handshake: Signed<C>,
+
+    /// Key confirmation that the listener can derive the shared secret
+    confirmation: KeyConfirmation,
+}
+
+impl<C: PublicKey> ListenerResponse<C> {
+    /// Create a new listener response with the given handshake and key confirmation.
+    pub fn new(handshake: Signed<C>, confirmation: KeyConfirmation) -> Self {
+        Self {
+            handshake,
+            confirmation,
+        }
+    }
+
+    /// Extract the handshake and key confirmation from this response.
+    ///
+    /// This consumes the response and returns its constituent parts,
+    /// which is useful during the handshake verification process.
+    pub fn into_parts(self) -> (Signed<C>, KeyConfirmation) {
+        (self.handshake, self.confirmation)
+    }
+}
+
+impl<C: PublicKey> Write for ListenerResponse<C> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.handshake.write(buf);
+        self.confirmation.write(buf);
+    }
+}
+
+impl<C: PublicKey> Read for ListenerResponse<C> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let handshake = Signed::read(buf)?;
+        let confirmation = KeyConfirmation::read(buf)?;
+        Ok(Self {
+            handshake,
+            confirmation,
+        })
+    }
+}
+
+impl<C: PublicKey> EncodeSize for ListenerResponse<C> {
+    fn encode_size(&self) -> usize {
+        self.handshake.encode_size() + self.confirmation.encode_size()
     }
 }
 
@@ -516,6 +639,91 @@ mod tests {
             );
             assert!(matches!(result, Err(Error::InvalidTimestampOld(t)) if t == 0));
         });
+    }
+
+    #[test]
+    fn test_key_confirmation_create_and_verify() {
+        use chacha20poly1305::KeyInit;
+
+        let key = [1u8; 32];
+        let cipher = ChaCha20Poly1305::new(&key.into());
+        let transcript = b"test_transcript_data";
+
+        // Create key confirmation
+        let confirmation = KeyConfirmation::create(cipher, transcript).unwrap();
+
+        // Verify the confirmation with the same parameters
+        let cipher = ChaCha20Poly1305::new(&key.into());
+        confirmation.verify(cipher, transcript).unwrap();
+
+        // Verify that confirmation fails with different transcript
+        let different_transcript = b"different_transcript_data";
+        let cipher = ChaCha20Poly1305::new(&key.into());
+        let result = confirmation.verify(cipher, different_transcript);
+        assert!(matches!(result, Err(Error::InvalidKeyConfirmation)));
+
+        // Verify that confirmation fails with different cipher
+        let different_key = [2u8; 32];
+        let different_cipher = ChaCha20Poly1305::new(&different_key.into());
+        let result = confirmation.verify(different_cipher, transcript);
+        assert!(matches!(result, Err(Error::InvalidKeyConfirmation)));
+    }
+
+    #[test]
+    fn test_key_confirmation_encoding() {
+        use chacha20poly1305::KeyInit;
+        use commonware_codec::{DecodeExt, Encode};
+
+        let key = [1u8; 32];
+        let cipher = ChaCha20Poly1305::new(&key.into());
+        let transcript = b"test_transcript_for_encoding";
+
+        // Create and encode confirmation
+        let original_confirmation = KeyConfirmation::create(cipher, transcript).unwrap();
+        let encoded = original_confirmation.encode();
+
+        // Decode and verify it matches
+        let decoded_confirmation = KeyConfirmation::decode(encoded).unwrap();
+        let cipher = ChaCha20Poly1305::new(&key.into());
+        decoded_confirmation.verify(cipher, transcript).unwrap();
+    }
+
+    #[test]
+    fn test_listener_response_encoding() {
+        use chacha20poly1305::KeyInit;
+        use commonware_codec::{DecodeExt, Encode};
+
+        // Create test components
+        let mut sender = PrivateKey::from_seed(0);
+        let recipient = PrivateKey::from_seed(1).public_key();
+        let ephemeral_public_key = PublicKey::from_bytes([3u8; 32]);
+
+        let handshake = Signed::sign(
+            &mut sender,
+            TEST_NAMESPACE,
+            Info {
+                timestamp: 12345,
+                recipient: recipient.clone(),
+                ephemeral_public_key,
+            },
+        );
+
+        let key = [1u8; 32];
+        let cipher = ChaCha20Poly1305::new(&key.into());
+        let transcript = b"test_transcript_for_listener_response";
+        let key_confirmation = KeyConfirmation::create(cipher, transcript).unwrap();
+
+        // Create and encode listener response
+        let original_response = ListenerResponse::new(handshake, key_confirmation);
+        let encoded = original_response.encode();
+
+        // Decode and verify components
+        let decoded_response = ListenerResponse::<edPublicKey>::decode(encoded).unwrap();
+        let (decoded_handshake, decoded_confirmation) = decoded_response.into_parts();
+
+        assert_eq!(decoded_handshake.signer(), sender.public_key());
+        let cipher = ChaCha20Poly1305::new(&key.into());
+        decoded_confirmation.verify(cipher, transcript).unwrap();
     }
 
     #[test]
