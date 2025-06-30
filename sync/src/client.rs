@@ -52,6 +52,7 @@ pub struct Metrics {
 }
 
 /// Client that syncs an [adb::any::Any] database.
+#[allow(clippy::large_enum_variant)] // TODO danlaine: is this OK?
 pub(super) enum Client<E, K, V, H, T, R>
 where
     E: Storage + Clock + MetricsTrait,
@@ -135,9 +136,9 @@ where
                     // TODO danlaine: add more comprehensive retry logic
                     metrics.invalid_batches_received += 1;
                     if metrics.invalid_batches_received >= config.max_retries {
-                        return Err(Error::InvalidResolver(format!(
-                            "Max retries reached for fetching operations"
-                        )));
+                        return Err(Error::InvalidResolver(
+                            "Max retries reached for fetching operations".to_string(),
+                        ));
                     }
 
                     return Ok(Client::FetchData {
@@ -162,9 +163,9 @@ where
                     debug!("Proof verification failed, retrying");
                     metrics.invalid_batches_received += 1;
                     if metrics.invalid_batches_received >= config.max_retries {
-                        return Err(Error::InvalidResolver(format!(
-                            "Max retries reached for verifying proof"
-                        )));
+                        return Err(Error::InvalidResolver(
+                            "Max retries reached for verifying proof".to_string(),
+                        ));
                     }
 
                     return Ok(Client::FetchData {
@@ -203,7 +204,7 @@ where
                         config: config.db_config,
                         mmr_pinned_nodes: Default::default(), // TODO danlaine: support pruning
                         pruned_to_loc: 0,                     // TODO danlaine: support pruning
-                        operations: operations,
+                        operations,
                     },
                 )
                 .await
@@ -254,6 +255,7 @@ mod tests {
     use commonware_storage::{adb::any::Any, index};
     use commonware_utils::NZU64;
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
+    use std::collections::{HashMap, HashSet};
     use test_case::test_case;
 
     type TestHash = Sha256;
@@ -261,6 +263,10 @@ mod tests {
     type TestValue = Digest;
     type TestTranslator = index::translator::TwoCap;
     type TestAny = Any<Context, TestKey, TestValue, TestHash, TestTranslator>;
+
+    fn create_test_hasher() -> commonware_storage::mmr::hasher::Standard<TestHash> {
+        commonware_storage::mmr::hasher::Standard::<TestHash>::new()
+    }
 
     fn create_test_config(seed: u64) -> adb::any::Config<TestTranslator> {
         adb::any::Config {
@@ -275,6 +281,7 @@ mod tests {
             pool: None,
         }
     }
+
     /// Create a test database with unique partition names
     async fn create_test_db(mut context: Context) -> TestAny {
         let seed = context.next_u64();
@@ -282,76 +289,63 @@ mod tests {
         TestAny::init(context, config).await.unwrap()
     }
 
+    /// Create n random operations. Some portion of the updates are deletes.
+    /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
+    fn create_test_ops(n: usize) -> Vec<Operation<TestKey, TestValue>> {
+        let mut rng = StdRng::seed_from_u64(1337);
+        let mut prev_key = TestKey::random(&mut rng);
+        let mut ops = Vec::new();
+        for i in 0..n {
+            let key = TestKey::random(&mut rng);
+            if i % 10 == 0 && i > 0 {
+                ops.push(Operation::Deleted(prev_key));
+            } else {
+                let value = TestValue::random(&mut rng);
+                ops.push(Operation::Update(key, value));
+                prev_key = key;
+            }
+        }
+        ops
+    }
+
     // Apply n updates to the database. Some portion of the updates are deletes.
     // It's guaranteed that calling this function with n' > n will apply the same updates
     // as calling this function with n, followed by additional updates.
     // Note that we don't commit after applying the updates.
-    async fn apply_test_ops(mut db: TestAny, n: usize) -> TestAny {
-        let mut rng = StdRng::seed_from_u64(1337);
-        let mut prev_key = TestKey::random(&mut rng);
-        for i in 0..n {
-            let key = TestKey::random(&mut rng);
-            if i % 10 == 0 && i > 0 {
-                db.delete(prev_key).await.unwrap();
-            } else {
-                let value = TestValue::random(&mut rng);
-                db.update(key, value).await.unwrap();
-                prev_key = key;
+    async fn apply_ops(mut db: TestAny, ops: Vec<Operation<TestKey, TestValue>>) -> TestAny {
+        for op in ops {
+            match op {
+                Operation::Update(key, value) => {
+                    db.update(key, value).await.unwrap();
+                }
+                Operation::Deleted(key) => {
+                    db.delete(key).await.unwrap();
+                }
+                Operation::Commit(_) => {
+                    db.commit().await.unwrap();
+                }
             }
         }
         db
     }
 
-    // #[test]
-    // fn test_client_configuration() {
-    //     let config = Config::default();
-    //     assert_eq!(config.max_ops_per_batch.get(), 1000);
-
-    //     let custom_config = Config {
-    //         max_ops_per_batch: NZU64!(5),
-    //     };
-    //     assert_eq!(custom_config.max_ops_per_batch.get(), 5);
-    // }
-
-    // Test that the client returns an error if the target ops is less than the current ops.
-    // #[test]
-    // fn test_invalid_target_error() {
-    //     let executor = deterministic::Runner::default();
-    //     executor.start(|context| async move {
-    //         let target_db = create_test_db(context.clone()).await;
-    //         let mut target_db = apply_test_ops(target_db, 9).await;
-    //         target_db.commit().await.unwrap();
-    //         let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
-    //         let target_hash = target_db.root(&mut hasher);
-    //         let sync_db = create_test_db(context.clone()).await;
-    //         let mut sync_db = apply_test_ops(sync_db, 10).await;
-    //         sync_db.commit().await.unwrap();
-
-    //         let resolver = TestResolver::_new(sync_db);
-    //         let client = Client::new(resolver, Config::default(), 0, target_hash).unwrap();
-    //         let result: Result<TestAny, Error> = client.sync().await;
-    //         match result {
-    //             Ok(_) => panic!("Expected error"),
-    //             Err(Error::InvalidTarget { .. }) => {}
-    //             Err(e) => panic!("Expected InvalidTarget, got {:?}", e),
-    //         }
-    //     });
-    // }
-
     #[test_case(1, NZU64!(1))]
-    #[test_case(100, NZU64!(1))]
-    #[test_case(100, NZU64!(10))]
-    #[test_case(100, NZU64!(100))]
-    #[test_case(100, NZU64!(1000))]
+    #[test_case(10, NZU64!(1))]
+    #[test_case(50, NZU64!(10))]
+    #[test_case(250, NZU64!(1))]
+    #[test_case(250, NZU64!(100))]
+    // TODO danlaine: add tests for larger databases
+    // when pruning is supported
 
     fn test_sync(target_db_ops: usize, max_ops_per_batch: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let target_db = create_test_db(context.clone()).await;
-            let mut target_db = apply_test_ops(target_db, target_db_ops).await;
+            let target_db_ops = create_test_ops(target_db_ops);
+            let mut target_db = apply_ops(target_db, target_db_ops.clone()).await;
             target_db.commit().await.unwrap();
             let target_ops = target_db.op_count();
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+            let mut hasher = create_test_hasher();
             let target_hash = target_db.root(&mut hasher);
 
             let config = Config {
@@ -365,29 +359,34 @@ mod tests {
                 hasher,
                 _phantom: PhantomData,
             };
-            let result = sync(config).await.unwrap();
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
-            assert_eq!(result.root(&mut hasher), target_hash);
-            assert_eq!(result.op_count(), target_ops);
+            let got_db = sync(config).await.unwrap();
+            let mut hasher = create_test_hasher();
+            assert_eq!(got_db.root(&mut hasher), target_hash);
+            assert_eq!(got_db.op_count(), target_ops);
+
+            let mut key_values = HashMap::new();
+            let mut deleted_keys = HashSet::new();
+            // Make sure the synced database has the same operations as the target database
+            for op in target_db_ops {
+                match op {
+                    Operation::Update(key, value) => {
+                        key_values.insert(key, value);
+                        deleted_keys.remove(&key);
+                    }
+                    Operation::Deleted(key) => {
+                        key_values.remove(&key);
+                        deleted_keys.insert(key);
+                    }
+                    Operation::Commit(_) => {}
+                }
+            }
+
+            for (key, value) in key_values {
+                assert_eq!(got_db.get(&key).await.unwrap(), Some(value));
+            }
+            for key in deleted_keys {
+                assert_eq!(got_db.get(&key).await.unwrap(), None);
+            }
         });
     }
-
-    // #[test]
-    // fn test_delete_me() {
-    //     let executor = deterministic::Runner::default();
-    //     executor.start(|context| async move {
-    //         let target_db = create_test_db(context.clone()).await;
-    //         let mut target_db = apply_test_ops(target_db, 100).await;
-    //         target_db.commit().await.unwrap();
-    //         let target_ops = target_db.op_count();
-    //         let floor = target_db.oldest_retained_loc().unwrap();
-    //         let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
-    //         let target_hash = target_db.root(&mut hasher);
-
-    //         let ops = target_db
-    //             .proof(floor, NonZeroU64::new(target_ops).unwrap())
-    //             .await
-    //             .unwrap();
-    //     });
-    // }
 }
