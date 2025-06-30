@@ -186,8 +186,7 @@ mod tests {
         let metrics = context.encode();
         assert!(
             !metrics.contains("messages_rate_limited_total{"),
-            "no messages should be rate limited: {}",
-            metrics
+            "no messages should be rate limited: {metrics}"
         );
     }
 
@@ -221,7 +220,7 @@ mod tests {
             let public_key = public_key.clone();
 
             // Create peer context
-            let context = context.with_label(&format!("peer-{}", i));
+            let context = context.with_label(&format!("peer-{i}"));
 
             // Create network
             let config = Config::test(private_key.clone(), *address, max_message_size);
@@ -478,7 +477,7 @@ mod tests {
             let mut waiters = Vec::new();
             for (i, (peer_sk, peer_pk, peer_addr)) in peers_and_sks.iter().enumerate() {
                 // Create peer context
-                let context = context.with_label(&format!("peer-{}", i));
+                let context = context.with_label(&format!("peer-{i}"));
 
                 // Create network
                 let config = Config::test(

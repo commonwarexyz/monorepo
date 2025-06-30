@@ -360,7 +360,7 @@ mod tests {
             let mut mailbox = mailboxes.get(&peers[0]).unwrap().clone();
             let mut messages = vec![];
             for i in 0..CACHE_SIZE + 1 {
-                messages.push(TestMessage::shared(format!("message {}", i).as_bytes()));
+                messages.push(TestMessage::shared(format!("message {i}").as_bytes()));
             }
             for message in messages.iter() {
                 let result = mailbox.broadcast(Recipients::All, message.clone()).await;
@@ -423,7 +423,7 @@ mod tests {
             // Peer A broadcasts 10 new messages to evict M1 from A's deque
             let mut new_messages_a = Vec::with_capacity(CACHE_SIZE);
             for i in 0..CACHE_SIZE {
-                new_messages_a.push(TestMessage::shared(format!("A{}", i).as_bytes()));
+                new_messages_a.push(TestMessage::shared(format!("A{i}").as_bytes()));
             }
             for msg in &new_messages_a {
                 let result = mailbox_a.broadcast(Recipients::All, msg.clone()).await;
@@ -439,7 +439,7 @@ mod tests {
             // Peer C broadcasts 10 new messages to evict M1 from C's deque
             let mut new_messages_c = Vec::with_capacity(CACHE_SIZE);
             for i in 0..CACHE_SIZE {
-                new_messages_c.push(TestMessage::shared(format!("C{}", i).as_bytes()));
+                new_messages_c.push(TestMessage::shared(format!("C{i}").as_bytes()));
             }
             for msg in &new_messages_c {
                 let result = mailbox_c.broadcast(Recipients::All, msg.clone()).await;

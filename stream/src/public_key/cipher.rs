@@ -121,7 +121,7 @@ mod tests {
         let modified_info_ciphers = derive::<N>(base_ikm, base_salts, modified_infos).unwrap();
 
         let nonce = Default::default();
-        let plaintext = format!("{}_test", test_name);
+        let plaintext = format!("{test_name}_test");
 
         // All variants should produce different results
         for i in 0..N {
@@ -137,13 +137,11 @@ mod tests {
 
             assert_ne!(
                 base_ct, salt_ct,
-                "Cipher {} should be sensitive to salt changes in {}",
-                i, test_name
+                "Cipher {i} should be sensitive to salt changes in {test_name}"
             );
             assert_ne!(
                 base_ct, info_ct,
-                "Cipher {} should be sensitive to info changes in {}",
-                i, test_name
+                "Cipher {i} should be sensitive to info changes in {test_name}"
             );
         }
     }

@@ -153,9 +153,9 @@ pub async fn run(
                 //
                 // Show or hide the cursor in the input block
                 let input_with_cursor = if cursor_visible {
-                    format!("> {}_", input)
+                    format!("> {input}_")
                 } else {
-                    format!("> {}", input.clone())
+                    format!("> {input}")
                 };
                 let input_block = Paragraph::new(input_with_cursor)
                     .style(Style::default().fg(Color::Yellow))
@@ -266,7 +266,7 @@ pub async fn run(
                                 successful.sort();
                                 let mut friends = String::from_str("[").unwrap();
                                 for friend in successful {
-                                    friends.push_str(&format!("{:?},", friend));
+                                    friends.push_str(&format!("{friend:?},"));
                                 }
                                 friends.pop();
                                 friends.push(']');

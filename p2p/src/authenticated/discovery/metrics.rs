@@ -29,7 +29,7 @@ impl EncodeLabelValue for MessageType {
         match self {
             MessageType::BitVec => encoder.write_str("bit_vec"),
             MessageType::Peers => encoder.write_str("peers"),
-            MessageType::Data(channel) => encoder.write_str(&format!("data_{}", channel)),
+            MessageType::Data(channel) => encoder.write_str(&format!("data_{channel}")),
             MessageType::Invalid => encoder.write_str("invalid"),
         }
     }

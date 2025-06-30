@@ -179,8 +179,7 @@ mod tests {
                 // Verify data integrity
                 assert!(
                     buf[..to_read].iter().all(|&b| b == 0x42),
-                    "Data at position {} is not correct",
-                    total_read
+                    "Data at position {total_read} is not correct"
                 );
 
                 total_read += to_read;

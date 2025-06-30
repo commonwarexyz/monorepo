@@ -140,8 +140,7 @@ impl<E: Spawner + Metrics, C: PublicKey> Releaser<E, C> {
         };
         assert!(
             e.is_full(),
-            "Unexpected error trying to release reservation {:?}",
-            e
+            "Unexpected error trying to release reservation {e:?}"
         );
         false
     }

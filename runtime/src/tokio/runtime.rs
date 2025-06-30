@@ -119,7 +119,7 @@ impl Config {
     /// Returns a new [Config] with default values.
     pub fn new() -> Self {
         let rng = OsRng.next_u64();
-        let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{}", rng));
+        let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{rng}"));
         Self {
             worker_threads: 2,
             max_blocking_threads: 512,
@@ -487,7 +487,7 @@ impl crate::Metrics for Context {
             if prefix.is_empty() {
                 label.to_string()
             } else {
-                format!("{}_{}", prefix, label)
+                format!("{prefix}_{label}")
             }
         };
         assert!(
