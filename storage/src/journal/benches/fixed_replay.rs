@@ -31,7 +31,7 @@ async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: us
             Ok(item) => {
                 black_box(item);
             }
-            Err(err) => panic!("Failed to read item: {}", err),
+            Err(err) => panic!("Failed to read item: {err}"),
         }
     }
 }

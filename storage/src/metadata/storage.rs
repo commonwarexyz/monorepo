@@ -3,6 +3,7 @@ use bytes::BufMut;
 use commonware_codec::{FixedSize, ReadExt};
 use commonware_runtime::{Blob, Clock, Metrics, Storage};
 use commonware_utils::Array;
+use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::BTreeMap;
 use tracing::{debug, warn};
@@ -14,13 +15,14 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
     context: E,
 
     // Data is stored in a BTreeMap to enable deterministic serialization.
-    data: BTreeMap<K, Vec<u8>>,
+    map: BTreeMap<K, Vec<u8>>,
     cursor: usize,
     partition: String,
-    blobs: [(E::Blob, u64, u64); 2],
+    blobs: [(E::Blob, u64, Vec<u8>); 2],
 
     syncs: Counter,
     keys: Gauge,
+    skipped: Counter,
 }
 
 impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
@@ -36,47 +38,58 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
         // Set checksums
         let mut left_version = 0;
-        let mut left_data = BTreeMap::new();
-        if let Some((version, data)) = left_result {
+        let mut left_map = BTreeMap::new();
+        let mut left_data = Vec::new();
+        if let Some((version, map, data)) = left_result {
             left_version = version;
+            left_map = map;
             left_data = data;
         }
         let mut right_version = 0;
-        let mut right_data = BTreeMap::new();
-        if let Some((version, data)) = right_result {
+        let mut right_map = BTreeMap::new();
+        let mut right_data = Vec::new();
+        if let Some((version, map, data)) = right_result {
             right_version = version;
+            right_map = map;
             right_data = data;
         }
 
         // Choose latest blob
-        let mut data = left_data;
+        let mut map = left_map;
         let mut cursor = 0;
         if right_version > left_version {
             cursor = 1;
-            data = right_data;
+            map = right_map;
         }
 
         // Create metrics
         let syncs = Counter::default();
         let keys = Gauge::default();
+        let skipped = Counter::default();
         context.register("syncs", "number of syncs of data to disk", syncs.clone());
         context.register("keys", "number of tracked keys", keys.clone());
+        context.register(
+            "skipped",
+            "total bytes not written to disk",
+            skipped.clone(),
+        );
 
         // Return metadata
-        keys.set(data.len() as i64);
+        keys.set(map.len() as i64);
         Ok(Self {
             context,
 
-            data,
+            map,
             cursor,
             partition: cfg.partition,
             blobs: [
-                (left_blob, left_len, left_version),
-                (right_blob, right_len, right_version),
+                (left_blob, left_version, left_data),
+                (right_blob, right_version, right_data),
             ],
 
             syncs,
             keys,
+            skipped,
         })
     }
 
@@ -84,7 +97,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         index: usize,
         blob: &E::Blob,
         len: u64,
-    ) -> Result<Option<(u64, BTreeMap<K, Vec<u8>>)>, Error<K>> {
+    ) -> Result<Option<(u64, BTreeMap<K, Vec<u8>>, Vec<u8>)>, Error<K>> {
         // Get blob length
         if len == 0 {
             // Empty blob
@@ -157,18 +170,18 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         }
 
         // Return info
-        Ok(Some((version, data)))
+        Ok(Some((version, data, buf.into())))
     }
 
     /// Get a value from `Metadata` (if it exists).
     pub fn get(&self, key: &K) -> Option<&Vec<u8>> {
-        self.data.get(key)
+        self.map.get(key)
     }
 
     /// Clear all values from `Metadata`. The new state will not be persisted until `sync` is
     /// called.
     pub fn clear(&mut self) {
-        self.data.clear();
+        self.map.clear();
         self.keys.set(0);
     }
 
@@ -177,55 +190,82 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
     /// If the key already exists, the value will be overwritten. The
     /// value stored will not be persisted until `sync` is called.
     pub fn put(&mut self, key: K, value: Vec<u8>) {
-        self.data.insert(key, value);
-        self.keys.set(self.data.len() as i64);
+        self.map.insert(key, value);
+        self.keys.set(self.map.len() as i64);
     }
 
     /// Remove a value from `Metadata` (if it exists).
     pub fn remove(&mut self, key: &K) {
-        self.data.remove(key);
-        self.keys.set(self.data.len() as i64);
+        self.map.remove(key);
+        self.keys.set(self.map.len() as i64);
     }
 
     /// Atomically commit the current state of `Metadata`.
     pub async fn sync(&mut self) -> Result<(), Error<K>> {
+        self.syncs.inc();
+
         // Compute next version.
         //
         // While it is possible that extremely high-frequency updates to `Metadata` could cause an eventual
         // overflow of version, syncing once per millisecond would overflow in 584,942,417 years.
-        let past_version = &self.blobs[self.cursor].2;
+        let past_version = self.blobs[self.cursor].1;
         let next_version = past_version.checked_add(1).expect("version overflow");
 
         // Create buffer
-        let mut buf = Vec::new();
-        buf.put_u64(next_version);
-        for (key, value) in &self.data {
-            buf.put_slice(key.as_ref());
+        let mut next_data = Vec::new();
+        next_data.put_u64(next_version);
+        for (key, value) in &self.map {
+            next_data.put_slice(key.as_ref());
             let value_len = value
                 .len()
                 .try_into()
                 .map_err(|_| Error::ValueTooBig(key.clone()))?;
-            buf.put_u32(value_len);
-            buf.put(&value[..]);
+            next_data.put_u32(value_len);
+            next_data.put(&value[..]);
         }
-        let checksum = crc32fast::hash(&buf[..]);
-        buf.put_u32(checksum);
+        let checksum = crc32fast::hash(&next_data[..]);
+        next_data.put_u32(checksum);
 
-        // Get next blob
-        let next_cursor = 1 - self.cursor;
-        let next_blob = &mut self.blobs[next_cursor];
+        // Get target blob (the one we will overwrite)
+        let target_cursor = 1 - self.cursor;
+        let (target_blob, target_version, target_data) = &mut self.blobs[target_cursor];
 
-        // Write and truncate blob
-        let buf_len = buf.len() as u64;
-        next_blob.0.write_at(buf, 0).await?;
-        next_blob.0.resize(buf_len).await?;
-        next_blob.0.sync().await?;
-        next_blob.1 = buf_len;
-        next_blob.2 = next_version;
+        // Compute byte-level diff and only write changed segments
+        let mut i = 0;
+        let mut skipped = 0;
+        let mut writes = Vec::new();
+        while i < next_data.len() {
+            // Skip equal bytes
+            while i < next_data.len() && i < target_data.len() && next_data[i] == target_data[i] {
+                i += 1;
+                skipped += 1;
+            }
+            if i >= next_data.len() {
+                break;
+            }
 
-        // Switch blobs
-        self.cursor = next_cursor;
-        self.syncs.inc();
+            // Write differing segments
+            let start = i;
+            while i < next_data.len() && (i >= target_data.len() || next_data[i] != target_data[i])
+            {
+                i += 1;
+            }
+            let end = i;
+            writes.push(target_blob.write_at(next_data[start..end].to_vec(), start as u64));
+        }
+        try_join_all(writes).await?;
+        self.skipped.inc_by(skipped);
+
+        // If the new file is shorter, truncate; if longer, resize was implicitly handled by write_at
+        if next_data.len() < target_data.len() {
+            target_blob.resize(next_data.len() as u64).await?;
+        }
+        target_blob.sync().await?;
+
+        // Update state
+        self.cursor = target_cursor;
+        *target_version = next_version;
+        *target_data = next_data;
         Ok(())
     }
 

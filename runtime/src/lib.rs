@@ -545,7 +545,7 @@ mod tests {
             for _ in 0..2 {
                 select! {
                     v = receiver.next() => {
-                        panic!("unexpected value: {:?}", v);
+                        panic!("unexpected value: {v:?}");
                     },
                     _ = context.sleep(Duration::from_millis(100)) => {
                         continue;
@@ -563,7 +563,7 @@ mod tests {
                     // Skip reading from channel even though populated
                 },
                 v = receiver.next() => {
-                    panic!("unexpected value: {:?}", v);
+                    panic!("unexpected value: {v:?}");
                 },
             };
 
@@ -1557,7 +1557,7 @@ mod tests {
                 content_length: usize,
             ) -> Result<String, Error> {
                 let read = stream.recv(vec![0; content_length]).await?;
-                String::from_utf8(read.as_ref().to_vec()).map_err(|_| Error::ReadFailed)
+                String::from_utf8(read.into()).map_err(|_| Error::ReadFailed)
             }
 
             // Simulate a client connecting to the server
@@ -1577,8 +1577,7 @@ mod tests {
 
                     // Send a GET request to the server
                     let request = format!(
-                        "GET /metrics HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-                        address
+                        "GET /metrics HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
                     );
                     sink.send(Bytes::from(request).to_vec()).await.unwrap();
 
@@ -1588,7 +1587,7 @@ mod tests {
 
                     // Read and parse headers
                     let headers = read_headers(&mut stream).await.unwrap();
-                    println!("Headers: {:?}", headers);
+                    println!("Headers: {headers:?}");
                     let content_length = headers
                         .get("content-length")
                         .unwrap()

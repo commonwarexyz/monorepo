@@ -32,6 +32,12 @@
 //! not be guaranteed to recover the latest complete state from disk on restart as half of a blob
 //! could be old data and half new data).
 //!
+//! # Efficient Writes
+//!
+//! When an update is committed, only updated bytes are actually written to disk. This makes `Metadata`
+//! a great choice for maintaining even large collections of data (there is only overhead to maintaining
+//! keys that aren't updated if the order of keys is unstable).
+//!
 //! # Example
 //!
 //! ```rust
@@ -512,6 +518,77 @@ mod tests {
             let result = metadata.sync().await;
             assert!(matches!(result, Err(Error::ValueTooBig(_))));
 
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_diffs() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a metadata store
+            let cfg = Config {
+                partition: "test".to_string(),
+            };
+            let mut metadata: Metadata<_, U64> =
+                Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Put initial keys
+            for i in 0..100 {
+                metadata.put(U64::new(i), vec![i as u8; 100]);
+            }
+
+            // First sync - should write everything to the first blob
+            //
+            // 100 keys * (8 bytes for key + 4 bytes for len + 100 bytes for value) + 8 bytes for version + 4 bytes for checksum
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("skipped_total 0"), "{}", buffer);
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 11212"),
+                "{}",
+                buffer
+            );
+
+            // Modify just one key
+            metadata.put(U64::new(51), vec![0xff; 100]);
+
+            // Sync again - should write everything to the second blob
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("skipped_total 0"), "{}", buffer);
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 22424"),
+                "{}",
+                buffer
+            );
+
+            // Sync again - should write only diff from the first blob
+            //
+            // 100 bytes for value + 1 byte for version (first 7 bytes are same) + 4 bytes for checksum
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("skipped_total 11107"), "{}", buffer);
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 22529"),
+                "{}",
+                buffer
+            );
+
+            // Sync again - should write only diff from the second blob
+            //
+            // 1 byte for version (first 7 bytes are same) + 4 bytes for checksum
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("skipped_total 22314"), "{}", buffer);
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 22534"),
+                "{}",
+                buffer
+            );
+
+            // Clean up
             metadata.destroy().await.unwrap();
         });
     }

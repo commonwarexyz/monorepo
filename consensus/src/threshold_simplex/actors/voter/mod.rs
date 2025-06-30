@@ -448,7 +448,7 @@ mod tests {
                 relay: application.clone(),
                 reporter: supervisor.clone(),
                 supervisor: supervisor.clone(),
-                partition: format!("voter_actor_test_{}", validator),
+                partition: format!("voter_actor_test_{validator}"),
                 compression: None,
                 namespace: namespace.clone(),
                 mailbox_size: 128,

@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn test_display() {
         let bytes = FixedBytes::new([0x01, 0x02, 0x03, 0x04]);
-        assert_eq!(format!("{}", bytes), "01020304");
+        assert_eq!(format!("{bytes}"), "01020304");
     }
 
     #[test]

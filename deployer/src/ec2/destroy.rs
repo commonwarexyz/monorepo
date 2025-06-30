@@ -65,7 +65,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                 .any(|sg| sg.group_name() == Some(tag));
             let has_binary_sg = security_groups
                 .iter()
-                .any(|sg| sg.group_name() == Some(&format!("{}-binary", tag)));
+                .any(|sg| sg.group_name() == Some(&format!("{tag}-binary")));
             if region == MONITORING_REGION && has_monitoring_sg && has_binary_sg {
                 // Find the monitoring security group (named `tag`)
                 let monitoring_sg = security_groups
@@ -78,7 +78,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                 // Find the binary security group (named `{tag}-binary`)
                 let binary_sg = security_groups
                     .iter()
-                    .find(|sg| sg.group_name() == Some(&format!("{}-binary", tag)))
+                    .find(|sg| sg.group_name() == Some(&format!("{tag}-binary")))
                     .expect("Regular security group not found")
                     .group_id()
                     .unwrap();
@@ -200,7 +200,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                 info!(region = region.as_str(), igw_id, "deleted internet gateway");
             }
 
-            let key_name = format!("deployer-{}", tag);
+            let key_name = format!("deployer-{tag}");
             delete_key_pair(&ec2_client, &key_name).await?;
             info!(region = region.as_str(), key_name, "deleted key pair");
             Ok::<(), Error>(())
