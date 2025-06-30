@@ -1,17 +1,15 @@
-//! A persistent, ordinal index that maps contiguous indices to fixed-size values.
+//! A persistent index that maps sparse indices to [commonware_utils::Array]s.
 //!
-//! [Ordinal] maintains a flat file where each record contains a fixed-size value and CRC checksum.
-//! The file position directly corresponds to the index, eliminating the need for complex indexing
-//! structures. This makes it ideal for storing sequential data where indices are contiguous or
-//! mostly contiguous.
+//! [Ordinal] is a collection of [commonware_runtime::Blob]s containing ordered records of fixed size.
+//! Because records are fixed size, file position corresponds directly to index. Unlike
+//! [crate::journal::fixed::Journal], [Ordinal] supports out-of-order insertion.
 //!
 //! # Design
 //!
-//! [Ordinal] uses a simple flat file approach:
-//! - Each record: `[V][crc32(V)]` where V is a fixed-size value
+//! [Ordinal] is a collection of [commonware_runtime::Blob]s where:
+//! - Each record: `[V][crc32(V)]` where V is an [commonware_utils::Array]
 //! - Index N is at file offset: `N * RECORD_SIZE`
-//! - Records are organized into blobs for better file management
-//! - An in-memory RMap tracks which indices have been written
+//! - A [crate::rmap::RMap] tracks which indices have been written (and which are missing)
 //!
 //! # File Organization
 //!
