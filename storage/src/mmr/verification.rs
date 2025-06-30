@@ -21,6 +21,10 @@ pub(crate) enum ReconstructionError {
     ExtraDigests,
     #[error("start position is not a leaf")]
     InvalidStartPos,
+    #[error("end position exceeds MMR size")]
+    InvalidEndPos,
+    #[error("missing elements")]
+    MissingElements,
 }
 
 /// Contains the information necessary for proving the inclusion of an element, or some range of
@@ -149,9 +153,7 @@ impl<D: Digest> Proof<D> {
     }
 
     /// Reconstruct the peak digests of the MMR that produced this proof, returning
-    /// [ReconstructionError::MissingDigests] error if there are not enough proof digests, or
-    /// [ReconstructionError::ExtraDigests] error if not all proof digests were used in the
-    /// reconstruction.
+    /// [ReconstructionError] if the input data is invalid.
     fn reconstruct_peak_digests<I, H, E>(
         &self,
         hasher: &mut H,
@@ -167,7 +169,7 @@ impl<D: Digest> Proof<D> {
             if start_element_pos == 0 {
                 return Ok(vec![]);
             }
-            return Err(ReconstructionError::MissingDigests);
+            return Err(ReconstructionError::MissingElements);
         }
         let Some(start_leaf) = leaf_pos_to_num(start_element_pos) else {
             debug!(pos = start_element_pos, "start pos is not a leaf");
@@ -178,6 +180,9 @@ impl<D: Digest> Proof<D> {
         } else {
             leaf_num_to_pos(start_leaf + elements.len() as u64 - 1)
         };
+        if end_element_pos >= self.size {
+            return Err(ReconstructionError::InvalidEndPos);
+        }
 
         let mut proof_digests_iter = self.digests.iter();
         let mut siblings_iter = self.digests.iter().rev();
