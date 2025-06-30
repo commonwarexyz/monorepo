@@ -54,7 +54,7 @@ impl<V: Array> Read for Record<V> {
     }
 }
 
-/// Implementation of ordinal storage.
+/// Implementation of [Ordinal].
 pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
     // Configuration and context
     context: E,
@@ -76,7 +76,7 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
 }
 
 impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
-    /// Initialize a new [Store] instance.
+    /// Initialize a new [Ordinal] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         // Scan for all blobs in the partition
         let mut blobs = BTreeMap::new();
@@ -191,7 +191,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
     pub async fn get(&self, index: u64) -> Result<Option<V>, Error> {
         self.gets.inc();
 
-        // If get isn't in an interval, it doesn't exist and we don't need to access disk.
+        // If get isn't in an interval, it doesn't exist and we don't need to access disk
         if self.intervals.get(&index).is_none() {
             return Ok(None);
         }
@@ -227,27 +227,18 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         self.intervals.next_gap(index)
     }
 
-    /// Prune indices older than `min_index` by removing entire blobs. Returns the actual pruning point.
+    /// Prune indices older than `min` by removing entire blobs. Returns the actual pruning point.
     ///
     /// Pruning is done at blob boundaries to avoid partial deletions. A blob is pruned only if
-    /// all possible indices in that blob are less than `min_index`.
-    pub async fn prune(&mut self, min_index: u64) -> Result<u64, Error> {
-        // Calculate section boundaries
-        let min_section = min_index / self.config.items_per_blob;
-
+    /// all possible indices in that blob are less than `min`.
+    pub async fn prune(&mut self, min: u64) -> Result<u64, Error> {
+        // If there are no blobs, there is nothing to prune
         if self.blobs.is_empty() {
             return Ok(0);
         }
 
-        // Find oldest section
-        let oldest_section = *self.blobs.keys().next().unwrap();
-
-        if min_section <= oldest_section {
-            // Nothing to prune
-            return Ok(oldest_section * self.config.items_per_blob);
-        }
-
-        // Collect sections to remove (those less than min_section)
+        // Collect sections to remove
+        let min_section = min / self.config.items_per_blob;
         let sections_to_remove: Vec<u64> = self
             .blobs
             .keys()
@@ -267,8 +258,9 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
                 let start_index = section * self.config.items_per_blob;
                 let end_index = (section + 1) * self.config.items_per_blob - 1;
                 self.intervals.remove(start_index, end_index);
-
                 debug!(section, start_index, end_index, "pruned blob");
+
+                // Update metrics
                 self.pruned.inc();
             }
         }
