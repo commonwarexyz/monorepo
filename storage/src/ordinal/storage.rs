@@ -2,7 +2,8 @@ use super::{Config, Error};
 use crate::rmap::RMap;
 use bytes::{Buf, BufMut, BytesMut};
 use commonware_codec::{
-    Decode, EncodeSize, FixedSize, Read as CodecRead, ReadExt, Write as CodecWrite,
+    Decode, Encode, EncodeSize, FixedSize, RangeCfg, Read as CodecRead, ReadExt,
+    Write as CodecWrite,
 };
 use commonware_runtime::{
     buffer::{Read, Write},
@@ -17,27 +18,76 @@ use std::{
 };
 use tracing::{debug, warn};
 
-/// Header stored at the beginning of each blob.
+/// Version marker.
 #[derive(Debug, Clone)]
-struct Header {
+struct Marker {
     bit_vec: BitVec,
+    version: u64,
     crc: u32,
 }
 
-impl Header {
-    /// Create a new header with a valid CRC.
-    fn new(bit_vec: BitVec) -> Self {
+impl Marker {
+    /// Create a new marker with a valid CRC.
+    fn new(bit_vec: BitVec, version: u64) -> Self {
         let mut buf = BytesMut::new();
         bit_vec.write(&mut buf);
+        version.write(&mut buf);
         let crc = crc32fast::hash(&buf);
-        Self { bit_vec, crc }
+        Self {
+            bit_vec,
+            version,
+            crc,
+        }
     }
 
     /// Check if the header's CRC is valid.
     fn is_valid(&self) -> bool {
         let mut buf = BytesMut::new();
         self.bit_vec.write(&mut buf);
+        self.version.write(&mut buf);
         self.crc == crc32fast::hash(&buf)
+    }
+}
+
+impl CodecRead for Marker {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let bit_vec = BitVec::read_cfg(buf, &RangeCfg::from(0..))?;
+        let version = u64::read(buf)?;
+        let crc = u32::read(buf)?;
+        Ok(Self {
+            bit_vec,
+            version,
+            crc,
+        })
+    }
+}
+
+impl CodecWrite for Marker {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.bit_vec.write(buf);
+        self.version.write(buf);
+        self.crc.write(buf);
+    }
+}
+
+impl EncodeSize for Marker {
+    fn encode_size(&self) -> usize {
+        self.bit_vec.len() + u64::SIZE + u32::SIZE
+    }
+}
+
+/// Header stored at the beginning of each blob.
+#[derive(Debug, Clone)]
+struct Header {
+    marker_1: Option<Marker>,
+    marker_2: Option<Marker>,
+}
+
+impl Header {
+    fn new(marker_1: Option<Marker>, marker_2: Option<Marker>) -> Self {
+        Self { marker_1, marker_2 }
     }
 }
 
@@ -45,22 +95,30 @@ impl CodecRead for Header {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let bit_vec = BitVec::read(buf)?;
-        let crc = u32::read(buf)?;
-        Ok(Self { bit_vec, crc })
+        let marker_1 = if Marker::read(buf)?.is_valid() {
+            Some(Marker::read(buf)?)
+        } else {
+            None
+        };
+        let marker_2 = if Marker::read(buf)?.is_valid() {
+            Some(Marker::read(buf)?)
+        } else {
+            None
+        };
+        Ok(Self { marker_1, marker_2 })
     }
 }
 
 impl CodecWrite for Header {
     fn write(&self, buf: &mut impl BufMut) {
-        self.bit_vec.write(buf);
-        self.crc.write(buf);
+        self.marker_1.write(buf);
+        self.marker_2.write(buf);
     }
 }
 
 impl EncodeSize for Header {
     fn encode_size(&self) -> usize {
-        self.bit_vec.len() + u32::SIZE
+        self.marker_1.encode_size() + self.marker_2.encode_size()
     }
 }
 
@@ -138,7 +196,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         let header_size = {
             let temp_bitmap = BitVec::zeroes(config.items_per_blob as usize);
             let temp_header = Header::new(temp_bitmap);
-            temp_header.encode().len()
+            temp_header.encode_size()
         };
 
         // Scan for all blobs in the partition
@@ -161,10 +219,10 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
             let bitmap = if len >= header_size as u64 {
                 let mut header_buf = vec![0u8; header_size];
                 let header_buf = blob.read_at(header_buf, 0).await?;
-                match Header::decode(&mut header_buf.as_ref()) {
+                match Header::read(&mut header_buf.as_ref()) {
                     Ok(h) if h.is_valid() => {
                         debug!(section, "loaded valid header from blob");
-                        h.bitmap
+                        h.bit_vec
                     }
                     _ => {
                         // Header is corrupt or invalid, rescan to repair.
