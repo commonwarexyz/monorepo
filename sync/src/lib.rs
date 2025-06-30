@@ -14,17 +14,9 @@ mod resolver;
 /// Synchronization errors
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// Network/transport error
-    #[error("Network error: {0}")]
-    NetworkError(String),
     /// Database operation error
     #[error("Database error: {0}")]
-    DatabaseError(commonware_storage::adb::Error),
-    /// Proof verification failed
-    #[error("Proof verification failed")]
-    ProofVerificationFailed,
-    #[error("Proof verification error: {0}")]
-    ProofVerificationError(commonware_storage::adb::Error),
+    GetProofFailed(commonware_storage::adb::Error),
     /// Hash mismatch after sync
     #[error("Hash mismatch - expected {expected:?}, got {actual:?}")]
     HashMismatch {

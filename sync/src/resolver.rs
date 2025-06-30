@@ -63,7 +63,7 @@ where
         self.db
             .proof(start_index, max_ops.get())
             .await
-            .map_err(Error::DatabaseError)
+            .map_err(Error::GetProofFailed)
     }
 }
 

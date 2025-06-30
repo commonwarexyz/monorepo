@@ -25,6 +25,9 @@ where
     /// Maximum operations to fetch per batch.
     pub max_ops_per_batch: NonZeroU64,
 
+    /// Maximum number of retries for fetching operations.
+    pub max_retries: u64,
+
     /// Target hash of the database.
     pub target_hash: H::Digest,
 
@@ -78,19 +81,6 @@ where
     },
 }
 
-/// Sync client for Any ADB
-// pub(crate) struct Client<E, K, V, H, T, R>
-// where
-//     E: Storage + Clock + MetricsTrait,
-//     K: Array,
-//     V: Array,
-//     H: Hasher,
-//     T: Translator,
-//     R: Resolver<H, K, V>,
-// {
-//     state: Option<ClientState<E, K, V, H, T, R>>,
-// }
-
 impl<E, K, V, H, T, R> Client<E, K, V, H, T, R>
 where
     E: Storage + Clock + MetricsTrait,
@@ -142,8 +132,14 @@ where
 
                 // Validate that we didn't get more operations than requested
                 if new_operations.len() as u64 > batch_size.get() {
+                    // TODO danlaine: add more comprehensive retry logic
                     metrics.invalid_batches_received += 1;
-                    // TODO danlaine: add max retry logic
+                    if metrics.invalid_batches_received >= config.max_retries {
+                        return Err(Error::InvalidResolver(format!(
+                            "Max retries reached for fetching operations"
+                        )));
+                    }
+
                     return Ok(Client::FetchData {
                         config,
                         operations,
@@ -165,7 +161,12 @@ where
                 ) {
                     debug!("Proof verification failed, retrying");
                     metrics.invalid_batches_received += 1;
-                    // TODO danlaine: add max retry logic
+                    if metrics.invalid_batches_received >= config.max_retries {
+                        return Err(Error::InvalidResolver(format!(
+                            "Max retries reached for verifying proof"
+                        )));
+                    }
+
                     return Ok(Client::FetchData {
                         config,
                         operations,
@@ -192,7 +193,7 @@ where
             }
 
             Client::ApplyData {
-                config,
+                mut config,
                 operations,
                 metrics,
             } => {
@@ -207,6 +208,14 @@ where
                 )
                 .await
                 .map_err(|e| Error::InvalidResolver(e.to_string()))?; // TODO danlaine: handle this error
+
+                let got_hash = db.root(&mut config.hasher);
+                if got_hash != config.target_hash {
+                    return Err(Error::HashMismatch {
+                        expected: Box::new(config.target_hash),
+                        actual: Box::new(got_hash),
+                    });
+                }
 
                 Ok(Client::Done { db, metrics })
             }
