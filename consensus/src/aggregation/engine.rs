@@ -239,7 +239,7 @@ impl<
         let journal = Journal::init(self.context.with_label("journal"), journal_cfg)
             .await
             .expect("init failed");
-        self.journal_replay(&journal).await;
+        self.replay(&journal).await;
         self.journal = Some(journal);
 
         // Initialize the tip manager
@@ -334,7 +334,7 @@ impl<
                         }
                     };
                     let mut guard = self.metrics.acks.guard(Status::Invalid);
-                    let peer_ack = match msg {
+                    let PeerAck { ack, tip } = match msg {
                         Ok(peer_ack) => peer_ack,
                         Err(err) => {
                             warn!(?err, ?sender, "ack decode failed, blocking peer");
@@ -342,7 +342,6 @@ impl<
                             continue;
                         }
                     };
-                    let PeerAck { ack, tip } = peer_ack;
 
                     // Update the tip manager
                     if self.safe_tip.update(sender.clone(), tip).is_some() {
@@ -498,8 +497,8 @@ impl<
 
         // Journal and notify the automaton
         let recovered = Activity::Recovered(item, threshold);
-        self.journal_append(recovered.clone()).await;
-        self.journal_sync(index).await;
+        self.record(recovered.clone()).await;
+        self.sync(index).await;
         self.reporter.report(recovered).await;
 
         // Increase the tip if needed
@@ -640,8 +639,8 @@ impl<
         let ack = Ack::sign(&self.namespace, self.epoch, share, item);
 
         // Journal the ack
-        self.journal_append(Activity::Ack(ack.clone())).await;
-        self.journal_sync(index).await;
+        self.record(Activity::Ack(ack.clone())).await;
+        self.sync(index).await;
 
         Ok(ack)
     }
@@ -697,7 +696,8 @@ impl<
         self.confirmed.retain(|index, _| *index >= tip);
 
         // Add tip to journal
-        self.journal_append(Activity::Tip(tip)).await;
+        self.record(Activity::Tip(tip)).await;
+        self.sync(tip).await;
         self.reporter.report(Activity::Tip(tip)).await;
 
         // Prune journal, ignoring errors
@@ -717,7 +717,7 @@ impl<
     }
 
     /// Replays the journal, updating the state of the engine.
-    async fn journal_replay(&mut self, journal: &Journal<E, Activity<V, D>>) {
+    async fn replay(&mut self, journal: &Journal<E, Activity<V, D>>) {
         let mut tip = Index::default();
         let mut recovered = Vec::new();
         let mut acks = Vec::new();
@@ -772,7 +772,7 @@ impl<
     }
 
     /// Appends an activity to the journal.
-    async fn journal_append(&mut self, activity: Activity<V, D>) {
+    async fn record(&mut self, activity: Activity<V, D>) {
         let index = match activity {
             Activity::Ack(ref ack) => ack.item.index,
             Activity::Recovered(ref item, _) => item.index,
@@ -788,7 +788,7 @@ impl<
     }
 
     /// Syncs (ensures all data is written to disk).
-    async fn journal_sync(&mut self, index: Index) {
+    async fn sync(&mut self, index: Index) {
         let section = self.get_journal_section(index);
         let journal = self.journal.as_mut().expect("journal must be initialized");
         journal.sync(section).await.expect("unable to sync journal");

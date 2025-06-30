@@ -224,7 +224,7 @@ impl<V: Variant, D: Digest> Write for Activity<V, D> {
                 0u8.write(writer);
                 ack.write(writer);
             }
-            Activity::Lock(item, signature) => {
+            Activity::Recovered(item, signature) => {
                 1u8.write(writer);
                 item.write(writer);
                 signature.write(writer);
@@ -243,7 +243,7 @@ impl<V: Variant, D: Digest> Read for Activity<V, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             0 => Ok(Activity::Ack(Ack::read(reader)?)),
-            1 => Ok(Activity::Lock(
+            1 => Ok(Activity::Recovered(
                 Item::read(reader)?,
                 V::Signature::read(reader)?,
             )),
@@ -260,7 +260,7 @@ impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Ack(ack) => ack.encode_size(),
-            Activity::Lock(item, signature) => item.encode_size() + signature.encode_size(),
+            Activity::Recovered(item, signature) => item.encode_size() + signature.encode_size(),
             Activity::Tip(index) => UInt(*index).encode_size(),
         }
     }
@@ -313,12 +313,12 @@ mod tests {
             Activity::decode(activity_ack.encode()).unwrap();
         assert_eq!(activity_ack, restored_activity_ack);
 
-        // Test Activity codec - Lock variant
+        // Test Activity codec - Recovered variant
         let signature = sign_message::<MinSig>(&shares[0].private, Some(b"test"), b"message");
-        let activity_lock = Activity::Lock(item, signature);
-        let restored_activity_lock: Activity<MinSig, sha256::Digest> =
-            Activity::decode(activity_lock.encode()).unwrap();
-        assert_eq!(activity_lock, restored_activity_lock);
+        let activity_recovered = Activity::Recovered(item, signature);
+        let restored_activity_recovered: Activity<MinSig, sha256::Digest> =
+            Activity::decode(activity_recovered.encode()).unwrap();
+        assert_eq!(activity_recovered, restored_activity_recovered);
 
         // Test Activity codec - Tip variant
         let activity_tip = Activity::Tip(123);
