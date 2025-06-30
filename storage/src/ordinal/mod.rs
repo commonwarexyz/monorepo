@@ -49,7 +49,8 @@
 //! cached may be written.
 //!
 //! _If you want atomicity, pair [crate::journal::fixed::Journal] and [crate::metadata::Metadata] with
-//! [Ordinal] (storing a log of writes and updating metadata when writes are consistently applied)._
+//! [Ordinal] (storing a log of writes and updating metadata when writes are consistently applied). This
+//! is much more efficient than storing a version on each record._
 //!
 //! # Recovery
 //!
