@@ -62,7 +62,6 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                                         &mut hasher,
                                         &elements[start_index..=end_index],
                                         start_pos,
-                                        end_pos,
                                         &root_digest,
                                     ));
                                 }
