@@ -15,7 +15,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
     context: E,
 
     // Data is stored in a BTreeMap to enable deterministic serialization.
-    data: BTreeMap<K, Vec<u8>>,
+    map: BTreeMap<K, Vec<u8>>,
     cursor: usize,
     partition: String,
     blobs: [(E::Blob, Vec<u8>, u64); 2],
@@ -38,28 +38,28 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
         // Set checksums
         let mut left_version = 0;
-        let mut left_data = BTreeMap::new();
-        let mut left_bytes = Vec::new();
-        if let Some((version, data, bytes)) = left_result {
+        let mut left_map = BTreeMap::new();
+        let mut left_data = Vec::new();
+        if let Some((version, map, data)) = left_result {
             left_version = version;
+            left_map = map;
             left_data = data;
-            left_bytes = bytes;
         }
         let mut right_version = 0;
-        let mut right_data = BTreeMap::new();
-        let mut right_bytes = Vec::new();
-        if let Some((version, data, bytes)) = right_result {
+        let mut right_map = BTreeMap::new();
+        let mut right_data = Vec::new();
+        if let Some((version, map, data)) = right_result {
             right_version = version;
+            right_map = map;
             right_data = data;
-            right_bytes = bytes;
         }
 
         // Choose latest blob
-        let mut data = left_data;
+        let mut map = left_map;
         let mut cursor = 0;
         if right_version > left_version {
             cursor = 1;
-            data = right_data;
+            map = right_map;
         }
 
         // Create metrics
@@ -75,16 +75,16 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         );
 
         // Return metadata
-        keys.set(data.len() as i64);
+        keys.set(map.len() as i64);
         Ok(Self {
             context,
 
-            data,
+            map,
             cursor,
             partition: cfg.partition,
             blobs: [
-                (left_blob, left_bytes, left_version),
-                (right_blob, right_bytes, right_version),
+                (left_blob, left_data, left_version),
+                (right_blob, right_data, right_version),
             ],
 
             syncs,
@@ -175,13 +175,13 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
     /// Get a value from `Metadata` (if it exists).
     pub fn get(&self, key: &K) -> Option<&Vec<u8>> {
-        self.data.get(key)
+        self.map.get(key)
     }
 
     /// Clear all values from `Metadata`. The new state will not be persisted until `sync` is
     /// called.
     pub fn clear(&mut self) {
-        self.data.clear();
+        self.map.clear();
         self.keys.set(0);
     }
 
@@ -190,14 +190,14 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
     /// If the key already exists, the value will be overwritten. The
     /// value stored will not be persisted until `sync` is called.
     pub fn put(&mut self, key: K, value: Vec<u8>) {
-        self.data.insert(key, value);
-        self.keys.set(self.data.len() as i64);
+        self.map.insert(key, value);
+        self.keys.set(self.map.len() as i64);
     }
 
     /// Remove a value from `Metadata` (if it exists).
     pub fn remove(&mut self, key: &K) {
-        self.data.remove(key);
-        self.keys.set(self.data.len() as i64);
+        self.map.remove(key);
+        self.keys.set(self.map.len() as i64);
     }
 
     /// Atomically commit the current state of `Metadata`.
@@ -212,7 +212,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         // Create buffer
         let mut buf = Vec::new();
         buf.put_u64(next_version);
-        for (key, value) in &self.data {
+        for (key, value) in &self.map {
             buf.put_slice(key.as_ref());
             let value_len = value
                 .len()

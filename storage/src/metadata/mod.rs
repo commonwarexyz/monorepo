@@ -32,10 +32,11 @@
 //! not be guaranteed to recover the latest complete state from disk on restart as half of a blob
 //! could be old data and half new data).
 //!
-//! # Writing Differences
+//! # Efficient Writes
 //!
-//! When an update is committed, only updated bytes are actually written to disk. This makes it efficient
-//! to maintain large instances of `Metadata` without constantly rewriting the entire blob.
+//! When an update is committed, only updated bytes are actually written to disk. This makes `Metadata`
+//! a great choice for maintaining even large collections of data (as there is no overhead to maintaining
+//! keys that aren't updated as long as new keys don't change the order of keys written).
 //!
 //! # Example
 //!
