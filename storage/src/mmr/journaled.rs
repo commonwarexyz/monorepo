@@ -826,14 +826,12 @@ mod tests {
 
             let proof = mmr.proof(test_element_pos).await.unwrap();
             let root = mmr.root(&mut hasher);
-            assert!(proof
-                .verify_element_inclusion(
-                    &mut hasher,
-                    &leaves[TEST_ELEMENT],
-                    test_element_pos,
-                    &root,
-                )
-                .unwrap());
+            assert!(proof.verify_element_inclusion(
+                &mut hasher,
+                &leaves[TEST_ELEMENT],
+                test_element_pos,
+                &root,
+            ));
 
             // Sync the MMR, make sure it flushes the in-mem MMR as expected.
             mmr.sync(&mut hasher).await.unwrap();
@@ -852,15 +850,13 @@ mod tests {
                 .range_proof(test_element_pos, last_element_pos)
                 .await
                 .unwrap();
-            assert!(proof
-                .verify_range_inclusion(
-                    &mut hasher,
-                    &leaves[TEST_ELEMENT..last_element + 1],
-                    test_element_pos,
-                    last_element_pos,
-                    &root
-                )
-                .unwrap());
+            assert!(proof.verify_range_inclusion(
+                &mut hasher,
+                &leaves[TEST_ELEMENT..last_element + 1],
+                test_element_pos,
+                last_element_pos,
+                &root
+            ));
 
             mmr.destroy().await.unwrap();
         });
@@ -903,9 +899,7 @@ mod tests {
             assert_eq!(len, 36); // N+4 = 36 bytes per node, 1 node in the last blob
 
             // truncate the blob by one byte to corrupt the checksum of the last parent node.
-            blob.truncate(len - 1)
-                .await
-                .expect("Failed to corrupt blob");
+            blob.resize(len - 1).await.expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
 
             let mmr = Mmr::init(context.clone(), &mut hasher, test_config())
@@ -938,7 +932,7 @@ mod tests {
             assert_eq!(len, 36 * 7); // this blob should be full.
 
             // The last leaf should be in slot 5 of this blob, truncate last byte of its checksum.
-            blob.truncate(36 * 5 + 35)
+            blob.resize(36 * 5 + 35)
                 .await
                 .expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");

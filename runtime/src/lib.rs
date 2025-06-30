@@ -80,8 +80,8 @@ pub enum Error {
     BlobOpenFailed(String, String, IoError),
     #[error("blob missing: {0}/{1}")]
     BlobMissing(String, String),
-    #[error("blob truncate failed: {0}/{1} error: {2}")]
-    BlobTruncateFailed(String, String, IoError),
+    #[error("blob resize failed: {0}/{1} error: {2}")]
+    BlobResizeFailed(String, String, IoError),
     #[error("blob sync failed: {0}/{1} error: {2}")]
     BlobSyncFailed(String, String, IoError),
     #[error("blob close failed: {0}/{1} error: {2}")]
@@ -90,6 +90,8 @@ pub enum Error {
     BlobInsufficientLength,
     #[error("offset overflow")]
     OffsetOverflow,
+    #[error("io error: {0}")]
+    Io(#[from] IoError),
 }
 
 /// Interface that any task scheduler must implement to start
@@ -380,8 +382,11 @@ pub trait Blob: Clone + Send + Sync + 'static {
         offset: u64,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// Truncate the blob to the given length.
-    fn truncate(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
+    /// Resize the blob to the given length.
+    ///
+    /// If the length is greater than the current length, the blob is extended with zeros.
+    /// If the length is less than the current length, the blob is resized.
+    fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Ensure all pending data is durably persisted.
     fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
@@ -690,26 +695,95 @@ mod tests {
             assert_eq!(&read.as_ref()[..5], data1);
             assert_eq!(&read.as_ref()[5..], data2);
 
+            // Read past end of blob
+            let result = blob.read_at(vec![0u8; 10], 10).await;
+            assert!(result.is_err());
+
             // Rewrite data without affecting length
             let data3 = b"Store";
             blob.write_at(Vec::from(data3), 5)
                 .await
                 .expect("Failed to write data3");
 
-            // Truncate the blob
-            blob.truncate(5).await.expect("Failed to truncate blob");
+            // Read data back
             let read = blob
-                .read_at(vec![0; 5], 0)
+                .read_at(vec![0u8; 10], 0)
                 .await
                 .expect("Failed to read data");
             assert_eq!(&read.as_ref()[..5], data1);
+            assert_eq!(&read.as_ref()[5..], data3);
 
-            // Full read after truncation
-            let result = blob.read_at(vec![0u8; 10], 0).await;
+            // Read past end of blob
+            let result = blob.read_at(vec![0u8; 10], 10).await;
             assert!(result.is_err());
+        });
+    }
 
-            // Close the blob
-            blob.close().await.expect("Failed to close blob");
+    fn test_blob_resize<R: Runner>(runner: R)
+    where
+        R::Context: Storage,
+    {
+        runner.start(|context| async move {
+            let partition = "test_partition_resize";
+            let name = b"test_blob_resize";
+
+            // Open and write to a new blob
+            let (blob, _) = context
+                .open(partition, name)
+                .await
+                .expect("Failed to open blob");
+
+            let data = b"some data";
+            blob.write_at(data.to_vec(), 0)
+                .await
+                .expect("Failed to write");
+            blob.sync().await.expect("Failed to sync after write");
+            blob.close()
+                .await
+                .expect("Failed to close blob after writing");
+
+            // Re-open and check length
+            let (blob, len) = context.open(partition, name).await.unwrap();
+            assert_eq!(len, data.len() as u64);
+
+            // Resize to extend the file
+            let new_len = (data.len() as u64) * 2;
+            blob.resize(new_len)
+                .await
+                .expect("Failed to resize to extend");
+            blob.sync().await.expect("Failed to sync after resize");
+            blob.close()
+                .await
+                .expect("Failed to close blob after resizing");
+
+            // Re-open and check length again
+            let (blob, len) = context.open(partition, name).await.unwrap();
+            assert_eq!(len, new_len);
+
+            // Read original data
+            let read_buf = blob.read_at(vec![0; data.len()], 0).await.unwrap();
+            assert_eq!(read_buf.as_ref(), data);
+
+            // Read extended part (should be zeros)
+            let extended_part = blob
+                .read_at(vec![0; data.len()], data.len() as u64)
+                .await
+                .unwrap();
+            assert_eq!(extended_part.as_ref(), vec![0; data.len()].as_slice());
+
+            // Truncate the blob
+            blob.resize(data.len() as u64).await.unwrap();
+            blob.sync().await.unwrap();
+            blob.close().await.unwrap();
+
+            // Reopen to check truncation
+            let (blob, size) = context.open(partition, name).await.unwrap();
+            assert_eq!(size, data.len() as u64);
+
+            // Read truncated data
+            let read_buf = blob.read_at(vec![0; data.len()], 0).await.unwrap();
+            assert_eq!(read_buf.as_ref(), data);
+            blob.close().await.unwrap();
         });
     }
 
@@ -1135,6 +1209,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_blob_resize() {
+        let executor = deterministic::Runner::default();
+        test_blob_resize(executor);
+    }
+
+    #[test]
     fn test_deterministic_many_partition_read_write() {
         let executor = deterministic::Runner::default();
         test_many_partition_read_write(executor);
@@ -1303,6 +1383,12 @@ mod tests {
     fn test_tokio_blob_read_write() {
         let executor = tokio::Runner::default();
         test_blob_read_write(executor);
+    }
+
+    #[test]
+    fn test_tokio_blob_resize() {
+        let executor = tokio::Runner::default();
+        test_blob_resize(executor);
     }
 
     #[test]

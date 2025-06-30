@@ -109,10 +109,10 @@ pub enum Error {
     MissingNode(u64),
     #[error("MMR is empty")]
     Empty,
-    #[error("missing digests in proof")]
-    MissingDigests,
-    #[error("extra digests in proof")]
-    ExtraDigests,
     #[error("invalid update")]
     InvalidUpdate,
+    #[error("invalid proof length")]
+    InvalidProofLength,
+    #[error("proof missing digest at position: {0}")]
+    MissingDigest(u64),
 }

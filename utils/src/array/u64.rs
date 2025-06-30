@@ -57,6 +57,12 @@ impl From<[u8; U64::SIZE]> for U64 {
     }
 }
 
+impl From<u64> for U64 {
+    fn from(value: u64) -> Self {
+        Self(value.to_be_bytes())
+    }
+}
+
 impl AsRef<[u8]> for U64 {
     fn as_ref(&self) -> &[u8] {
         &self.0

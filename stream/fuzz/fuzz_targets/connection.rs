@@ -40,7 +40,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
             .collect::<Result<Vec<_>, _>>()?;
 
         // Generate constrained parameters
-        let max_message_size = u.int_in_range(161..=1024 * 1023)?;
+        let max_message_size = u.int_in_range(177..=1024 * 1023)?;
         let synchrony_bound_secs = u.int_in_range(1..=12)?;
         let max_handshake_age_secs = u.int_in_range(1..=12)?;
         let handshake_timeout_secs = u.int_in_range(1..=12)?;

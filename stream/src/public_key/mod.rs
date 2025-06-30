@@ -1,67 +1,79 @@
 //! Communicate with an authenticated peer over an encrypted connection.
 //!
-//! Encrypted communication with a peer, identified by a developer-specified
-//! cryptographic identity (i.e. BLS, ed25519, etc.).
-//! Implements its own encrypted transport layer (No TLS, No X.509 Certificates,
-//! No Protocol Negotiation) that exclusively uses said cryptographic identities
-//! to authenticate incoming connections (dropping any that aren't explicitly
-//! authorized). Uses ChaCha20-Poly1305 for encryption of messages.
+//! Provides encrypted communication with peers identified by developer-specified
+//! cryptographic identities (e.g., BLS, ed25519, etc.).
+//! Implements its own encrypted transport layer (no TLS, no X.509 certificates,
+//! no protocol negotiation) that exclusively uses these cryptographic identities
+//! to authenticate incoming connections. Uses ChaCha20-Poly1305 for message encryption.
 //!
 //! # Design
 //!
 //! ## Handshake
 //!
-//! When establishing a connection with a peer, a simple handshake is performed
-//! to authenticate each other and to establish a shared secret for connection
-//! encryption (explained below). This simple handshake is done in lieu of using
-//! TLS, Noise, WireGuard, etc. because it supports the usage of arbitrary
-//! cryptographic schemes, there is no protocol negotiation (only one way to
-//! connect), because it only takes a few hundred lines of code to implement
-//! (not having any features is a feature in safety-critical code), and because
-//! it can be simulated deterministically.
+//! A 3-message handshake provides mutual authentication and establishes a shared secret
+//! between peers. Custom implementation supports arbitrary cryptographic schemes without
+//! protocol negotiation overhead.
 //!
-//! In any handshake, the dialer is the party that attempts to connect to some known address/identity (public key)
-//! and the recipient of this connection is the listener. Upon forming a TCP connection, the dialer sends a signed
-//! handshake message to the listener. Besides the signature and the public key of the dialer, the handshake message
-//! contains:
+//! The **dialer** initiates the connection to a known peer identity, while the **listener**
+//! accepts incoming connections. Much like a SYN / SYN-ACK / ACK handshake, the dialer and listener
+//! exchange messages in three rounds.
 //!
-//! - The receiver's public key.
-//! - The sender's ephemeral public key (used to establish a shared secret).
-//! - The current timestamp (used to prevent replay attacks).
+//! The SYN-equivalent is a handshake message that contains:
+//! - The recipient's expected public key (prevents wrong-target attacks)
+//! - The sender's ephemeral public key (for Diffie-Hellman key exchange)
+//! - The current timestamp (prevents replay attacks)
+//! - The sender's static public key and signature
 //!
-//! The listener verifies the public keys are well-formatted, the timestamp is valid (not too old/not too far in the future),
-//! and that the signature is valid. If all these checks pass, the listener checks to see if it is already connected or dialing
-//! this peer. If it is, it drops the connection. If it isn't, it sends back its own signed handshake message (same as above)
-//! and considers the connection established.
+//! The ACK-equivalent is a key confirmation message that proves that each party can derive the
+//! correct shared secret.
 //!
-//! Upon receiving the listener's handshake message, the dialer verifies the same data as the listener and additionally verifies
-//! that the public key returned matches what they expected at the address. If all these checks pass, the dialer considers the
-//! connection established. If not, the dialer drops the connection.
+//! Thus:
+//! - Message 1 is a handshake message from the dialer to the listener
+//! - Message 2 is a handshake and key confirmation message from the listener to the dialer
+//! - Message 3 is a key confirmation message from the dialer to the listener
 //!
-//! To better protect against malicious peers that create and/or accept connections but do not participate in handshakes,
-//! a configurable deadline is enforced for any handshake to be completed. This allows for the underlying runtime to maintain
-//! a standard read/write timeout for connections without making it easier for malicious peers to keep useless connections open.
+//! ### Security Properties
+//!
+//! This protocol provides:
+//!
+//! - **Mutual Authentication**: Both parties prove existence of their static private keys through
+//!   signatures.
+//! - **Replay Protection**: Key confirmations are bound to the complete handshake exchange to
+//!   prevent replay attacks by confirming that the peer that sent the handshake message (with the
+//!   cryptographic signature) also had possession of the ephemeral key.
+//! - **Forward Secrecy**: Ephemeral keys ensure that any compromise of long-term static keys
+//!   doesn't affect other sessions.
+//! - **DoS Protection**: A configurable deadline is enforced for handshake completion to protect
+//!   against DoS attacks by malicious peers that create connections but abandon handshakes.
 //!
 //! ## Encryption
 //!
-//! During the handshake (described above), a shared x25519 secret is established using a
-//! Diffie-Hellman Key Exchange. This x25519 secret is then used in-conjunction with the handshake
-//! data in a key-derivation-function to create a pair of ChaCha20-Poly1305 ciphers. One cipher per
-//! direction allows for encryption of all messages.
+//! During the handshake, a shared X25519 secret is established using
+//! Diffie-Hellman key exchange. This secret is combined with the handshake
+//! transcript to derive four separate ChaCha20-Poly1305 ciphers:
 //!
-//! Each direction of communication also uses a 12-byte nonce derived from a counter that is
-//! incremented for each message sent. This provides for a maximum of 2^96 messages per sender,
+//! - **Confirmation Ciphers**: One cipher per direction for key confirmation during the handshake
+//! - **Traffic Ciphers**: One cipher per direction for encrypting post-handshake traffic
+//!
+//! Using the handshake transcript in key derivation ensures that derived keys
+//! are bound to the specific handshake exchange, providing additional security against
+//! man-in-the-middle and transcript substitution attacks.
+//!
+//! Each direction of communication uses a 12-byte nonce derived from a counter that is
+//! incremented for each message sent. This provides a maximum of 2^96 messages per sender,
 //! which would be sufficient for over 2.5 trillion years of continuous communication at a rate of
-//! 1 billion messages per second. In other words, sufficient for all practical use cases. This
-//! approach ensures well-behaving peers, as long as they both stay online, remain connected
-//! indefinitely (maximizing the stability of any p2p construction). In an unlikely case of
-//! overflow, a new connection should be established.
+//! 1 billion messages per second—sufficient for all practical use cases. This approach ensures that
+//! well-behaving peers can remain connected indefinitely as long as they both stay online
+//! (maximizing p2p network stability). In the unlikely case of counter overflow, the connection
+//! will be terminated and a new connection should be established.
 //!
-//! This simple coordination prevents nonce reuse (which would allow for messages to be decrypted)
-//! and saves a small amount of bandwidth (no need to send the nonce alongside the encrypted
-//! message). This also avoids accidental reuse of a nonce over long-lived connections (for example
-//! when setting it to be a small hash as in XChaCha20-Poly1305).
+//! This prevents nonce reuse (which would compromise message confidentiality)
+//! and saves bandwidth (as there is no need to transmit nonces alongside encrypted messages).
 
+use chacha20poly1305::{
+    aead::{generic_array::typenum::Unsigned, AeadCore},
+    ChaCha20Poly1305,
+};
 use std::time::Duration;
 
 mod cipher;
@@ -72,33 +84,34 @@ pub mod handshake;
 mod nonce;
 pub mod x25519;
 
+// When encrypting data, an authentication tag is appended to the ciphertext.
+// This constant represents the size of the authentication tag in bytes.
+const AUTHENTICATION_TAG_LENGTH: usize = <ChaCha20Poly1305 as AeadCore>::TagSize::USIZE;
+
 /// Configuration for a connection.
 ///
 /// # Warning
 ///
-/// It is recommended to synchronize this configuration with any relevant peer.
-/// If this is not synchronized, connections could be unnecessarily dropped,
-/// or messages could be parsed incorrectly.
+/// Synchronize this configuration across all peers.
+/// Mismatched configurations may cause dropped connections or parsing errors.
 #[derive(Clone)]
 pub struct Config<C: Signer> {
-    /// Cryptographic primitives.
+    /// Cryptographic primitives for signing and verification.
     pub crypto: C,
 
-    /// Prefix for all signed messages. Should be unique to the application.
-    /// Used to avoid replay attacks across different applications
+    /// Unique prefix for all signed messages. Should be application-specific.
+    /// Prevents replay attacks across different applications using the same keys.
     pub namespace: Vec<u8>,
 
-    /// Maximum size allowed for messages (in bytes).
-    /// Used to prevent DoS attacks.
+    /// Maximum message size (in bytes). Prevents memory exhaustion DoS attacks.
     pub max_message_size: usize,
 
-    /// Time into the future that a timestamp can be and still be considered valid.
-    /// Used to handle clock skew between peers.
+    /// Maximum time drift allowed for future timestamps. Handles clock skew.
     pub synchrony_bound: Duration,
 
-    /// Maximum age of a handshake message before it is considered stale.
+    /// Maximum age of handshake messages before rejection.
     pub max_handshake_age: Duration,
 
-    /// Timeout for completing the handshake process.
+    /// Maximum time allowed for completing the handshake.
     pub handshake_timeout: Duration,
 }

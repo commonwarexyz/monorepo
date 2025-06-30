@@ -12,16 +12,14 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select;
-use commonware_runtime::{
-    telemetry::traces::status, Clock, Handle, Metrics, Network, SinkOf, Spawner, StreamOf,
-};
+use commonware_runtime::{Clock, Handle, Metrics, Network, SinkOf, Spawner, StreamOf};
 use commonware_stream::public_key::{Config as StreamConfig, Connection};
 use commonware_utils::SystemTimeExt;
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{seq::SliceRandom, CryptoRng, Rng};
 use std::time::Duration;
-use tracing::{debug, debug_span, Instrument};
+use tracing::debug;
 
 /// Configuration for the dialer actor.
 pub struct Config<C: Signer> {
@@ -99,38 +97,28 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
             let config = self.stream_cfg.clone();
             let mut supervisor = supervisor.clone();
             move |context| async move {
-                // Create span
-                let span = debug_span!("dialer", ?peer, ?address);
-                let guard = span.enter();
-
                 // Attempt to dial peer
-                let (sink, stream) =
-                    match context.dial(address).instrument(debug_span!("dial")).await {
-                        Ok(stream) => stream,
-                        Err(e) => {
-                            status::error(&span, "failed to dial peer", Some(&e));
-                            return;
-                        }
-                    };
-                debug!("dialed peer");
+                let (sink, stream) = match context.dial(address).await {
+                    Ok(stream) => stream,
+                    Err(err) => {
+                        debug!(?err, "failed to dial peer");
+                        return;
+                    }
+                };
+                debug!(?peer, ?address, "dialed peer");
 
                 // Upgrade connection
                 let connection =
                     match Connection::upgrade_dialer(context, config, sink, stream, peer.clone())
-                        .instrument(debug_span!("upgrade"))
                         .await
                     {
                         Ok(instance) => instance,
-                        Err(e) => {
-                            status::error(&span, "failed to upgrade connection", Some(&e));
+                        Err(err) => {
+                            debug!(?err, "failed to upgrade connection");
                             return;
                         }
                     };
-                debug!("upgraded connection");
-
-                // Set status to OK
-                status::ok(&span);
-                drop(guard);
+                debug!(?peer, ?address, "upgraded connection");
 
                 // Start peer to handle messages
                 supervisor.spawn(connection, reservation).await;
