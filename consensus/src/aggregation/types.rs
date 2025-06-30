@@ -326,4 +326,22 @@ mod tests {
             Activity::decode(activity_tip.encode()).unwrap();
         assert_eq!(activity_tip, restored_activity_tip);
     }
+
+    #[test]
+    fn test_activity_invalid_enum() {
+        use bytes::BytesMut;
+
+        let mut buf = BytesMut::new();
+        3u8.write(&mut buf); // Invalid discriminant
+
+        let result = Activity::<MinSig, sha256::Digest>::decode(&buf[..]);
+        assert!(result.is_err());
+
+        if let Err(CodecError::Invalid(context, msg)) = result {
+            assert_eq!(context, "consensus::aggregation::Activity");
+            assert_eq!(msg, "Invalid type");
+        } else {
+            panic!("Expected CodecError::Invalid");
+        }
+    }
 }

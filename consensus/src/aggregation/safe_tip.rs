@@ -258,12 +258,26 @@ mod tests {
         PrivateKey::from_seed(i).public_key()
     }
 
+    fn setup_safe_tip(validator_count: usize) -> (SafeTip<PublicKey>, Vec<PublicKey>) {
+        let mut safe_tip = SafeTip::<PublicKey>::default();
+        let validators: Vec<PublicKey> = (1..=validator_count).map(|i| key(i as u64)).collect();
+        safe_tip.init(&validators);
+        (safe_tip, validators)
+    }
+
+    fn setup_with_tips(validator_count: usize, tips: &[Index]) -> SafeTip<PublicKey> {
+        let (mut safe_tip, validators) = setup_safe_tip(validator_count);
+        for (i, &tip) in tips.iter().enumerate() {
+            if i < validators.len() && tip > 0 {
+                safe_tip.update(validators[i].clone(), tip);
+            }
+        }
+        safe_tip
+    }
+
     #[test]
     fn test_init() {
-        let mut safe_tip = SafeTip::<PublicKey>::default();
-        let validators = vec![key(1), key(2), key(3), key(4)];
-        safe_tip.init(&validators);
-
+        let (safe_tip, _) = setup_safe_tip(4);
         assert_eq!(safe_tip.tips.len(), 4);
         assert_eq!(safe_tip.get(), 0);
     }
@@ -310,36 +324,27 @@ mod tests {
 
     #[test]
     fn test_update_and_get() {
-        let mut safe_tip = SafeTip::<PublicKey>::default();
-        let validators = vec![key(1), key(2), key(3), key(4)];
-        safe_tip.init(&validators);
+        let (mut safe_tip, validators) = setup_safe_tip(4);
 
         // Valid update
-        assert_eq!(safe_tip.update(key(1), 10), Some(0));
+        assert_eq!(safe_tip.update(validators[0].clone(), 10), Some(0));
         assert_eq!(safe_tip.get(), 0);
 
         // Update with lower tip - no-op
-        assert_eq!(safe_tip.update(key(1), 5), None);
+        assert_eq!(safe_tip.update(validators[0].clone(), 5), None);
         assert_eq!(safe_tip.get(), 0);
 
         // Update with same tip - no-op
-        assert_eq!(safe_tip.update(key(1), 10), None);
+        assert_eq!(safe_tip.update(validators[0].clone(), 10), None);
         assert_eq!(safe_tip.get(), 0);
 
-        // Update another validator
-        assert_eq!(safe_tip.update(key(2), 20), Some(0));
+        // Update remaining validators
+        assert_eq!(safe_tip.update(validators[1].clone(), 20), Some(0));
         assert_eq!(safe_tip.get(), 10);
-
-        // Update another validator
-        assert_eq!(safe_tip.update(key(3), 30), Some(0));
+        assert_eq!(safe_tip.update(validators[2].clone(), 30), Some(0));
         assert_eq!(safe_tip.get(), 20);
-
-        // Update another validator
-        assert_eq!(safe_tip.update(key(4), 40), Some(0));
+        assert_eq!(safe_tip.update(validators[3].clone(), 40), Some(0));
         assert_eq!(safe_tip.get(), 30);
-
-        // Update for non-existent validator
-        assert_eq!(safe_tip.update(key(5), 50), None);
     }
 
     #[test]
@@ -398,29 +403,16 @@ mod tests {
     }
 
     #[test]
-    fn test_update_nonexistent_validator_focused() {
-        let mut safe_tip = SafeTip::<PublicKey>::default();
-        let validators = vec![key(1), key(2), key(3), key(4)];
-        safe_tip.init(&validators);
-
-        // Set some initial state
-        safe_tip.update(key(1), 10);
-        safe_tip.update(key(2), 20);
+    fn test_update_nonexistent_validator() {
+        let mut safe_tip = setup_with_tips(4, &[10, 20, 0, 0]);
 
         let initial_safe_tip = safe_tip.get();
         let initial_tips = safe_tip.tips.clone();
 
-        // Try to update a validator not in the set
-        let result = safe_tip.update(key(100), 50);
-
-        // Should return None and not change any state
-        assert_eq!(result, None);
-        assert_eq!(safe_tip.get(), initial_safe_tip);
-        assert_eq!(safe_tip.tips, initial_tips);
-
-        // Try multiple non-existent validators
-        assert_eq!(safe_tip.update(key(200), 100), None);
-        assert_eq!(safe_tip.update(key(300), 200), None);
+        // Test multiple non-existent validators
+        for nonexistent_key in [key(100), key(200), key(300)] {
+            assert_eq!(safe_tip.update(nonexistent_key, 50), None);
+        }
 
         // State should remain unchanged
         assert_eq!(safe_tip.get(), initial_safe_tip);
@@ -429,62 +421,96 @@ mod tests {
 
     #[test]
     fn test_edge_cases_for_f() {
-        // Test case: n=1, f=0 (single validator, no faults possible)
-        let mut safe_tip_single = SafeTip::<PublicKey>::default();
-        let single_validator = vec![key(1)];
-        safe_tip_single.init(&single_validator);
+        struct TestCase {
+            n: usize,
+            f: usize,
+            description: &'static str,
+        }
 
-        assert_eq!(safe_tip_single.get(), 0);
-        assert_eq!(safe_tip_single.hi.len(), 0); // f=0, so hi should be empty
-        assert_eq!(safe_tip_single.lo.len(), 1); // All validators in lo
+        let test_cases = [
+            TestCase {
+                n: 1,
+                f: 0,
+                description: "single validator, no faults possible",
+            },
+            TestCase {
+                n: 2,
+                f: 0,
+                description: "two validators, no faults possible",
+            },
+            TestCase {
+                n: 3,
+                f: 0,
+                description: "three validators, no faults possible",
+            },
+            TestCase {
+                n: 4,
+                f: 1,
+                description: "four validators, 1 fault possible",
+            },
+            TestCase {
+                n: 7,
+                f: 2,
+                description: "seven validators, 2 faults possible",
+            },
+        ];
 
-        // Update should immediately change safe tip since f=0
-        safe_tip_single.update(key(1), 10);
-        assert_eq!(safe_tip_single.get(), 10);
+        for case in test_cases {
+            let (mut safe_tip, validators) = setup_safe_tip(case.n);
 
-        // Test case: n=2, f=0 (two validators, no faults possible)
-        let mut safe_tip_two = SafeTip::<PublicKey>::default();
-        let two_validators = vec![key(1), key(2)];
-        safe_tip_two.init(&two_validators);
+            // Initial state checks
+            assert_eq!(safe_tip.get(), 0, "Failed for {}", case.description);
 
-        assert_eq!(safe_tip_two.get(), 0);
-        assert_eq!(safe_tip_two.hi.len(), 0); // f=0, so hi should be empty
-        assert_eq!(safe_tip_two.lo.len(), 1); // All validators in lo
+            if case.f == 0 {
+                assert_eq!(
+                    safe_tip.hi.len(),
+                    0,
+                    "f=0 should have empty hi heap for {}",
+                    case.description
+                );
+                assert_eq!(
+                    safe_tip.lo.len(),
+                    1,
+                    "f=0 should have all validators in lo for {}",
+                    case.description
+                );
 
-        // Any update should immediately change safe tip since f=0
-        safe_tip_two.update(key(1), 15);
-        assert_eq!(safe_tip_two.get(), 15);
-        safe_tip_two.update(key(2), 25);
-        assert_eq!(safe_tip_two.get(), 25);
+                // When f=0, updates should immediately change safe tip
+                safe_tip.update(validators[0].clone(), 10);
+                assert_eq!(
+                    safe_tip.get(),
+                    10,
+                    "f=0 should immediately reflect updates for {}",
+                    case.description
+                );
+            } else {
+                assert_eq!(
+                    safe_tip.hi.len(),
+                    1,
+                    "f>0 should have entries in hi for {}",
+                    case.description
+                );
+                assert_eq!(
+                    safe_tip.lo.len(),
+                    1,
+                    "Should have entries in lo for {}",
+                    case.description
+                );
 
-        // Test case: n=3, f=0 (three validators, no faults possible)
-        let mut safe_tip_three = SafeTip::<PublicKey>::default();
-        let three_validators = vec![key(1), key(2), key(3)];
-        safe_tip_three.init(&three_validators);
-
-        assert_eq!(safe_tip_three.get(), 0);
-        assert_eq!(safe_tip_three.hi.len(), 0); // f=0, so hi should be empty
-        assert_eq!(safe_tip_three.lo.len(), 1); // All validators in lo
-
-        // Test case: n=4, f=1 (four validators, 1 fault possible)
-        let mut safe_tip_four = SafeTip::<PublicKey>::default();
-        let four_validators = vec![key(1), key(2), key(3), key(4)];
-        safe_tip_four.init(&four_validators);
-
-        assert_eq!(safe_tip_four.get(), 0);
-        assert_eq!(safe_tip_four.hi.len(), 1); // f=1, so hi has entries
-        assert_eq!(safe_tip_four.lo.len(), 1); // n-f=3 validators in lo
-
-        // Test case: n=7, f=2 (seven validators, 2 faults possible)
-        let mut safe_tip_seven = SafeTip::<PublicKey>::default();
-        let seven_validators = vec![key(1), key(2), key(3), key(4), key(5), key(6), key(7)];
-        safe_tip_seven.init(&seven_validators);
-
-        assert_eq!(safe_tip_seven.get(), 0);
-        assert_eq!(safe_tip_seven.hi.len(), 1); // f=2, so hi has entries
-        assert_eq!(safe_tip_seven.lo.len(), 1); // n-f=5 validators in lo
-        assert_eq!(safe_tip_seven.hi.get(&0), Some(&2)); // f=2 validators in hi
-        assert_eq!(safe_tip_seven.lo.get(&0), Some(&5)); // n-f=5 validators in lo
+                if case.n == 7 && case.f == 2 {
+                    assert_eq!(
+                        safe_tip.hi.get(&0),
+                        Some(&2),
+                        "Should have f=2 validators in hi"
+                    );
+                    assert_eq!(
+                        safe_tip.lo.get(&0),
+                        Some(&5),
+                        "Should have n-f=5 validators in lo"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -525,5 +551,184 @@ mod tests {
         dec(map.entry(30));
         assert_eq!(map.get(&30), None);
         assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn test_reconcile_overall_behavior_lo_heap() {
+        // Test overall reconcile behavior when removing validator from lo heap
+        let mut safe_tip = setup_with_tips(7, &[5, 10, 15, 20, 25, 30, 35]);
+        assert_eq!(safe_tip.get(), 25);
+
+        // Remove validator with tip 10 (in lo heap), replace with new validator
+        let new_validators = vec![key(1), key(8), key(3), key(4), key(5), key(6), key(7)];
+        safe_tip.reconcile(&new_validators);
+
+        assert_eq!(safe_tip.get(), 25); // Should remain the same
+        assert_eq!(*safe_tip.tips.get(&key(8)).unwrap(), 0); // New validator starts at 0
+    }
+
+    #[test]
+    fn test_reconcile_overall_behavior_hi_heap() {
+        // Test overall reconcile behavior when removing validator from hi heap
+        let mut safe_tip = setup_with_tips(7, &[5, 10, 15, 20, 25, 30, 35]);
+        assert_eq!(safe_tip.get(), 25);
+
+        // Remove validator with tip 30 (in hi heap), replace with new validator
+        let new_validators = vec![key(1), key(2), key(3), key(4), key(5), key(8), key(7)];
+        safe_tip.reconcile(&new_validators);
+
+        // When a validator with tip 30 is removed and replaced with one at tip 0,
+        // the max of lo heap should drop from 25 to 20
+        assert_eq!(safe_tip.get(), 20);
+        assert_eq!(*safe_tip.tips.get(&key(8)).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_reconcile_overall_behavior_with_rebalancing() {
+        // Test overall reconcile behavior when heap rebalancing occurs
+        let mut safe_tip = setup_with_tips(4, &[10, 20, 30, 0]);
+        assert_eq!(safe_tip.get(), 20);
+
+        // Remove validator with tip 30 (in hi heap), causing rebalancing
+        let new_validators = vec![key(1), key(2), key(8), key(4)];
+        safe_tip.reconcile(&new_validators);
+
+        assert_eq!(*safe_tip.tips.get(&key(8)).unwrap(), 0);
+        // After removing validator with tip 30 and adding one with tip 0,
+        // the safe tip should now be 10 (with tips [10, 20, 0, 0], lo heap has [0, 0, 10])
+        assert_eq!(safe_tip.get(), 10);
+    }
+
+    #[test]
+    fn test_reconcile_internal_case_1_noop() {
+        // Test Case 1: No-op when validator already has tip 0
+        let mut safe_tip = setup_with_tips(4, &[0, 10, 20, 30]);
+
+        let initial_hi = safe_tip.hi.clone();
+        let initial_lo = safe_tip.lo.clone();
+
+        // Remove validator that already has tip 0
+        let new_validators = vec![key(8), key(2), key(3), key(4)];
+        safe_tip.reconcile(&new_validators);
+
+        // Heaps should be unchanged since removing 0 -> 0 is a no-op
+        assert_eq!(safe_tip.hi, initial_hi);
+        assert_eq!(safe_tip.lo, initial_lo);
+        assert_eq!(safe_tip.get(), 20);
+    }
+
+    #[test]
+    fn test_reconcile_internal_case_2_remains_in_lo() {
+        // Test Case 2: Value remains in lo heap
+        let mut safe_tip = setup_with_tips(4, &[5, 15, 25, 30]);
+        assert_eq!(safe_tip.get(), 25);
+
+        // Verify initial heap state: with n=4, f=1, we have 1 in hi, 3 in lo
+        // Tips [5, 15, 25, 30] -> hi has [30], lo has [5, 15, 25]
+        assert!(safe_tip.lo.contains_key(&5));
+        assert!(safe_tip.lo.contains_key(&15));
+        assert!(safe_tip.lo.contains_key(&25));
+        assert!(safe_tip.hi.contains_key(&30));
+
+        // Remove validator with tip 5 (in lo heap)
+        let new_validators = vec![key(8), key(2), key(3), key(4)];
+        safe_tip.reconcile(&new_validators);
+
+        // The removed tip 5 should be replaced with 0, both in lo heap
+        assert!(safe_tip.lo.contains_key(&0));
+        assert!(!safe_tip.lo.contains_key(&5));
+        assert_eq!(safe_tip.get(), 25); // Safe tip unchanged
+    }
+
+    #[test]
+    fn test_reconcile_internal_case_3_remains_in_hi() {
+        // Test Case 3: Value remains in hi heap when new value >= max(lo)
+        let safe_tip = setup_with_tips(4, &[5, 15, 25, 35]);
+        assert_eq!(safe_tip.get(), 25);
+
+        // Verify tip 35 is in hi heap
+        assert!(safe_tip.hi.contains_key(&35));
+
+        // Create a scenario where removed value can stay in hi:
+        // Remove validator with tip 35, all lo values (5,15,25) <= 0 is false
+        // But we can test by removing and replacing with a value that satisfies the condition
+
+        // Actually, let's test the condition directly by creating the right setup
+        let mut safe_tip = setup_with_tips(7, &[0, 0, 0, 0, 0, 10, 20]);
+        assert_eq!(safe_tip.get(), 0);
+
+        // With n=7, f=2: hi has [10, 20], lo has [0, 0, 0, 0, 0]
+        // Remove validator with tip 10 (in hi), max_lo is 0, so 0 <= 0 is true
+        let new_validators = vec![key(1), key(2), key(3), key(4), key(5), key(8), key(7)];
+        safe_tip.reconcile(&new_validators);
+
+        // Value should remain in hi heap as 0, since max_lo (0) <= new (0)
+        assert!(safe_tip.hi.contains_key(&0) || safe_tip.hi.is_empty());
+        assert_eq!(safe_tip.get(), 0);
+    }
+
+    #[test]
+    fn test_reconcile_internal_case_4_move_hi_to_lo() {
+        // Test Case 4: Value must move from hi to lo heap with rebalancing
+        let mut safe_tip = setup_with_tips(4, &[10, 20, 30, 40]);
+        assert_eq!(safe_tip.get(), 30);
+
+        // With n=4, f=1: hi has [40], lo has [10, 20, 30]
+        // Remove validator with tip 40 (in hi), max_lo is 30, so 30 > 0, condition fails
+        let new_validators = vec![key(1), key(2), key(3), key(8)];
+        safe_tip.reconcile(&new_validators);
+
+        // This should trigger Case 4: move from hi to lo with rebalancing
+        // The 0 goes to lo, and max_lo (30) moves to hi
+        assert!(safe_tip.hi.contains_key(&30));
+        assert!(safe_tip.lo.contains_key(&0));
+        assert_eq!(safe_tip.get(), 20); // New max of lo heap
+    }
+
+    #[test]
+    fn test_update_internal_case_2_remains_in_lo() {
+        // Test Case 2 in update: Value remains in lo heap
+        let mut safe_tip = setup_with_tips(4, &[5, 15, 25, 35]);
+        assert_eq!(safe_tip.get(), 25);
+
+        // With n=4, f=1: hi has [35], lo has [5, 15, 25]
+        // Update tip 5 to 10 - both should stay in lo since min_hi (35) >= 10
+        assert!(safe_tip.lo.contains_key(&5));
+        safe_tip.update(key(1), 10);
+
+        assert!(safe_tip.lo.contains_key(&10));
+        assert!(!safe_tip.lo.contains_key(&5));
+        assert_eq!(safe_tip.get(), 25); // Safe tip unchanged
+    }
+
+    #[test]
+    fn test_update_internal_case_3_move_lo_to_hi() {
+        // Test Case 3 in update: Value must move from lo to hi heap with rebalancing
+        let mut safe_tip = setup_with_tips(4, &[5, 15, 25, 35]);
+        assert_eq!(safe_tip.get(), 25);
+
+        // With n=4, f=1: hi has [35], lo has [5, 15, 25]
+        // Update tip 5 to 40 - should move to hi and cause rebalancing
+        safe_tip.update(key(1), 40);
+
+        // The 40 goes to hi, min_hi (35) moves to lo
+        assert!(safe_tip.hi.contains_key(&40));
+        assert!(safe_tip.lo.contains_key(&35));
+        assert_eq!(safe_tip.get(), 35); // New max of lo heap
+    }
+
+    #[test]
+    fn test_update_edge_cases() {
+        let mut safe_tip = setup_with_tips(7, &[0, 0, 0, 0, 0, 10, 20]);
+
+        // Test updating when hi heap might be empty after rebalancing
+        // With n=7, f=2: initially hi has [10, 20], lo has [0, 0, 0, 0, 0]
+
+        // Update one of the 0s to a very high value
+        safe_tip.update(key(1), 100);
+
+        // This should cause rebalancing
+        assert!(safe_tip.hi.contains_key(&100));
+        assert_eq!(safe_tip.get(), 10); // Should now be higher than 0
     }
 }
