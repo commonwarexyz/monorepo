@@ -263,30 +263,24 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
                 skipped += BLOCK_SIZE as u64;
             }
 
-            // Find the differing segment
-            let mut diff_start = None;
+            // Skip identical bytes
+            while i < next_data.len() && i < target.data.len() && next_data[i] == target.data[i] {
+                i += 1;
+                skipped += 1;
+            }
+
+            // Reached end of new data
+            if i >= next_data.len() {
+                break;
+            }
+
+            // Find end of differing segment
+            let diff_start = i;
             while i < next_data.len() {
-                // Exit early if we have reached the end of the target
                 if i >= target.data.len() {
-                    if diff_start.is_none() {
-                        diff_start = Some(i);
-                    }
                     i = next_data.len();
                     break;
                 }
-
-                // Look for difference
-                if diff_start.is_none() {
-                    if next_data[i] != target.data[i] {
-                        diff_start = Some(i);
-                    } else {
-                        skipped += 1;
-                    }
-                    i += 1;
-                    continue;
-                }
-
-                // If the bytes are equal, we have found the end of the differing segment
                 if next_data[i] == target.data[i] {
                     break;
                 }
@@ -294,15 +288,11 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             }
 
             // Write the differing segment
-            if let Some(diff_start) = diff_start {
-                if diff_start < i {
-                    writes.push(
-                        target
-                            .blob
-                            .write_at(next_data[diff_start..i].to_vec(), diff_start as u64),
-                    );
-                }
-            }
+            writes.push(
+                target
+                    .blob
+                    .write_at(next_data[diff_start..i].to_vec(), diff_start as u64),
+            );
         }
         try_join_all(writes).await?;
         self.skipped.inc_by(skipped);
