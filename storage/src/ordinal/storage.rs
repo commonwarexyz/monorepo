@@ -1,12 +1,14 @@
 use super::{Config, Error};
 use crate::rmap::RMap;
-use bytes::{Buf, BufMut};
-use commonware_codec::{Encode as _, FixedSize, Read as CodecRead, ReadExt, Write as CodecWrite};
+use bytes::{Buf, BufMut, BytesMut};
+use commonware_codec::{
+    Decode, EncodeSize, FixedSize, Read as CodecRead, ReadExt, Write as CodecWrite,
+};
 use commonware_runtime::{
     buffer::{Read, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
 };
-use commonware_utils::{hex, Array};
+use commonware_utils::{hex, Array, BitVec};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::{
@@ -15,32 +17,51 @@ use std::{
 };
 use tracing::{debug, warn};
 
-const PARITY_BIT: u32 = 1 << 31;
-const CRC_MASK: u32 = 0x7FFF_FFFF;
-
 /// Header stored at the beginning of each blob.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Header {
-    parity: u8,
+    bit_vec: BitVec,
+    crc: u32,
+}
+
+impl Header {
+    /// Create a new header with a valid CRC.
+    fn new(bit_vec: BitVec) -> Self {
+        let mut buf = BytesMut::new();
+        bit_vec.write(&mut buf);
+        let crc = crc32fast::hash(&buf);
+        Self { bit_vec, crc }
+    }
+
+    /// Check if the header's CRC is valid.
+    fn is_valid(&self) -> bool {
+        let mut buf = BytesMut::new();
+        self.bit_vec.write(&mut buf);
+        self.crc == crc32fast::hash(&buf)
+    }
 }
 
 impl CodecRead for Header {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let parity = u8::read(buf)?;
-        Ok(Self { parity })
+        let bit_vec = BitVec::read(buf)?;
+        let crc = u32::read(buf)?;
+        Ok(Self { bit_vec, crc })
     }
 }
 
 impl CodecWrite for Header {
     fn write(&self, buf: &mut impl BufMut) {
-        self.parity.write(buf);
+        self.bit_vec.write(buf);
+        self.crc.write(buf);
     }
 }
 
-impl FixedSize for Header {
-    const SIZE: usize = u8::SIZE;
+impl EncodeSize for Header {
+    fn encode_size(&self) -> usize {
+        self.bit_vec.len() + u32::SIZE
+    }
 }
 
 /// Value stored in the index file.
@@ -51,19 +72,13 @@ struct Record<V: Array> {
 }
 
 impl<V: Array> Record<V> {
-    fn new(value: V, parity: u8) -> Self {
-        let mut crc = crc32fast::hash(value.as_ref());
-        crc &= CRC_MASK;
-        crc |= (parity as u32) << 31;
+    fn new(value: V) -> Self {
+        let crc = crc32fast::hash(value.as_ref());
         Self { value, crc }
     }
 
-    fn is_valid(&self, committed_parity: u8) -> bool {
-        let record_parity = (self.crc >> 31) as u8;
-        if record_parity != committed_parity {
-            return false;
-        }
-        (self.crc & CRC_MASK) == (crc32fast::hash(self.value.as_ref()) & CRC_MASK)
+    fn is_valid(&self) -> bool {
+        self.crc == crc32fast::hash(self.value.as_ref())
     }
 }
 
@@ -94,12 +109,13 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
     // Configuration and context
     context: E,
     config: Config,
+    header_size: usize,
 
     // Index blobs for storing key records
     blobs: BTreeMap<u64, Write<E::Blob>>,
 
-    // Committed parity for each blob
-    parities: BTreeMap<u64, u8>,
+    // In-memory cache of blob bitmaps.
+    bitmaps: BTreeMap<u64, BitVec>,
 
     // RMap for interval tracking
     intervals: RMap,
@@ -118,98 +134,92 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
 impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
     /// Initialize a new [Ordinal] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
+        // Calculate header size based on config. This is constant for a given `items_per_blob`.
+        let header_size = {
+            let temp_bitmap = BitVec::zeroes(config.items_per_blob as usize);
+            let temp_header = Header::new(temp_bitmap);
+            temp_header.encode().len()
+        };
+
         // Scan for all blobs in the partition
         let mut blobs = BTreeMap::new();
-        let mut parities = BTreeMap::new();
+        let mut bitmaps = BTreeMap::new();
         let stored_blobs = match context.scan(&config.partition).await {
             Ok(blobs) => blobs,
             Err(commonware_runtime::Error::PartitionMissing(_)) => Vec::new(),
             Err(err) => return Err(Error::Runtime(err)),
         };
 
-        // Open all blobs and check for partial records
+        // Open all blobs and process their headers
         for name in stored_blobs {
             let (blob, mut len) = context.open(&config.partition, &name).await?;
-            let index = match name.try_into() {
+            let section = match name.try_into() {
                 Ok(index) => u64::from_be_bytes(index),
                 Err(nm) => Err(Error::InvalidBlobName(hex(&nm)))?,
             };
 
-            // Read header or create one if blob is new/too small
-            let header = if len >= HEADER_SIZE {
-                let mut header_buf = vec![0u8; Header::SIZE];
+            let bitmap = if len >= header_size as u64 {
+                let mut header_buf = vec![0u8; header_size];
                 let header_buf = blob.read_at(header_buf, 0).await?;
-                Header::read(&mut header_buf.as_slice())?
+                match Header::decode(&mut header_buf.as_ref()) {
+                    Ok(h) if h.is_valid() => {
+                        debug!(section, "loaded valid header from blob");
+                        h.bitmap
+                    }
+                    _ => {
+                        // Header is corrupt or invalid, rescan to repair.
+                        warn!(section, "header invalid, rebuilding from records");
+                        Self::rebuild_bitmap(&blob, section, &config, header_size).await?
+                    }
+                }
             } else {
-                let header = Header::default();
-                blob.write_at(header.encode(), 0).await?;
-                len = HEADER_SIZE;
+                // Blob is too small, treat as new/empty.
+                debug!(section, "blob too small for header, creating new bitmap");
+                let new_bitmap = BitVec::zeroes(config.items_per_blob as usize);
+                let new_header = Header::new(new_bitmap.clone());
+                blob.write_at(new_header.encode(), 0).await?;
+                len = header_size as u64;
                 blob.resize(len).await?;
                 blob.sync().await?;
-                header
+                new_bitmap
             };
-            parities.insert(index, header.committed_parity);
 
             // Check if blob data size is aligned to record size
-            let data_len = len - HEADER_SIZE;
+            let data_len = len - header_size as u64;
             let record_size = Record::<V>::SIZE as u64;
             if data_len % record_size != 0 {
                 warn!(
-                    blob = index,
+                    blob = section,
                     invalid_size = len,
                     record_size,
                     "blob size is not a multiple of record size, truncating"
                 );
-                len = HEADER_SIZE + data_len - (data_len % record_size);
+                len = header_size as u64 + data_len - (data_len % record_size);
                 blob.resize(len).await?;
                 blob.sync().await?;
             }
 
-            debug!(blob = index, len, "found index blob");
+            debug!(blob = section, len, "found index blob");
             let wrapped_blob = Write::new(blob, len, config.write_buffer);
-            blobs.insert(index, wrapped_blob);
+            blobs.insert(section, wrapped_blob);
+            bitmaps.insert(section, bitmap);
         }
 
-        // Initialize intervals by scanning existing records
+        // Initialize intervals from bitmaps for fast startup
         debug!(
             blobs = blobs.len(),
-            "rebuilding intervals from existing index"
+            "rebuilding intervals from existing bitmaps"
         );
         let start = context.current();
         let mut items = 0;
         let mut intervals = RMap::new();
-        for (section, blob) in &blobs {
-            let committed_parity = *parities.get(section).unwrap();
-
-            // Initialize read buffer
-            let size = blob.size().await;
-            let mut replay_blob = Read::new(blob.clone(), size, config.replay_buffer);
-
-            // Iterate over all records in the blob
-            let mut offset = HEADER_SIZE;
-            while offset < size {
-                // Calculate index for this record
-                let index = section * config.items_per_blob
-                    + ((offset - HEADER_SIZE) / Record::<V>::SIZE as u64);
-
-                // Attempt to read record at offset
-                replay_blob.seek_to(offset)?;
-                let mut record_buf = vec![0u8; Record::<V>::SIZE];
-                replay_blob
-                    .read_exact(&mut record_buf, Record::<V>::SIZE)
-                    .await?;
-                let record = Record::<V>::read(&mut record_buf.as_slice())?;
-                offset += Record::<V>::SIZE as u64;
-
-                // If record is valid, add to intervals
-                if record.is_valid(committed_parity) {
+        for (section, bitmap) in &bitmaps {
+            for (i, bit) in bitmap.iter().enumerate() {
+                if bit {
                     items += 1;
+                    let index = section * config.items_per_blob + i as u64;
                     intervals.insert(index);
-                    continue;
                 }
-
-                // If record is invalid, it may either be empty or corrupted. We don't
-                // store enough information to determine which (and thus don't log).
             }
         }
         debug!(
@@ -233,8 +243,9 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         Ok(Self {
             context,
             config,
+            header_size,
             blobs,
-            parities,
+            bitmaps,
             intervals,
             pending: BTreeMap::new(),
             puts,
@@ -245,15 +256,66 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         })
     }
 
+    /// Rebuilds a blob's bitmap by scanning all its records. This is a recovery mechanism.
+    async fn rebuild_bitmap(
+        blob: &E::Blob,
+        section: u64,
+        config: &Config,
+        header_size: usize,
+    ) -> Result<BitVec, Error> {
+        let mut rebuilt_bitmap = BitVec::zeroes(config.items_per_blob as usize);
+        let size = blob.size().await;
+        let mut replay_blob = ReadBuffer::new(blob.clone(), size, config.replay_buffer);
+
+        let mut offset = header_size as u64;
+        while offset < size {
+            let index_in_blob = (offset - header_size as u64) / Record::<V>::SIZE as u64;
+
+            replay_blob.seek_to(offset)?;
+            let mut record_buf = vec![0u8; Record::<V>::SIZE];
+            if replay_blob
+                .read_exact(&mut record_buf, Record::<V>::SIZE)
+                .await
+                .is_err()
+            {
+                // Partial record at the end, stop here.
+                break;
+            }
+            let record = Record::<V>::read(&mut record_buf.as_slice())?;
+            offset += Record::<V>::SIZE as u64;
+
+            if record.is_valid() {
+                rebuilt_bitmap.set(index_in_blob as usize);
+            }
+        }
+
+        // Write the repaired header back to the blob.
+        let new_header = Header::new(rebuilt_bitmap.clone());
+        blob.write_at(new_header.encode(), 0).await?;
+        blob.sync().await?;
+        debug!(section, "repaired and synced new header");
+
+        Ok(rebuilt_bitmap)
+    }
+
     /// Add a value at the specified index (pending until sync).
     pub fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
         self.puts.inc();
         let section = index / self.config.items_per_blob;
+        let index_in_blob = (index % self.config.items_per_blob) as usize;
+
+        // Add to pending writes for sync.
         self.pending
             .entry(section)
             .or_default()
             .insert(index, value);
+
+        // Update intervals and in-memory bitmap immediately for `has` and `get` calls.
         self.intervals.insert(index);
+        self.bitmaps
+            .entry(section)
+            .or_insert_with(|| BitVec::zeroes(self.config.items_per_blob as usize))
+            .set(index_in_blob);
 
         Ok(())
     }
@@ -276,21 +338,22 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         }
 
         // Read from disk
-        let section = index / self.config.items_per_blob;
         let blob = self.blobs.get(&section).unwrap();
-        let committed_parity = *self.parities.get(&section).unwrap();
-        let offset = HEADER_SIZE + (index % self.config.items_per_blob) * Record::<V>::SIZE as u64;
+        let offset = self.header_size as u64
+            + (index % self.config.items_per_blob) * Record::<V>::SIZE as u64;
         let read_buf = vec![0u8; Record::<V>::SIZE];
         let read_buf = blob.read_at(read_buf, offset).await?;
         let record = Record::<V>::read(&mut read_buf.as_ref())?;
 
         // If record is valid, return it
-        if record.is_valid(committed_parity) {
+        if record.is_valid() {
             Ok(Some(record.value))
         } else {
-            debug!(
+            // This case implies a torn write or disk corruption, as the bitmap indicated
+            // the record should be valid. We treat it as if it doesn't exist.
+            warn!(
                 index,
-                "record failed validation, likely from an incomplete sync"
+                "record failed crc validation despite being in bitmap"
             );
             Ok(None)
         }
@@ -330,6 +393,9 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
                     .remove(&self.config.partition, Some(&section.to_be_bytes()))
                     .await?;
 
+                // Remove from in-memory bitmap cache.
+                self.bitmaps.remove(&section);
+
                 // Remove the corresponding index range from intervals
                 let start_index = section * self.config.items_per_blob;
                 let end_index = (section + 1) * self.config.items_per_blob - 1;
@@ -357,42 +423,28 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
             return Ok(());
         }
 
-        // --- Phase 1: Write records with new parity bit ---
-
-        // Ensure all necessary blobs are created and get their current parity.
         let modified: Vec<u64> = pending.keys().copied().collect();
         for &section in &modified {
+            // This will create a blob on disk if it doesn't exist. The in-memory bitmap
+            // should have already been created in `put`.
             if let Entry::Vacant(entry) = self.blobs.entry(section) {
-                let (blob, len) = self
+                let (new, len) = self
                     .context
                     .open(&self.config.partition, &section.to_be_bytes())
                     .await?;
-
-                let (header, final_len) = if len >= HEADER_SIZE {
-                    let mut header_buf = vec![0u8; Header::SIZE];
-                    let header_buf = blob.read_at(header_buf, 0).await?;
-                    (Header::read(&mut header_buf.as_slice())?, len)
-                } else {
-                    let header = Header::default();
-                    blob.write_at(header.encode(), 0).await?;
-                    (header, HEADER_SIZE)
-                };
-
-                entry.insert(Write::new(blob, final_len, self.config.write_buffer));
-                self.parities.insert(section, header.committed_parity);
-                debug!(section, "created blob for sync");
+                entry.insert(Write::new(new, len, self.config.write_buffer));
+                debug!(section, "created blob on-demand for sync");
             }
         }
 
-        // Write all pending entries to disk with the next parity bit.
+        // --- Phase 1: Write data records ---
         let mut futures = Vec::new();
         for (section, writes) in &pending {
             let blob = self.blobs.get(section).unwrap();
-            let new_parity = self.parities.get(section).unwrap() ^ 1;
             for (index, value) in writes {
-                let offset =
-                    HEADER_SIZE + (index % self.config.items_per_blob) * Record::<V>::SIZE as u64;
-                let record = Record::new(value.clone(), new_parity);
+                let offset = self.header_size as u64
+                    + (index % self.config.items_per_blob) * Record::<V>::SIZE as u64;
+                let record = Record::new(value.clone());
                 futures.push(blob.write_at(record.encode(), offset));
             }
         }
@@ -405,17 +457,12 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         }
         try_join_all(futures).await?;
 
-        // --- Phase 2: Flip parity bit in header ---
-
-        // Write the new headers to disk.
+        // --- Phase 2: Write new headers ---
         let mut futures = Vec::new();
         for &section in &modified {
             let blob = self.blobs.get(&section).unwrap();
-            let new_parity = self.parities.get(&section).unwrap() ^ 1;
-            let header = Header {
-                committed_parity: new_parity,
-                ..Default::default()
-            };
+            let bitmap = self.bitmaps.get(&section).unwrap();
+            let header = Header::new(bitmap.clone());
             futures.push(blob.write_at(header.encode(), 0));
         }
         try_join_all(futures).await?;
@@ -426,11 +473,6 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
             futures.push(self.blobs.get(&section).unwrap().sync());
         }
         try_join_all(futures).await?;
-
-        // Update in-memory parity state now that the commit is complete.
-        for &section in &modified {
-            self.parities.entry(section).and_modify(|p| *p ^= 1);
-        }
 
         Ok(())
     }
