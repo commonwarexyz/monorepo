@@ -44,9 +44,12 @@
 //! # Atomicity
 //!
 //! [Ordinal] stages all writes in memory until [Ordinal::sync] is called. While this ensures
-//! that [Ordinal] can be updated after some other store has been synced, it does not guarantee
+//! that [Ordinal] will only be updated after some other store has been synced, it does not guarantee
 //! all items written during [Ordinal::sync] are atomically persisted and only some of the items
 //! cached may be written.
+//!
+//! _If you want atomicity, pair [crate::journal::fixed::Journal] and [crate::metadata::Metadata] with
+//! [Ordinal] (storing a log of writes and updating metadata when writes are consistently applied)._
 //!
 //! # Recovery
 //!
