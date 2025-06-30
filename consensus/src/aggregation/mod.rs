@@ -1,8 +1,12 @@
-//! Recover threshold signatures over an externally synchronized stream of digests.
+//! Recover threshold signatures to represent agreement over an ordered sequence of items.
 //!
-//! Validators use this module to agree on a chain of externally-finalized hashes by aggregating
-//! their partial signatures into threshold signatures. For example, validators can agree on the
-//! state hash of blocks as the contents of them are finalized by an external consensus mechanism.
+//! This module allows a dynamic set of participants to collectively produce threshold signatures
+//! for any ordered sequence of items.
+//!
+//! A primary use case for this is to allow blockchain validators to agree on a series of digests,
+//! such as state roots. Some chains may finalize transaction data but not execute the transactions
+//! during consensus. This module enables validators to come to cryptographically-proven agreement
+//! on the state root, which is necessary to support features like state sync.
 //!
 //! # Architecture
 //!
