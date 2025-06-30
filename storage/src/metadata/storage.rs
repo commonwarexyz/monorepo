@@ -265,7 +265,6 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         *old_version = next_version;
         self.cursor = next_cursor;
         self.skipped.inc_by(skipped);
-
         Ok(())
     }
 
