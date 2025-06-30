@@ -148,6 +148,15 @@ impl Record {
         }
     }
 
+    /// Returns `true` if the peer is listenable.
+    ///
+    /// A record is listenable if:
+    /// - The peer is allowed
+    /// - We are not already connected
+    pub fn listenable(&self, allow_private_ips: bool) -> bool {
+        self.allowed(allow_private_ips) && self.status == Status::Inert
+    }
+
     /// Return the socket of the peer, if known.
     pub fn socket(&self) -> Option<SocketAddr> {
         match &self.address {
