@@ -310,6 +310,7 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg_initial);
 
+            // None listenable because not registered
             assert!(!mailbox.listenable(peer_pk.clone()).await);
             assert!(!mailbox.listenable(peer_pk2.clone()).await);
             assert!(!mailbox.listenable(peer_pk3.clone()).await);
@@ -322,8 +323,11 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
+            // Not listenable because self
             assert!(!mailbox.listenable(peer_pk).await);
+            // Listenable because registered
             assert!(mailbox.listenable(peer_pk2).await);
+            // Not listenable because not registered
             assert!(!mailbox.listenable(peer_pk3).await);
         });
     }
