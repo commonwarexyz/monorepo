@@ -226,17 +226,17 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         let checksum = crc32fast::hash(&buf[..]);
         buf.put_u32(checksum);
 
-        // Get next blob (the one we will overwrite)
-        let old_cursor = 1 - self.cursor;
-        let (old_blob, old_bytes, old_version) = &mut self.blobs[old_cursor];
+        // Get target blob (the one we will overwrite)
+        let target_cursor = 1 - self.cursor;
+        let (target_blob, target_bytes, target_version) = &mut self.blobs[target_cursor];
 
-        // Compute byte-level diff and only write changed segments.
+        // Compute byte-level diff and only write changed segments
         let mut i = 0usize;
         let mut skipped = 0;
         let mut writes = Vec::new();
         while i < buf.len() {
             // Skip equal bytes
-            while i < buf.len() && i < old_bytes.len() && buf[i] == old_bytes[i] {
+            while i < buf.len() && i < target_bytes.len() && buf[i] == target_bytes[i] {
                 i += 1;
                 skipped += 1;
             }
@@ -246,24 +246,24 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
             // Write differing segments
             let start = i;
-            while i < buf.len() && (i >= old_bytes.len() || buf[i] != old_bytes[i]) {
+            while i < buf.len() && (i >= target_bytes.len() || buf[i] != target_bytes[i]) {
                 i += 1;
             }
             let end = i;
-            writes.push(old_blob.write_at(buf[start..end].to_vec(), start as u64));
+            writes.push(target_blob.write_at(buf[start..end].to_vec(), start as u64));
         }
         try_join_all(writes).await?;
 
         // If the new file is shorter, truncate; if longer, resize was implicitly handled by write_at
-        if buf.len() < old_bytes.len() {
-            old_blob.resize(buf.len() as u64).await?;
+        if buf.len() < target_bytes.len() {
+            target_blob.resize(buf.len() as u64).await?;
         }
-        old_blob.sync().await?;
+        target_blob.sync().await?;
 
         // Update state
-        *old_bytes = buf;
-        *old_version = next_version;
-        self.cursor = old_cursor;
+        *target_bytes = buf;
+        *target_version = next_version;
+        self.cursor = target_cursor;
         self.skipped.inc_by(skipped);
         Ok(())
     }
