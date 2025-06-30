@@ -1,18 +1,25 @@
-//! Defines the inclusion `Proof` structure, functions for generating them from any MMR implementing
-//! the `Storage` trait, and functions for verifying them against a root digest.
+//! Defines the inclusion [Proof] structure, functions for generating them from any MMR implementing
+//! the [Storage] trait, and functions for verifying them against a root digest.
 
 use crate::mmr::{
     iterator::{leaf_pos_to_num, PathIterator, PeakIterator},
     storage::Storage,
-    Error,
-    Error::*,
-    Hasher,
+    Error, Hasher,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{FixedSize, ReadExt};
-use commonware_cryptography::Hasher as CHasher;
+use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_cryptography::{Digest, Hasher as CHasher};
 use futures::future::try_join_all;
 use tracing::debug;
+
+/// Errors that can occur when reconstructing a digest from a proof due to invalid input.
+#[derive(Error, Debug)]
+pub(crate) enum ReconstructionError {
+    #[error("missing digests in proof")]
+    MissingDigests,
+    #[error("extra digests in proof")]
+    ExtraDigests,
+}
 
 /// Contains the information necessary for proving the inclusion of an element, or some range of
 /// elements, in the MMR from its root digest.
@@ -25,80 +32,115 @@ use tracing::debug;
 /// 2: the nodes in the remaining mountains necessary for reconstructing their peak digests from the
 /// elements within the range, ordered by the position of their parent.
 #[derive(Clone, Debug, Eq)]
-pub struct Proof<H: CHasher> {
+pub struct Proof<D: Digest> {
     /// The total number of nodes in the MMR.
     pub size: u64,
     /// The digests necessary for proving the inclusion of an element, or range of elements, in the
     /// MMR.
-    pub digests: Vec<H::Digest>,
+    pub digests: Vec<D>,
 }
 
-impl<H: CHasher> PartialEq for Proof<H> {
+impl<D: Digest> PartialEq for Proof<D> {
     fn eq(&self, other: &Self) -> bool {
         self.size == other.size && self.digests == other.digests
     }
 }
 
-impl<H: CHasher> Proof<H> {
+impl<D: Digest> EncodeSize for Proof<D> {
+    fn encode_size(&self) -> usize {
+        UInt(self.size).encode_size() + self.digests.encode_size()
+    }
+}
+
+impl<D: Digest> Write for Proof<D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        // Write the number of nodes in the MMR as a varint
+        UInt(self.size).write(buf);
+
+        // Write the digests
+        self.digests.write(buf);
+    }
+}
+
+impl<D: Digest> Read for Proof<D> {
+    /// The maximum number of digests in the proof.
+    type Cfg = usize;
+
+    fn read_cfg(buf: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        // Read the number of nodes in the MMR
+        let size = UInt::<u64>::read(buf)?.into();
+
+        // Read the digests
+        let range = ..=max_len;
+        let digests = Vec::<D>::read_range(buf, range)?;
+        Ok(Proof { size, digests })
+    }
+}
+
+impl<D: Digest> Proof<D> {
     /// Return true if `proof` proves that `element` appears at position `element_pos` within the
     /// MMR with root `root_digest`.
-    pub fn verify_element_inclusion<M: Hasher<H>>(
+    pub fn verify_element_inclusion<I, H>(
         &self,
-        hasher: &mut M,
+        hasher: &mut H,
         element: &[u8],
         element_pos: u64,
-        root_digest: &H::Digest,
-    ) -> Result<bool, Error> {
+        root_digest: &D,
+    ) -> bool
+    where
+        I: CHasher<Digest = D>,
+        H: Hasher<I>,
+    {
         self.verify_range_inclusion(hasher, &[element], element_pos, element_pos, root_digest)
     }
 
     /// Return true if `proof` proves that the `elements` appear consecutively between positions
     /// `start_element_pos` through `end_element_pos` (inclusive) within the MMR with root
     /// `root_digest`.
-    pub fn verify_range_inclusion<M: Hasher<H>, T>(
+    pub fn verify_range_inclusion<I, H, E>(
         &self,
-        hasher: &mut M,
-        elements: T,
+        hasher: &mut H,
+        elements: E,
         start_element_pos: u64,
         end_element_pos: u64,
-        root_digest: &H::Digest,
-    ) -> Result<bool, Error>
+        root_digest: &D,
+    ) -> bool
     where
-        T: IntoIterator<Item: AsRef<[u8]>>,
+        I: CHasher<Digest = D>,
+        H: Hasher<I>,
+        E: IntoIterator<Item: AsRef<[u8]>>,
     {
         if leaf_pos_to_num(start_element_pos).is_none() {
             debug!(pos = start_element_pos, "start pos is not a leaf");
-            return Ok(false);
+            return false;
         }
         if end_element_pos != start_element_pos && leaf_pos_to_num(end_element_pos).is_none() {
             debug!(pos = end_element_pos, "end pos is not a leaf");
-            return Ok(false);
+            return false;
         }
+
         match self.reconstruct_root(hasher, elements, start_element_pos, end_element_pos) {
-            Ok(reconstructed_root) => Ok(*root_digest == reconstructed_root),
-            Err(MissingDigests) => {
-                debug!("Not enough digests in proof to reconstruct peak digests");
-                Ok(false)
+            Ok(reconstructed_root) => *root_digest == reconstructed_root,
+            Err(error) => {
+                debug!(error = ?error, "invalid proof input");
+                false
             }
-            Err(ExtraDigests) => {
-                debug!("Not all digests in proof were used to reconstruct peak digests");
-                Ok(false)
-            }
-            Err(e) => Err(e),
         }
     }
 
     /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
-    /// of elements.
-    pub fn reconstruct_root<M: Hasher<H>, T>(
+    /// of elements, or returns a [ReconstructionError] if the input data is invalid.
+    pub(crate) fn reconstruct_root<I, H, E>(
         &self,
-        hasher: &mut M,
-        elements: T,
+        hasher: &mut H,
+        elements: E,
         start_element_pos: u64,
         end_element_pos: u64,
-    ) -> Result<H::Digest, Error>
+    ) -> Result<D, ReconstructionError>
     where
-        T: IntoIterator<Item: AsRef<[u8]>>,
+        I: CHasher<Digest = D>,
+        H: Hasher<I>,
+        E: IntoIterator<Item: AsRef<[u8]>>,
     {
         let peak_digests =
             self.reconstruct_peak_digests(hasher, elements, start_element_pos, end_element_pos)?;
@@ -106,18 +148,21 @@ impl<H: CHasher> Proof<H> {
         Ok(hasher.root_digest(self.size, peak_digests.iter()))
     }
 
-    /// Reconstruct the peak digests of the MMR that produced this proof, returning `MissingDigests`
-    /// error if there are not enough proof digests, or `ExtraDigests` error if not all proof
-    /// digests were used in the reconstruction.
-    fn reconstruct_peak_digests<T>(
+    /// Reconstruct the peak digests of the MMR that produced this proof, returning
+    /// [ReconstructionError::MissingDigests] error if there are not enough proof digests, or
+    /// [ReconstructionError::ExtraDigests] error if not all proof digests were used in the
+    /// reconstruction.
+    fn reconstruct_peak_digests<I, H, E>(
         &self,
-        hasher: &mut impl Hasher<H>,
-        elements: T,
+        hasher: &mut H,
+        elements: E,
         start_element_pos: u64,
         end_element_pos: u64,
-    ) -> Result<Vec<H::Digest>, Error>
+    ) -> Result<Vec<D>, ReconstructionError>
     where
-        T: IntoIterator<Item: AsRef<[u8]>>,
+        I: CHasher<Digest = D>,
+        H: Hasher<I>,
+        E: IntoIterator<Item: AsRef<[u8]>>,
     {
         let mut proof_digests_iter = self.digests.iter();
         let mut siblings_iter = self.digests.iter().rev();
@@ -125,7 +170,7 @@ impl<H: CHasher> Proof<H> {
 
         // Include peak digests only for trees that have no elements from the range, and keep track
         // of the starting and ending trees of those that do contain some.
-        let mut peak_digests: Vec<H::Digest> = Vec::new();
+        let mut peak_digests: Vec<D> = Vec::new();
         let mut proof_digests_used = 0;
         for (peak_pos, height) in PeakIterator::new(self.size) {
             let leftmost_pos = peak_pos + 2 - (1 << (height + 1));
@@ -144,74 +189,22 @@ impl<H: CHasher> Proof<H> {
                 proof_digests_used += 1;
                 peak_digests.push(*hash);
             } else {
-                return Err(MissingDigests);
+                return Err(ReconstructionError::MissingDigests);
             }
         }
 
         if elements_iter.next().is_some() {
-            return Err(ExtraDigests);
+            return Err(ReconstructionError::ExtraDigests);
         }
         let next_sibling = siblings_iter.next();
         if (proof_digests_used == 0 && next_sibling.is_some())
             || (next_sibling.is_some()
                 && *next_sibling.unwrap() != self.digests[proof_digests_used - 1])
         {
-            return Err(ExtraDigests);
+            return Err(ReconstructionError::ExtraDigests);
         }
 
         Ok(peak_digests)
-    }
-
-    /// Return the maximum size in bytes of any serialized `Proof`.
-    pub fn max_serialization_size() -> usize {
-        u64::SIZE + (u8::MAX as usize * H::Digest::SIZE)
-    }
-
-    /// Canonically serializes the `Proof` as:
-    /// ```text
-    ///    [0-8): size (u64 big-endian)
-    ///    [8-...): raw bytes of each hash, each of length `H::len()`
-    /// ```
-    pub fn serialize(&self) -> Vec<u8> {
-        // A proof should never contain more digests than the depth of the MMR, thus a single byte
-        // for encoding the length of the digests array still allows serializing MMRs up to 2^255
-        // elements.
-        assert!(
-            self.digests.len() <= u8::MAX as usize,
-            "too many digests in proof"
-        );
-
-        // Serialize the proof as a byte vector.
-        let bytes_len = u64::SIZE + (self.digests.len() * H::Digest::SIZE);
-        let mut bytes = Vec::with_capacity(bytes_len);
-        bytes.put_u64(self.size);
-        for hash in self.digests.iter() {
-            bytes.extend_from_slice(hash.as_ref());
-        }
-        assert_eq!(bytes.len(), bytes_len, "serialization length mismatch");
-        bytes.to_vec()
-    }
-
-    /// Deserializes a canonically encoded `Proof`. See `serialize` for the serialization format.
-    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
-        let mut buf = bytes;
-        if buf.len() < u64::SIZE {
-            return None;
-        }
-        let size = buf.get_u64();
-
-        // A proof should divide neatly into the hash length and not contain more than 255 digests.
-        let buf_remaining = buf.remaining();
-        let digests_len = buf_remaining / H::Digest::SIZE;
-        if buf_remaining % H::Digest::SIZE != 0 || digests_len > u8::MAX as usize {
-            return None;
-        }
-        let mut digests = Vec::with_capacity(digests_len);
-        for _ in 0..digests_len {
-            let digest = H::Digest::read(&mut buf).ok()?;
-            digests.push(digest);
-        }
-        Some(Self { size, digests })
     }
 
     /// Return the list of pruned (pos < `start_pos`) node positions that are still required for
@@ -305,12 +298,12 @@ impl<H: CHasher> Proof<H> {
 
     /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints. Returns
     /// ElementPruned error if some element needed to generate the proof has been pruned.
-    pub async fn range_proof<S: Storage<H::Digest>>(
+    pub async fn range_proof<S: Storage<D>>(
         mmr: &S,
         start_element_pos: u64,
         end_element_pos: u64,
-    ) -> Result<Proof<H>, Error> {
-        let mut digests: Vec<H::Digest> = Vec::new();
+    ) -> Result<Proof<D>, Error> {
+        let mut digests: Vec<D> = Vec::new();
         let positions =
             Self::nodes_required_for_range_proof(mmr.size(), start_element_pos, end_element_pos);
 
@@ -331,31 +324,32 @@ impl<H: CHasher> Proof<H> {
     }
 }
 
-fn peak_digest_from_range<'a, H, M: Hasher<H>, I, S>(
-    hasher: &mut M,
+fn peak_digest_from_range<'a, I, H, E, S>(
+    hasher: &mut H,
     pos: u64,           // current node position in the tree
     two_h: u64,         // 2^height of the current node
     leftmost_pos: u64,  // leftmost leaf in the tree to be traversed
     rightmost_pos: u64, // rightmost leaf in the tree to be traversed
-    elements: &mut I,
+    elements: &mut E,
     sibling_digests: &mut S,
-) -> Result<H::Digest, Error>
+) -> Result<I::Digest, ReconstructionError>
 where
-    H: CHasher,
-    I: Iterator<Item: AsRef<[u8]>>,
-    S: Iterator<Item = &'a H::Digest>,
+    I: CHasher,
+    H: Hasher<I>,
+    E: Iterator<Item: AsRef<[u8]>>,
+    S: Iterator<Item = &'a I::Digest>,
 {
     assert_ne!(two_h, 0);
     if two_h == 1 {
         // we are at a leaf
         match elements.next() {
             Some(element) => return Ok(hasher.leaf_digest(pos, element.as_ref())),
-            None => return Err(MissingDigests),
+            None => return Err(ReconstructionError::MissingDigests),
         }
     }
 
-    let mut left_digest: Option<H::Digest> = None;
-    let mut right_digest: Option<H::Digest> = None;
+    let mut left_digest: Option<I::Digest> = None;
+    let mut right_digest: Option<I::Digest> = None;
 
     let left_pos = pos - two_h;
     let right_pos = left_pos + two_h - 1;
@@ -387,13 +381,13 @@ where
     if left_digest.is_none() {
         match sibling_digests.next() {
             Some(hash) => left_digest = Some(*hash),
-            None => return Err(MissingDigests),
+            None => return Err(ReconstructionError::MissingDigests),
         }
     }
     if right_digest.is_none() {
         match sibling_digests.next() {
             Some(hash) => right_digest = Some(*hash),
-            None => return Err(MissingDigests),
+            None => return Err(ReconstructionError::MissingDigests),
         }
     }
 
@@ -404,6 +398,8 @@ where
 mod tests {
     use super::*;
     use crate::mmr::{hasher::Standard, mem::Mmr};
+    use bytes::Bytes;
+    use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{hash, sha256::Digest, Sha256};
     use commonware_runtime::{deterministic, Runner};
 
@@ -428,11 +424,9 @@ mod tests {
 
             // confirm the proof of inclusion for each leaf successfully verifies
             for leaf in leaves.iter().by_ref() {
-                let proof = mmr.proof(*leaf).await.unwrap();
+                let proof: Proof<Digest> = mmr.proof(*leaf).await.unwrap();
                 assert!(
-                    proof
-                        .verify_element_inclusion(&mut hasher, &element, *leaf, &root_digest)
-                        .unwrap(),
+                    proof.verify_element_inclusion(&mut hasher, &element, *leaf, &root_digest),
                     "valid proof should verify successfully"
                 );
             }
@@ -441,67 +435,49 @@ mod tests {
             const POS: u64 = 18;
             let proof = mmr.proof(POS).await.unwrap();
             assert!(
-                proof
-                    .verify_element_inclusion(&mut hasher, &element, POS, &root_digest)
-                    .unwrap(),
+                proof.verify_element_inclusion(&mut hasher, &element, POS, &root_digest),
                 "proof verification should be successful"
             );
             assert!(
-                !proof
-                    .verify_element_inclusion(&mut hasher, &element, POS + 1, &root_digest)
-                    .unwrap(),
+                !proof.verify_element_inclusion(&mut hasher, &element, POS + 1, &root_digest),
                 "proof verification should fail with incorrect element position"
             );
             assert!(
-                !proof
-                    .verify_element_inclusion(&mut hasher, &element, POS - 1, &root_digest)
-                    .unwrap(),
+                !proof.verify_element_inclusion(&mut hasher, &element, POS - 1, &root_digest),
                 "proof verification should fail with incorrect element position 2"
             );
             assert!(
-                !proof
-                    .verify_element_inclusion(&mut hasher, &test_digest(0), POS, &root_digest)
-                    .unwrap(),
+                !proof.verify_element_inclusion(&mut hasher, &test_digest(0), POS, &root_digest),
                 "proof verification should fail with mangled element"
             );
             let root_digest2 = test_digest(0);
             assert!(
-                !proof
-                    .verify_element_inclusion(&mut hasher, &element, POS, &root_digest2)
-                    .unwrap(),
+                !proof.verify_element_inclusion(&mut hasher, &element, POS, &root_digest2),
                 "proof verification should fail with mangled root_digest"
             );
             let mut proof2 = proof.clone();
             proof2.digests[0] = test_digest(0);
             assert!(
-                !proof2
-                    .verify_element_inclusion(&mut hasher, &element, POS, &root_digest)
-                    .unwrap(),
+                !proof2.verify_element_inclusion(&mut hasher, &element, POS, &root_digest),
                 "proof verification should fail with mangled proof hash"
             );
             proof2 = proof.clone();
             proof2.size = 10;
             assert!(
-                !proof2
-                    .verify_element_inclusion(&mut hasher, &element, POS, &root_digest)
-                    .unwrap(),
+                !proof2.verify_element_inclusion(&mut hasher, &element, POS, &root_digest),
                 "proof verification should fail with incorrect size"
             );
             proof2 = proof.clone();
             proof2.digests.push(test_digest(0));
             assert!(
-                !proof2
-                    .verify_element_inclusion(&mut hasher, &element, POS, &root_digest)
-                    .unwrap(),
+                !proof2.verify_element_inclusion(&mut hasher, &element, POS, &root_digest),
                 "proof verification should fail with extra hash"
             );
             proof2 = proof.clone();
             while !proof2.digests.is_empty() {
                 proof2.digests.pop();
                 assert!(
-                    !proof2
-                        .verify_element_inclusion(&mut hasher, &element, 7, &root_digest)
-                        .unwrap(),
+                    !proof2.verify_element_inclusion(&mut hasher, &element, 7, &root_digest),
                     "proof verification should fail with missing digests"
                 );
             }
@@ -518,9 +494,9 @@ mod tests {
                 .digests
                 .extend(proof.digests[PEAK_COUNT - 1..].iter().cloned());
             assert!(
-            !proof2.verify_element_inclusion(&mut hasher, &element, POS, &root_digest).unwrap(),
-            "proof verification should fail with extra hash even if it's unused by the computation"
-        );
+                !proof2.verify_element_inclusion(&mut hasher, &element, POS, &root_digest),
+                "proof verification should fail with extra hash even if it's unused by the computation"
+            );
         });
     }
 
@@ -547,18 +523,14 @@ mod tests {
                     let end_pos = element_positions[j];
                     let range_proof = mmr.range_proof(start_pos, end_pos).await.unwrap();
                     assert!(
-                        range_proof
-                            .verify_range_inclusion(
-                                &mut hasher,
-                                &elements[i..j + 1],
-                                start_pos,
-                                end_pos,
-                                &root_digest,
-                            )
-                            .unwrap(),
-                        "valid range proof should verify successfully {}:{}",
-                        i,
-                        j
+                        range_proof.verify_range_inclusion(
+                            &mut hasher,
+                            &elements[i..j + 1],
+                            start_pos,
+                            end_pos,
+                            &root_digest,
+                        ),
+                        "valid range proof should verify successfully {i}:{j}",
                     );
                 }
             }
@@ -571,30 +543,26 @@ mod tests {
             let range_proof = mmr.range_proof(start_pos, end_pos).await.unwrap();
             let valid_elements = &elements[start_index..end_index + 1];
             assert!(
-                range_proof
-                    .verify_range_inclusion(
-                        &mut hasher,
-                        valid_elements,
-                        start_pos,
-                        end_pos,
-                        &root_digest,
-                    )
-                    .unwrap(),
+                range_proof.verify_range_inclusion(
+                    &mut hasher,
+                    valid_elements,
+                    start_pos,
+                    end_pos,
+                    &root_digest,
+                ),
                 "valid range proof should verify successfully"
             );
             let mut invalid_proof = range_proof.clone();
             for _i in 0..range_proof.digests.len() {
                 invalid_proof.digests.remove(0);
                 assert!(
-                    !range_proof
-                        .verify_range_inclusion(
-                            &mut hasher,
-                            Vec::<&[u8]>::new(),
-                            start_pos,
-                            end_pos,
-                            &root_digest,
-                        )
-                        .unwrap(),
+                    !range_proof.verify_range_inclusion(
+                        &mut hasher,
+                        Vec::<&[u8]>::new(),
+                        start_pos,
+                        end_pos,
+                        &root_digest,
+                    ),
                     "range proof with removed elements should fail"
                 );
             }
@@ -606,48 +574,40 @@ mod tests {
                         continue;
                     }
                     assert!(
-                        !range_proof
-                            .verify_range_inclusion(
-                                &mut hasher,
-                                &elements[i..j + 1],
-                                start_pos,
-                                end_pos,
-                                &root_digest,
-                            )
-                            .unwrap(),
-                        "range proof with invalid elements should fail {}:{}",
-                        i,
-                        j
+                        !range_proof.verify_range_inclusion(
+                            &mut hasher,
+                            &elements[i..j + 1],
+                            start_pos,
+                            end_pos,
+                            &root_digest,
+                        ),
+                        "range proof with invalid elements should fail {i}:{j}",
                     );
                 }
             }
             // confirm proof fails with invalid root
             let invalid_root_digest = test_digest(1);
             assert!(
-                !range_proof
-                    .verify_range_inclusion(
-                        &mut hasher,
-                        valid_elements,
-                        start_pos,
-                        end_pos,
-                        &invalid_root_digest,
-                    )
-                    .unwrap(),
+                !range_proof.verify_range_inclusion(
+                    &mut hasher,
+                    valid_elements,
+                    start_pos,
+                    end_pos,
+                    &invalid_root_digest,
+                ),
                 "range proof with invalid root should fail"
             );
             // mangle the proof and confirm it fails
             let mut invalid_proof = range_proof.clone();
             invalid_proof.digests[1] = test_digest(0);
             assert!(
-                !invalid_proof
-                    .verify_range_inclusion(
-                        &mut hasher,
-                        valid_elements,
-                        start_pos,
-                        end_pos,
-                        &root_digest,
-                    )
-                    .unwrap(),
+                !invalid_proof.verify_range_inclusion(
+                    &mut hasher,
+                    valid_elements,
+                    start_pos,
+                    end_pos,
+                    &root_digest,
+                ),
                 "mangled range proof should fail verification"
             );
             // inserting elements into the proof should also cause it to fail (malleability check)
@@ -655,17 +615,14 @@ mod tests {
                 let mut invalid_proof = range_proof.clone();
                 invalid_proof.digests.insert(i, test_digest(0));
                 assert!(
-                    !invalid_proof
-                        .verify_range_inclusion(
-                            &mut hasher,
-                            valid_elements,
-                            start_pos,
-                            end_pos,
-                            &root_digest,
-                        )
-                        .unwrap(),
-                    "mangled range proof should fail verification. inserted element at: {}",
-                    i
+                    !invalid_proof.verify_range_inclusion(
+                        &mut hasher,
+                        valid_elements,
+                        start_pos,
+                        end_pos,
+                        &root_digest,
+                    ),
+                    "mangled range proof should fail verification. inserted element at: {i}",
                 );
             }
             // removing proof elements should cause verification to fail
@@ -673,15 +630,13 @@ mod tests {
             for _ in 0..range_proof.digests.len() {
                 invalid_proof.digests.remove(0);
                 assert!(
-                    !invalid_proof
-                        .verify_range_inclusion(
-                            &mut hasher,
-                            valid_elements,
-                            start_pos,
-                            end_pos,
-                            &root_digest,
-                        )
-                        .unwrap(),
+                    !invalid_proof.verify_range_inclusion(
+                        &mut hasher,
+                        valid_elements,
+                        start_pos,
+                        end_pos,
+                        &root_digest,
+                    ),
                     "shortened range proof should fail verification"
                 );
             }
@@ -694,18 +649,14 @@ mod tests {
                         continue;
                     }
                     assert!(
-                        !range_proof
-                            .verify_range_inclusion(
-                                &mut hasher,
-                                valid_elements,
-                                start_pos2,
-                                end_pos2,
-                                &root_digest,
-                            )
-                            .unwrap(),
-                        "bad element range should fail verification {}:{}",
-                        i,
-                        j
+                        !range_proof.verify_range_inclusion(
+                            &mut hasher,
+                            valid_elements,
+                            start_pos2,
+                            end_pos2,
+                            &root_digest,
+                        ),
+                        "bad element range should fail verification {i}:{j}",
                     );
                 }
             }
@@ -738,10 +689,12 @@ mod tests {
                         assert!(proof.is_err());
                     } else {
                         assert!(proof.is_ok());
-                        assert!(proof
-                            .unwrap()
-                            .verify_element_inclusion(&mut hasher, &elements[j], *pos, &root)
-                            .unwrap());
+                        assert!(proof.unwrap().verify_element_inclusion(
+                            &mut hasher,
+                            &elements[j],
+                            *pos,
+                            &root
+                        ));
                     }
                 }
             }
@@ -788,7 +741,7 @@ mod tests {
                             start_pos,
                             end_pos,
                             &root_digest,
-                        ).unwrap(),
+                        ),
                         "valid range proof over remaining elements should verify successfully",
                     );
                 }
@@ -820,7 +773,7 @@ mod tests {
                     start_pos,
                     end_pos,
                     &updated_root_digest,
-                ).unwrap(),
+                ),
                 "valid range proof over remaining elements after 2 pruning rounds should verify successfully",
             );
         });
@@ -830,11 +783,6 @@ mod tests {
     fn test_verification_proof_serialization() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            assert_eq!(
-                Proof::<Sha256>::max_serialization_size(),
-                8168,
-                "wrong max serialization size of a Sha256 proof"
-            );
             // create a new MMR and add a non-trivial amount of elements
             let mut mmr = Mmr::default();
             let mut elements = Vec::new();
@@ -853,28 +801,51 @@ mod tests {
                     let end_pos = element_positions[j];
                     let proof = mmr.range_proof(start_pos, end_pos).await.unwrap();
 
-                    let mut serialized_proof = proof.serialize();
-                    let deserialized_proof = Proof::<Sha256>::deserialize(&serialized_proof);
-                    assert!(deserialized_proof.is_some(), "proof didn't deserialize");
+                    let expected_size = proof.encode_size();
+                    let serialized_proof = proof.encode().freeze();
                     assert_eq!(
-                        proof,
-                        deserialized_proof.unwrap(),
+                        serialized_proof.len(),
+                        expected_size,
+                        "serialized proof should have expected size"
+                    );
+                    let max_digests = proof.digests.len();
+                    let deserialized_proof =
+                        Proof::decode_cfg(serialized_proof, &max_digests).unwrap();
+                    assert_eq!(
+                        proof, deserialized_proof,
                         "deserialized proof should match source proof"
                     );
 
-                    let deserialized_truncated = Proof::<Sha256>::deserialize(
-                        &serialized_proof[0..serialized_proof.len() - 1],
-                    );
+                    // Remove one byte from the end of the serialized
+                    // proof and confirm it fails to deserialize.
+                    let serialized_proof = proof.encode().freeze();
+                    let serialized_proof: Bytes =
+                        serialized_proof.slice(0..serialized_proof.len() - 1);
                     assert!(
-                        deserialized_truncated.is_none(),
+                        Proof::<Digest>::decode_cfg(serialized_proof, &max_digests).is_err(),
                         "proof should not deserialize with truncated data"
                     );
 
-                    serialized_proof.push(i as u8);
+                    // Add 1 byte of extra data to the end of the serialized
+                    // proof and confirm it fails to deserialize.
+                    let mut serialized_proof = proof.encode();
+                    serialized_proof.extend_from_slice(&[0; 10]);
+                    let serialized_proof = serialized_proof.freeze();
+
                     assert!(
-                        Proof::<Sha256>::deserialize(&serialized_proof).is_none(),
+                        Proof::<Digest>::decode_cfg(serialized_proof, &max_digests,).is_err(),
                         "proof should not deserialize with extra data"
                     );
+
+                    // Confirm deserialization fails when max length is exceeded.
+                    if max_digests > 0 {
+                        let serialized_proof = proof.encode().freeze();
+                        assert!(
+                            Proof::<Digest>::decode_cfg(serialized_proof, &(max_digests - 1),)
+                                .is_err(),
+                            "proof should not deserialize with max length exceeded"
+                        );
+                    }
                 }
             }
         });

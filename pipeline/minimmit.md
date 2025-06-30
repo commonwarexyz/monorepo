@@ -4,11 +4,13 @@
 
 Minimmit is a responsive, leader-based consensus protocol designed for simplicity and speed, tolerant of a Byzantine adversary that controls fewer than `20%` of replicas. Minimmit advances to the next view when a `40%` quorum is reached and finalizes blocks when an `80%` quorum is reached (after only a single round of voting). Minimmit can be instantiated with a number of practical optimizations to improve performance when deployed in production.
 
+_Minimmit is so-named for the `2f + 1` proofs that provide its "faster block times". We call each proof a "mini" + "commit"._
+
 ## 2. Model & Parameters
 
-- Byzantine replicas: `≤ f`
-- Total replicas: `n ≥ 5f + 1`
-- Partial synchrony: every message arrives within `Δ` after an unknown global stabilization time (GST).
+- There is a set of `n` total replicas.
+- At-most `f` are Byzantine or faulty, such that `n ≥ 5f + 1`.
+- Partial synchrony: every message arrives within `Δ` after an unknown Global Stabilization Time (GST).
 
 ## 3. Quorums
 
@@ -21,30 +23,32 @@ _There exists `≥ 1` honest replica in any `Q`-set and `L`-set intersection._
 
 | Message | Purpose |
 |---------|---------|
-| `genesis` | The genesis block. |
-| `propose(c, v, (c', v'))` | Leader's proposal `c` for view `v` with parent `c'` in view `v'`. |
+| `genesis` | The genesis block. Considered finalized at view `⊥ < 0`. |
+| `propose(r, c, v, (c', v'))` | Leader `r`'s proposal `c` for view `v` with parent `c'` in view `v'`. |
 | `notarize(c, v)` | Vote to finalize block `c` in view `v`. |
 | `nullify(v)` | Vote to advance to view `v + 1`. |
 | `notarization(c, v)` | Certificate of ≥ `L` `notarize(c, v)` messages for `(c, v)`. |
 | `nullification(v)` | Certificate of ≥ `L` `nullify(v)` messages for view `v`. |
-| `proof(v)` | Either a `notarization(*, v)` or a `nullification(v)` certificate. |
+| `proof(v)` | Either a `notarization(c, v)` certificate for some block `c` or a `nullification(v)` certificate. |
 
 ## 5. Initial Replica State
 
-```text
-view         = 0
-notarized    = ⊥         # the proposal this replica has notarized
-nullified    = false     # whether this replica has nullified this view
-timer        = None      # time until nullify if not yet nullified or notarized
-messages     = []        # list of messages this replica has seen
-proofs       = []        # list of proofs this replica has collected
-```
+A replica's (`r`'s) state contains the following fields:
+
+- `view` is the replica's view, initially `0`
+- `notarized` is the proposal this replica has notarized, initially `⊥`
+- `nullified` is whether this replica has nullified this view, initially `false`
+- `timer` is the time until nullifying (if `notarized == ⊥` and `!nullified` ), initially `None`
+- `proofs` is a map `View → Set<Certificate>` the set of certificates this replica has collected for each view, initially `{}`.
+- `messages` is a map `View → (Replica → Set<Message>)` storing every message the replica has received, grouped first by view and then by sender, initially `{}`.
+
+_We denote replica `r`'s state fields using dot notation (e.g., `r.view`, `r.timer`, etc.)._
 
 ## 6. External Functions
 
 ```text
-// Select the leader for view `v`
-fn leader(v) -> L;
+// Select the leader replica for view `v`
+fn leader(v) -> r;
 
 // Build a block on top of `c'`. This should pass `verify(c, c')`.
 fn build(c') -> c;
@@ -56,90 +60,94 @@ fn verify(c, c') -> bool;
 
 ## 7. Helpers
 
+_In every helper function, the first parameter `r` is the replica whose local state the helper inspects or updates._
+
 ```text
-// Find a valid parent to build on
-fn select_parent(v) -> (c', v') {
+// Replica `r` selects a valid parent to build on
+fn select_parent(r, v) -> (c', v') {
     let i = v - 1;
     while i >= 0 {
-        if notarization(c', i) ∈ proofs[i] {
-            // If there are multiple, pick any.
-            return (c', i);
+        if notarization(c', i) ∈ r.proofs[i] {
+            return (c', i); // If there are multiple, pick any
         }
-        if nullification(i) ∈ proofs[i] {
+        if nullification(i) ∈ r.proofs[i] {
             i -= 1;
             continue;
         }
-        return ⊥;
+        return (⊥, ⊥); // No proofs for view i, cannot proceed
     }
-    return genesis;
+    return (genesis, ⊥);
 }
 
-// Ensure there are proofs for all views between `v` and `v'`
-fn valid_parent(v, (c', v')) -> bool {
+// Replica `r` ensures there are nullifications for all views `[v', v)` and that there is a `notarization(c', v')`
+fn valid_parent(r, v, (c', v')) -> bool {
     let i = v - 1;
     while i > v' {
-        if nullification(i) ∈ proofs[i] {
-            i -= 1;
-            continue;
+        if nullification(i) ∉ r.proofs[i] {
+            return false;
         }
-        return false;
+        i -= 1;
     }
-    return notarization(c', v') ∈ proofs[v']
+    return notarization(c', v') ∈ r.proofs[v']
 }
 
-// Enter view `next`
-fn enter_view(next) {
-    if view >= next {
+// Replica `r` enters view `next` if greater than the current view
+fn enter_view(r, next) {
+    if r.view >= next {
         return;
     }
-    view = next;
-    notarized = ⊥;
-    nullified = false;
-    timer = 2Δ;
+    r.view = next;
+    r.notarized = ⊥;
+    r.nullified = false;
+    r.timer = 2Δ;
 }
 
-// Record a message from a `replica`
-fn record_message(replica, message) -> bool {
-    if replica ∉ messages[message.view] {
-        messages[message.view][replica] = [];
+// Replica `r` records a message, `m`, received from a replica `r'`
+fn record_message(r, r', m) -> bool {
+    if m.v ∉ r.messages {
+        r.messages[m.v] = {};
     }
-    if message ∉ messages[message.view][replica] {
-        messages[message.view][replica].add(message);
+    if r' ∉ r.messages[m.v] {
+        r.messages[m.v][r'] = {};
+    }
+    if m ∉ r.messages[m.v][r'] {
+        r.messages[m.v][r'].add(m);
         return true;
     }
     return false;
 }
 
-// Prune data less than `view`
-fn prune(view) {
-    messages.remove(m => m.view < view);
-    proofs.remove(p => p.view < view);
+// Replica `r` prunes data less than `view`
+fn prune(r, view) {
+    r.messages.remove(v => v < view);
+    r.proofs.remove(v => v < view);
 }
 ```
 
-## 8. Protocol for View `v`
+## 8. Protocol for Replica `r` in View `v`
 
 ### 8.1. Propose
 
-_If the leader, propose._
+_If replica `r` is the leader, propose._
 
-1. Upon entering view `v`, if identity is equal to `leader(v)`:
-   1. `(c', v') = select_parent(v)` (if `⊥`, return).
-   1. `c = build(c')`.
-   1. `notarized = c`.
-   1. Broadcast `propose(c, v, (c', v'))`.
+1. On entering view `v`, if `leader(v) == r`:
+   1. Let `(c', v') = select_parent(r, v)`.
+   1. If `c'` == `⊥`, return.
+   1. Let `c = build(c')`.
+   1. Set `r.notarized = c`.
+   1. Broadcast `propose(r, c, v, (c', v'))`.
 
-_Treat `propose(c, v, (c', v'))` as a leader `l`'s `notarize(c, v)`._
+_Treat `propose(r, c, v, (c', v'))` as `r`'s `notarize(c, v)`._
 
 ### 8.2. Notarize
 
 _Upon receipt of a first valid block proposal from leader, broadcast `notarize(c, v)`._
 
-1. On receiving first `propose(c, v, (c', v'))` from `leader(v)`:
-   1. If `notarized != ⊥` or `nullified`, return.
-   1. If `!valid_parent(v, (c', v'))`, return.
+1. On receiving first `propose(r', c, v, (c', v'))` from `r' = leader(v)`:
+   1. If `r.notarized != ⊥` or `r.nullified`, return.
+   1. If `!valid_parent(r, v, (c', v'))`, return.
    1. If `!verify(c, c')`, return.
-   1. `notarized = c`.
+   1. Set `r.notarized = c`.
    1. Broadcast `notarize(c, v)`.
 
 ### 8.3. Nullify by Timeout
@@ -147,43 +155,43 @@ _Upon receipt of a first valid block proposal from leader, broadcast `notarize(c
 _If `timer` expires, broadcast `nullify(v)` if not yet broadcasted `notarize(c, v)`._
 
 1. On `timer` expiry:
-   1. If `notarized != ⊥` or `nullified`, return.
-   1. `nullified = true`.
+   1. If `r.notarized != ⊥` or `r.nullified`, return.
+   1. Set `r.nullified = true`.
    1. Broadcast `nullify(v)`.
 
 ### 8.4. Notarization & Finalization
 
 _After `L` messages, create and broadcast a `notarization(c, v)` certificate. After `Q` messages, finalize._
 
-1. On receiving `notarize(c, v)` from replica `r`:
-   1. If `!record_message(r, notarize(c, v))`, return.
+1. On receiving `notarize(c, v)` from replica `r'`:
+   1. If `!record_message(r, r', notarize(c, v))`, return.
 1. On observing `≥ L` `notarize(c, v)` messages:
    1. Assemble `notarization(c, v)`.
-   1. Add `notarization(c, v)` to `proofs`.
+   1. Add `notarization(c, v)` to `r.proofs[v]`.
    1. Broadcast `notarization(c, v)`.
-   1. `enter_view(v + 1)`.
+   1. Call `enter_view(r, v + 1)`.
 1. On observing `≥ Q` `notarize(c, v)` messages:
    1. Finalize `c` and all of its ancestors.
-   1. `prune(v)`.
+   1. Call `prune(r, v)`.
 
 ### 8.5. Nullification
 
 _After `L` messages, create and broadcast a `nullification(v)` certificate._
 
-1. On receiving `nullify(v)` from replica `r`:
-   1. If `!record_message(r, nullify(v))`, return.
+1. On receiving `nullify(v)` from replica `r'`:
+   1. If `!record_message(r, r', nullify(v))`, return.
 1. On observing `≥ L` `nullify(v)` messages (or a single `nullification(v)` message):
    1. Assemble `nullification(v)`.
-   1. Add `nullification(v)` to `proofs`.
+   1. Add `nullification(v)` to `r.proofs[v]`.
    1. Broadcast `nullification(v)`.
-   1. `enter_view(v + 1)`.
+   1. Call `enter_view(r, v + 1)`.
 
 ### 8.6 Nullify by Contradiction
 
 _If you have already broadcast `notarize(c, v)` for a `c` that cannot be finalized directly, broadcast `nullify(v)` to ensure some `proof(v)` will exist in view `v`._
 
-1. On observing messages from `≥ L` replicas of either `nullify(v)` or `notarize(*, v)` (where `notarized != ⊥` and `notarized != *`):
-   1. `nullified = true`.
+1. On observing messages from `≥ L` replicas of either `nullify(v)` or `notarize(*, v)` (where `r.notarized != ⊥` and `r.notarized != *`):
+   1. Set `r.nullified = true`.
    1. Broadcast `nullify(v)`.
 
 ## 9. Intuition
@@ -203,15 +211,20 @@ _If you have already broadcast `notarize(c, v)` for a `c` that cannot be finaliz
 - In any given view `v`, there may be multiple `notarization(*, v)` messages and one `nullification(v)`. If there are multiple `notarization(*, v)`s, no block `*` referenced by a `notarization(*, v)` can be finalized in `v`. If there exists some `nullification(v)`, no block can be finalized in `v`.
 
 ### 9.3 Liveness
-
-- There exists at least one `proof(v)` for every view `v`.
-- After GST, all views with honest leaders will emit a `notarization` message before the timer of any honest replica expires. To see this is true, consider the following:
-    - The first honest replica broadcasts some `proof(v - 1)` message to all replicas and enters view `v` at time `t_0`.
-    - The leader of view `v` will receive said `proof(v - 1)` message by `t_0 + Δ` and broadcast some `propose(c, v, (c', v'))` message to all replicas.
-    - All honest replicas will receive said `propose(c, v, (c', v'))` message by `t_0 + 2Δ` and broadcast some `notarize(c, v)` message.
-- Replicas enter `v + 1` as soon as they see some `proof(v)` (as fast as `L` messages). If the network is partitioned in two, replicas in each half of the partition may continue to enter successive views (on different `proof(v)`s) but will never finalize conflicting blocks. To bound the depth of forks in a partition, replicas can wait to enter some view `v + k` until they have seen `Q` messages in view `v`.
-- A Byzantine leader could equivocate, sending a distinct proposal to each replica and causing them to broadcast a `notarize(*, v)` for different blocks. After a replica observes `≥ L` `notarize(*, v)` messages for some `* != c`, it will then choose to broadcast a `nullify(v)` message. Eventually, `L` `nullify(v)` messages will be received and honest replicas will enter `v + 1` (within `Δ` of the first honest replica).
-- Since at most `f` nodes are Byzantine or faulty, once an honest leader is assigned, it is possible for at least `Q` correct replicas to finalize a block (including all of its ancestors).
+- After GST, all views with honest leaders will:
+   - Emit a `notarization` message before the timer of any honest replica expires. To see this is true:
+      - The first honest replica broadcasts some `proof(v - 1)` message to all replicas and enters view `v` at time `t`.
+      - The leader of view `v` will receive said `proof(v - 1)` message by `t + Δ` and broadcast some `propose(c, v, (c', v'))` message to all replicas.
+      - All honest replicas will receive said `propose(c, v, (c', v'))` message by `t + 2Δ` and broadcast some `notarize(c, v)` message.
+      - Since, by definition, the first honest replica entered the view at `t`, then none of the honest replica timers fired before broadcasting `notarize(c, v)`.
+   - Finalize a block. To see this is true:
+      - As above, each honest replica will broadcast `notarize(c, v)` before their timers expire.
+      - As there are at least `Q` honest nodes, each honest node will eventually see at least `Q` `notarize(c, v)` messages.
+- Faulty leaders can delay the network, however it still makes progress under good network conditions.
+    - A crash-faulty leader can delay the network by at most `3Δ`. Let's assume that all honest replicas enter view `v` by time `t'` and set a `2Δ` timer. If the leader is faulty and sends no proposal, all timers will expire by `t' + 2Δ`, causing honest replicas to broadcast `nullify(v)`. These messages will be seen by all other honest replicas by `t' + 3Δ`, allowing them to form a `nullification(v)` and enter view `v+1`.
+    - A Byzantine leader can delay the network by at most `4Δ`. This can happen if the leader equivocates by sending different proposals to different replicas, causing them to broadcast `notarize(*, v)` for different blocks. To see why, again assume all honest replicas enter view `v` by time `t'`. The first round of `notarize` messages are sent and received by `t' + 3Δ`. At this point, all honest replicas observe the conflicting votes and broadcast `nullify(v)`. This "second-round" vote is received by `t' + 4Δ`, allowing a `nullification(v)` to be created, allowing them to enter `v+1`.
+    - These latency bounds are competitive despite the possibility of two rounds of voting. This is due to the timer being set to `2Δ`. For comparison, a protocol like Simplex with a `3Δ` timer would see replicas advance to the next view by `t' + 4Δ` regardless of whether the leader is crash-faulty or Byzantine.
+- Every view `v` eventually produces at least one certificate `proof(v)`. As soon as a replica sees any `proof(v)` (as fast as `L` messages), it moves to view `v + 1`. If the network is partitioned in two, replicas in each half of the partition may continue to enter successive views (on different `proof(v)`s) but will never be able to finalize such blocks. To bound the depth of forks in a partition, replicas can wait to enter some view `v + k` until they have seen `Q` messages in view `v`.
 
 ## 10. Extensions
 
@@ -219,9 +232,10 @@ Minimmit can be instantiated in several different ways to tune performance when 
 
 - Use block digests (i.e. `c = hash(block)`) in `propose(c, v, (c', v'))`, `notarize(c, v)`, and `notarization(c, v)` messages.
 - Employ BLS multi-signatures or BLS threshold signatures, like [Threshold Simplex](#threshold), to cap `notarization(c, v)` and `nullification(v)` messages at a constant size regardless of the number of replicas.
+- Broadcast `nullify(v)` when entering the view of a leader that has been offline for some number of recent views, like [Threshold Simplex](#threshold). This reduces the effect of faulty or crashed nodes on a network's block production rate. Once the faulty replicas begin participating in consensus again, honest replicas can stop "fast-skipping" their views.
 - Attach some recent set of `proof(v)` messages to each `propose(c, v, (c', v'))` message (to ensure honest replicas that are not yet aware of recent proofs can still broadcast a `notarize(c, v)` message for valid blocks).
 - If `≥ f + 1` `notarize(c, v)` messages are observed for some `proposal(c, v, (c', v'))` considered invalid, request the missing `notarization(c, v')` or `nullification(v')` not found in our `proofs` (that prohibited us from broadcasting a `notarize(c, v)`) from the peers that consider it valid.
-- If stuck in the same view `v` for time `t_s`, re-broadcast some `proof(v - 1)` (to ensure all correct replicas enter `v`) and re-broadcast `notarized` (if not `⊥`) and `nullified` (if not `false`).
+- If stuck in the same view `v` for time `t_s`, re-broadcast some `proof(v - 1)` (to ensure all correct replicas enter `v`) and re-broadcast `r.notarized` (if not `⊥`) and `r.nullified` (if not `false`).
 - Assemble and broadcast a `finalization(c, v)` message after finalizing some `c` (i.e. `≥ Q` `notarize(c, v)` messages). This can both help lagging replicas catch up to the finalized tip and make it easier for downstream services to integrate.
 - Disseminate blocks using `(k,d)`-erasure codes, like [DispersedSimplex](#sing-a-song), [Kudzu](#kudzu), and [Alpenglow](#alpenglow), to avoid a leader broadcast bottleneck. Each `notarize` message would be augmented with the relevant fragment. `k` would be set to the number of replicas, and `d` can be set as `f+1` so that the replicas only have a bandwidth requirement of about ~5 times the size of the full block. If a `notarization` exists, then at least `f+1` honest nodes have been distributed a fragment. This prevents `Byzantine` nodes from constructing a `notarization` without honest nodes being able to reconstruct the block among themselves. `d` can be set at higher values like `2f+1` to halve the required bandwidth, but replicas would have to ignore any gossiped `notarization` messages, instead making sure to gather the `2f+1` `notarize` messages themselves.
 - To punish equivocating leaders, treat `propose` messages for different blocks in the same view as a slashable offense. To incentivize performant leaders, issue a reward for any block `c` included in the canonical chain.

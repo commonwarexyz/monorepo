@@ -61,15 +61,19 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         )
     }
 
-    /// Unpack `msg` and verify the underlying `channel` is registered.
-    fn validate_msg<V>(msg: Option<Data>, rate_limits: &HashMap<u32, V>) -> Result<Data, Error> {
+    /// Unpack outbound `msg` and assert the underlying `channel` is registered.
+    fn validate_outbound_msg<V>(
+        msg: Option<Data>,
+        rate_limits: &HashMap<u32, V>,
+    ) -> Result<Data, Error> {
         let data = match msg {
             Some(data) => data,
             None => return Err(Error::PeerDisconnected),
         };
-        if !rate_limits.contains_key(&data.channel) {
-            return Err(Error::InvalidChannel);
-        }
+        assert!(
+            rate_limits.contains_key(&data.channel),
+            "outbound message on invalid channel"
+        );
         Ok(data)
     }
 
@@ -140,12 +144,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                             }
                         },
                         msg_high = self.high.next() => {
-                            let msg = Self::validate_msg(msg_high, &rate_limits)?;
+                            let msg = Self::validate_outbound_msg(msg_high, &rate_limits)?;
                             Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into())
                                 .await?;
                         },
                         msg_low = self.low.next() => {
-                            let msg = Self::validate_msg(msg_low, &rate_limits)?;
+                            let msg = Self::validate_outbound_msg(msg_low, &rate_limits)?;
                             Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into())
                                 .await?;
                         }
@@ -188,12 +192,16 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     // Wait until rate limiter allows us to process the message
                     let rate_limiter = match &msg {
                         types::Message::Data(data) => {
-                            let Some(rate_limiter) = rate_limits.get(&data.channel) else {
-                                // We permit unknown messages to be received in case peers
-                                // are on a newer version than us
-                                continue;
-                            };
-                            rate_limiter
+                            match rate_limits.get(&data.channel) {
+                                Some(rate_limit) => rate_limit,
+                                None => { // Treat unknown channels as invalid
+                                    debug!(?peer, channel = data.channel, "invalid channel");
+                                    self.received_messages
+                                        .get_or_create(&metrics::Message::new_invalid(&peer))
+                                        .inc();
+                                    return Err(Error::InvalidChannel);
+                                }
+                            }
                         }
                         types::Message::Ping => &ping_rate_limiter,
                     };

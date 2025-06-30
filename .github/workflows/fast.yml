@@ -11,18 +11,24 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   UDEPS_VERSION: 0.1.50
-  FUZZ_VERSION: 0.12.0
 
 jobs:
   Lint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       matrix:
-        flags:
-          - "--features commonware-runtime/iouring-storage"
-          - "--features commonware-runtime/iouring-network"
-          - ""
+        include:
+          - os: ubuntu-latest
+            flags: "--features commonware-runtime/iouring-storage"
+          - os: ubuntu-latest
+            flags: "--features commonware-runtime/iouring-network"
+          - os: ubuntu-latest
+            flags: ""
+          - os: windows-latest
+            flags: ""
+          - os: macos-latest
+            flags: ""
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -40,14 +46,21 @@ jobs:
         RUSTDOCFLAGS: "-D warnings"
 
   Tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       matrix:
-        flags:
-          - "--features commonware-runtime/iouring-storage"
-          - "--features commonware-runtime/iouring-network"
-          - ""
+        include:
+          - os: ubuntu-latest
+            flags: "--features commonware-runtime/iouring-storage"
+          - os: ubuntu-latest
+            flags: "--features commonware-runtime/iouring-network"
+          - os: ubuntu-latest
+            flags: ""
+          - os: windows-latest
+            flags: ""
+          - os: macos-latest
+            flags: ""
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -58,7 +71,7 @@ jobs:
 
   Dependencies:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -137,6 +150,7 @@ jobs:
 
   Scripts:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4

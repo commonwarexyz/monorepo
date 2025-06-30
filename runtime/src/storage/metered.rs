@@ -123,8 +123,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         Ok(())
     }
 
-    async fn truncate(&self, len: u64) -> Result<(), Error> {
-        self.inner.truncate(len).await
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.inner.resize(len).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
