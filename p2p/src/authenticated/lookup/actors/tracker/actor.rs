@@ -111,6 +111,12 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 } => {
                     let _ = reservation.send(self.directory.dial(&public_key));
                 }
+                Message::Listenable {
+                    public_key,
+                    responder,
+                } => {
+                    let _ = responder.send(self.directory.listenable(&public_key));
+                }
                 Message::Listen {
                     public_key,
                     reservation,
@@ -289,6 +295,44 @@ mod tests {
     }
 
     #[test]
+    fn test_listenable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (peer_signer, peer_pk) = new_signer_and_pk(1);
+            let peer_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
+            let (_peer_signer2, peer_pk2) = new_signer_and_pk(2);
+            let peer_addr2 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1002);
+            let (_peer_signer3, peer_pk3) = new_signer_and_pk(3);
+            let cfg_initial = default_test_config(peer_signer);
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg_initial);
+
+            // None listenable because not registered
+            assert!(!mailbox.listenable(peer_pk.clone()).await);
+            assert!(!mailbox.listenable(peer_pk2.clone()).await);
+            assert!(!mailbox.listenable(peer_pk3.clone()).await);
+
+            oracle
+                .register(
+                    0,
+                    vec![(peer_pk.clone(), peer_addr), (peer_pk2.clone(), peer_addr2)],
+                )
+                .await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Not listenable because self
+            assert!(!mailbox.listenable(peer_pk).await);
+            // Listenable because registered
+            assert!(mailbox.listenable(peer_pk2).await);
+            // Not listenable because not registered
+            assert!(!mailbox.listenable(peer_pk3).await);
+        });
+    }
+
+    #[test]
     fn test_listen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -308,8 +352,12 @@ mod tests {
             oracle.register(0, vec![(peer_pk.clone(), peer_addr)]).await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
+            assert!(mailbox.listenable(peer_pk.clone()).await);
+
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_some());
+
+            assert!(!mailbox.listenable(peer_pk.clone()).await);
 
             let failed_reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(failed_reservation.is_none());

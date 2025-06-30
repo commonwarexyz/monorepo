@@ -230,7 +230,7 @@ cfg_if::cfg_if! {
         /// Directory where deployer files are stored
         fn deployer_directory(tag: &str) -> PathBuf {
             let base_dir = std::env::var("HOME").expect("$HOME is not configured");
-            PathBuf::from(format!("{}/.commonware_deployer/{}", base_dir, tag))
+            PathBuf::from(format!("{base_dir}/.commonware_deployer/{tag}"))
         }
 
         /// Errors that can occur when deploying infrastructure on AWS

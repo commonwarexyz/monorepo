@@ -49,11 +49,10 @@ pub async fn rsync_file(
             .arg("-az")
             .arg("-e")
             .arg(format!(
-                "ssh -i {} -o ServerAliveInterval=600 -o StrictHostKeyChecking=no",
-                key_file
+                "ssh -i {key_file} -o ServerAliveInterval=600 -o StrictHostKeyChecking=no"
             ))
             .arg(local_path)
-            .arg(format!("ubuntu@{}:{}", ip, remote_path))
+            .arg(format!("ubuntu@{ip}:{remote_path}"))
             .output()
             .await?;
         if output.status.success() {
@@ -75,7 +74,7 @@ pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), 
             .arg("ServerAliveInterval=600")
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
-            .arg(format!("ubuntu@{}", ip))
+            .arg(format!("ubuntu@{ip}"))
             .arg(command)
             .output()
             .await?;
@@ -98,8 +97,8 @@ pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Res
             .arg("ServerAliveInterval=600")
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
-            .arg(format!("ubuntu@{}", ip))
-            .arg(format!("systemctl is-active {}", service))
+            .arg(format!("ubuntu@{ip}"))
+            .arg(format!("systemctl is-active {service}"))
             .output()
             .await?;
         let parsed = String::from_utf8_lossy(&output.stdout);
@@ -127,8 +126,8 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
             .arg("ServerAliveInterval=600")
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
-            .arg(format!("ubuntu@{}", ip))
-            .arg(format!("systemctl is-active {}", service))
+            .arg(format!("ubuntu@{ip}"))
+            .arg(format!("systemctl is-active {service}"))
             .output()
             .await?;
         let parsed = String::from_utf8_lossy(&output.stdout);
@@ -167,5 +166,5 @@ pub async fn enable_bbr(key_file: &str, ip: &str, bbr_conf_local_path: &str) -> 
 
 /// Converts an IP address to a CIDR block
 pub fn exact_cidr(ip: &str) -> String {
-    format!("{}/32", ip)
+    format!("{ip}/32")
 }

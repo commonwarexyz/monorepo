@@ -468,13 +468,7 @@ pub mod tests {
                         assert_eq!(res.0[i], larger.0[i]);
                     }
                 }
-                assert_eq!(
-                    res.degree(),
-                    larger.degree(),
-                    "deg1={}, deg2={}",
-                    deg1,
-                    deg2
-                );
+                assert_eq!(res.degree(), larger.degree(), "deg1={deg1}, deg2={deg2}");
             }
         }
     }
@@ -492,14 +486,12 @@ pub mod tests {
                 if num_evals > degree {
                     assert_eq!(
                         expected, recovered_constant,
-                        "degree={}, num_evals={}",
-                        degree, num_evals
+                        "degree={degree}, num_evals={num_evals}"
                     );
                 } else {
                     assert_ne!(
                         expected, recovered_constant,
-                        "degree={}, num_evals={}",
-                        degree, num_evals
+                        "degree={degree}, num_evals={num_evals}"
                     );
                 }
             }
@@ -530,7 +522,7 @@ pub mod tests {
                     sum.add(&var);
                 }
 
-                assert_eq!(sum, evaluation, "degree={}, idx={}", d, idx);
+                assert_eq!(sum, evaluation, "degree={d}, idx={idx}");
             }
         }
     }

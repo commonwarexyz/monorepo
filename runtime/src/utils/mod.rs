@@ -49,7 +49,7 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
     } else if let Some(s) = err.downcast_ref::<String>() {
         s.clone()
     } else {
-        format!("{:?}", err)
+        format!("{err:?}")
     }
 }
 

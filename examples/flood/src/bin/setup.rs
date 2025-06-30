@@ -145,7 +145,7 @@ fn main() {
     for (index, scheme) in peer_schemes.iter().enumerate() {
         // Create peer config
         let name = scheme.public_key().to_string();
-        let peer_config_file = format!("{}.yaml", name);
+        let peer_config_file = format!("{name}.yaml");
         let peer_config = Config {
             private_key: scheme.to_string(),
             port: PORT,
@@ -196,7 +196,7 @@ fn main() {
     let raw_current_dir = std::env::current_dir().unwrap();
     let current_dir = raw_current_dir.to_str().unwrap();
     let output = matches.get_one::<String>("output").unwrap();
-    let output = format!("{}/{}", current_dir, output);
+    let output = format!("{current_dir}/{output}");
     assert!(
         !std::path::Path::new(&output).exists(),
         "output directory already exists"
@@ -204,16 +204,16 @@ fn main() {
     std::fs::create_dir_all(output.clone()).unwrap();
     let dashboard = matches.get_one::<String>("dashboard").unwrap().clone();
     std::fs::copy(
-        format!("{}/{}", current_dir, dashboard),
-        format!("{}/dashboard.json", output),
+        format!("{current_dir}/{dashboard}"),
+        format!("{output}/dashboard.json"),
     )
     .unwrap();
     for (peer_config_file, peer_config) in peer_configs {
-        let path = format!("{}/{}", output, peer_config_file);
+        let path = format!("{output}/{peer_config_file}");
         let file = std::fs::File::create(path).unwrap();
         serde_yaml::to_writer(file, &peer_config).unwrap();
     }
-    let path = format!("{}/config.yaml", output);
+    let path = format!("{output}/config.yaml");
     let file = std::fs::File::create(path.clone()).unwrap();
     serde_yaml::to_writer(file, &config).unwrap();
     info!(path, "wrote configuration files");
