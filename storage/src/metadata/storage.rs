@@ -273,7 +273,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             }
 
             // If we have reached the end of the target, just write the new data
-            if i > target.data.len() {
+            if i >= target.data.len() {
                 writes.push(target.blob.write_at(next_data[i..].to_vec(), i as u64));
                 break;
             }
