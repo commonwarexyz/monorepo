@@ -543,15 +543,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         root_digest: &H::Digest,
     ) -> bool {
         let start_pos = leaf_num_to_pos(start_loc);
-        let end_loc = start_loc + ops.len() as u64 - 1;
-        let end_pos = leaf_num_to_pos(end_loc);
 
         let digests = ops
             .iter()
             .map(|op| Any::<E, _, _, _, T>::op_digest(hasher, op))
             .collect::<Vec<_>>();
 
-        proof.verify_range_inclusion(hasher, digests, start_pos, end_pos, root_digest)
+        proof.verify_range_inclusion(hasher, &digests, start_pos, root_digest)
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable

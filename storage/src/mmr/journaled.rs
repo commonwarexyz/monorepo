@@ -745,7 +745,6 @@ mod tests {
                 &mut hasher,
                 &leaves[TEST_ELEMENT..last_element + 1],
                 test_element_pos,
-                last_element_pos,
                 &root
             ));
 
