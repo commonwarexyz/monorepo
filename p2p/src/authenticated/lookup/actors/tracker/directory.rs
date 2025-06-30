@@ -156,19 +156,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         deleted_peers
     }
 
-    /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
-    pub fn dialable(&self) -> Vec<C> {
-        // Collect peers with known addresses
-        let mut result: Vec<_> = self
-            .peers
-            .iter()
-            .filter(|&(_, r)| r.dialable(self.allow_private_ips))
-            .map(|(peer, _)| peer.clone())
-            .collect();
-        result.sort();
-        result
-    }
-
     /// Attempt to reserve a peer for the dialer.
     ///
     /// Returns `Some` on success, `None` otherwise.
@@ -198,6 +185,26 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         self.peers
             .get(peer)
             .is_some_and(|r| r.allowed(self.allow_private_ips))
+    }
+
+    /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
+    pub fn dialable(&self) -> Vec<C> {
+        // Collect peers with known addresses
+        let mut result: Vec<_> = self
+            .peers
+            .iter()
+            .filter(|&(_, r)| r.dialable(self.allow_private_ips))
+            .map(|(peer, _)| peer.clone())
+            .collect();
+        result.sort();
+        result
+    }
+
+    /// Returns true if the peer is listenable.
+    pub fn listenable(&self, peer: &C) -> bool {
+        self.peers
+            .get(peer)
+            .is_some_and(|r| r.listenable(self.allow_private_ips))
     }
 
     // --------- Helpers ----------
