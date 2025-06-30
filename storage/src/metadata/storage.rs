@@ -191,6 +191,11 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         self.map.get(key)
     }
 
+    /// Get a mutable reference to a value from [Metadata] (if it exists).
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut Vec<u8>> {
+        self.map.get_mut(key)
+    }
+
     /// Clear all values from [Metadata]. The new state will not be persisted until [Self::sync] is
     /// called.
     pub fn clear(&mut self) {
