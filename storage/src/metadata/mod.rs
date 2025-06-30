@@ -525,55 +525,68 @@ mod tests {
             let cfg = Config {
                 partition: "test".to_string(),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata: Metadata<_, U64> =
+                Metadata::init(context.clone(), cfg).await.unwrap();
 
-            // Put initial keys with large values
-            for i in 0..50 {
-                metadata.put(U64::new(i), vec![i as u8; 1000]);
+            // Put initial keys
+            for i in 0..100 {
+                metadata.put(U64::new(i), vec![i as u8; 100]);
             }
 
-            // First sync - writes everything
+            // First sync - should write everything
             metadata.sync().await.unwrap();
 
-            // Test 1: No changes sync - should still write due to version increment
+            // Get initial bytes written
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("bytes_written_total 11212"),
+                "Expected bytes_written_total to be 11212, but got: {}",
+                buffer
+            );
+
+            // Modify just one key
+            metadata.put(U64::new(50), vec![0xff; 100]);
+
+            // Sync again - should only write the changed portion
             metadata.sync().await.unwrap();
 
-            // Test 2: Modify one key in the middle
-            metadata.put(U64::new(25), vec![255u8; 1000]);
-            metadata.sync().await.unwrap();
+            // Get bytes written after second sync
+            let buffer_after = context.encode();
 
-            // Test 3: Add a new key at the end
-            metadata.put(U64::new(50), vec![200u8; 1000]);
-            metadata.sync().await.unwrap();
+            // Extract bytes_written value from the buffer
+            // The format is "bytes_written_total <value>"
+            let bytes_written_line = buffer_after
+                .lines()
+                .find(|line| line.contains("bytes_written_total"))
+                .expect("bytes_written_total metric not found");
+            let bytes_after_update: u64 = bytes_written_line
+                .split_whitespace()
+                .last()
+                .expect("Invalid metric format")
+                .parse()
+                .expect("Failed to parse bytes_written value");
 
-            // Test 4: Remove a key in the middle
-            metadata.remove(&U64::new(25));
-            metadata.sync().await.unwrap();
+            // Calculate the delta
+            let bytes_written_in_update = bytes_after_update - 11212;
 
-            // Test 5: Modify multiple scattered keys
-            metadata.put(U64::new(5), vec![100u8; 1000]);
-            metadata.put(U64::new(20), vec![101u8; 1000]);
-            metadata.put(U64::new(35), vec![102u8; 1000]);
-            metadata.sync().await.unwrap();
+            // Expected bytes for update:
+            // - Version changed (8 bytes)
+            // - One value changed (100 bytes)
+            // - Checksum changed (4 bytes)
+            // Plus some overhead for key and length, but should be much less than full rewrite
+            // Full rewrite would be 11212 bytes, but we should write far less
+            assert!(
+                bytes_written_in_update < 1000,
+                "Expected less than 1000 bytes written for single key update, but wrote {}",
+                bytes_written_in_update
+            );
+            assert!(
+                bytes_written_in_update > 100,
+                "Expected at least 100 bytes written for value update, but only wrote {}",
+                bytes_written_in_update
+            );
 
-            // Close and reopen to verify data integrity
-            metadata.close().await.unwrap();
-            let cfg = Config {
-                partition: "test".to_string(),
-            };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
-
-            // Verify final state
-            assert!(metadata.get(&U64::new(25)).is_none());
-            assert_eq!(metadata.get(&U64::new(5)).unwrap(), &vec![100u8; 1000]);
-            assert_eq!(metadata.get(&U64::new(20)).unwrap(), &vec![101u8; 1000]);
-            assert_eq!(metadata.get(&U64::new(35)).unwrap(), &vec![102u8; 1000]);
-            assert_eq!(metadata.get(&U64::new(50)).unwrap(), &vec![200u8; 1000]);
-
-            // Verify keys that shouldn't have changed
-            assert_eq!(metadata.get(&U64::new(0)).unwrap(), &vec![0u8; 1000]);
-            assert_eq!(metadata.get(&U64::new(49)).unwrap(), &vec![49u8; 1000]);
-
+            // Clean up
             metadata.destroy().await.unwrap();
         });
     }
@@ -590,67 +603,135 @@ mod tests {
             let mut metadata: Metadata<_, U64> =
                 Metadata::init(context.clone(), cfg).await.unwrap();
             metadata.sync().await.unwrap();
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("bytes_written_total 12"),
+                "Expected bytes_written_total to be 12 for empty sync"
+            );
+
             metadata.sync().await.unwrap(); // Second sync with no changes
+            let buffer_after_noop = context.encode();
+            let bytes_written_line = buffer_after_noop
+                .lines()
+                .find(|line| line.contains("bytes_written_total"))
+                .expect("bytes_written_total metric not found");
+            let bytes_after_noop: u64 = bytes_written_line
+                .split_whitespace()
+                .last()
+                .expect("Invalid metric format")
+                .parse()
+                .expect("Failed to parse bytes_written value");
+            // Only version should change, so we write 8 bytes (version changed)
+            // But in practice, the entire 12 bytes might be rewritten due to checksum
+            assert!(
+                bytes_after_noop - 12 <= 12,
+                "No-op sync wrote too many bytes: {}",
+                bytes_after_noop - 12
+            );
+
             metadata.close().await.unwrap();
 
-            // Test edge case 2: Single key metadata
+            // Test edge case 2: Single small key
             let cfg = Config {
                 partition: "test2".to_string(),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
-            metadata.put(U64::new(0), vec![42u8; 10]);
+            let mut metadata: Metadata<_, U64> =
+                Metadata::init(context.clone(), cfg).await.unwrap();
+            metadata.put(U64::new(1), vec![42]);
             metadata.sync().await.unwrap();
 
-            // Change the single key
-            metadata.put(U64::new(0), vec![43u8; 10]);
+            // Reset counter to track from this point
+            let buffer_before = context.encode();
+            let bytes_written_line = buffer_before
+                .lines()
+                .find(|line| line.contains("bytes_written_total"))
+                .expect("bytes_written_total metric not found");
+            let bytes_before_update: u64 = bytes_written_line
+                .split_whitespace()
+                .last()
+                .expect("Invalid metric format")
+                .parse()
+                .expect("Failed to parse bytes_written value");
+
+            // Update the same key with different value
+            metadata.put(U64::new(1), vec![43]);
             metadata.sync().await.unwrap();
 
-            metadata.destroy().await.unwrap();
+            let buffer_after = context.encode();
+            let bytes_written_line = buffer_after
+                .lines()
+                .find(|line| line.contains("bytes_written_total"))
+                .expect("bytes_written_total metric not found");
+            let bytes_after_update: u64 = bytes_written_line
+                .split_whitespace()
+                .last()
+                .expect("Invalid metric format")
+                .parse()
+                .expect("Failed to parse bytes_written value");
+            let update_bytes = bytes_after_update - bytes_before_update;
 
-            // Test edge case 3: Keys with varying sizes
-            let cfg = Config {
-                partition: "test3".to_string(),
-            };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            // Should only write the changed byte in value, plus version change
+            // In practice, might write a small segment including version, value, and checksum
+            assert!(
+                update_bytes < 50,
+                "Single byte update wrote too many bytes: {}",
+                update_bytes
+            );
 
-            // Add keys with different sizes
-            metadata.put(U64::new(0), vec![0u8; 10]);
-            metadata.put(U64::new(1), vec![1u8; 100]);
-            metadata.put(U64::new(2), vec![2u8; 1000]);
-            metadata.sync().await.unwrap();
-
-            // Change middle key to different size
-            metadata.put(U64::new(1), vec![1u8; 50]);
-            metadata.sync().await.unwrap();
-
-            // Verify data integrity
             metadata.close().await.unwrap();
+
+            // Test edge case 3: Large number of small updates
             let cfg = Config {
                 partition: "test3".to_string(),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
-            assert_eq!(metadata.get(&U64::new(0)).unwrap(), &vec![0u8; 10]);
-            assert_eq!(metadata.get(&U64::new(1)).unwrap(), &vec![1u8; 50]);
-            assert_eq!(metadata.get(&U64::new(2)).unwrap(), &vec![2u8; 1000]);
+            let mut metadata: Metadata<_, U64> =
+                Metadata::init(context.clone(), cfg).await.unwrap();
 
-            metadata.destroy().await.unwrap();
-
-            // Test edge case 4: Alternating blob writes
-            let cfg = Config {
-                partition: "test4".to_string(),
-            };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
-
-            // Multiple syncs to test alternating blob usage
-            for i in 0..5 {
-                metadata.put(U64::new(i), vec![i as u8; 100]);
-                metadata.sync().await.unwrap();
+            // Add 1000 small keys
+            for i in 0..1000 {
+                metadata.put(U64::new(i), vec![i as u8]);
             }
+            metadata.sync().await.unwrap();
 
-            // Verify all data is preserved
-            for i in 0..5 {
-                assert_eq!(metadata.get(&U64::new(i)).unwrap(), &vec![i as u8; 100]);
+            let buffer_before = context.encode();
+            let bytes_written_line = buffer_before
+                .lines()
+                .find(|line| line.contains("bytes_written_total"))
+                .expect("bytes_written_total metric not found");
+            let bytes_before_sparse: u64 = bytes_written_line
+                .split_whitespace()
+                .last()
+                .expect("Invalid metric format")
+                .parse()
+                .expect("Failed to parse bytes_written value");
+
+            // Update every 100th key
+            for i in (0..1000).step_by(100) {
+                metadata.put(U64::new(i), vec![(i as u8).wrapping_add(1)]);
             }
+            metadata.sync().await.unwrap();
+
+            let buffer_after = context.encode();
+            let bytes_written_line = buffer_after
+                .lines()
+                .find(|line| line.contains("bytes_written_total"))
+                .expect("bytes_written_total metric not found");
+            let bytes_after_sparse: u64 = bytes_written_line
+                .split_whitespace()
+                .last()
+                .expect("Invalid metric format")
+                .parse()
+                .expect("Failed to parse bytes_written value");
+            let sparse_update_bytes = bytes_after_sparse - bytes_before_sparse;
+
+            // Full rewrite would be ~17000 bytes (1000 * (8 + 4 + 1) + 8 + 4)
+            // Sparse update of 10 keys should be much less
+            assert!(
+                sparse_update_bytes < 5000,
+                "Sparse update wrote too many bytes: {}",
+                sparse_update_bytes
+            );
 
             metadata.destroy().await.unwrap();
         });

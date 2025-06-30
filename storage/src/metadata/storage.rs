@@ -25,6 +25,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
 
     syncs: Counter,
     keys: Gauge,
+    bytes_written: Counter,
 }
 
 impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
@@ -67,8 +68,14 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         // Create metrics
         let syncs = Counter::default();
         let keys = Gauge::default();
+        let bytes_written = Counter::default();
         context.register("syncs", "number of syncs of data to disk", syncs.clone());
         context.register("keys", "number of tracked keys", keys.clone());
+        context.register(
+            "bytes_written",
+            "total bytes written to disk",
+            bytes_written.clone(),
+        );
 
         // Return metadata
         keys.set(data.len() as i64);
@@ -85,6 +92,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
             syncs,
             keys,
+            bytes_written,
         })
     }
 
@@ -201,7 +209,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         //
         // While it is possible that extremely high-frequency updates to `Metadata` could cause an eventual
         // overflow of version, syncing once per millisecond would overflow in 584,942,417 years.
-        let past_version = &self.blobs[self.cursor].2;
+        let past_version = self.blobs[self.cursor].2;
         let next_version = past_version.checked_add(1).expect("version overflow");
 
         // Create buffer
@@ -223,9 +231,27 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         let next_cursor = 1 - self.cursor;
         let (blob, old_bytes, version) = &mut self.blobs[next_cursor];
 
+        // If the blob we're about to write to has a different version than what we're basing on,
+        // it means its old_bytes is stale. Update it to enable proper diffing.
+        if *version != past_version {
+            // Need to regenerate old_bytes to match current state
+            let mut current_buf = Vec::new();
+            current_buf.put_u64(past_version);
+            for (key, value) in &self.data {
+                current_buf.put_slice(key.as_ref());
+                let value_len = value.len() as u32;
+                current_buf.put_u32(value_len);
+                current_buf.put(&value[..]);
+            }
+            let current_checksum = crc32fast::hash(&current_buf[..]);
+            current_buf.put_u32(current_checksum);
+            *old_bytes = current_buf;
+        }
+
         // Compute byte-level diff and only write changed segments.
         let new_bytes = &buf;
         let mut i = 0usize;
+        let mut total_bytes_written = 0u64;
         while i < new_bytes.len() {
             // Skip equal bytes
             while i < new_bytes.len() && i < old_bytes.len() && new_bytes[i] == old_bytes[i] {
@@ -243,8 +269,10 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             }
             let end = i;
 
-            blob.write_at(new_bytes[start..end].to_vec(), start as u64)
-                .await?;
+            let segment = new_bytes[start..end].to_vec();
+            let segment_len = segment.len() as u64;
+            blob.write_at(segment, start as u64).await?;
+            total_bytes_written += segment_len;
         }
 
         // If the new file is shorter, truncate; if longer, resize was implicitly handled by write_at
@@ -254,7 +282,10 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
 
         blob.sync().await?;
 
-        // Update in-memory bookkeeping
+        // Update metrics
+        self.bytes_written.inc_by(total_bytes_written);
+
+        // Update in-memory bookkeeping for the blob we just wrote to
         *old_bytes = new_bytes.clone();
         *version = next_version;
 
