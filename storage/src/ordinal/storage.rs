@@ -1,7 +1,10 @@
 use super::{Config, Error};
 use crate::rmap::RMap;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{
+    derive::{Encode, Read},
+    Encode as _, FixedSize, Read as _, ReadExt, Write as CodecWrite,
+};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
@@ -15,6 +18,32 @@ use std::{
 };
 use tracing::{debug, warn};
 
+const PARITY_BIT: u32 = 1 << 31;
+const CRC_MASK: u32 = 0x7FFF_FFFF;
+const HEADER_SIZE: u64 = 16;
+
+/// Header stored at the beginning of each blob.
+#[derive(Debug, Clone, Copy, Encode, Read)]
+#[repr(C)]
+struct Header {
+    committed_parity: u8,
+    #[codec(with = commonware_codec::unsafe_as_array)]
+    _padding: [u8; 15],
+}
+
+impl FixedSize for Header {
+    const SIZE: usize = 16;
+}
+
+impl Default for Header {
+    fn default() -> Self {
+        Self {
+            committed_parity: 0,
+            _padding: [0; 15],
+        }
+    }
+}
+
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
 struct Record<V: Array> {
@@ -23,13 +52,19 @@ struct Record<V: Array> {
 }
 
 impl<V: Array> Record<V> {
-    fn new(value: V) -> Self {
-        let crc = crc32fast::hash(value.as_ref());
+    fn new(value: V, parity: u8) -> Self {
+        let mut crc = crc32fast::hash(value.as_ref());
+        crc &= CRC_MASK;
+        crc |= (parity as u32) << 31;
         Self { value, crc }
     }
 
-    fn is_valid(&self) -> bool {
-        self.crc == crc32fast::hash(self.value.as_ref())
+    fn is_valid(&self, committed_parity: u8) -> bool {
+        let record_parity = (self.crc >> 31) as u8;
+        if record_parity != committed_parity {
+            return false;
+        }
+        (self.crc & CRC_MASK) == (crc32fast::hash(self.value.as_ref()) & CRC_MASK)
     }
 }
 
@@ -64,6 +99,9 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
     // Index blobs for storing key records
     blobs: BTreeMap<u64, Write<E::Blob>>,
 
+    // Committed parity for each blob
+    parities: BTreeMap<u64, u8>,
+
     // RMap for interval tracking
     intervals: RMap,
 
@@ -83,6 +121,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         // Scan for all blobs in the partition
         let mut blobs = BTreeMap::new();
+        let mut parities = BTreeMap::new();
         let stored_blobs = match context.scan(&config.partition).await {
             Ok(blobs) => blobs,
             Err(commonware_runtime::Error::PartitionMissing(_)) => Vec::new(),
@@ -97,16 +136,32 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
                 Err(nm) => Err(Error::InvalidBlobName(hex(&nm)))?,
             };
 
-            // Check if blob size is aligned to record size
+            // Read header or create one if blob is new/too small
+            let header = if len >= HEADER_SIZE {
+                let mut header_buf = vec![0u8; Header::SIZE];
+                let header_buf = blob.read_at(header_buf, 0).await?;
+                Header::read(&mut header_buf.as_slice())?
+            } else {
+                let header = Header::default();
+                blob.write_at(header.encode(), 0).await?;
+                len = HEADER_SIZE;
+                blob.resize(len).await?;
+                blob.sync().await?;
+                header
+            };
+            parities.insert(index, header.committed_parity);
+
+            // Check if blob data size is aligned to record size
+            let data_len = len - HEADER_SIZE;
             let record_size = Record::<V>::SIZE as u64;
-            if len % record_size != 0 {
+            if data_len % record_size != 0 {
                 warn!(
                     blob = index,
                     invalid_size = len,
                     record_size,
                     "blob size is not a multiple of record size, truncating"
                 );
-                len -= len % record_size;
+                len = HEADER_SIZE + data_len - (data_len % record_size);
                 blob.resize(len).await?;
                 blob.sync().await?;
             }
@@ -125,15 +180,18 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         let mut items = 0;
         let mut intervals = RMap::new();
         for (section, blob) in &blobs {
+            let committed_parity = *parities.get(section).unwrap();
+
             // Initialize read buffer
             let size = blob.size().await;
             let mut replay_blob = ReadBuffer::new(blob.clone(), size, config.replay_buffer);
 
             // Iterate over all records in the blob
-            let mut offset = 0;
+            let mut offset = HEADER_SIZE;
             while offset < size {
                 // Calculate index for this record
-                let index = section * config.items_per_blob + (offset / Record::<V>::SIZE as u64);
+                let index = section * config.items_per_blob
+                    + ((offset - HEADER_SIZE) / Record::<V>::SIZE as u64);
 
                 // Attempt to read record at offset
                 replay_blob.seek_to(offset)?;
@@ -145,7 +203,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
                 offset += Record::<V>::SIZE as u64;
 
                 // If record is valid, add to intervals
-                if record.is_valid() {
+                if record.is_valid(committed_parity) {
                     items += 1;
                     intervals.insert(index);
                     continue;
@@ -177,6 +235,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
             context,
             config,
             blobs,
+            parities,
             intervals,
             pending: BTreeMap::new(),
             puts,
@@ -220,16 +279,21 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         // Read from disk
         let section = index / self.config.items_per_blob;
         let blob = self.blobs.get(&section).unwrap();
-        let offset = (index % self.config.items_per_blob) * Record::<V>::SIZE as u64;
+        let committed_parity = *self.parities.get(&section).unwrap();
+        let offset = HEADER_SIZE + (index % self.config.items_per_blob) * Record::<V>::SIZE as u64;
         let read_buf = vec![0u8; Record::<V>::SIZE];
         let read_buf = blob.read_at(read_buf, offset).await?;
         let record = Record::<V>::read(&mut read_buf.as_ref())?;
 
         // If record is valid, return it
-        if record.is_valid() {
+        if record.is_valid(committed_parity) {
             Ok(Some(record.value))
         } else {
-            Err(Error::InvalidRecord(index))
+            debug!(
+                index,
+                "record failed validation, likely from an incomplete sync"
+            );
+            Ok(None)
         }
     }
 
@@ -290,38 +354,84 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
 
         // Take the pending writes, which are already grouped by section.
         let pending = take(&mut self.pending);
+        if pending.is_empty() {
+            return Ok(());
+        }
 
-        // Ensure all necessary blobs are created.
+        // --- Phase 1: Write records with new parity bit ---
+
+        // Ensure all necessary blobs are created and get their current parity.
         let modified: Vec<u64> = pending.keys().copied().collect();
         for &section in &modified {
             if let Entry::Vacant(entry) = self.blobs.entry(section) {
-                let (new, len) = self
+                let (blob, len) = self
                     .context
                     .open(&self.config.partition, &section.to_be_bytes())
                     .await?;
-                entry.insert(Write::new(new, len, self.config.write_buffer));
-                debug!(section, "created blob");
+
+                let (header, final_len) = if len >= HEADER_SIZE {
+                    let mut header_buf = vec![0u8; Header::SIZE];
+                    let header_buf = blob.read_at(header_buf, 0).await?;
+                    (Header::read(&mut header_buf.as_slice())?, len)
+                } else {
+                    let header = Header::default();
+                    blob.write_at(header.encode(), 0).await?;
+                    (header, HEADER_SIZE)
+                };
+
+                entry.insert(Write::new(blob, final_len, self.config.write_buffer));
+                self.parities.insert(section, header.committed_parity);
+                debug!(section, "created blob for sync");
             }
         }
 
-        // Write all pending entries to disk.
+        // Write all pending entries to disk with the next parity bit.
         let mut futures = Vec::new();
-        for (section, writes) in pending {
-            let blob = self.blobs.get(&section).unwrap();
+        for (section, writes) in &pending {
+            let blob = self.blobs.get(section).unwrap();
+            let new_parity = self.parities.get(section).unwrap() ^ 1;
             for (index, value) in writes {
-                let offset = (index % self.config.items_per_blob) * Record::<V>::SIZE as u64;
-                let record = Record::new(value);
+                let offset =
+                    HEADER_SIZE + (index % self.config.items_per_blob) * Record::<V>::SIZE as u64;
+                let record = Record::new(value.clone(), new_parity);
                 futures.push(blob.write_at(record.encode(), offset));
             }
         }
         try_join_all(futures).await?;
 
-        // Sync the modified blobs.
+        // Sync the modified blobs to persist the data records.
         let mut futures = Vec::with_capacity(modified.len());
         for &section in &modified {
             futures.push(self.blobs.get(&section).unwrap().sync());
         }
         try_join_all(futures).await?;
+
+        // --- Phase 2: Flip parity bit in header ---
+
+        // Write the new headers to disk.
+        let mut futures = Vec::new();
+        for &section in &modified {
+            let blob = self.blobs.get(&section).unwrap();
+            let new_parity = self.parities.get(&section).unwrap() ^ 1;
+            let header = Header {
+                committed_parity: new_parity,
+                ..Default::default()
+            };
+            futures.push(blob.write_at(header.encode(), 0));
+        }
+        try_join_all(futures).await?;
+
+        // Sync the modified blobs again to persist the headers.
+        let mut futures = Vec::with_capacity(modified.len());
+        for &section in &modified {
+            futures.push(self.blobs.get(&section).unwrap().sync());
+        }
+        try_join_all(futures).await?;
+
+        // Update in-memory parity state now that the commit is complete.
+        for &section in &modified {
+            self.parities.entry(section).and_modify(|p| *p ^= 1);
+        }
 
         Ok(())
     }
