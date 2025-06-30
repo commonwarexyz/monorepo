@@ -22,6 +22,26 @@ struct Wrapper<E: Clock + Storage + Metrics> {
     data: Vec<u8>,
 }
 
+impl<E: Clock + Storage + Metrics> Wrapper<E> {
+    /// Create a new wrapper with the given data.
+    fn new(blob: E::Blob, version: u64, data: Vec<u8>) -> Self {
+        Self {
+            blob,
+            version,
+            data,
+        }
+    }
+
+    /// Create a new empty wrapper.
+    fn empty(blob: E::Blob) -> Self {
+        Self {
+            blob,
+            version: 0,
+            data: Vec::new(),
+        }
+    }
+}
+
 /// Implementation of [Metadata] storage.
 pub struct Metadata<E: Clock + Storage + Metrics, K: Array> {
     context: E,
@@ -92,14 +112,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         // Get blob length
         if len == 0 {
             // Empty blob
-            return Ok((
-                BTreeMap::new(),
-                Wrapper {
-                    blob,
-                    version: 0,
-                    data: Vec::new(),
-                },
-            ));
+            return Ok((BTreeMap::new(), Wrapper::empty(blob)));
         }
 
         // Read blob
@@ -118,14 +131,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             );
             blob.resize(0).await?;
             blob.sync().await?;
-            return Ok((
-                BTreeMap::new(),
-                Wrapper {
-                    blob,
-                    version: 0,
-                    data: Vec::new(),
-                },
-            ));
+            return Ok((BTreeMap::new(), Wrapper::empty(blob)));
         }
 
         // Extract checksum
@@ -143,14 +149,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
             );
             blob.resize(0).await?;
             blob.sync().await?;
-            return Ok((
-                BTreeMap::new(),
-                Wrapper {
-                    blob,
-                    version: 0,
-                    data: Vec::new(),
-                },
-            ));
+            return Ok((BTreeMap::new(), Wrapper::empty(blob)));
         }
 
         // Get parent
@@ -182,14 +181,7 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         }
 
         // Return info
-        Ok((
-            data,
-            Wrapper {
-                blob,
-                version,
-                data: buf.into(),
-            },
-        ))
+        Ok((data, Wrapper::new(blob, version, buf.into())))
     }
 
     /// Get a value from [Metadata] (if it exists).
