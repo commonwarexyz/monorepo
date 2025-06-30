@@ -8,7 +8,11 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::BTreeMap;
 use tracing::{debug, warn};
 
+/// The names of the two blobs that store metadata.
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
+
+/// The size of the block to fast-forward over.
+const BLOCK_SIZE: usize = 8;
 
 /// One of the two wrappers that store metadata.
 struct Wrapper<E: Clock + Storage + Metrics> {
@@ -250,12 +254,27 @@ impl<E: Clock + Storage + Metrics, K: Array> Metadata<E, K> {
         let mut skipped = 0;
         let mut writes = Vec::new();
         while i < next_data.len() {
+            // Fast-forward over identical blocks
+            while i + BLOCK_SIZE <= next_data.len()
+                && i + BLOCK_SIZE <= target.data.len()
+                && next_data[i..i + BLOCK_SIZE] == target.data[i..i + BLOCK_SIZE]
+            {
+                i += BLOCK_SIZE;
+                skipped += BLOCK_SIZE as u64;
+            }
+
             // Skip equal bytes
             while i < next_data.len() && i < target.data.len() && next_data[i] == target.data[i] {
                 i += 1;
                 skipped += 1;
             }
             if i >= next_data.len() {
+                break;
+            }
+
+            // If we have reached the end of the target, just write the new data
+            if i > target.data.len() {
+                writes.push(target.blob.write_at(next_data[i..].to_vec(), i as u64));
                 break;
             }
 
