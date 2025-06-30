@@ -72,6 +72,8 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
     // Metrics
     puts: Counter,
     gets: Counter,
+    has: Counter,
+    syncs: Counter,
     pruned: Counter,
 }
 
@@ -161,10 +163,14 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         // Initialize metrics
         let puts = Counter::default();
         let gets = Counter::default();
+        let has = Counter::default();
+        let syncs = Counter::default();
         let pruned = Counter::default();
-        context.register("puts", "Number of puts performed", puts.clone());
-        context.register("gets", "Number of gets performed", gets.clone());
-        context.register("pruned", "Number of blobs pruned", pruned.clone());
+        context.register("puts", "Number of put calls", puts.clone());
+        context.register("gets", "Number of get calls", gets.clone());
+        context.register("has", "Number of has calls", has.clone());
+        context.register("syncs", "Number of sync calls", syncs.clone());
+        context.register("pruned", "Number of pruned blobs", pruned.clone());
 
         Ok(Self {
             context,
@@ -174,6 +180,8 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
             pending: BTreeMap::new(),
             puts,
             gets,
+            has,
+            syncs,
             pruned,
         })
     }
@@ -219,6 +227,8 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
 
     /// Check if an index exists.
     pub fn has(&self, index: u64) -> bool {
+        self.has.inc();
+
         self.intervals.get(&index).is_some()
     }
 
@@ -254,10 +264,10 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
                 let end_index = (section + 1) * self.config.items_per_blob - 1;
                 self.intervals.remove(start_index, end_index);
                 debug!(section, start_index, end_index, "pruned blob");
-
-                // Update metrics
-                self.pruned.inc();
             }
+
+            // Update metrics
+            self.pruned.inc();
         }
 
         // Clean pending entries that fall into pruned sections.
@@ -269,6 +279,8 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
 
     /// Write all pending entries and sync all modified [Blob]s.
     pub async fn sync(&mut self) -> Result<(), Error> {
+        self.syncs.inc();
+
         // Write all pending entries to disk
         let mut modified = BTreeSet::new();
         for (index, value) in take(&mut self.pending) {

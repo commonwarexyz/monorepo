@@ -180,13 +180,16 @@ mod tests {
                 .expect("Data not found");
             assert_eq!(retrieved, value);
 
+            // Force a sync
+            store.sync().await.expect("Failed to sync data");
+
             // Check metrics
             let buffer = context.encode();
             assert!(buffer.contains("gets_total 1"), "{}", buffer);
             assert!(buffer.contains("puts_total 1"), "{}", buffer);
-
-            // Force a sync
-            store.sync().await.expect("Failed to sync data");
+            assert!(buffer.contains("has_total 2"), "{}", buffer);
+            assert!(buffer.contains("syncs_total 1"), "{}", buffer);
+            assert!(buffer.contains("pruned_total 0"), "{}", buffer);
 
             // Get the value back (after sync)
             let retrieved = store
