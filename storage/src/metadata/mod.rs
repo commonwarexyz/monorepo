@@ -32,6 +32,11 @@
 //! not be guaranteed to recover the latest complete state from disk on restart as half of a blob
 //! could be old data and half new data).
 //!
+//! # Writing Differences
+//!
+//! When an update is committed, only updated bytes are actually written to disk. This makes it efficient
+//! to maintain large instances of `Metadata` without constantly rewriting the entire blob.
+//!
 //! # Example
 //!
 //! ```rust
@@ -533,58 +538,26 @@ mod tests {
                 metadata.put(U64::new(i), vec![i as u8; 100]);
             }
 
-            // First sync - should write everything
+            // First sync - should write everything to the first blob
             metadata.sync().await.unwrap();
-
-            // Get initial bytes written
             let buffer = context.encode();
-            assert!(
-                buffer.contains("bytes_written_total 11212"),
-                "Expected bytes_written_total to be 11212, but got: {}",
-                buffer
-            );
+            assert!(buffer.contains("skipped_total 0"), "{}", buffer);
 
             // Modify just one key
             metadata.put(U64::new(50), vec![0xff; 100]);
 
-            // Sync again - should only write the changed portion
+            // Sync again - should write everything to the second blob
             metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("skipped_total 0"), "{}", buffer);
 
-            // Get bytes written after second sync
-            let buffer_after = context.encode();
+            // Modify another key
+            metadata.put(U64::new(51), vec![0xff; 100]);
 
-            // Extract bytes_written value from the buffer
-            // The format is "bytes_written_total <value>"
-            let bytes_written_line = buffer_after
-                .lines()
-                .find(|line| line.contains("bytes_written_total"))
-                .expect("bytes_written_total metric not found");
-            let bytes_after_update: u64 = bytes_written_line
-                .split_whitespace()
-                .last()
-                .expect("Invalid metric format")
-                .parse()
-                .expect("Failed to parse bytes_written value");
-
-            // Calculate the delta
-            let bytes_written_in_update = bytes_after_update - 11212;
-
-            // Expected bytes for update:
-            // - Version changed (8 bytes)
-            // - One value changed (100 bytes)
-            // - Checksum changed (4 bytes)
-            // Plus some overhead for key and length, but should be much less than full rewrite
-            // Full rewrite would be 11212 bytes, but we should write far less
-            assert!(
-                bytes_written_in_update < 1000,
-                "Expected less than 1000 bytes written for single key update, but wrote {}",
-                bytes_written_in_update
-            );
-            assert!(
-                bytes_written_in_update > 100,
-                "Expected at least 100 bytes written for value update, but only wrote {}",
-                bytes_written_in_update
-            );
+            // Sync again - should write only diff from the first blob
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("skipped_total 11007"), "{}", buffer);
 
             // Clean up
             metadata.destroy().await.unwrap();
