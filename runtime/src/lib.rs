@@ -1557,7 +1557,7 @@ mod tests {
                 content_length: usize,
             ) -> Result<String, Error> {
                 let read = stream.recv(vec![0; content_length]).await?;
-                String::from_utf8(read.as_ref().to_vec()).map_err(|_| Error::ReadFailed)
+                String::from_utf8(read.into()).map_err(|_| Error::ReadFailed)
             }
 
             // Simulate a client connecting to the server
