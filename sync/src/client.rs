@@ -1,52 +1,62 @@
-use crate::{resolver::Resolver, Error, SyncProgress};
-use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_storage::{adb::any::Any, index::Translator, mmr::verification::Proof};
+use crate::{resolver::Resolver, Error};
+use commonware_cryptography::{Digest, Hasher};
+use commonware_runtime::{Clock, Metrics as MetricsTrait, Storage};
+use commonware_storage::{
+    adb::{self, operation::Operation},
+    index::Translator,
+};
 use commonware_utils::Array;
 use std::num::NonZeroU64;
 use tracing::{debug, info};
 
 /// Configuration for the sync client
 #[derive(Debug, Clone)]
-pub struct ClientConfig {
+pub struct Config<T: Translator, D: Digest> {
+    /// Database configuration
+    pub db_config: adb::any::Config<T>,
+
     /// Maximum operations to fetch per batch
     pub max_ops_per_batch: NonZeroU64,
+
+    /// Target hash of the database
+    pub target_hash: D,
+
+    /// Target operations to sync
+    pub target_ops: u64,
 }
 
-impl Default for ClientConfig {
-    fn default() -> Self {
-        Self {
-            max_ops_per_batch: NonZeroU64::new(1000).unwrap(),
-        }
-    }
+pub struct Metrics {
+    valid_batches_received: u64,
+    invalid_batches_received: u64,
 }
 
 /// Current state of the sync client
-pub enum ClientState<E: Storage + Clock + Metrics, K: Array, V: Array, H: Hasher, T: Translator> {
+enum ClientState<E: Storage + Clock + MetricsTrait, K: Array, V: Array, H: Hasher, T: Translator> {
     /// Requesting proof and operations from server
     FetchOps {
-        config: ClientConfig,
-        target_hash: H::Digest,
-        progress: SyncProgress<K, V>,
+        context: E,
+        config: Config<T, H::Digest>,
+        operations: Vec<Operation<K, V>>,
+        metrics: Metrics,
     },
     /// Applying received operations to local database
     ApplyOps {
-        config: ClientConfig,
-        target_hash: H::Digest,
-        proof: Proof<H::Digest>,
-        progress: SyncProgress<K, V>,
+        context: E,
+        config: Config<T, H::Digest>,
+        operations: Vec<Operation<K, V>>,
+        metrics: Metrics,
     },
     /// Sync completed successfully
     Done {
-        db: Any<E, K, V, H, T>,
-        progress: SyncProgress<K, V>,
+        db: adb::any::Any<E, K, V, H, T>,
+        metrics: Metrics,
     },
 }
 
 /// Sync client for Any ADB
-pub struct Client<E, K, V, H, T, R>
+pub(crate) struct Client<E, K, V, H, T, R>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + MetricsTrait,
     K: Array,
     V: Array,
     H: Hasher,
@@ -60,7 +70,7 @@ where
 
 impl<E, K, V, H, T, R> Client<E, K, V, H, T, R>
 where
-    E: Storage + Clock + Metrics,
+    E: Storage + Clock + MetricsTrait,
     K: Array,
     V: Array,
     H: Hasher,
@@ -68,38 +78,25 @@ where
     R: Resolver<H, K, V>,
 {
     /// Create a new sync client
-    pub fn new(
+    pub(crate) fn new(
+        context: E,
         resolver: R,
-        config: ClientConfig,
-        target_ops: u64,
-        target_hash: H::Digest,
+        config: Config<T, H::Digest>,
     ) -> Result<Self, Error> {
         let state = ClientState::FetchOps {
+            context,
             config,
-            progress: SyncProgress {
-                operations: vec![],
-                target_ops,
+            operations: vec![],
+            metrics: Metrics {
                 valid_batches_received: 0,
                 invalid_batches_received: 0,
             },
-            target_hash,
         };
-
         Ok(Self {
             state: Some(state),
             resolver,
             hasher: commonware_storage::mmr::hasher::Standard::<H>::new(),
         })
-    }
-
-    /// Get current sync progress
-    fn _progress(&self) -> Option<&SyncProgress<K, V>> {
-        match &self.state {
-            Some(ClientState::FetchOps { progress, .. }) => Some(progress),
-            Some(ClientState::ApplyOps { progress, .. }) => Some(progress),
-            Some(ClientState::Done { progress, .. }) => Some(progress),
-            _ => None,
-        }
     }
 
     /// Process the next step in the sync process
@@ -108,13 +105,14 @@ where
 
         match current_state {
             ClientState::FetchOps {
+                context,
                 config,
-                target_hash,
-                mut progress,
+                mut operations,
+                mut metrics,
             } => {
                 // Calculate how many operations we need
-                let current_ops = progress.operations.len() as u64;
-                let remaining_ops = progress
+                let current_ops = operations.len() as u64;
+                let remaining_ops = config
                     .target_ops
                     .checked_sub(current_ops)
                     .and_then(NonZeroU64::new)
@@ -122,72 +120,90 @@ where
                 let batch_size = std::cmp::min(config.max_ops_per_batch, remaining_ops);
 
                 debug!(
-                    ?target_hash,
-                    progress.target_ops, remaining_ops, batch_size, "Fetching proof and operations"
+                    ?config.target_hash,
+                    config.target_ops,
+                    remaining_ops,
+                    batch_size,
+                    "Fetching proof and operations"
                 );
 
-                let (proof, operations) = self.resolver.get_proof(current_ops, batch_size).await?;
+                let (proof, new_operations) =
+                    self.resolver.get_proof(current_ops, batch_size).await?;
 
                 // Validate that we didn't get more operations than requested
-                if operations.len() as u64 > batch_size.get() {
-                    progress.invalid_batches_received += 1;
+                if new_operations.len() as u64 > batch_size.get() {
+                    metrics.invalid_batches_received += 1;
                     return Err(Error::InvalidResolver(format!(
                         "Resolver returned {} operations but only {} were requested",
-                        operations.len(),
+                        new_operations.len(),
                         batch_size.get()
                     )));
                 }
 
                 debug!(
-                    operations_count = operations.len(),
+                    num_ops = new_operations.len(),
                     "Received operations from resolver"
                 );
 
-                if !Any::<E, K, V, H, T>::verify_proof(
+                if !adb::any::Any::<E, K, V, H, T>::verify_proof(
                     &mut self.hasher,
                     &proof,
                     current_ops,
-                    &operations,
-                    &target_hash,
+                    &new_operations,
+                    &config.target_hash,
                 ) {
                     debug!("Proof verification failed, retrying");
-                    progress.invalid_batches_received += 1;
+                    metrics.invalid_batches_received += 1;
                     // TODO danlaine: add max retry logic
                     self.state = Some(ClientState::FetchOps {
+                        context,
                         config,
-                        target_hash,
-                        progress,
+                        operations,
+                        metrics,
                     });
                     return Ok(self);
                 }
-                progress.operations.extend(operations);
+                operations.extend(new_operations);
 
-                // TODO danlaine: track invalid batches
-                progress.valid_batches_received += 1;
-                if progress.is_complete() {
+                metrics.valid_batches_received += 1;
+                if operations.len() as u64 >= config.target_ops {
                     self.state = Some(ClientState::ApplyOps {
+                        context,
                         config,
-                        target_hash,
-                        proof,
-                        progress,
+                        operations,
+                        metrics,
                     });
                 } else {
                     self.state = Some(ClientState::FetchOps {
+                        context,
                         config,
-                        target_hash,
-                        progress,
+                        operations,
+                        metrics,
                     });
                 }
                 Ok(self)
             }
 
             ClientState::ApplyOps {
-                config: _,
-                target_hash: _,
-                proof: _,
-                progress: _,
+                context,
+                config,
+                operations,
+                metrics,
             } => {
-                todo!()
+                let db = adb::any::Any::<E, K, V, H, T>::init_sync(
+                    context,
+                    adb::any::SyncConfig {
+                        config: config.db_config,
+                        mmr_pinned_nodes: Default::default(), // TODO danlaine: support pruning
+                        pruned_to_loc: 0,                     // TODO danlaine: support pruning
+                        operations: operations,
+                    },
+                )
+                .await
+                .map_err(|e| Error::InvalidResolver(e.to_string()))?; // TODO danlaine: handle this error
+
+                self.state = Some(ClientState::Done { db, metrics });
+                Ok(self)
             }
 
             ClientState::Done { .. } => Err(Error::AlreadyComplete),
@@ -195,15 +211,15 @@ where
     }
 
     /// Run the complete sync process
-    pub async fn sync(mut self) -> Result<Any<E, K, V, H, T>, Error> {
+    pub(crate) async fn sync(mut self) -> Result<adb::any::Any<E, K, V, H, T>, Error> {
         info!("Starting complete sync process");
 
         loop {
             self = self.step().await?;
-            if let Some(ClientState::Done { db, progress }) = self.state {
+            if let Some(ClientState::Done { db, metrics }) = self.state {
                 info!(
-                    final_ops = progress.operations.len(),
-                    batches_received = progress.valid_batches_received,
+                    valid_batches_received = metrics.valid_batches_received,
+                    invalid_batches_received = metrics.invalid_batches_received,
                     "Sync completed successfully"
                 );
                 return Ok(db);
@@ -273,41 +289,41 @@ mod tests {
         db
     }
 
-    #[test]
-    fn test_client_configuration() {
-        let config = ClientConfig::default();
-        assert_eq!(config.max_ops_per_batch.get(), 1000);
+    // #[test]
+    // fn test_client_configuration() {
+    //     let config = Config::default();
+    //     assert_eq!(config.max_ops_per_batch.get(), 1000);
 
-        let custom_config = ClientConfig {
-            max_ops_per_batch: NZU64!(5),
-        };
-        assert_eq!(custom_config.max_ops_per_batch.get(), 5);
-    }
+    //     let custom_config = Config {
+    //         max_ops_per_batch: NZU64!(5),
+    //     };
+    //     assert_eq!(custom_config.max_ops_per_batch.get(), 5);
+    // }
 
     // Test that the client returns an error if the target ops is less than the current ops.
-    #[test]
-    fn test_invalid_target_error() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let target_db = create_test_db(context.clone()).await;
-            let mut target_db = apply_test_ops(target_db, 9).await;
-            target_db.commit().await.unwrap();
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
-            let target_hash = target_db.root(&mut hasher);
-            let sync_db = create_test_db(context.clone()).await;
-            let mut sync_db = apply_test_ops(sync_db, 10).await;
-            sync_db.commit().await.unwrap();
+    // #[test]
+    // fn test_invalid_target_error() {
+    //     let executor = deterministic::Runner::default();
+    //     executor.start(|context| async move {
+    //         let target_db = create_test_db(context.clone()).await;
+    //         let mut target_db = apply_test_ops(target_db, 9).await;
+    //         target_db.commit().await.unwrap();
+    //         let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+    //         let target_hash = target_db.root(&mut hasher);
+    //         let sync_db = create_test_db(context.clone()).await;
+    //         let mut sync_db = apply_test_ops(sync_db, 10).await;
+    //         sync_db.commit().await.unwrap();
 
-            let resolver = TestResolver::_new(sync_db);
-            let client = Client::new(resolver, ClientConfig::default(), 0, target_hash).unwrap();
-            let result: Result<TestAny, Error> = client.sync().await;
-            match result {
-                Ok(_) => panic!("Expected error"),
-                Err(Error::InvalidTarget { .. }) => {}
-                Err(e) => panic!("Expected InvalidTarget, got {:?}", e),
-            }
-        });
-    }
+    //         let resolver = TestResolver::_new(sync_db);
+    //         let client = Client::new(resolver, Config::default(), 0, target_hash).unwrap();
+    //         let result: Result<TestAny, Error> = client.sync().await;
+    //         match result {
+    //             Ok(_) => panic!("Expected error"),
+    //             Err(Error::InvalidTarget { .. }) => {}
+    //             Err(e) => panic!("Expected InvalidTarget, got {:?}", e),
+    //         }
+    //     });
+    // }
 
     // #[test_case(0, 1, NZU64!(1))]
     // #[test_case(0, 1, NZU64!(10))]

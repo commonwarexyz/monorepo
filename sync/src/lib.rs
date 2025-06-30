@@ -1,5 +1,5 @@
 use crate::{
-    client::{Client, ClientConfig},
+    client::{Client, Config},
     resolver::Resolver,
 };
 use commonware_cryptography::Hasher;
@@ -13,28 +13,6 @@ use std::fmt;
 
 mod client;
 mod resolver;
-
-/// Progress information for sync operations
-#[derive(Debug, Clone)]
-pub struct SyncProgress<K: Array, V: Array> {
-    pub operations: Vec<Operation<K, V>>,
-    pub target_ops: u64,
-    pub valid_batches_received: u64,
-    pub invalid_batches_received: u64,
-}
-
-impl<K: Array, V: Array> SyncProgress<K, V> {
-    pub fn completion_percentage(&self) -> f64 {
-        if self.target_ops == 0 {
-            return 100.0;
-        }
-        (self.operations.len() as f64 / self.target_ops as f64 * 100.0).min(100.0)
-    }
-
-    pub fn is_complete(&self) -> bool {
-        self.operations.len() as u64 >= self.target_ops
-    }
-}
 
 /// Synchronization errors
 #[derive(Debug, thiserror::Error)]
@@ -73,12 +51,11 @@ pub enum Error {
     ExceededTarget { target: u64, actual: u64 },
 }
 
-/// Sync to the given `target_ops` and `target_hash` using the given `resolver`.
+/// Sync to the given database.
 pub async fn sync<E, K, V, H, T, R>(
+    context: E,
     resolver: R,
-    target_ops: u64,
-    target_hash: H::Digest,
-    config: ClientConfig,
+    config: Config<T, H::Digest>,
 ) -> Result<Any<E, K, V, H, T>, Error>
 where
     E: Storage + Clock + Metrics,
@@ -88,7 +65,5 @@ where
     T: Translator,
     R: Resolver<H, K, V>,
 {
-    Client::new(resolver, config, target_ops, target_hash)?
-        .sync()
-        .await
+    Client::new(context, resolver, config)?.sync().await
 }
