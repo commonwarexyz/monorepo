@@ -168,7 +168,7 @@ mod tests {
     ) -> Mailbox<Key> {
         let public_key = signer.public_key();
         let (engine, mailbox) = Engine::new(
-            context.with_label(&format!("actor_{}", public_key)),
+            context.with_label(&format!("actor_{public_key}")),
             Config {
                 coordinator: coordinator.clone(),
                 consumer,

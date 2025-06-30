@@ -803,7 +803,7 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            let tracked = format!("items_tracked {:?}", num_keys);
+            let tracked = format!("items_tracked {num_keys:?}");
             assert!(buffer.contains(&tracked));
             assert!(buffer.contains("pruned_total 0"));
 
@@ -881,7 +881,7 @@ mod tests {
             let buffer = context.encode();
             let tracked = format!("items_tracked {:?}", num_keys - removed);
             assert!(buffer.contains(&tracked));
-            let pruned = format!("indices_pruned_total {}", removed);
+            let pruned = format!("indices_pruned_total {removed}");
             assert!(buffer.contains(&pruned));
             assert!(buffer.contains("pruned_total 0")); // have not lazily removed keys yet
 

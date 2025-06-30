@@ -290,7 +290,7 @@ pub(crate) mod tests {
         let mut read = vec![0u8; chunk_size].into();
         for i in 0..num_chunks {
             read = blob.read_at(read, (i * chunk_size) as u64).await.unwrap();
-            assert_eq!(read.as_ref(), data, "Chunk {} is incorrect", i);
+            assert_eq!(read.as_ref(), data, "Chunk {i} is incorrect");
         }
     }
 

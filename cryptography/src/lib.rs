@@ -192,6 +192,9 @@ pub trait Hasher: Clone + Send + Sync + 'static {
     ///
     /// This function does not need to be called after `finalize`.
     fn reset(&mut self);
+
+    /// Return result of hashing nothing.
+    fn empty() -> Self::Digest;
 }
 
 #[cfg(test)]

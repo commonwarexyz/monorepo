@@ -39,6 +39,15 @@ impl From<StableBuf> for Bytes {
     }
 }
 
+impl From<StableBuf> for Vec<u8> {
+    fn from(buf: StableBuf) -> Self {
+        match buf {
+            StableBuf::Vec(v) => v,
+            StableBuf::BytesMut(b) => b.to_vec(),
+        }
+    }
+}
+
 impl Index<usize> for StableBuf {
     type Output = u8;
 

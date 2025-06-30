@@ -92,6 +92,10 @@ impl Hasher for Sha256 {
     fn reset(&mut self) {
         self.hasher = ISha256::new();
     }
+
+    fn empty() -> Self::Digest {
+        Self::new().finalize()
+    }
 }
 
 /// Digest of a SHA-256 hashing operation.
@@ -198,6 +202,30 @@ mod tests {
     #[test]
     fn test_sha256_len() {
         assert_eq!(Digest::SIZE, DIGEST_LENGTH);
+    }
+
+    #[test]
+    fn test_hash_empty() {
+        let digest1 = Sha256::empty();
+        let digest2 = Sha256::empty();
+
+        assert_eq!(digest1, digest2);
+    }
+
+    #[test]
+    fn test_sha256_empty() {
+        let empty_digest = Sha256::empty();
+
+        // SHA-256 hash of empty string:
+        // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        let expected_bytes = [
+            0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
+            0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
+            0x78, 0x52, 0xb8, 0x55,
+        ];
+        let expected_digest = Digest::from(expected_bytes);
+
+        assert_eq!(empty_digest, expected_digest);
     }
 
     #[test]

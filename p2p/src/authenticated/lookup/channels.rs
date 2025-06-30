@@ -121,7 +121,7 @@ impl<P: PublicKey> Channels<P> {
     ) -> (Sender<P>, Receiver<P>) {
         let (sender, receiver) = mpsc::channel(backlog);
         if self.receivers.insert(channel, (rate, sender)).is_some() {
-            panic!("duplicate channel registration: {}", channel);
+            panic!("duplicate channel registration: {channel}");
         }
         (
             Sender::new(channel, self.max_size, self.messenger.clone()),

@@ -214,19 +214,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         self.rate_limiter.shrink_to_fit();
     }
 
-    /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
-    pub fn dialable(&self) -> Vec<C> {
-        // Collect peers with known addresses
-        let mut result: Vec<_> = self
-            .peers
-            .iter()
-            .filter(|&(_, r)| r.dialable())
-            .map(|(peer, _)| peer.clone())
-            .collect();
-        result.sort();
-        result
-    }
-
     /// Attempt to reserve a peer for the dialer.
     ///
     /// Returns `Some` on success, `None` otherwise.
@@ -308,6 +295,24 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Returns true if the peer is able to be connected to.
     pub fn allowed(&self, peer: &C) -> bool {
         self.peers.get(peer).is_some_and(|r| r.allowed())
+    }
+
+    /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
+    pub fn dialable(&self) -> Vec<C> {
+        // Collect peers with known addresses
+        let mut result: Vec<_> = self
+            .peers
+            .iter()
+            .filter(|&(_, r)| r.dialable())
+            .map(|(peer, _)| peer.clone())
+            .collect();
+        result.sort();
+        result
+    }
+
+    /// Returns true if the peer is listenable.
+    pub fn listenable(&self, peer: &C) -> bool {
+        self.peers.get(peer).is_some_and(|r| r.listenable())
     }
 
     // --------- Helpers ----------

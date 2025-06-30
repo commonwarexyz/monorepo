@@ -1,12 +1,12 @@
 //! A key-value store optimized for atomically committing a small collection of metadata.
 //!
-//! `Metadata` is a key-value store optimized for tracking a small collection of metadata
+//! [Metadata] is a key-value store optimized for tracking a small collection of metadata
 //! that allows multiple updates to be committed in a single batch. It is commonly used with
 //! a variety of other underlying storage systems to persist application state across restarts.
 //!
 //! # Format
 //!
-//! Data stored in `Metadata` is serialized as a sequence of key-value pairs in either a
+//! Data stored in [Metadata] is serialized as a sequence of key-value pairs in either a
 //! "left" or "right" blob:
 //!
 //! ```text
@@ -25,12 +25,18 @@
 //!
 //! # Atomic Updates
 //!
-//! To provide support for atomic updates, `Metadata` maintains two blobs: a "left" and a "right"
+//! To provide support for atomic updates, [Metadata] maintains two blobs: a "left" and a "right"
 //! blob. When a new update is committed, it is written to the "older" of the two blobs (indicated
-//! by the version persisted). Writes to `Storage` are not atomic and may only complete partially,
-//! so we only overwrite the "newer" blob once the "older" blob has been synced (otherwise, we would
-//! not be guaranteed to recover the latest complete state from disk on restart as half of a blob
-//! could be old data and half new data).
+//! by the version persisted). Writes to [commonware_runtime::Blob] are not atomic and may only
+//! complete partially, so we only overwrite the "newer" blob once the "older" blob has been synced
+//! (otherwise, we would not be guaranteed to recover the latest complete state from disk on
+//! restart as half of a blob could be old data and half new data).
+//!
+//! # Efficient Writes
+//!
+//! When an update is committed, only updated bytes are actually written to disk. This makes [Metadata]
+//! a great choice for maintaining even large collections of data (there is only overhead to maintaining
+//! keys that aren't updated if the order of keys is unstable).
 //!
 //! # Example
 //!
@@ -66,7 +72,7 @@ use commonware_utils::Array;
 pub use storage::Metadata;
 use thiserror::Error;
 
-/// Errors that can occur when interacting with `Metadata`.
+/// Errors that can occur when interacting with [Metadata].
 #[derive(Debug, Error)]
 pub enum Error<K: Array> {
     #[error("runtime error: {0}")]
@@ -77,11 +83,10 @@ pub enum Error<K: Array> {
     ValueTooBig(K),
 }
 
-/// Configuration for `Metadata` storage.
+/// Configuration for [Metadata] storage.
 #[derive(Clone)]
 pub struct Config {
-    /// The `commonware_runtime::Storage` partition to
-    /// use for storing metadata.
+    /// The [commonware_runtime::Storage] partition to use for storing metadata.
     pub partition: String,
 }
 
@@ -512,6 +517,73 @@ mod tests {
             let result = metadata.sync().await;
             assert!(matches!(result, Err(Error::ValueTooBig(_))));
 
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_diffs() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a metadata store
+            let cfg = Config {
+                partition: "test".to_string(),
+            };
+            let mut metadata: Metadata<_, U64> =
+                Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Put initial keys
+            for i in 0..100 {
+                metadata.put(U64::new(i), vec![i as u8; 100]);
+            }
+
+            // First sync - should write everything to the first blob
+            //
+            // 100 keys * (8 bytes for key + 4 bytes for len + 100 bytes for value) + 8 bytes for version + 4 bytes for checksum
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("skipped_total 0"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 11212"),
+                "{buffer}",
+            );
+
+            // Modify just one key
+            metadata.put(U64::new(51), vec![0xff; 100]);
+
+            // Sync again - should write everything to the second blob
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("skipped_total 0"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 22424"),
+                "{buffer}",
+            );
+
+            // Sync again - should write only diff from the first blob
+            //
+            // 100 bytes for value + 1 byte for version (first 7 bytes are same) + 4 bytes for checksum
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("skipped_total 11107"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 22529"),
+                "{buffer}",
+            );
+
+            // Sync again - should write only diff from the second blob
+            //
+            // 1 byte for version (first 7 bytes are same) + 4 bytes for checksum
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("skipped_total 22314"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 22534"),
+                "{buffer}",
+            );
+
+            // Clean up
             metadata.destroy().await.unwrap();
         });
     }

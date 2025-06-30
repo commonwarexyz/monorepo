@@ -19,7 +19,7 @@ pub use stable_buf::StableBuf;
 pub fn hex(bytes: &[u8]) -> String {
     let mut hex = String::new();
     for byte in bytes.iter() {
-        hex.push_str(&format!("{:02x}", byte));
+        hex.push_str(&format!("{byte:02x}"));
     }
     hex
 }
