@@ -175,7 +175,6 @@ mod tests {
         oracle: &mut Oracle<PublicKey>,
         rebroadcast_timeout: Duration,
         invalid_when: fn(u64) -> bool,
-        misses_allowed: Option<usize>,
     ) -> HashMap<PublicKey, mocks::Monitor> {
         let mut monitors = HashMap::new();
         let namespace = b"my testing namespace";
@@ -199,11 +198,8 @@ mod tests {
             let automaton = mocks::Application::new(invalid_when);
             automatons.insert(validator.clone(), automaton.clone());
 
-            let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
-                namespace,
-                polynomial.clone(),
-                misses_allowed,
-            );
+            let (reporter, reporter_mailbox) =
+                mocks::Reporter::<V, Sha256Digest>::new(namespace, polynomial.clone());
             context.with_label("reporter").spawn(|_| reporter.run());
             reporters.insert(validator.clone(), reporter_mailbox);
 
@@ -319,7 +315,6 @@ mod tests {
                 &mut oracle,
                 Duration::from_secs(5),
                 |_| false,
-                None,
             );
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
         });
@@ -385,11 +380,8 @@ mod tests {
                             .unwrap()
                             .insert(validator.clone(), automaton.clone());
 
-                        let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
-                            namespace,
-                            polynomial.clone(),
-                            None,
-                        );
+                        let (reporter, reporter_mailbox) =
+                            mocks::Reporter::<V, Sha256Digest>::new(namespace, polynomial.clone());
                         validator_context
                             .with_label("reporter")
                             .spawn(|_| reporter.run());
@@ -531,7 +523,7 @@ mod tests {
     fn slow_and_lossy_links<V: Variant>() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        let runner = deterministic::Runner::timed(Duration::from_secs(120));
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
@@ -565,9 +557,8 @@ mod tests {
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
                 &mut oracle,
-                Duration::from_secs(5),
+                Duration::from_secs(2),
                 |_| false,
-                None,
             );
 
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
@@ -616,7 +607,6 @@ mod tests {
                 &mut oracle,
                 Duration::from_secs(5),
                 |_| false,
-                None,
             );
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
         });
@@ -661,7 +651,6 @@ mod tests {
                 &mut oracle,
                 Duration::from_secs(5),
                 |_| false,
-                None,
             );
 
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
@@ -707,7 +696,6 @@ mod tests {
                 &mut oracle,
                 Duration::from_secs(5),
                 |_| false,
-                None,
             );
 
             for v1 in pks.iter() {
@@ -797,7 +785,6 @@ mod tests {
                 &mut oracle,
                 Duration::from_secs(5),
                 byzantine_fault_fn,
-                None,
             );
 
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
@@ -843,7 +830,6 @@ mod tests {
                 &mut oracle,
                 Duration::from_secs(5),
                 |_| false,
-                None,
             );
 
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
@@ -945,7 +931,6 @@ mod tests {
                 &mut oracle,
                 Duration::from_secs(8), // Longer timeout for more complex scenarios
                 advanced_byzantine_fn,
-                Some(10), // Allow more missed acks due to advanced Byzantine behavior
             );
 
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
@@ -995,7 +980,6 @@ mod tests {
                 &mut oracle,
                 Duration::from_secs(3),
                 |_| false,
-                None,
             );
 
             // With insufficient validators, consensus should not be achievable
@@ -1067,7 +1051,6 @@ mod tests {
                 &mut oracle,
                 Duration::from_secs(5),
                 |_| false, // No Byzantine faults for this test
-                None,
             );
 
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;

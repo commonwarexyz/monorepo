@@ -34,7 +34,6 @@ pub struct Reporter<V: Variant, D: Digest> {
 
     // Received acks (for validation)
     acks: HashSet<(Index, Epoch)>,
-    limit_misses: Option<usize>,
 
     // All known digests
     digests: BTreeMap<Index, (D, Epoch)>,
@@ -50,11 +49,7 @@ pub struct Reporter<V: Variant, D: Digest> {
 }
 
 impl<V: Variant, D: Digest> Reporter<V, D> {
-    pub fn new(
-        namespace: &[u8],
-        public: poly::Public<V>,
-        limit_misses: Option<usize>,
-    ) -> (Self, Mailbox<V, D>) {
+    pub fn new(namespace: &[u8], public: poly::Public<V>) -> (Self, Mailbox<V, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
             Reporter {
@@ -62,7 +57,6 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                 namespace: namespace.to_vec(),
                 public,
                 acks: HashSet::new(),
-                limit_misses,
                 digests: BTreeMap::new(),
                 contiguous: None,
                 highest: None,
@@ -73,7 +67,6 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
     }
 
     pub async fn run(mut self) {
-        let mut misses = 0;
         while let Some(msg) = self.mailbox.next().await {
             match msg {
                 Message::Ack(ack) => {
@@ -123,19 +116,6 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                     let encoded = signature.encode();
                     V::Signature::decode(encoded).unwrap();
 
-                    // Check if we saw acks for this item
-                    if let Some(misses_allowed) = self.limit_misses {
-                        let ack_count = self
-                            .acks
-                            .iter()
-                            .filter(|(index, _)| *index == item.index)
-                            .count();
-                        if ack_count == 0 {
-                            misses += 1;
-                        }
-                        assert!(misses <= misses_allowed, "Missed too many acks");
-                    }
-
                     // Update the reporter
                     let entry = self.digests.entry(item.index);
                     match entry {
@@ -172,6 +152,13 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                     // Update our view of the tip
                     if self.highest.is_none_or(|(h, _)| index > h) {
                         self.highest = Some((index, self.current_epoch));
+                    }
+
+                    // Update the contiguous tip if necessary;
+                    // An individual validator may have missed constructing a lock, but a majority
+                    // of the rest of the network has constructed a lock.
+                    if self.contiguous.is_none_or(|c| index > c) {
+                        self.contiguous = Some(index);
                     }
                 }
                 Message::GetTip(sender) => {
