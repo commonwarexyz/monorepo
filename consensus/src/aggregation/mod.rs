@@ -325,6 +325,12 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_all_online() {
+        all_online::<MinPk>();
+        all_online::<MinSig>();
+    }
+
     fn unclean_shutdown<V: Variant>() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
@@ -516,6 +522,12 @@ mod tests {
         );
     }
 
+    #[test_traced]
+    fn test_unclean_shutdown() {
+        unclean_shutdown::<MinPk>();
+        unclean_shutdown::<MinSig>();
+    }
+
     fn slow_and_lossy_links<V: Variant>() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
@@ -562,6 +574,12 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_slow_and_lossy_links() {
+        slow_and_lossy_links::<MinPk>();
+        slow_and_lossy_links::<MinSig>();
+    }
+
     fn one_offline<V: Variant>() {
         let num_validators: u32 = 5;
         let quorum: u32 = 3;
@@ -605,27 +623,9 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_all_online() {
-        all_online::<MinPk>();
-        all_online::<MinSig>();
-    }
-
-    #[test_traced]
     fn test_one_offline() {
         one_offline::<MinPk>();
         one_offline::<MinSig>();
-    }
-
-    #[test_traced]
-    fn test_slow_and_lossy_links() {
-        slow_and_lossy_links::<MinPk>();
-        slow_and_lossy_links::<MinSig>();
-    }
-
-    #[test_traced]
-    fn test_unclean_shutdown() {
-        unclean_shutdown::<MinPk>();
-        unclean_shutdown::<MinSig>();
     }
 
     /// Test that consensus can be reached starting from index 0.
@@ -1115,6 +1115,12 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_threshold_signature_correctness() {
+        threshold_signature_correctness::<MinPk>();
+        threshold_signature_correctness::<MinSig>();
+    }
+
     /// Test that manually constructs and verifies threshold signatures.
     fn manual_threshold_verification<V: Variant>() {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
@@ -1183,12 +1189,6 @@ mod tests {
 
             tracing::debug!("Manual threshold signature verification completed successfully");
         });
-    }
-
-    #[test_traced]
-    fn test_threshold_signature_correctness() {
-        threshold_signature_correctness::<MinPk>();
-        threshold_signature_correctness::<MinSig>();
     }
 
     #[test_traced]
