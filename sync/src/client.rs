@@ -135,7 +135,7 @@ where
                 if new_operations.len() as u64 > batch_size.get() {
                     // TODO danlaine: add more comprehensive retry logic
                     metrics.invalid_batches_received += 1;
-                    if metrics.invalid_batches_received >= config.max_retries {
+                    if metrics.invalid_batches_received > config.max_retries {
                         return Err(Error::InvalidResolver(
                             "Max retries reached for fetching operations".to_string(),
                         ));
@@ -162,7 +162,7 @@ where
                 ) {
                     debug!("Proof verification failed, retrying");
                     metrics.invalid_batches_received += 1;
-                    if metrics.invalid_batches_received >= config.max_retries {
+                    if metrics.invalid_batches_received > config.max_retries {
                         return Err(Error::InvalidResolver(
                             "Max retries reached for verifying proof".to_string(),
                         ));
@@ -252,10 +252,13 @@ mod tests {
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_storage::{adb::any::Any, index};
+    use commonware_storage::{adb::any::Any, index, mmr::verification::Proof};
     use commonware_utils::NZU64;
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
-    use std::collections::{HashMap, HashSet};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::{atomic::AtomicU64, Arc},
+    };
     use test_case::test_case;
 
     type TestHash = Sha256;
@@ -387,6 +390,86 @@ mod tests {
             for key in deleted_keys {
                 assert_eq!(got_db.get(&key).await.unwrap(), None);
             }
+        });
+    }
+
+    /// A simple resolver that always returns too many operations to trigger retry logic
+    struct FailingResolver {
+        call_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl FailingResolver {
+        fn new(call_count: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Self {
+            Self { call_count }
+        }
+    }
+
+    impl Resolver<TestHash, TestKey, TestValue> for FailingResolver {
+        async fn get_proof(
+            &mut self,
+            _start_index: u64,
+            max_ops: NonZeroU64,
+        ) -> Result<
+            (
+                Proof<<TestHash as Hasher>::Digest>,
+                Vec<Operation<TestKey, TestValue>>,
+            ),
+            Error,
+        > {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+            // Return more operations than requested to trigger retry logic
+            let mut ops = Vec::new();
+            for i in 0..(max_ops.get() + 1) {
+                ops.push(Operation::Update(
+                    TestKey::from([(i % 256) as u8; 32]),
+                    TestValue::from([0u8; 32]),
+                ));
+            }
+
+            Ok((
+                Proof {
+                    size: 1,
+                    digests: vec![Digest::from([0u8; 32])],
+                },
+                ops,
+            ))
+        }
+    }
+
+    /// Test that we return an error after max_retries attempts to get a proof fail.
+    #[test]
+    fn test_sync_max_retries() {
+        const MAX_RETRIES: u64 = 2;
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let get_proof_call_count = Arc::new(AtomicU64::new(0));
+            let resolver = FailingResolver::new(get_proof_call_count.clone());
+            let config = Config {
+                db_config: create_test_config(context.next_u64()),
+                max_ops_per_batch: NZU64!(10),
+                max_retries: MAX_RETRIES,
+                target_hash: Digest::from([1u8; 32]),
+                target_ops: 100,
+                context,
+                resolver,
+                hasher: create_test_hasher(),
+                _phantom: PhantomData,
+            };
+
+            let result = sync(config).await;
+
+            // Should fail after max_retries attempts
+            match result {
+                Err(Error::InvalidResolver(_)) => {}
+                _ => panic!("Expected InvalidResolver error for max retries exceeded"),
+            }
+            // Verify we made max_retries + 1 calls before giving up
+            assert_eq!(
+                get_proof_call_count.load(std::sync::atomic::Ordering::SeqCst),
+                MAX_RETRIES + 1
+            );
         });
     }
 }
