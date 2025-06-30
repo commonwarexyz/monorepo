@@ -260,8 +260,9 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
             }
         }
 
-        // Clean pending entries
-        self.pending.retain(|&index, _| index >= min);
+        // Clean pending entries that fall into pruned sections.
+        self.pending
+            .retain(|&index, _| (index / self.config.items_per_blob) >= min_section);
 
         Ok(())
     }
