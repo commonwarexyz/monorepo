@@ -79,6 +79,9 @@ impl EncodeSize for Marker {
 }
 
 /// Header stored at the beginning of each blob.
+///
+/// Store two markers for the current version and next version (need to be able to rollback
+/// to the previous version if only partially written).
 #[derive(Debug, Clone)]
 struct Header {
     marker_1: Option<Marker>,
@@ -121,6 +124,8 @@ impl EncodeSize for Header {
         self.marker_1.encode_size() + self.marker_2.encode_size()
     }
 }
+
+// TODO: use metadata to enforce version across all blobs? Could just store all markers there rather than adding a blob header.
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
@@ -314,55 +319,20 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         })
     }
 
-    /// Rebuilds a blob's bitmap by scanning all its records. This is a recovery mechanism.
-    async fn rebuild_bitmap(
-        blob: &E::Blob,
-        section: u64,
-        config: &Config,
-        header_size: usize,
-    ) -> Result<BitVec, Error> {
-        let mut rebuilt_bitmap = BitVec::zeroes(config.items_per_blob as usize);
-        let size = blob.size().await;
-        let mut replay_blob = ReadBuffer::new(blob.clone(), size, config.replay_buffer);
-
-        let mut offset = header_size as u64;
-        while offset < size {
-            let index_in_blob = (offset - header_size as u64) / Record::<V>::SIZE as u64;
-
-            replay_blob.seek_to(offset)?;
-            let mut record_buf = vec![0u8; Record::<V>::SIZE];
-            if replay_blob
-                .read_exact(&mut record_buf, Record::<V>::SIZE)
-                .await
-                .is_err()
-            {
-                // Partial record at the end, stop here.
-                break;
-            }
-            let record = Record::<V>::read(&mut record_buf.as_slice())?;
-            offset += Record::<V>::SIZE as u64;
-
-            if record.is_valid() {
-                rebuilt_bitmap.set(index_in_blob as usize);
-            }
-        }
-
-        // Write the repaired header back to the blob.
-        let new_header = Header::new(rebuilt_bitmap.clone());
-        blob.write_at(new_header.encode(), 0).await?;
-        blob.sync().await?;
-        debug!(section, "repaired and synced new header");
-
-        Ok(rebuilt_bitmap)
-    }
-
     /// Add a value at the specified index (pending until sync).
     pub fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
         self.puts.inc();
+
+        // If already exists, return an error.
+        if self.has(index) {
+            return Err(Error::AlreadyExists(index));
+        }
+
+        // Add to blob
         let section = index / self.config.items_per_blob;
         let index_in_blob = (index % self.config.items_per_blob) as usize;
 
-        // Add to pending writes for sync.
+        // Add to new version bitvec for section (but don't write to disk yet).
         self.pending
             .entry(section)
             .or_default()
