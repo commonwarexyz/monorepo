@@ -12,6 +12,7 @@ use commonware_utils::{
     array::{U32, U64},
     Array, BitVec, NZUsize,
 };
+use futures::{future::try_join_all, join};
 use std::collections::{BTreeSet, HashMap};
 use tracing::debug;
 
@@ -331,16 +332,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        // Sync journal
+        // Sync journal and ordinal
+        let mut futures = Vec::new();
         for section in self.modified.iter() {
-            self.journal.sync(*section).await?;
+            futures.push(self.journal.sync(*section));
         }
+        let (journal_result, ordinal_result) = join!(try_join_all(futures), self.ordinal.sync());
+        journal_result.map_err(Error::Journal)?;
+        ordinal_result.map_err(Error::Ordinal)?;
+
+        // Clear modified sections
         self.modified.clear();
 
-        // Sync ordinal
-        self.ordinal.sync().await?;
-
-        // Sync metadata
+        // Sync metadata once underlying are synced
         self.metadata.sync().await?;
 
         Ok(())
