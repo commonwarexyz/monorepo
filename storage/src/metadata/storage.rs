@@ -232,8 +232,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             key.write(&mut next_data);
             value.write(&mut next_data);
         }
-        let checksum = crc32fast::hash(&next_data[..]);
-        next_data.put_u32(checksum);
+        next_data.put_u32(crc32fast::hash(&next_data[..]));
 
         // Get target blob (the one we will overwrite)
         let target_cursor = 1 - self.cursor;
