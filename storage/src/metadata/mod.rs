@@ -116,7 +116,8 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("syncs_total 0"));
+            assert!(buffer.contains("sync_rewrites_total 0"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
             assert!(buffer.contains("keys 0"));
 
             // Put a key
@@ -129,7 +130,8 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("syncs_total 0"));
+            assert!(buffer.contains("sync_rewrites_total 0"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
             assert!(buffer.contains("keys 1"));
 
             // Close the metadata store
@@ -137,7 +139,8 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("syncs_total 1"));
+            assert!(buffer.contains("sync_rewrites_total 1"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
             assert!(buffer.contains("keys 1"));
 
             // Reopen the metadata store
@@ -151,7 +154,8 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("syncs_total 0"));
+            assert!(buffer.contains("sync_rewrites_total 0"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
             assert!(buffer.contains("keys 1"));
 
             // Get the key
@@ -165,7 +169,8 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("syncs_total 0"));
+            assert!(buffer.contains("sync_rewrites_total 1"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
             assert!(buffer.contains("keys 0"));
 
             metadata.destroy().await.unwrap();
