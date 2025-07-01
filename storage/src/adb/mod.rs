@@ -10,7 +10,6 @@
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
 //! (2) it is an update operation, and (3) it is the most recent operation for that key.
 
-use commonware_utils::array::prefixed_u64::U64;
 use thiserror::Error;
 
 pub mod any;
@@ -24,7 +23,7 @@ pub enum Error {
     MmrError(#[from] crate::mmr::Error),
 
     #[error("metadata error: {0}")]
-    MetadataError(#[from] crate::metadata::Error<U64>),
+    MetadataError(#[from] crate::metadata::Error),
 
     #[error("journal error: {0}")]
     JournalError(#[from] crate::journal::Error),

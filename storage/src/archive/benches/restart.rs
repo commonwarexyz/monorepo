@@ -1,4 +1,4 @@
-use super::utils::{append_random, get_archive};
+use super::utils::{append_random, init};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
@@ -14,7 +14,7 @@ fn bench_restart(c: &mut Criterion) {
         for items in [10_000, 50_000, 100_000, 500_000] {
             let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
             builder.start(|ctx| async move {
-                let mut a = get_archive(ctx, compression).await;
+                let mut a = init(ctx, compression).await;
                 append_random(&mut a, items).await;
                 a.close().await.unwrap();
             });
@@ -36,7 +36,7 @@ fn bench_restart(c: &mut Criterion) {
                         let mut total = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
-                            let a = get_archive(ctx.clone(), compression).await; // replay happens inside init
+                            let a = init(ctx.clone(), compression).await; // replay happens inside init
                             total += start.elapsed();
                             a.close().await.unwrap();
                         }
@@ -48,7 +48,7 @@ fn bench_restart(c: &mut Criterion) {
             // Tear down
             let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
             cleaner.start(|ctx| async move {
-                let a = get_archive(ctx, compression).await;
+                let a = init(ctx, compression).await;
                 a.destroy().await.unwrap();
             });
         }

@@ -1,6 +1,6 @@
 //! Random key-lookup benchmark for Archive.
 
-use super::utils::{append_random, get_archive, ArchiveType, Key};
+use super::utils::{append_random, init, ArchiveType, Key};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
@@ -65,7 +65,7 @@ fn bench_get(c: &mut Criterion) {
         // Create a shared on-disk archive once so later setup is fast.
         let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
         let keys = builder.start(|ctx| async move {
-            let mut a = get_archive(ctx, compression).await;
+            let mut a = init(ctx, compression).await;
             let keys = append_random(&mut a, ITEMS).await;
             a.close().await.unwrap();
             keys
@@ -92,7 +92,7 @@ fn bench_get(c: &mut Criterion) {
                             let keys = keys.clone();
                             async move {
                                 let ctx = context::get::<commonware_runtime::tokio::Context>();
-                                let archive = get_archive(ctx, compression).await;
+                                let archive = init(ctx, compression).await;
                                 if pattern == "key" {
                                     let selected_keys = select_keys(&keys, reads);
                                     let start = Instant::now();
@@ -140,7 +140,7 @@ fn bench_get(c: &mut Criterion) {
         // Clean up shared artifacts.
         let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
         cleaner.start(|ctx| async move {
-            let a = get_archive(ctx, compression).await;
+            let a = init(ctx, compression).await;
             a.destroy().await.unwrap();
         });
     }
