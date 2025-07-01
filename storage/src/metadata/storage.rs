@@ -50,7 +50,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array, V: Codec> {
 
     map: BTreeMap<K, V>,
     cursor: usize,
-    last_key_modified: u64,
+    key_order_changed: u64,
     next_version: u64,
     partition: String,
     blobs: [Wrapper<E::Blob, K>; 2],
@@ -107,7 +107,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
 
             map,
             cursor,
-            last_key_modified: next_version, // rewrite on startup because we don't have a diff record
+            key_order_changed: next_version, // rewrite on startup because we don't have a diff record
             next_version,
             partition: cfg.partition,
             blobs: [left_wrapper, right_wrapper],
@@ -202,18 +202,25 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
 
     /// Get a mutable reference to a value from [Metadata] (if it exists).
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        // Get value
         let value = self.map.get_mut(key)?;
+
+        // Mark key as modified
         self.blobs[self.cursor].modified.insert(key.clone());
         self.blobs[1 - self.cursor].modified.insert(key.clone());
+
         Some(value)
     }
 
     /// Clear all values from [Metadata]. The new state will not be persisted until [Self::sync] is
     /// called.
     pub fn clear(&mut self) {
+        // Clear map
         self.map.clear();
+
+        // Mark key order as changed
+        self.key_order_changed = self.next_version;
         self.keys.set(0);
-        self.last_key_modified = self.next_version;
     }
 
     /// Put a value into [Metadata].
@@ -221,23 +228,29 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
     /// If the key already exists, the value will be overwritten. The
     /// value stored will not be persisted until [Self::sync] is called.
     pub fn put(&mut self, key: K, value: V) {
-        let modified = self.map.insert(key.clone(), value).is_some();
-        self.keys.set(self.map.len() as i64);
-        if modified {
+        // Get value
+        let exists = self.map.insert(key.clone(), value).is_some();
+
+        // Mark key as modified
+        if exists {
             self.blobs[self.cursor].modified.insert(key.clone());
             self.blobs[1 - self.cursor].modified.insert(key.clone());
         } else {
-            self.last_key_modified = self.next_version;
+            self.key_order_changed = self.next_version;
         }
+        self.keys.set(self.map.len() as i64);
     }
 
     /// Remove a value from [Metadata] (if it exists).
     pub fn remove(&mut self, key: &K) {
-        let modified = self.map.remove(key).is_some();
-        self.keys.set(self.map.len() as i64);
-        if modified {
-            self.last_key_modified = self.next_version;
+        // Get value
+        let exists = self.map.remove(key).is_some();
+
+        // Mark key as modified
+        if exists {
+            self.key_order_changed = self.next_version;
         }
+        self.keys.set(self.map.len() as i64);
     }
 
     /// Atomically commit the current state of [Metadata].
@@ -256,7 +269,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         // Attempt to modify in-place (as long as values are unmodified)
         let mut rewrite = false;
         let mut writes = Vec::with_capacity(target.modified.len());
-        if self.last_key_modified < past_version {
+        if self.key_order_changed < past_version {
             for key in target.modified.iter() {
                 let (value_cursor, prev_length) = target.lengths.get(key).expect("key must exist");
                 let new_value = self.map.get(key).expect("key must exist");
@@ -277,10 +290,13 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         }
         target.modified.clear();
 
-        // If we can rewrite in-place, do so
+        // Modify in-place
         if !rewrite {
+            // Update version
             target.data[0..8].copy_from_slice(&self.next_version.to_be_bytes());
             writes.push(target.blob.write_at(target.data[0..8].into(), 0));
+
+            // Update checksum
             let checksum = crc32fast::hash(&target.data[..target.data.len() - 4]);
             let target_len = target.data.len();
             target.data[target_len - 4..].copy_from_slice(&checksum.to_be_bytes());
@@ -292,10 +308,10 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             // Persist changes
             try_join_all(writes).await?;
             target.blob.sync().await?;
-            self.cursor = target_cursor;
             target.version = self.next_version;
-            self.sync_overwrites.inc();
+            self.cursor = target_cursor;
             self.next_version = next_next_version;
+            self.sync_overwrites.inc();
             return Ok(());
         }
 
@@ -319,12 +335,12 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
 
         // Persist changes
         target.blob.sync().await?;
-        self.cursor = target_cursor;
         target.version = self.next_version;
         target.lengths = lengths;
         target.data = next_data;
-        self.sync_rewrites.inc();
+        self.cursor = target_cursor;
         self.next_version = next_next_version;
+        self.sync_rewrites.inc();
         Ok(())
     }
 
