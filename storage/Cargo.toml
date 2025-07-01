@@ -66,6 +66,11 @@ harness = false
 path = "src/mmr/benches/bench.rs"
 
 [[bench]]
+name="metadata"
+harness = false
+path = "src/metadata/benches/bench.rs"
+
+[[bench]]
 name="rmap"
 harness = false
 path = "src/rmap/benches/bench.rs"
