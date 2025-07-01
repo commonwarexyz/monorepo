@@ -17,44 +17,49 @@ const TRAFFIC_INFO_L2D: &[u8] = b"l2d/traffic";
 const CONFIRMATION_INFO_D2L: &[u8] = b"d2l/confirmation";
 const CONFIRMATION_INFO_L2D: &[u8] = b"l2d/confirmation";
 
-/// Return value when deriving directional ciphers.
-///
-/// Contains all four ciphers needed for a complete bidirectional encrypted connection:
-/// two for traffic (one per direction) and two for key confirmation during handshake.
-pub struct DirectionalCipher {
+/// Return value when deriving ciphers from a shared secret.
+pub struct Full {
+    /// The ciphers used for key confirmation during the handshake.
+    pub confirmation: Directional,
+    /// The ciphers used for traffic after the handshake.
+    pub traffic: Directional,
+}
+
+/// A pair of ciphers used to encrypt and decrypt messages.
+pub struct Directional {
     /// The cipher used for sending messages from the dialer to the listener.
     pub d2l: ChaCha20Poly1305,
     /// The cipher used for sending messages from the listener to the dialer.
     pub l2d: ChaCha20Poly1305,
-    /// The cipher used for key confirmation by the dialer during the handshake.
-    pub d2l_confirmation: ChaCha20Poly1305,
-    /// The cipher used for key confirmation by the listener during the handshake.
-    pub l2d_confirmation: ChaCha20Poly1305,
 }
 
 /// Derive directional ChaCha20Poly1305 ciphers from a given input key material, a unique
 /// application namespace, and the handshake transcript.
 ///
-/// Returns a DirectionalCipher struct containing the four directional ciphers.
+/// Returns a [Full] ciphers struct containing a pair of [Directional] ciphers for each direction.
 pub fn derive_directional(
     ikm: &[u8],
     namespace: &[u8],
-    handshake_transcript: &[u8],
-) -> Result<DirectionalCipher, Error> {
+    hello_transcript: &[u8],
+) -> Result<Full, Error> {
     let infos = [
         TRAFFIC_INFO_D2L,
         TRAFFIC_INFO_L2D,
         CONFIRMATION_INFO_D2L,
         CONFIRMATION_INFO_L2D,
     ];
-    let salts = [namespace, handshake_transcript];
+    let salts = [namespace, hello_transcript];
     let ciphers = derive::<4>(ikm, &salts, &infos)?;
-    let [d2l, l2d, d2l_confirmation, l2d_confirmation] = ciphers;
-    Ok(DirectionalCipher {
-        d2l,
-        l2d,
-        d2l_confirmation,
-        l2d_confirmation,
+    let [d2l_traffic, l2d_traffic, d2l_confirmation, l2d_confirmation] = ciphers;
+    Ok(Full {
+        confirmation: Directional {
+            d2l: d2l_confirmation,
+            l2d: l2d_confirmation,
+        },
+        traffic: Directional {
+            d2l: d2l_traffic,
+            l2d: l2d_traffic,
+        },
     })
 }
 
@@ -152,9 +157,8 @@ mod tests {
         let salts: &[&[u8]] = &[b"salt1", b"salt2"];
         let infos: &[&[u8]] = &[b"info1", b"info2"];
 
-        let result = derive::<2>(&ikm, salts, infos);
-        assert!(result.is_ok(), "Basic derivation should succeed");
-        let [cipher1, cipher2] = result.unwrap();
+        let [cipher1, cipher2] =
+            derive::<2>(&ikm, salts, infos).expect("Basic derivation should succeed");
 
         // Test that different ciphers produce different outputs
         let nonce = Default::default();
@@ -363,25 +367,26 @@ mod tests {
     fn test_derive_directional_functionality() {
         let ikm = b"directional_test_ikm";
         let namespace = b"test_namespace";
-        let transcript = b"test_handshake_transcript_data";
+        let hello_transcript = b"test_handshake_transcript_data";
 
-        let result = derive_directional(ikm, namespace, transcript);
-        assert!(result.is_ok(), "derive_directional should succeed");
-
-        let directional = result.unwrap();
+        let Full {
+            traffic,
+            confirmation,
+        } = derive_directional(ikm, namespace, hello_transcript)
+            .expect("derive_directional should succeed");
 
         // Test that all four ciphers produce different outputs
         let nonce = Default::default();
         let plaintext = b"directional_test";
 
-        let d2l_ct = directional.d2l.encrypt(&nonce, plaintext.as_ref()).unwrap();
-        let l2d_ct = directional.l2d.encrypt(&nonce, plaintext.as_ref()).unwrap();
-        let d2l_conf_ct = directional
-            .d2l_confirmation
+        let d2l_ct = traffic.d2l.encrypt(&nonce, plaintext.as_ref()).unwrap();
+        let l2d_ct = traffic.l2d.encrypt(&nonce, plaintext.as_ref()).unwrap();
+        let d2l_conf_ct = confirmation
+            .d2l
             .encrypt(&nonce, plaintext.as_ref())
             .unwrap();
-        let l2d_conf_ct = directional
-            .l2d_confirmation
+        let l2d_conf_ct = confirmation
+            .l2d
             .encrypt(&nonce, plaintext.as_ref())
             .unwrap();
 
@@ -408,14 +413,17 @@ mod tests {
         let plaintext = b"consistency_check";
 
         // All corresponding ciphers should be identical
-        assert_eq!(
-            dir1.d2l.encrypt(&nonce, plaintext.as_ref()).unwrap(),
-            dir2.d2l.encrypt(&nonce, plaintext.as_ref()).unwrap(),
-        );
-        assert_eq!(
-            dir1.l2d.encrypt(&nonce, plaintext.as_ref()).unwrap(),
-            dir2.l2d.encrypt(&nonce, plaintext.as_ref()).unwrap(),
-        );
+        for (c1, c2) in [
+            (dir1.traffic.d2l, dir2.traffic.d2l),
+            (dir1.traffic.l2d, dir2.traffic.l2d),
+            (dir1.confirmation.d2l, dir2.confirmation.d2l),
+            (dir1.confirmation.l2d, dir2.confirmation.l2d),
+        ] {
+            assert_eq!(
+                c1.encrypt(&nonce, plaintext.as_ref()).unwrap(),
+                c2.encrypt(&nonce, plaintext.as_ref()).unwrap(),
+            );
+        }
     }
 
     #[test]
@@ -436,10 +444,18 @@ mod tests {
 
         let nonce = Default::default();
         let plaintext = b"sensitivity_test";
-        let base_ct = base_dir.d2l.encrypt(&nonce, plaintext.as_ref()).unwrap();
+        let base_ct = base_dir
+            .traffic
+            .d2l
+            .encrypt(&nonce, plaintext.as_ref())
+            .unwrap();
 
         for variant in variants.iter() {
-            let variant_ct = variant.d2l.encrypt(&nonce, plaintext.as_ref()).unwrap();
+            let variant_ct = variant
+                .traffic
+                .d2l
+                .encrypt(&nonce, plaintext.as_ref())
+                .unwrap();
             assert_ne!(base_ct, variant_ct);
         }
     }
@@ -451,17 +467,23 @@ mod tests {
         let namespace = b"production-app-v2.1.0";
 
         let transcript = b"realistic_test_transcript_with_reasonable_length_for_testing";
-        let result = derive_directional(&ikm, namespace, transcript);
-        assert!(result.is_ok(), "Realistic inputs should work correctly");
-
-        let directional = result.unwrap();
+        let ciphers = derive_directional(&ikm, namespace, transcript)
+            .expect("derive_directional should succeed");
 
         // Test that we can actually use these ciphers
         let nonce = Default::default();
         let message = b"Hello, this is a realistic message that might be sent over the network";
 
-        let encrypted = directional.d2l.encrypt(&nonce, message.as_ref()).unwrap();
-        let decrypted = directional.d2l.decrypt(&nonce, encrypted.as_ref()).unwrap();
+        let encrypted = ciphers
+            .traffic
+            .d2l
+            .encrypt(&nonce, message.as_ref())
+            .unwrap();
+        let decrypted = ciphers
+            .traffic
+            .d2l
+            .decrypt(&nonce, encrypted.as_ref())
+            .unwrap();
 
         assert_eq!(message.as_ref(), decrypted);
     }

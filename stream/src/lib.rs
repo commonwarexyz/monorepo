@@ -13,12 +13,14 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum Error {
     // Handshake errors
-    #[error("handshake not for us")]
-    HandshakeNotForUs,
-    #[error("handshake uses our public key")]
-    HandshakeUsesOurKey,
     #[error("handshake timeout")]
     HandshakeTimeout,
+
+    // Hello errors
+    #[error("hello not for us")]
+    HelloNotForUs,
+    #[error("hello uses our public key")]
+    HelloUsesOurKey,
     #[error("invalid signature")]
     InvalidSignature,
     #[error("timestamp too old: {0}")]
@@ -26,7 +28,7 @@ pub enum Error {
     #[error("timestamp too future: {0}")]
     InvalidTimestampFuture(u64),
 
-    // Cipher errors
+    // Confirmation errors
     #[error("shared secret was not contributory")]
     SharedSecretNotContributory,
     #[error("cipher creation failed")]
@@ -34,9 +36,9 @@ pub enum Error {
     #[error("HKDF expansion failed")]
     HKDFExpansion,
     #[error("key confirmation failed")]
-    KeyConfirmationFailed,
+    ConfirmationFailed,
     #[error("invalid key confirmation")]
-    InvalidKeyConfirmation,
+    InvalidConfirmation,
 
     // Connection errors
     #[error("cannot dial self")]
