@@ -45,7 +45,7 @@ fn fuzz(data: FuzzInput) {
     runner.start(|context| async move {
         let cfg = Config {
             partition: "test".into(),
-            items_per_section: 256, // 2^8 items per section
+            items_per_section: 256,
             write_buffer: 1024,
             translator: EightCap,
             replay_buffer: 1024*1024,
