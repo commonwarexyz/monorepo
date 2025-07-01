@@ -148,9 +148,6 @@ fn test_public_key_derivation(private_key_data: &[u8]) {
 }
 
 fuzz_target!(|input: FuzzInput| {
-    test_private_key(&input.private_key_32);
-    test_private_key(&input.variable_data);
-    return;
     match input.case_selector % 10 {
         0 => test_private_key(&input.private_key_32),
         1 => test_public_key(&input.public_key_33),
