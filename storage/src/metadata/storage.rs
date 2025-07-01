@@ -298,13 +298,13 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             writes.push(target.blob.write_at(version.as_slice().into(), 0));
 
             // Update checksum
-            let checksum_start = target.data.len() - 4;
-            let checksum = crc32fast::hash(&target.data[..checksum_start]).to_be_bytes();
-            target.data[checksum_start..].copy_from_slice(&checksum);
+            let checksum_index = target.data.len() - 4;
+            let checksum = crc32fast::hash(&target.data[..checksum_index]).to_be_bytes();
+            target.data[checksum_index..].copy_from_slice(&checksum);
             writes.push(
                 target
                     .blob
-                    .write_at(checksum.as_slice().into(), checksum_start as u64),
+                    .write_at(checksum.as_slice().into(), checksum_index as u64),
             );
 
             // Persist changes
