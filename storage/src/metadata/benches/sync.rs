@@ -6,17 +6,12 @@ use std::time::{Duration, Instant};
 fn bench_sync(c: &mut Criterion) {
     let runner = tokio::Runner::default();
     for &num_keys in &[100, 1_000, 10_000] {
-        for &modified_pct in &[0, 1, 5, 25, 50, 75, 100] {
-            let label = format!(
-                "{}/keys={} modified_pct={}",
-                module_path!(),
-                num_keys,
-                modified_pct
-            );
+        for &modified in &[0, 1, 5, 25, 50, 75, 100] {
+            let label = format!("{}/keys={} modified={}", module_path!(), num_keys, modified);
 
             // Generate key-value pairs for the benchmark
             let initial_kvs = get_random_kvs(num_keys);
-            let modified_kvs = get_modified_kvs(&initial_kvs, modified_pct);
+            let modified_kvs = get_modified_kvs(&initial_kvs, modified);
 
             // Run the benchmark
             c.bench_function(&label, |b| {
