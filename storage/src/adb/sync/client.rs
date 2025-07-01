@@ -402,16 +402,18 @@ mod tests {
     }
 
     #[test_case(1, NZU64!(1))]
+    #[test_case(1, NZU64!(2))]
     #[test_case(10, NZU64!(1))]
-    #[test_case(50, NZU64!(10))]
+    #[test_case(10, NZU64!(3))]
     #[test_case(250, NZU64!(1))]
     #[test_case(250, NZU64!(100))]
+    #[test_case(250, NZU64!(251))]
     #[test_case(1000, NZU64!(1))]
     #[test_case(1000, NZU64!(3))]
-    #[test_case(1000, NZU64!(10))]
     #[test_case(1000, NZU64!(100))]
     #[test_case(1000, NZU64!(1000))]
-    #[test_case(1000, NZU64!(10000))]
+    #[test_case(1000, NZU64!(1001))]
+    #[test_case(10_000, NZU64!(13))]
     fn test_sync(target_db_ops: usize, max_ops_per_batch: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
@@ -425,7 +427,7 @@ mod tests {
 
             // After commit, the database may have pruned early operations
             // Start syncing from the oldest retained location, not 0
-            let lower_bound_ops = target_db.oldest_retained_loc().unwrap_or(0);
+            let lower_bound_ops = target_db.oldest_retained_loc().unwrap();
 
             // Get target database state before moving it into the config
             let mut target_key_values = HashMap::new();
