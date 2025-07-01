@@ -262,11 +262,11 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         let past_version = self.blobs[self.cursor].version;
         let next_next_version = self.next_version.checked_add(1).expect("version overflow");
 
-        // Get target blob (the one we will overwrite)
+        // Get target blob (the one we will modify)
         let target_cursor = 1 - self.cursor;
         let target = &mut self.blobs[target_cursor];
 
-        // Attempt to modify in-place (as long as values are unmodified)
+        // Attempt to overwrite existing data
         let mut overwrite = true;
         let mut writes = Vec::with_capacity(target.modified.len());
         if self.key_order_changed < past_version {
@@ -274,7 +274,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
                 let (value_cursor, prev_length) = target.lengths.get(key).expect("key must exist");
                 let new_value = self.map.get(key).expect("key must exist");
                 if *prev_length == new_value.encode_size() {
-                    // Overwrite value in-place
+                    // Overwrite existing value
                     let encoded = new_value.encode();
                     target.data[*value_cursor..*value_cursor + *prev_length]
                         .copy_from_slice(&encoded);
