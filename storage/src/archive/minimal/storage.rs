@@ -338,8 +338,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
             futures.push(self.journal.sync(*section));
         }
         let (journal_result, ordinal_result) = join!(try_join_all(futures), self.ordinal.sync());
-        journal_result.map_err(Error::Journal)?;
-        ordinal_result.map_err(Error::Ordinal)?;
+        journal_result?;
+        ordinal_result?;
 
         // Clear modified sections
         self.modified.clear();
