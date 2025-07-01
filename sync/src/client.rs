@@ -4,10 +4,11 @@ use commonware_runtime::{Clock, Metrics as MetricsTrait, Storage};
 use commonware_storage::{
     adb::{self, operation::Operation},
     index::Translator,
+    mmr::verification::Proof,
 };
 use commonware_utils::Array;
-use std::{marker::PhantomData, num::NonZeroU64};
-use tracing::{debug, info};
+use std::{collections::HashMap, marker::PhantomData, num::NonZeroU64};
+use tracing::{debug, info, warn};
 
 /// Configuration for the sync client
 pub struct Config<E, K, V, H, T, R>
@@ -69,6 +70,7 @@ where
     FetchData {
         config: Config<E, K, V, H, T, R>,
         operations: Vec<Operation<K, V>>,
+        pinned_nodes: HashMap<u64, H::Digest>,
         metrics: Metrics,
     },
     /// We're done fetching data.
@@ -76,6 +78,7 @@ where
     ApplyData {
         config: Config<E, K, V, H, T, R>,
         operations: Vec<Operation<K, V>>,
+        pinned_nodes: HashMap<u64, H::Digest>,
         metrics: Metrics,
     },
     /// We're done syncing.
@@ -107,6 +110,7 @@ where
         Ok(Client::FetchData {
             config,
             operations: vec![],
+            pinned_nodes: HashMap::new(),
             metrics: Metrics {
                 valid_batches_received: 0,
                 invalid_batches_received: 0,
@@ -120,6 +124,7 @@ where
             Client::FetchData {
                 mut config,
                 mut operations,
+                mut pinned_nodes,
                 mut metrics,
             } => {
                 // Calculate total operations needed and current position (inclusive bounds)
@@ -169,6 +174,7 @@ where
                     return Ok(Client::FetchData {
                         config,
                         operations,
+                        pinned_nodes,
                         metrics,
                     });
                 }
@@ -196,22 +202,70 @@ where
                     return Ok(Client::FetchData {
                         config,
                         operations,
+                        pinned_nodes,
                         metrics,
                     });
                 }
+                let new_operations_len = new_operations.len() as u64;
                 operations.extend(new_operations);
+
+                // Only extract pinned nodes from the first batch (starting at pruning boundary)
+                if current_global_pos == config.lower_bound_ops && config.lower_bound_ops == 0 {
+                    // When syncing from position 0, extract pinned nodes from the proof
+                    match proof.extract_pinned_nodes(
+                        current_global_pos,
+                        current_global_pos + new_operations_len - 1,
+                    ) {
+                        Ok(new_pinned_nodes) => {
+                            let nodes_to_pin = Proof::<H::Digest>::nodes_to_pin(current_global_pos)
+                                .collect::<Vec<_>>();
+                            if nodes_to_pin.len() == new_pinned_nodes.len() {
+                                for (loc, digest) in
+                                    nodes_to_pin.iter().zip(new_pinned_nodes.iter())
+                                {
+                                    pinned_nodes.insert(*loc, *digest);
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            warn!("Failed to extract pinned nodes, retrying");
+                            metrics.invalid_batches_received += 1;
+                            if metrics.invalid_batches_received > config.max_retries {
+                                return Err(Error::InvalidResolver(
+                                    "Max retries reached for extracting pinned nodes".to_string(),
+                                ));
+                            }
+
+                            return Ok(Client::FetchData {
+                                config,
+                                operations,
+                                pinned_nodes,
+                                metrics,
+                            });
+                        }
+                    }
+                } else if current_global_pos == config.lower_bound_ops && config.lower_bound_ops > 0
+                {
+                    // When syncing from a pruning boundary, get pinned nodes from the resolver
+                    let target_pinned_nodes = config.resolver.get_pinned_nodes();
+                    for (pos, digest) in target_pinned_nodes {
+                        pinned_nodes.insert(pos, digest);
+                    }
+                }
 
                 metrics.valid_batches_received += 1;
                 let next_state = if operations.len() as u64 >= total_ops_needed {
                     Client::ApplyData {
                         config,
                         operations,
+                        pinned_nodes,
                         metrics,
                     }
                 } else {
                     Client::FetchData {
                         config,
                         operations,
+                        pinned_nodes,
                         metrics,
                     }
                 };
@@ -221,13 +275,14 @@ where
             Client::ApplyData {
                 mut config,
                 operations,
+                pinned_nodes,
                 metrics,
             } => {
                 let db = adb::any::Any::<E, K, V, H, T>::init_sync(
                     config.context,
                     adb::any::SyncConfig {
                         config: config.db_config,
-                        mmr_pinned_nodes: Default::default(), // TODO danlaine: support pruning
+                        mmr_pinned_nodes: pinned_nodes,
                         pruned_to_loc: config.lower_bound_ops,
                         operations,
                     },
@@ -281,7 +336,7 @@ mod tests {
     use commonware_utils::NZU64;
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
     use std::{
-        collections::{HashMap, HashSet},
+        collections::HashMap,
         sync::{atomic::AtomicU64, Arc},
     };
     use test_case::test_case;
@@ -362,9 +417,12 @@ mod tests {
     #[test_case(50, NZU64!(10))]
     #[test_case(250, NZU64!(1))]
     #[test_case(250, NZU64!(100))]
-    // TODO danlaine: add tests for larger databases
-    // when pruning is supported
-
+    #[test_case(1000, NZU64!(1))]
+    #[test_case(1000, NZU64!(3))]
+    #[test_case(1000, NZU64!(10))]
+    #[test_case(1000, NZU64!(100))]
+    #[test_case(1000, NZU64!(1000))]
+    #[test_case(1000, NZU64!(10000))]
     fn test_sync(target_db_ops: usize, max_ops_per_batch: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
@@ -376,12 +434,25 @@ mod tests {
             let mut hasher = create_test_hasher();
             let target_hash = target_db.root(&mut hasher);
 
+            // After commit, the database may have pruned early operations
+            // Start syncing from the oldest retained location, not 0
+            let lower_bound_ops = target_db.oldest_retained_loc().unwrap_or(0);
+
+            // Get target database state before moving it into the config
+            let mut target_key_values = HashMap::new();
+            for op in &target_db_ops {
+                if let Operation::Update(key, _) = op {
+                    let value = target_db.get(key).await.unwrap();
+                    target_key_values.insert(*key, value);
+                }
+            }
+
             let config = Config {
                 db_config: create_test_config(context.next_u64()),
                 max_ops_per_batch,
                 max_retries: 0,
                 target_hash,
-                lower_bound_ops: 0,
+                lower_bound_ops,
                 upper_bound_ops: target_ops - 1, // target_ops is the count, operations are 0-indexed
                 context,
                 resolver: target_db,
@@ -393,28 +464,11 @@ mod tests {
             assert_eq!(got_db.root(&mut hasher), target_hash);
             assert_eq!(got_db.op_count(), target_ops);
 
-            let mut key_values = HashMap::new();
-            let mut deleted_keys = HashSet::new();
-            // Make sure the synced database has the same operations as the target database
-            for op in target_db_ops {
-                match op {
-                    Operation::Update(key, value) => {
-                        key_values.insert(key, value);
-                        deleted_keys.remove(&key);
-                    }
-                    Operation::Deleted(key) => {
-                        key_values.remove(&key);
-                        deleted_keys.insert(key);
-                    }
-                    Operation::Commit(_) => {}
-                }
-            }
-
-            for (key, value) in key_values {
-                assert_eq!(got_db.get(&key).await.unwrap(), Some(value));
-            }
-            for key in deleted_keys {
-                assert_eq!(got_db.get(&key).await.unwrap(), None);
+            // Verify that the synced database produces the same final state
+            // by checking that all keys match the target database state
+            for (key, target_value) in target_key_values {
+                let synced_value = got_db.get(&key).await.unwrap();
+                assert_eq!(target_value, synced_value, "Mismatch for key {key}");
             }
         });
     }
@@ -462,6 +516,10 @@ mod tests {
                 },
                 ops,
             ))
+        }
+
+        fn get_pinned_nodes(&self) -> HashMap<u64, <TestHash as Hasher>::Digest> {
+            HashMap::new()
         }
     }
 

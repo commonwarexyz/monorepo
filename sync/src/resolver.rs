@@ -7,7 +7,7 @@ use commonware_storage::{
     mmr::verification::Proof,
 };
 use commonware_utils::Array;
-use std::num::NonZeroU64;
+use std::{collections::HashMap, num::NonZeroU64};
 
 /// Trait for network communication with the sync server
 pub trait Resolver<H: Hasher, K: Array, V: Array> {
@@ -18,6 +18,9 @@ pub trait Resolver<H: Hasher, K: Array, V: Array> {
         start_index: u64,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error>;
+
+    /// Get the pinned nodes from the resolver (for syncing from pruned state)
+    fn get_pinned_nodes(&self) -> HashMap<u64, H::Digest>;
 }
 
 impl<E, K, V, H, T> Resolver<H, K, V> for Any<E, K, V, H, T>
@@ -36,6 +39,10 @@ where
         self.proof(start_index, max_ops.get())
             .await
             .map_err(Error::GetProofFailed)
+    }
+
+    fn get_pinned_nodes(&self) -> HashMap<u64, H::Digest> {
+        Any::get_pinned_nodes(self)
     }
 }
 

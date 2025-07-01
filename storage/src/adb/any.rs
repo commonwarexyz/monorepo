@@ -489,6 +489,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             .map(|pos| leaf_pos_to_num(pos).unwrap())
     }
 
+    /// Get the pinned nodes from the MMR (for syncing from pruned state).
+    pub fn get_pinned_nodes(&self) -> HashMap<u64, H::Digest> {
+        self.ops.get_pinned_nodes()
+    }
+
     /// Updates `key` to have value `value`. If the key already has this same value, then this is a
     /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
     /// next successful `commit`.
