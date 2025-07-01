@@ -95,7 +95,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         );
         context.register(
             "sync_overwrites",
-            "number of syncs that modified data in-place",
+            "number of syncs that modified existing data",
             sync_overwrites.clone(),
         );
         context.register("keys", "number of tracked keys", keys.clone());
