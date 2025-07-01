@@ -10,7 +10,8 @@ use commonware_utils::{hex, Array};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::{
-    collections::{btree_map::Entry, BTreeMap},
+    collections::{btree_map::Entry, BTreeMap, BTreeSet},
+    marker::PhantomData,
     mem::take,
 };
 use tracing::{debug, warn};
@@ -68,7 +69,7 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
     intervals: RMap,
 
     // Pending index entries to be synced, grouped by section
-    pending: BTreeMap<u64, BTreeMap<u64, V>>,
+    pending: BTreeSet<u64>,
 
     // Metrics
     puts: Counter,
@@ -76,6 +77,8 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
     has: Counter,
     syncs: Counter,
     pruned: Counter,
+
+    _phantom: PhantomData<V>,
 }
 
 impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
@@ -178,23 +181,39 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
             config,
             blobs,
             intervals,
-            pending: BTreeMap::new(),
+            pending: BTreeSet::new(),
             puts,
             gets,
             has,
             syncs,
             pruned,
+            _phantom: PhantomData,
         })
     }
 
     /// Add a value at the specified index (pending until sync).
-    pub fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
+    pub async fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
         self.puts.inc();
+
+        // Check if blob exists
         let section = index / self.config.items_per_blob;
-        self.pending
-            .entry(section)
-            .or_default()
-            .insert(index, value);
+        if let Entry::Vacant(entry) = self.blobs.entry(section) {
+            let (blob, len) = self
+                .context
+                .open(&self.config.partition, &section.to_be_bytes())
+                .await?;
+            entry.insert(Write::new(blob, len, self.config.write_buffer));
+            debug!(section, "created blob");
+        }
+
+        // Write the value to the blob
+        let blob = self.blobs.get(&section).unwrap();
+        let offset = (index % self.config.items_per_blob) * Record::<V>::SIZE as u64;
+        let record = Record::new(value);
+        blob.write_at(record.encode(), offset).await?;
+        self.pending.insert(section);
+
+        // Add to intervals
         self.intervals.insert(index);
 
         Ok(())
@@ -207,14 +226,6 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         // If get isn't in an interval, it doesn't exist and we don't need to access disk
         if self.intervals.get(&index).is_none() {
             return Ok(None);
-        }
-
-        // Check pending entries first
-        let section = index / self.config.items_per_blob;
-        if let Some(writes) = self.pending.get(&section) {
-            if let Some(value) = writes.get(&index) {
-                return Ok(Some(value.clone()));
-            }
         }
 
         // Read from disk
@@ -279,7 +290,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         }
 
         // Clean pending entries that fall into pruned sections.
-        self.pending.retain(|&section, _| section >= min_section);
+        self.pending.retain(|&section| section >= min_section);
 
         Ok(())
     }
@@ -288,40 +299,15 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.syncs.inc();
 
-        // Take the pending writes, which are already grouped by section.
-        let pending = take(&mut self.pending);
-
-        // Ensure all necessary blobs are created.
-        let modified: Vec<u64> = pending.keys().copied().collect();
-        for &section in &modified {
-            if let Entry::Vacant(entry) = self.blobs.entry(section) {
-                let (new, len) = self
-                    .context
-                    .open(&self.config.partition, &section.to_be_bytes())
-                    .await?;
-                entry.insert(Write::new(new, len, self.config.write_buffer));
-                debug!(section, "created blob");
-            }
-        }
-
-        // Write all pending entries to disk.
-        let mut futures = Vec::new();
-        for (section, writes) in pending {
-            let blob = self.blobs.get(&section).unwrap();
-            for (index, value) in writes {
-                let offset = (index % self.config.items_per_blob) * Record::<V>::SIZE as u64;
-                let record = Record::new(value);
-                futures.push(blob.write_at(record.encode(), offset));
-            }
-        }
-        try_join_all(futures).await?;
-
-        // Sync the modified blobs.
-        let mut futures = Vec::with_capacity(modified.len());
-        for &section in &modified {
+        // Sync all modified blobs
+        let mut futures = Vec::with_capacity(self.pending.len());
+        for &section in &self.pending {
             futures.push(self.blobs.get(&section).unwrap().sync());
         }
         try_join_all(futures).await?;
+
+        // Clear pending sections
+        self.pending.clear();
 
         Ok(())
     }

@@ -43,9 +43,9 @@
 //!
 //! # Atomicity
 //!
-//! [Ordinal] stages all writes in memory until [Ordinal::sync] is called. While this ensures
-//! that [Ordinal] will only be updated after some other store has been synced, it does not guarantee
-//! all items written during [Ordinal::sync] are atomically persisted.
+//! [Ordinal] eagerly writes all new data to [commonware_runtime::Blob]s. New data, however, is not
+//! synced until [Ordinal::sync] is called. As a result, data is not guaranteed to be atomically
+//! persisted (i.e. shutdown before [Ordinal::sync] may lead to some writes being lost).
 //!
 //! _If you want atomicity for sparse writes, pair [commonware_utils::BitVec] and
 //! [crate::metadata::Metadata] with [Ordinal] (use bits to indicate which items have been atomically
