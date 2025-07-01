@@ -408,9 +408,9 @@ mod tests {
         // Wait for the read and write operations to complete.
         if should_succeed {
             let (result, _) = recv_rx.await.expect("failed to receive result");
-            assert!(result > 0, "recv failed: {}", result);
+            assert!(result > 0, "recv failed: {result}");
             let (result, _) = write_rx.await.expect("failed to receive result");
-            assert!(result > 0, "write failed: {}", result);
+            assert!(result > 0, "write failed: {result}");
         } else {
             let _ = recv_rx.await;
             let _ = write_rx.await;
