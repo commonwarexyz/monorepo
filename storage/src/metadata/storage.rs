@@ -202,9 +202,10 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
 
     /// Get a mutable reference to a value from [Metadata] (if it exists).
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        let value = self.map.get_mut(key)?;
         self.blobs[self.cursor].modified.insert(key.clone());
         self.blobs[1 - self.cursor].modified.insert(key.clone());
-        self.map.get_mut(key)
+        Some(value)
     }
 
     /// Clear all values from [Metadata]. The new state will not be persisted until [Self::sync] is
