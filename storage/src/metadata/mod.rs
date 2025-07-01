@@ -391,7 +391,8 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("syncs_total 0"));
+            assert!(buffer.contains("sync_rewrites_total 0"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
             assert!(buffer.contains("keys 0"));
 
             metadata.destroy().await.unwrap();
@@ -538,7 +539,8 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("syncs_total 0"));
+            assert!(buffer.contains("sync_rewrites_total 0"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
             assert!(buffer.contains("keys 0"));
 
             metadata.destroy().await.unwrap();
