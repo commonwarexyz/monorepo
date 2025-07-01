@@ -259,15 +259,17 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
     }
 
     /// Remove a value from [Metadata] (if it exists).
-    pub fn remove(&mut self, key: &K) {
+    pub fn remove(&mut self, key: &K) -> Option<V> {
         // Get value
-        let exists = self.map.remove(key).is_some();
+        let past = self.map.remove(key);
 
         // Mark key as modified.
-        if exists {
+        if past.is_some() {
             self.key_order_changed = self.next_version;
         }
         self.keys.set(self.map.len() as i64);
+
+        past
     }
 
     /// Iterate over all keys in metadata, optionally filtered by prefix.

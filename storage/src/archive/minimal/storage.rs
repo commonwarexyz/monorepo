@@ -110,10 +110,11 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     items_per_section: u64,
     cursor_heads: u32,
 
-    sections: BTreeSet<u64>,
     metadata: Metadata<E, U64, MetadataRecord>,
     journal: Journal<E, JournalRecord<K, V>>,
     ordinal: Ordinal<E, U32>,
+
+    modified: BTreeSet<u64>,
 }
 
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
@@ -142,7 +143,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
 
         // Collect sections
         let sections = metadata.keys(None).collect::<Vec<_>>();
-        let mut section_set = BTreeSet::new();
         let mut section_bits = HashMap::new();
         for section in sections {
             // Get record
@@ -154,9 +154,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
 
             // Rewind journal
             journal.rewind(section, active.size).await?;
-
-            // Add section to set
-            section_set.insert(section);
         }
 
         // Initialize ordinal
@@ -175,10 +172,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         Ok(Self {
             items_per_section: cfg.items_per_section,
             cursor_heads: cfg.cursor_heads,
-            sections: section_set,
             metadata,
             journal,
             ordinal,
+            modified: BTreeSet::new(),
         })
     }
 
@@ -270,7 +267,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
     async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
         // Check if section exists
         let section = index / self.items_per_section;
-        if !self.sections.contains(&section) {
+        self.modified.insert(section);
+
+        // Initialize section if it doesn't exist
+        if self.metadata.get(&section.into()).is_none() {
             self.initialize_section(section).await;
         }
         let record = self.metadata.get_mut(&section.into()).unwrap();
@@ -310,11 +310,43 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
     }
 
     async fn prune(&mut self, min: u64) -> Result<(), Error> {
-        unimplemented!()
+        // Get sections
+        let sections = self.metadata.keys(None).cloned().collect::<Vec<_>>();
+
+        // Remove old sections from metadata
+        for section in sections {
+            if section.to_u64() >= min {
+                break;
+            }
+            self.metadata.remove(&section).unwrap();
+        }
+
+        // Sync metadata before removing any other data to ensure we can always recover
+        self.metadata.sync().await?;
+
+        // Remove journal
+        self.journal.prune(min).await?;
+
+        // Remove ordinal
+        self.ordinal.prune(min).await?;
+
+        Ok(())
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        unimplemented!()
+        // Sync journal
+        for section in self.modified.iter() {
+            self.journal.sync(*section).await?;
+        }
+        self.modified.clear();
+
+        // Sync ordinal
+        self.ordinal.sync().await?;
+
+        // Sync metadata
+        self.metadata.sync().await?;
+
+        Ok(())
     }
 
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
