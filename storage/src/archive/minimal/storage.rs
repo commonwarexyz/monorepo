@@ -11,7 +11,7 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{Array, BitVec};
 use futures::future::try_join_all;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ops::Deref,
 };
 
@@ -160,7 +160,7 @@ enum MetadataRecord {
     /// The bloom filter of keys for the section.
     Bloom(BloomFilter),
     /// The first item in the section for a given key.
-    Cursor(u32),
+    Cursor(Option<u32>),
     /// The size of the journal for a given section.
     Size(u64),
 }
@@ -176,6 +176,13 @@ impl MetadataRecord {
     fn active(&self) -> &BitVec {
         match self {
             Self::Active(active) => active,
+            _ => panic!("wrong type"),
+        }
+    }
+
+    fn cursor(&self) -> Option<u32> {
+        match self {
+            Self::Cursor(cursor) => *cursor,
             _ => panic!("wrong type"),
         }
     }
@@ -218,7 +225,7 @@ impl Read for MetadataRecord {
                 buf,
                 &((..=usize::MAX).into(), (..=usize::MAX).into()),
             )?)),
-            METADATA_CURSOR => Ok(Self::Cursor(u32::read_cfg(buf, &())?)),
+            METADATA_CURSOR => Ok(Self::Cursor(Option::<u32>::read_cfg(buf, &())?)),
             METADATA_SIZE => Ok(Self::Size(u64::read_cfg(buf, &())?)),
             _ => Err(commonware_codec::Error::InvalidEnum(tag)),
         }
@@ -238,6 +245,9 @@ impl EncodeSize for MetadataRecord {
 
 pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     items_per_section: u64,
+    cursor_heads: u32,
+
+    sections: BTreeSet<u64>,
     metadata: Metadata<E, MetadataKey, MetadataRecord>,
     journal: Journal<E, JournalRecord<K, V>>,
     ordinal: Ordinal<E, K>,
@@ -258,10 +268,12 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         // Collect all journal sizes
         let section_prefix = MetadataKey::purpose_prefix(METADATA_SIZE);
         let sections = metadata.keys(Some(&section_prefix));
+        let mut section_set = BTreeSet::new();
         let mut section_sizes = BTreeMap::new();
         for section in sections {
             let length = metadata.get(section).unwrap().size();
             section_sizes.insert(section.section(), length);
+            section_set.insert(section.section());
         }
 
         // Initialize journal
@@ -305,6 +317,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
 
         Ok(Self {
             items_per_section: cfg.items_per_section,
+            cursor_heads: cfg.cursor_heads,
+            sections: section_set,
             metadata,
             journal,
             ordinal,
@@ -323,6 +337,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
         unimplemented!()
     }
+
+    async fn initialize_section(&self, section: u64) -> Result<(), Error> {
+        unimplemented!()
+    }
 }
 
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
@@ -332,8 +350,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
     type Value = V;
 
     async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
+        // Check if section exists
+        let section = index / self.items_per_section;
+        if !self.sections.contains(&section) {
+            self.initialize_section(section).await?;
+        }
+
+        // Get head for key
+        let head = crc32fast::hash(key.as_ref()) % self.cursor_heads;
+        let cursor_key = MetadataKey::new(section, METADATA_CURSOR, head);
+        let cursor = self.metadata.get(&cursor_key).expect("cursor should exist");
+
         // Put key in ordinal
-        self.ordinal.put(index, key).await?;
+        self.ordinal.put(index, key.clone()).await?;
 
         unimplemented!()
     }
