@@ -286,6 +286,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         // Insert key into bloom filter
         record.bloom.insert(key.as_ref());
 
+        // Update active bits
+        record.active.set((index % self.items_per_section) as usize);
+
         // Put section and offset in ordinal
         self.ordinal.put(index, offset.into()).await?;
 
