@@ -310,6 +310,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
             ordinal,
         })
     }
+
+    async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
+        let key = self.ordinal.get(index).await?;
+        if let Some(key) = key {
+            self.get_key(&key).await
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
+        unimplemented!()
+    }
 }
 
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
@@ -319,15 +332,24 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
     type Value = V;
 
     async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
+        // Put key in ordinal
+        self.ordinal.put(index, key).await?;
+
         unimplemented!()
     }
 
     async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
-        unimplemented!()
+        match identifier {
+            Identifier::Index(index) => self.get_index(index).await,
+            Identifier::Key(key) => self.get_key(key).await,
+        }
     }
 
     async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
-        unimplemented!()
+        match identifier {
+            Identifier::Index(index) => Ok(self.ordinal.has(index)),
+            Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
+        }
     }
 
     async fn prune(&mut self, min: u64) -> Result<(), Error> {
@@ -339,7 +361,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
     }
 
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        unimplemented!()
+        self.ordinal.next_gap(index)
     }
 
     async fn close(self) -> Result<(), Error> {
