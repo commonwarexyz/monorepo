@@ -339,6 +339,12 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     }
 
     async fn initialize_section(&self, section: u64) -> Result<(), Error> {
+        // Create active bit vector
+
+        // Create size vector
+
+        // Create a bunch of cursors
+
         unimplemented!()
     }
 }
