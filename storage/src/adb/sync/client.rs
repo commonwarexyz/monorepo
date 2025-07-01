@@ -1,4 +1,3 @@
-use crate::mmr::iterator::leaf_num_to_pos;
 use crate::{
     adb::{
         self,
@@ -6,7 +5,7 @@ use crate::{
         sync::{resolver::Resolver, Error},
     },
     index::Translator,
-    mmr::{self, verification::Proof},
+    mmr::{self, iterator::leaf_num_to_pos, verification::Proof},
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics as MetricsTrait, Storage};
