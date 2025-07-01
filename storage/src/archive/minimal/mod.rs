@@ -19,11 +19,12 @@ pub struct Config<C> {
     /// The codec configuration to use for the value stored in the archive.
     pub codec_config: C,
 
-    /// Mask to apply to indices to determine section.
-    ///
-    /// This value is `index & section_mask`.
-    pub section_mask: u64,
+    /// The number of items per section.
+    pub items_per_section: u64,
 
     /// The amount of bytes that can be buffered in a section before being written to disk.
     pub write_buffer: usize,
+
+    /// The amount of bytes to use when replaying the ordinal.
+    pub replay_buffer: usize,
 }

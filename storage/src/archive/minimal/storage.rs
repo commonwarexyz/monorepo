@@ -1,13 +1,13 @@
 use crate::{
     archive::{minimal::Config, Error},
-    journal::variable::Journal,
+    journal::variable::{self, Journal},
     metadata::{self, Metadata},
-    rmap::RMap,
+    ordinal::{self, Ordinal},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::BloomFilter;
-use commonware_runtime::{Metrics, Storage};
+use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{Array, BitVec};
 use std::{collections::BTreeMap, ops::Deref};
 
@@ -216,22 +216,21 @@ impl EncodeSize for MetadataRecord {
     }
 }
 
-pub struct Archive<E: Storage + Metrics, K: Array, V: Codec> {
-    section_mask: u64,
-    metadata: Journal<E, MetadataRecord>,
+pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
+    items_per_section: u64,
+    metadata: Metadata<E, MetadataKey, MetadataRecord>,
     journal: Journal<E, JournalRecord<K, V>>,
-    ordinal: BTreeMap<u64, E::Blob>,
-    rmap: RMap,
+    ordinal: Ordinal<E, K>,
 }
 
-impl<E: Storage + Metrics, K: Array, V: Codec> Archive<E, K, V> {
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metadata
-        let mut metadata = Metadata::init(
+        let metadata = Metadata::init(
             context.with_label("metadata"),
             metadata::Config {
                 partition: cfg.metadata_partition,
-                codec_config: &(),
+                codec_config: (),
             },
         )
         .await?;
@@ -239,7 +238,7 @@ impl<E: Storage + Metrics, K: Array, V: Codec> Archive<E, K, V> {
         // Initialize journal
         let journal = Journal::init(
             context.with_label("journal"),
-            journal::variable::Config {
+            variable::Config {
                 partition: cfg.journal_partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
@@ -247,5 +246,24 @@ impl<E: Storage + Metrics, K: Array, V: Codec> Archive<E, K, V> {
             },
         )
         .await?;
+
+        // Initialize ordinal
+        let ordinal = Ordinal::init(
+            context.with_label("ordinal"),
+            ordinal::Config {
+                partition: cfg.ordinal_partition,
+                items_per_blob: cfg.items_per_section,
+                write_buffer: cfg.write_buffer,
+                replay_buffer: cfg.replay_buffer,
+            },
+        )
+        .await?;
+
+        Ok(Self {
+            items_per_section: cfg.items_per_section,
+            metadata,
+            journal,
+            ordinal,
+        })
     }
 }

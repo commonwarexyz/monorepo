@@ -22,6 +22,10 @@ pub enum Identifier<'a, K: Array> {
 pub enum Error {
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
+    #[error("ordinal error: {0}")]
+    Ordinal(#[from] crate::ordinal::Error),
+    #[error("metadata error: {0}")]
+    Metadata(#[from] crate::metadata::Error),
     #[error("record corrupted")]
     RecordCorrupted,
     #[error("already pruned to: {0}")]
