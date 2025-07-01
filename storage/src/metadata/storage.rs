@@ -168,11 +168,13 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         while cursor < checksum_index {
             // Read key
             let next_cursor = cursor + K::SIZE;
-            let key = K::read(&mut buf.as_ref()[cursor..next_cursor].as_ref()).unwrap();
+            let key = K::read(&mut buf.as_ref()[cursor..next_cursor].as_ref())
+                .expect("unable to read key from blob");
             cursor = next_cursor;
 
             // Read value
-            let value = V::read_cfg(&mut buf.as_ref()[cursor..].as_ref(), codec_config).unwrap();
+            let value = V::read_cfg(&mut buf.as_ref()[cursor..].as_ref(), codec_config)
+                .expect("unable to read value from blob");
             cursor = next_cursor + value.encode_size();
             data.insert(key, value);
         }
