@@ -227,9 +227,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         // Create active bit vector
         let active = BitVec::with_capacity(self.items_per_section as usize);
 
-        // Create size vector
-        let size = 0;
-
         // Create bloom filter
         let bloom = BloomFilter::with_capacity(
             NZUsize!(self.items_per_section as usize),
@@ -246,11 +243,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
             active,
             bloom,
             cursors,
-            size,
+            size: 0,
         };
-        let size = record.encode_size();
+        let record_size = record.encode_size();
         self.metadata.put(section.into(), record);
-        debug!(section, size, "initialized section");
+        debug!(section, size = record_size, "initialized section");
     }
 }
 
