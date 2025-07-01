@@ -145,7 +145,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         let mut section_bits = HashMap::new();
         for section in sections {
             // Get record
-            let active = metadata.get(&section).unwrap();
+            let active = metadata.get(section).unwrap();
 
             // Get active bits
             let section = section.to_u64();
