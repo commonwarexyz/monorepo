@@ -8,12 +8,15 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::BloomFilter;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{array::U64, Array, BitVec};
+use commonware_utils::{array::U64, Array, BitVec, NZUsize};
 use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ops::Deref,
 };
+
+const FALSE_POSITIVE_NUMERATOR: usize = 1;
+const FALSE_POSITIVE_DENOMINATOR: usize = 100;
 
 struct JournalRecord<K: Array, V: Codec> {
     key: K,
@@ -188,7 +191,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         unimplemented!()
     }
 
-    async fn initialize_section(&self, section: u64) {
+    async fn initialize_section(&mut self, section: u64) {
         // Create active bit vector
         let active = BitVec::with_capacity(self.items_per_section as usize);
 
@@ -196,7 +199,12 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         let size = 0;
 
         // Create bloom filter
-        let bloom = BloomFilter::with_capacity(self.items_per_section as usize);
+        let bloom = BloomFilter::with_capacity(
+            NZUsize!(self.items_per_section as usize),
+            NZUsize!(FALSE_POSITIVE_NUMERATOR),
+            NZUsize!(FALSE_POSITIVE_DENOMINATOR),
+        )
+        .unwrap();
 
         // Create cursors
         let cursors = vec![0; self.cursor_heads as usize];
@@ -222,7 +230,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         // Check if section exists
         let section = index / self.items_per_section;
         if !self.sections.contains(&section) {
-            self.initialize_section(section).await?;
+            self.initialize_section(section).await;
         }
 
         // Get head for key
