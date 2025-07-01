@@ -57,7 +57,8 @@ fn fuzz(data: FuzzInput) {
 
         let mut expected_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
         let mut all_keys: HashSet<RawKey> = HashSet::new();
-        let op_count: u64 = 0;
+        let mut uncommitted_ops = 0;
+        let mut last_known_op_count = 0;
 
         for op in &data.operations {
             match op {
@@ -71,15 +72,15 @@ fn fuzz(data: FuzzInput) {
                         commonware_storage::adb::any::UpdateResult::Inserted(_) => {
                             expected_state.insert(*key, Some(*value));
                             all_keys.insert(*key);
+                            uncommitted_ops += 1;
                         }
                         commonware_storage::adb::any::UpdateResult::Updated(..) => {
                             expected_state.insert(*key, Some(*value));
                             all_keys.insert(*key);
+                            uncommitted_ops += 1;
                         }
                         commonware_storage::adb::any::UpdateResult::NoOp => {
-                            // NoOp means the value was already the same
-                            // We should still track this key
-                            all_keys.insert(*key);
+                            // The key already has this value, so this is a no-op.
                         }
                     }
                 }
@@ -90,47 +91,79 @@ fn fuzz(data: FuzzInput) {
 
                     if result.is_some() {
                         // Delete succeeded - mark as deleted, not remove
+                        assert!(all_keys.contains(key), "there was no key");
                         expected_state.insert(*key, None);
-                        all_keys.insert(*key);
+                        uncommitted_ops += 1;
                     }
-                    // If result is None, it was a no-op (key didn't exist)
                 }
 
                 AdbOperation::OpCount => {
-                    adb.op_count();
+                    let actual_count = adb.op_count();
+                    // The count should have increased by the number of uncommitted operations
+                    let expected_count = last_known_op_count + uncommitted_ops;
+                    assert_eq!(actual_count, expected_count,
+                        "Operation count mismatch: expected {expected_count} (last_known={last_known_op_count} + uncommitted={uncommitted_ops}), got {actual_count}");
                 }
 
                 AdbOperation::OldestRetainedLoC => {
-                    adb.oldest_retained_loc();
+                    let oldest_loc = adb.oldest_retained_loc();
+                    // The oldest retained location should be None if no operations exist
+                    // or Some value >= 0 if operations exist
+                    let actual_op_count = adb.op_count();
+                    if actual_op_count == 0 {
+                        assert_eq!(oldest_loc, None, "Expected no oldest location when no operations exist");
+                    } else {
+                        // The oldest retained location should be Some value
+                        // It might not be 0 because commits can cause pruning
+                        assert!(oldest_loc.is_some(), "Expected Some oldest location when operations exist");
+                        if let Some(loc) = oldest_loc {
+                            assert!(loc < actual_op_count,
+                                "Oldest retained location {loc} should be less than op count {actual_op_count}", 
+                            );
+                        }
+                    }
                 }
 
                 AdbOperation::Commit => {
                     adb.commit().await.expect("commit should not fail");
+                    // After commit, update our last known count since commit may add more operations
+                    last_known_op_count = adb.op_count();
+                    uncommitted_ops = 0; // Reset uncommitted operations counter
                 }
 
                 AdbOperation::Root => {
-                    // root panics if there are uncommitted operations.
-                    adb.commit().await.expect("commit should not fail");
+                    // root requires all operations to be committed
+                    if uncommitted_ops > 0 {
+                        adb.commit().await.expect("commit should not fail");
+                        last_known_op_count = adb.op_count();
+                        uncommitted_ops = 0;
+                    }
                     adb.root(&mut hasher);
                 }
 
                 AdbOperation::Proof { start_loc, max_ops } => {
-                    // Only generate proof if we have operations and valid parameters
-                    if op_count > 0 && *start_loc < op_count && *max_ops > 0 {
+                    let actual_op_count = adb.op_count();
+
+                    // Only generate proof if ADB has operations and valid parameters
+                    if actual_op_count > 0 && *max_ops > 0 {
                         // Ensure all operations are committed before generating proof
-                        adb.commit().await.expect("commit should not fail");
+                        if uncommitted_ops > 0 {
+                            adb.commit().await.expect("commit should not fail");
+                            last_known_op_count = adb.op_count();
+                            uncommitted_ops = 0;
+                        }
 
-                        // Get the current root
                         let current_root = adb.root(&mut hasher);
-
-                        // Adjust start_loc to be within valid range (1-indexed)
-                        let adjusted_start = (*start_loc % op_count) + 1;
-                        let adjusted_max_ops = (*max_ops % 100) + 1; // Limit max_ops to reasonable range
+                        // Adjust start_loc to be within valid range
+                        // Locations are 0-indexed (first operation is at location 0)
+                        let adjusted_start = *start_loc % actual_op_count;
+                        let adjusted_max_ops = (*max_ops % 100).max(1); // Ensure at least 1
 
                         let (proof, log) = adb
                             .proof(adjusted_start, adjusted_max_ops)
                             .await
                             .expect("proof should not fail");
+
                         assert!(
                             Any::<deterministic::Context, _, _, _, EightCap>::verify_proof(
                                 &mut hasher,
@@ -138,7 +171,8 @@ fn fuzz(data: FuzzInput) {
                                 adjusted_start,
                                 &log,
                                 &current_root
-                            )
+                            ),
+                            "Proof verification failed for start_loc={adjusted_start}, max_ops={adjusted_max_ops}",
                         );
                     }
                 }
@@ -179,7 +213,9 @@ fn fuzz(data: FuzzInput) {
         }
 
         // Final commit to ensure all operations are persisted
-        adb.commit().await.expect("commit should not fail");
+        if uncommitted_ops > 0 {
+            adb.commit().await.expect("final commit should not fail");
+        }
 
         // Comprehensive final verification - check ALL keys ever touched
         for key in &all_keys {
