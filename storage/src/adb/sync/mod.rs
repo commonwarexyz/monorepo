@@ -1,10 +1,15 @@
 use crate::{
-    client::{Client, Config},
-    resolver::Resolver,
+    adb::{
+        any::Any,
+        sync::{
+            client::{Client, Config},
+            resolver::Resolver,
+        },
+    },
+    index::Translator,
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_storage::{adb::any::Any, index::Translator};
 use commonware_utils::Array;
 use std::fmt;
 
@@ -16,7 +21,7 @@ mod resolver;
 pub enum Error {
     /// Database operation error
     #[error("Database error: {0}")]
-    GetProofFailed(commonware_storage::adb::Error),
+    GetProofFailed(crate::adb::Error),
     /// Hash mismatch after sync
     #[error("Hash mismatch - expected {expected:?}, got {actual:?}")]
     HashMismatch {
@@ -37,7 +42,7 @@ pub enum Error {
     AlreadyComplete,
     /// Database initialization failed during sync
     #[error("Database initialization failed: {0}")]
-    DatabaseInitFailed(commonware_storage::adb::Error),
+    DatabaseInitFailed(crate::adb::Error),
     /// Maximum retries exceeded
     #[error("Maximum retries exceeded")]
     MaxRetriesExceeded,

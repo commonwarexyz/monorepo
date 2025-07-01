@@ -1,11 +1,14 @@
-use crate::{resolver::Resolver, Error};
+use crate::{
+    adb::{
+        self,
+        operation::Operation,
+        sync::{resolver::Resolver, Error},
+    },
+    index::Translator,
+    mmr::{self, verification::Proof},
+};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics as MetricsTrait, Storage};
-use commonware_storage::{
-    adb::{self, operation::Operation},
-    index::Translator,
-    mmr::verification::Proof,
-};
 use commonware_utils::Array;
 use std::{collections::HashMap, marker::PhantomData, num::NonZeroU64};
 use tracing::{debug, info, warn};
@@ -45,7 +48,7 @@ where
     pub resolver: R,
 
     /// Hasher for root hashes.
-    pub hasher: commonware_storage::mmr::hasher::Standard<H>,
+    pub hasher: mmr::hasher::Standard<H>,
 
     _phantom: PhantomData<(K, V)>,
 }
@@ -319,13 +322,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync;
+    use crate::{
+        adb::{any::Any, sync::sync},
+        index,
+        mmr::verification::Proof,
+    };
     use commonware_cryptography::{sha256::Digest, Digest as _, Sha256};
     use commonware_runtime::{
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_storage::{adb::any::Any, index, mmr::verification::Proof};
     use commonware_utils::NZU64;
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
     use std::{
@@ -340,8 +346,8 @@ mod tests {
     type TestTranslator = index::translator::TwoCap;
     type TestAny = Any<Context, TestKey, TestValue, TestHash, TestTranslator>;
 
-    fn create_test_hasher() -> commonware_storage::mmr::hasher::Standard<TestHash> {
-        commonware_storage::mmr::hasher::Standard::<TestHash>::new()
+    fn create_test_hasher() -> crate::mmr::hasher::Standard<TestHash> {
+        crate::mmr::hasher::Standard::<TestHash>::new()
     }
 
     fn create_test_config(seed: u64) -> adb::any::Config<TestTranslator> {

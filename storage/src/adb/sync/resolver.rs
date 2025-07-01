@@ -1,11 +1,10 @@
-use crate::Error;
-use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_storage::{
-    adb::{any::Any, operation::Operation},
+use crate::{
+    adb::{any::Any, operation::Operation, sync::Error},
     index::Translator,
     mmr::verification::Proof,
 };
+use commonware_cryptography::Hasher;
+use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::{collections::HashMap, num::NonZeroU64};
 
@@ -49,14 +48,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        adb::any::{Any, Config},
+        index,
+        mmr::hasher,
+    };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_runtime::{
         deterministic::{self, Context},
         Runner as _,
-    };
-    use commonware_storage::{
-        adb::any::{Any, Config},
-        index,
     };
 
     type TestHash = Sha256;
@@ -113,7 +113,7 @@ mod tests {
             let mut source_db = create_test_db(context.clone()).await;
             let _operations = populate_db_with_operations(&mut source_db, 10).await;
 
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+            let mut hasher = hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
             let (proof, returned_ops) = source_db.proof(0, 5).await.unwrap();
@@ -147,7 +147,7 @@ mod tests {
             let mut source_db = create_test_db(context.clone()).await;
             populate_db_with_operations(&mut source_db, 15).await;
 
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+            let mut hasher = hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
             let (proof, returned_ops) = source_db.proof(0, 1000).await.unwrap();
@@ -181,7 +181,7 @@ mod tests {
             let mut source_db = create_test_db(context.clone()).await;
             populate_db_with_operations(&mut source_db, 20).await;
 
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+            let mut hasher = hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
             let (proof, returned_ops) = source_db.proof(5, 10).await.unwrap();
@@ -219,7 +219,7 @@ mod tests {
             source_db.update(key, value).await.unwrap();
             source_db.commit().await.unwrap();
 
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+            let mut hasher = hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
             let (proof, returned_ops) = source_db.proof(0, 1).await.unwrap();
@@ -249,7 +249,7 @@ mod tests {
             let mut source_db = create_test_db(context.clone()).await;
             populate_db_with_operations(&mut source_db, 100).await;
 
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+            let mut hasher = hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
             let (proof, returned_ops) = source_db.proof(0, 3).await.unwrap();
@@ -315,7 +315,7 @@ mod tests {
             source_db.delete(key2).await.unwrap();
             source_db.commit().await.unwrap();
 
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+            let mut hasher = hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
             let (proof, returned_ops) = source_db.proof(0, 20).await.unwrap();
@@ -371,7 +371,7 @@ mod tests {
             source_db.delete(key2).await.unwrap();
             source_db.commit().await.unwrap();
 
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+            let mut hasher = hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
             let (proof, returned_ops) = source_db.proof(0, 20).await.unwrap();
@@ -405,7 +405,7 @@ mod tests {
             let mut source_db = create_test_db(context.clone()).await;
             populate_db_with_operations(&mut source_db, 10).await;
 
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+            let mut hasher = hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
             // This should handle the edge case gracefully
@@ -432,7 +432,7 @@ mod tests {
             let mut source_db = create_test_db(context.clone()).await;
             populate_db_with_operations(&mut source_db, 50).await;
 
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+            let mut hasher = hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
             let (proof, returned_ops) = source_db.proof(0, 30).await.unwrap();
@@ -467,7 +467,7 @@ mod tests {
             let mut source_db = create_test_db(context.clone()).await;
             populate_db_with_operations(&mut source_db, 30).await;
 
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+            let mut hasher = hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
             // Make consecutive requests
@@ -510,7 +510,7 @@ mod tests {
             }
             source_db.commit().await.unwrap();
 
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+            let mut hasher = hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
             let (proof, returned_ops) = source_db.proof(0, 20).await.unwrap();
@@ -542,7 +542,7 @@ mod tests {
             let mut source_db = create_test_db(context.clone()).await;
             populate_db_with_operations(&mut source_db, 10).await;
 
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+            let mut hasher = hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
             let (proof, returned_ops) = source_db.proof(0, 5).await.unwrap();
@@ -566,7 +566,7 @@ mod tests {
             let mut source_db = create_test_db(context.clone()).await;
             populate_db_with_operations(&mut source_db, 20).await;
 
-            let mut hasher = commonware_storage::mmr::hasher::Standard::<TestHash>::new();
+            let mut hasher = hasher::Standard::<TestHash>::new();
             let root_hash = source_db.root(&mut hasher);
 
             // Test different ranges

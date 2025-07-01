@@ -1238,6 +1238,7 @@ dependencies = [
  "prometheus-client",
  "rand",
  "rayon",
+ "test-case",
  "thiserror 2.0.12",
  "tracing",
  "tracing-subscriber",
@@ -1275,22 +1276,6 @@ dependencies = [
  "commonware-stream",
  "futures",
  "libfuzzer-sys",
-]
-
-[[package]]
-name = "commonware-sync"
-version = "0.0.54"
-dependencies = [
- "commonware-codec",
- "commonware-cryptography",
- "commonware-macros",
- "commonware-runtime",
- "commonware-storage",
- "commonware-utils",
- "rand",
- "test-case",
- "thiserror 2.0.12",
- "tracing",
 ]
 
 [[package]]
