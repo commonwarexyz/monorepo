@@ -9,6 +9,7 @@ use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Writ
 use commonware_cryptography::BloomFilter;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{Array, BitVec};
+use futures::future::try_join_all;
 use std::{collections::BTreeMap, ops::Deref};
 
 struct JournalRecord<K: Array, V: Codec> {
@@ -257,7 +258,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         .await?;
 
         // Limit journal sizes to committed
-
+        let mut futures = Vec::with_capacity(section_sizes.len());
+        for (section, size) in section_sizes {
+            futures.push(journal.rewind(section, size));
+        }
+        try_join_all(futures).await?;
 
         // Initialize ordinal
         let ordinal = Ordinal::init(
