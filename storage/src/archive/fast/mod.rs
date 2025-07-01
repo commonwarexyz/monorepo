@@ -724,7 +724,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Initialize the archive
-            let items_per_section = 256u64; // 2^8 items per section
+            let items_per_section = 256u64;
             let cfg = Config {
                 partition: "test_partition".into(),
                 translator: TwoCap,
