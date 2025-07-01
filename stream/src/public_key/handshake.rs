@@ -16,9 +16,9 @@ use commonware_utils::SystemTimeExt;
 use std::time::Duration;
 
 /// Handshake information that is signed over by some peer.
-pub struct Info<C: PublicKey> {
+pub struct Info<P: PublicKey> {
     /// The public key of the recipient.
-    recipient: C,
+    recipient: P,
 
     /// The ephemeral public key of the sender.
     ///
@@ -29,9 +29,9 @@ pub struct Info<C: PublicKey> {
     timestamp: u64,
 }
 
-impl<C: PublicKey> Info<C> {
+impl<P: PublicKey> Info<P> {
     /// Create a new handshake.
-    pub fn new(recipient: C, ephemeral_public_key: x25519::PublicKey, timestamp: u64) -> Self {
+    pub fn new(recipient: P, ephemeral_public_key: x25519::PublicKey, timestamp: u64) -> Self {
         Self {
             recipient,
             ephemeral_public_key,
@@ -40,7 +40,7 @@ impl<C: PublicKey> Info<C> {
     }
 }
 
-impl<C: PublicKey> Write for Info<C> {
+impl<P: PublicKey> Write for Info<P> {
     fn write(&self, buf: &mut impl BufMut) {
         self.recipient.write(buf);
         self.ephemeral_public_key.write(buf);
@@ -48,11 +48,11 @@ impl<C: PublicKey> Write for Info<C> {
     }
 }
 
-impl<C: PublicKey> Read for Info<C> {
+impl<P: PublicKey> Read for Info<P> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let recipient = C::read(buf)?;
+        let recipient = P::read(buf)?;
         let ephemeral_public_key = x25519::PublicKey::read(buf)?;
         let timestamp = UInt::read(buf)?.into();
         Ok(Info {
@@ -63,7 +63,7 @@ impl<C: PublicKey> Read for Info<C> {
     }
 }
 
-impl<K: PublicKey> EncodeSize for Info<K> {
+impl<P: PublicKey> EncodeSize for Info<P> {
     fn encode_size(&self) -> usize {
         self.recipient.encode_size()
             + self.ephemeral_public_key.encode_size()
@@ -83,23 +83,23 @@ impl<K: PublicKey> EncodeSize for Info<K> {
 /// dialer to sign some random bytes provided by the server but this would
 /// require the server to send a message to a peer before authorizing that
 /// it should connect to them.
-pub struct Signed<C: PublicKey> {
+pub struct Signed<P: PublicKey> {
     // The handshake info that was signed over
-    info: Info<C>,
+    info: Info<P>,
 
     // The public key of the sender
-    signer: C,
+    signer: P,
 
     // The signature of the sender
-    signature: C::Signature,
+    signature: P::Signature,
 }
 
-impl<C: PublicKey> Signed<C> {
+impl<P: PublicKey> Signed<P> {
     /// Sign a handshake message.
-    pub fn sign<Sk: Signer<PublicKey = C, Signature = C::Signature>>(
+    pub fn sign<Sk: Signer<PublicKey = P, Signature = P::Signature>>(
         crypto: &mut Sk,
         namespace: &[u8],
-        info: Info<C>,
+        info: Info<P>,
     ) -> Self {
         let signature = crypto.sign(Some(namespace), &info.encode());
         Self {
@@ -110,7 +110,7 @@ impl<C: PublicKey> Signed<C> {
     }
 
     /// Get the public key of the signer.
-    pub fn signer(&self) -> C {
+    pub fn signer(&self) -> P {
         self.signer.clone()
     }
 
@@ -123,7 +123,7 @@ impl<C: PublicKey> Signed<C> {
     pub fn verify<E: Clock>(
         &self,
         context: &E,
-        crypto: &C,
+        crypto: &P,
         namespace: &[u8],
         synchrony_bound: Duration,
         max_handshake_age: Duration,
@@ -173,7 +173,7 @@ impl<C: PublicKey> Signed<C> {
     }
 }
 
-impl<C: PublicKey> Write for Signed<C> {
+impl<P: PublicKey> Write for Signed<P> {
     fn write(&self, buf: &mut impl BufMut) {
         self.info.write(buf);
         self.signer.write(buf);
@@ -181,13 +181,13 @@ impl<C: PublicKey> Write for Signed<C> {
     }
 }
 
-impl<C: PublicKey> Read for Signed<C> {
+impl<P: PublicKey> Read for Signed<P> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let info = Info::read(buf)?;
-        let signer = C::read(buf)?;
-        let signature = C::Signature::read(buf)?;
+        let signer = P::read(buf)?;
+        let signature = P::Signature::read(buf)?;
         Ok(Self {
             info,
             signer,
@@ -196,7 +196,7 @@ impl<C: PublicKey> Read for Signed<C> {
     }
 }
 
-impl<C: PublicKey> EncodeSize for Signed<C> {
+impl<P: PublicKey> EncodeSize for Signed<P> {
     fn encode_size(&self) -> usize {
         self.info.encode_size() + self.signer.encode_size() + self.signature.encode_size()
     }
@@ -263,62 +263,6 @@ impl Read for KeyConfirmation {
 
 impl FixedSize for KeyConfirmation {
     const SIZE: usize = AUTHENTICATION_TAG_LENGTH;
-}
-
-/// Message 2 in the 3-message handshake protocol: Listener's response with key confirmation.
-///
-/// The listener sends their signed handshake along with a confirmation that they can
-/// derive the correct shared secret.
-pub struct ListenerResponse<C: PublicKey> {
-    /// The signed handshake from the listener
-    handshake: Signed<C>,
-
-    /// Key confirmation that the listener can derive the shared secret
-    confirmation: KeyConfirmation,
-}
-
-impl<C: PublicKey> ListenerResponse<C> {
-    /// Create a new listener response with the given handshake and key confirmation.
-    pub fn new(handshake: Signed<C>, confirmation: KeyConfirmation) -> Self {
-        Self {
-            handshake,
-            confirmation,
-        }
-    }
-
-    /// Extract the handshake and key confirmation from this response.
-    ///
-    /// This consumes the response and returns its constituent parts,
-    /// which is useful during the handshake verification process.
-    pub fn into_parts(self) -> (Signed<C>, KeyConfirmation) {
-        (self.handshake, self.confirmation)
-    }
-}
-
-impl<C: PublicKey> Write for ListenerResponse<C> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.handshake.write(buf);
-        self.confirmation.write(buf);
-    }
-}
-
-impl<C: PublicKey> Read for ListenerResponse<C> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let handshake = Signed::read(buf)?;
-        let confirmation = KeyConfirmation::read(buf)?;
-        Ok(Self {
-            handshake,
-            confirmation,
-        })
-    }
-}
-
-impl<C: PublicKey> EncodeSize for ListenerResponse<C> {
-    fn encode_size(&self) -> usize {
-        self.handshake.encode_size() + self.confirmation.encode_size()
-    }
 }
 
 #[cfg(test)]
@@ -684,44 +628,6 @@ mod tests {
 
         // Decode and verify it matches
         let decoded_confirmation = KeyConfirmation::decode(encoded).unwrap();
-        let cipher = ChaCha20Poly1305::new(&key.into());
-        decoded_confirmation.verify(cipher, transcript).unwrap();
-    }
-
-    #[test]
-    fn test_listener_response_encoding() {
-        use chacha20poly1305::KeyInit;
-        use commonware_codec::{DecodeExt, Encode};
-
-        // Create test components
-        let mut sender = PrivateKey::from_seed(0);
-        let recipient = PrivateKey::from_seed(1).public_key();
-        let ephemeral_public_key = PublicKey::from_bytes([3u8; 32]);
-
-        let handshake = Signed::sign(
-            &mut sender,
-            TEST_NAMESPACE,
-            Info {
-                timestamp: 12345,
-                recipient: recipient.clone(),
-                ephemeral_public_key,
-            },
-        );
-
-        let key = [1u8; 32];
-        let cipher = ChaCha20Poly1305::new(&key.into());
-        let transcript = b"test_transcript_for_listener_response";
-        let key_confirmation = KeyConfirmation::create(cipher, transcript).unwrap();
-
-        // Create and encode listener response
-        let original_response = ListenerResponse::new(handshake, key_confirmation);
-        let encoded = original_response.encode();
-
-        // Decode and verify components
-        let decoded_response = ListenerResponse::<edPublicKey>::decode(encoded).unwrap();
-        let (decoded_handshake, decoded_confirmation) = decoded_response.into_parts();
-
-        assert_eq!(decoded_handshake.signer(), sender.public_key());
         let cipher = ChaCha20Poly1305::new(&key.into());
         decoded_confirmation.verify(cipher, transcript).unwrap();
     }
