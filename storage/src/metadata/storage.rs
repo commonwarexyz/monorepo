@@ -172,20 +172,9 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             let key = K::read(&mut buf.as_ref()[cursor..next_cursor].as_ref()).unwrap();
             cursor = next_cursor;
 
-            // Read value length
-            let next_cursor = cursor + 4;
-            let value_len =
-                u32::from_be_bytes(buf.as_ref()[cursor..next_cursor].try_into().unwrap()) as usize;
-            cursor = next_cursor;
-
             // Read value
-            let next_cursor = cursor + value_len;
-            let value = V::read_cfg(
-                &mut buf.as_ref()[cursor..next_cursor].as_ref(),
-                codec_config,
-            )
-            .unwrap();
-            cursor = next_cursor;
+            let value = V::read_cfg(&mut buf.as_ref()[cursor..].as_ref(), codec_config).unwrap();
+            cursor = next_cursor + value.encode_size();
             data.insert(key, value);
         }
 
@@ -241,11 +230,6 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         next_data.put_u64(next_version);
         for (key, value) in &self.map {
             next_data.put_slice(key.as_ref());
-            let value_len = value
-                .encode_size()
-                .try_into()
-                .map_err(|_| Error::ValueTooBig(key.clone()))?;
-            next_data.put_u32(value_len);
             value.write(&mut next_data);
         }
         let checksum = crc32fast::hash(&next_data[..]);

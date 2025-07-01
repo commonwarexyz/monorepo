@@ -541,6 +541,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[should_panic(expected = "usize value is larger than u32")]
     fn test_value_too_big_error() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
@@ -557,10 +558,7 @@ mod tests {
             metadata.put(U64::new(1), value);
 
             // Assert
-            let result = metadata.sync().await;
-            assert!(matches!(result, Err(Error::ValueTooBig(_))));
-
-            metadata.destroy().await.unwrap();
+            metadata.sync().await.unwrap();
         });
     }
 
@@ -583,12 +581,12 @@ mod tests {
 
             // First sync - should write everything to the first blob
             //
-            // 100 keys * (8 bytes for key + 4 bytes for len + 100 bytes for value) + 8 bytes for version + 4 bytes for checksum
+            // 100 keys * (8 bytes for key + 1 bytes for len + 100 bytes for value) + 8 bytes for version + 4 bytes for checksum
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("skipped_total 0"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 11212"),
+                buffer.contains("runtime_storage_write_bytes_total 10912"),
                 "{buffer}",
             );
 
@@ -600,7 +598,7 @@ mod tests {
             let buffer = context.encode();
             assert!(buffer.contains("skipped_total 0"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 22424"),
+                buffer.contains("runtime_storage_write_bytes_total 21824"),
                 "{buffer}",
             );
 
@@ -609,9 +607,9 @@ mod tests {
             // 100 bytes for value + 1 byte for version (first 7 bytes are same) + 4 bytes for checksum
             metadata.sync().await.unwrap();
             let buffer = context.encode();
-            assert!(buffer.contains("skipped_total 11107"), "{buffer}");
+            assert!(buffer.contains("skipped_total 10807"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 22529"),
+                buffer.contains("runtime_storage_write_bytes_total 21929"),
                 "{buffer}",
             );
 
@@ -620,9 +618,9 @@ mod tests {
             // 1 byte for version (first 7 bytes are same) + 4 bytes for checksum
             metadata.sync().await.unwrap();
             let buffer = context.encode();
-            assert!(buffer.contains("skipped_total 22314"), "{buffer}");
+            assert!(buffer.contains("skipped_total 21714"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 22534"),
+                buffer.contains("runtime_storage_write_bytes_total 21934"),
                 "{buffer}",
             );
 
