@@ -359,10 +359,22 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         // Get head for key
         let head = crc32fast::hash(key.as_ref()) % self.cursor_heads;
         let cursor_key = MetadataKey::new(section, METADATA_CURSOR, head);
-        let cursor = self.metadata.get(&cursor_key).expect("cursor should exist");
+        let cursor = self
+            .metadata
+            .get(&cursor_key)
+            .expect("cursor should exist")
+            .cursor();
 
-        // Put key in ordinal
-        self.ordinal.put(index, key.clone()).await?;
+        // Put item in journal
+        let record = JournalRecord::new(key.clone(), data, cursor);
+        let (offset, _) = self.journal.append(section, record).await?;
+
+        // Put cursor in metadata
+        self.metadata
+            .put(cursor_key, MetadataRecord::Cursor(Some(offset)));
+
+        // Put section and offset in ordinal
+        self.ordinal.put(index, (section, offset)).await?;
 
         unimplemented!()
     }
