@@ -61,8 +61,7 @@ impl<K: Array, V: Codec> EncodeSize for Record<K, V> {
 
 /// Implementation of `Archive` storage.
 pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
-    // The section mask is used to determine which section of the journal to write to.
-    section_mask: u64,
+    items_per_section: u64,
     journal: Journal<E, Record<K, V>>,
     pending: BTreeSet<u64>,
 
@@ -85,6 +84,11 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
 }
 
 impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V> {
+    /// Calculate the section for a given index.
+    fn section(&self, index: u64) -> u64 {
+        (index / self.items_per_section) * self.items_per_section
+    }
+
     /// Initialize a new `Archive` instance.
     ///
     /// The in-memory index for `Archive` is populated during this call
@@ -155,7 +159,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
         // Return populated archive
         Ok(Self {
-            section_mask: cfg.section_mask,
+            items_per_section: cfg.items_per_section,
             journal,
             pending: BTreeSet::new(),
             oldest_allowed: None,
@@ -182,7 +186,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         };
 
         // Fetch item from disk
-        let section = self.section_mask & index;
+        let section = self.section(index);
         let record = self
             .journal
             .get_exact(section, location.offset, location.len)
@@ -206,7 +210,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
             // Fetch item from disk
             let location = self.indices.get(index).ok_or(Error::RecordCorrupted)?;
-            let section = self.section_mask & index;
+            let section = self.section(*index);
             let record = self
                 .journal
                 .get_exact(section, location.offset, location.len)
@@ -249,7 +253,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
 
         // Store item in journal
         let record = Record::new(index, key.clone(), data);
-        let section = self.section_mask & index;
+        let section = self.section(index);
         let (offset, len) = self.journal.append(section, record).await?;
 
         // Store index
@@ -287,7 +291,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
 
     async fn prune(&mut self, min: u64) -> Result<(), Error> {
         // Update `min` to reflect section mask
-        let min = self.section_mask & min;
+        let min = self.section(min);
 
         // Check if min is less than last pruned
         if let Some(oldest_allowed) = self.oldest_allowed {

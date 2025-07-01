@@ -17,8 +17,8 @@ pub const PARTITION: &str = "archive_bench_partition";
 /// Number of bytes that can be buffered in a section before being written to disk.
 const WRITE_BUFFER: usize = 1024;
 
-/// Section-mask that yields reasonably small blobs for local testing.
-const SECTION_MASK: u64 = 0xffff_ffff_ffff_ff00u64;
+/// Number of items per section.
+const ITEMS_PER_SECTION: u64 = 256;
 
 /// Number of bytes to buffer when replaying.
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
@@ -39,7 +39,7 @@ pub async fn init(ctx: Context, compression: Option<u8>) -> ArchiveType {
         translator: TwoCap,
         compression,
         codec_config: (),
-        section_mask: SECTION_MASK,
+        items_per_section: ITEMS_PER_SECTION,
         write_buffer: WRITE_BUFFER,
         replay_buffer: REPLAY_BUFFER,
     };

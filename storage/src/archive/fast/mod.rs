@@ -126,7 +126,7 @@
 //!         partition: "demo".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
-//!         section_mask: 0xffff_ffff_ffff_0000u64,
+//!         items_per_section: 1024,
 //!         pending_writes: 10,
 //!         write_buffer: 1024 * 1024,
 //!         replay_buffer: 4096,
@@ -166,10 +166,8 @@ pub struct Config<T: Translator, C> {
     /// The codec configuration to use for the value stored in the archive.
     pub codec_config: C,
 
-    /// Mask to apply to indices to determine section.
-    ///
-    /// This value is `index & section_mask`.
-    pub section_mask: u64,
+    /// The number of items per section.
+    pub items_per_section: u64,
 
     /// The amount of bytes that can be buffered in a section before being written to disk.
     pub write_buffer: usize,
@@ -193,7 +191,7 @@ mod tests {
     use rand::Rng;
     use std::collections::BTreeMap;
 
-    const DEFAULT_SECTION_MASK: u64 = 0xffff_ffff_ffff_0000u64;
+    const DEFAULT_ITEMS_PER_SECTION: u64 = 65536;
     const DEFAULT_WRITE_BUFFER: usize = 1024;
     const DEFAULT_REPLAY_BUFFER: usize = 4096;
 
@@ -217,7 +215,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: DEFAULT_SECTION_MASK,
+                items_per_section: DEFAULT_ITEMS_PER_SECTION,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -315,7 +313,7 @@ mod tests {
                 compression: Some(3),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: DEFAULT_SECTION_MASK,
+                items_per_section: DEFAULT_ITEMS_PER_SECTION,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -341,7 +339,7 @@ mod tests {
                 compression: None,
                 write_buffer: 1024,
                 replay_buffer: 4096,
-                section_mask: DEFAULT_SECTION_MASK,
+                items_per_section: DEFAULT_ITEMS_PER_SECTION,
             };
             let result = Archive::<_, _, FixedBytes<64>, i32>::init(context, cfg.clone()).await;
             assert!(matches!(
@@ -364,7 +362,7 @@ mod tests {
                 compression: None,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: DEFAULT_SECTION_MASK,
+                items_per_section: DEFAULT_ITEMS_PER_SECTION,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -384,7 +382,7 @@ mod tests {
             archive.close().await.expect("Failed to close archive");
 
             // Corrupt the value
-            let section = index & DEFAULT_SECTION_MASK;
+            let section = (index / DEFAULT_ITEMS_PER_SECTION) * DEFAULT_ITEMS_PER_SECTION;
             let (blob, _) = context
                 .open("test_partition", &section.to_be_bytes())
                 .await
@@ -403,7 +401,7 @@ mod tests {
                     compression: None,
                     write_buffer: DEFAULT_WRITE_BUFFER,
                     replay_buffer: DEFAULT_REPLAY_BUFFER,
-                    section_mask: DEFAULT_SECTION_MASK,
+                    items_per_section: DEFAULT_ITEMS_PER_SECTION,
                 },
             )
             .await.expect("Failed to initialize archive");
@@ -430,7 +428,7 @@ mod tests {
                 compression: None,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: DEFAULT_SECTION_MASK,
+                items_per_section: DEFAULT_ITEMS_PER_SECTION,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -488,7 +486,7 @@ mod tests {
                 compression: None,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: DEFAULT_SECTION_MASK,
+                items_per_section: DEFAULT_ITEMS_PER_SECTION,
             };
             let archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -531,7 +529,7 @@ mod tests {
                 compression: None,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: DEFAULT_SECTION_MASK,
+                items_per_section: DEFAULT_ITEMS_PER_SECTION,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -593,7 +591,7 @@ mod tests {
                 compression: None,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: DEFAULT_SECTION_MASK,
+                items_per_section: DEFAULT_ITEMS_PER_SECTION,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -649,7 +647,7 @@ mod tests {
                 compression: None,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: 0xffff_ffff_ffff_ffffu64, // no mask
+                items_per_section: 1, // no mask - each item is its own section
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -726,7 +724,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Initialize the archive
-            let section_mask = 0xffff_ffff_ffff_ff00u64;
+            let items_per_section = 256u64;
             let cfg = Config {
                 partition: "test_partition".into(),
                 translator: TwoCap,
@@ -734,7 +732,7 @@ mod tests {
                 compression: None,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask,
+                items_per_section,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -791,7 +789,7 @@ mod tests {
                 compression: None,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask,
+                items_per_section,
             };
             let mut archive =
                 Archive::<_, _, _, FixedBytes<1024>>::init(context.clone(), cfg.clone())
@@ -819,7 +817,7 @@ mod tests {
             archive.prune(min).await.expect("Failed to prune");
 
             // Ensure all keys can be retrieved that haven't been pruned
-            let min = min & section_mask;
+            let min = (min / items_per_section) * items_per_section;
             let mut removed = 0;
             for (key, (index, data)) in keys {
                 if index >= min {
@@ -888,7 +886,7 @@ mod tests {
                 compression: None,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: DEFAULT_SECTION_MASK,
+                items_per_section: DEFAULT_ITEMS_PER_SECTION,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
