@@ -286,8 +286,8 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             let target_len = target.data.len();
             target.data[target_len - 4..].copy_from_slice(&checksum.to_be_bytes());
             writes.push(target.blob.write_at(
-                target.data[target.data.len() - 4..].into(),
-                (target.data.len() - 4) as u64,
+                target.data[target_len - 4..].into(),
+                (target_len - 4) as u64,
             ));
 
             // Persist changes

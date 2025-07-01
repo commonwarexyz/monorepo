@@ -38,7 +38,7 @@ pub fn get_random_kvs(count: usize) -> Vec<(Key, Val)> {
 /// Modify `modified_pct` of keys and emit a new set of keys.
 pub fn get_modified_kvs(kvs: &[(Key, Val)], modified_pct: usize) -> Vec<(Key, Val)> {
     let mut rng = StdRng::seed_from_u64(0);
-    let mut new_kvs = kvs.to_vec();
+    let mut motified_kvs = Vec::with_capacity(kvs.len());
     if modified_pct > 0 {
         let modified_count = (kvs.len() * modified_pct) / 100;
         let mut indices: Vec<usize> = (0..kvs.len()).collect();
@@ -46,8 +46,8 @@ pub fn get_modified_kvs(kvs: &[(Key, Val)], modified_pct: usize) -> Vec<(Key, Va
         for &idx in indices.iter().take(modified_count) {
             let mut val = vec![0; 100];
             rng.fill(&mut val[..]);
-            new_kvs[idx].1 = val;
+            motified_kvs.push((kvs[idx].0.clone(), val));
         }
     }
-    new_kvs
+    motified_kvs
 }

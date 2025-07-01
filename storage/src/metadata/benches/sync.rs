@@ -16,13 +16,13 @@ fn bench_sync(c: &mut Criterion) {
 
             // Generate key-value pairs for the benchmark
             let initial_kvs = get_random_kvs(num_keys);
-            let second_kvs = get_modified_kvs(&initial_kvs, modified_pct);
+            let modified_kvs = get_modified_kvs(&initial_kvs, modified_pct);
 
             // Run the benchmark
             c.bench_function(&label, |b| {
                 b.to_async(&runner).iter_custom(|iters| {
                     let initial_kvs = initial_kvs.clone();
-                    let second_kvs = second_kvs.clone();
+                    let modified_kvs = modified_kvs.clone();
                     async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
                         let mut total = Duration::ZERO;
@@ -38,7 +38,7 @@ fn bench_sync(c: &mut Criterion) {
                             metadata.sync().await.unwrap();
 
                             // Update some keys
-                            for (k, v) in &second_kvs {
+                            for (k, v) in &modified_kvs {
                                 metadata.put(k.clone(), v.clone());
                             }
 
