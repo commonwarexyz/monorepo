@@ -39,7 +39,7 @@ const UNUSED_N: usize = 0;
 const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 
 /// Configuration for an `Any` authenticated db.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config<T: Translator> {
     /// The name of the [RStorage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
