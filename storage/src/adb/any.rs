@@ -190,7 +190,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     pub async fn init_sync(context: E, cfg: SyncConfig<K, V, H, T>) -> Result<Self, Error> {
         // Convert log operations to MMR digests
         let mut hasher = Standard::<H>::new();
-        let operations_hashes: Vec<H::Digest> = cfg
+        let operations: Vec<H::Digest> = cfg
             .operations
             .iter()
             .map(|op| Self::op_digest(&mut hasher, op))
@@ -207,7 +207,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             pinned_nodes: cfg.mmr_pinned_nodes,
             // Convert log index (location) to MMR index (position)
             pruned_to_pos: leaf_num_to_pos(cfg.pruned_to_loc),
-            operations: operations_hashes,
+            operations,
         };
         let mmr = Mmr::init_sync(context.with_label("mmr"), &mut hasher, mmr_config).await?;
 
@@ -1408,34 +1408,17 @@ mod test {
         });
     }
 
-    /// Helper function to create a SyncConfig for testing
-    fn test_sync_config<K: Array, V: Array, H: CHasher, T: Translator>(
-        suffix: &str,
-        translator: T,
-        mmr_pinned_nodes: HashMap<u64, H::Digest>,
-        pruned_to_loc: u64,
-        operations: Vec<Operation<K, V>>,
-    ) -> SyncConfig<K, V, H, T> {
-        SyncConfig {
-            config: any_db_config(suffix, translator),
-            mmr_pinned_nodes,
-            pruned_to_loc,
-            operations,
-        }
-    }
-
     /// Test init_sync where the target state is empty and unpruned.
     #[test_traced("WARN")]
     pub fn test_any_db_init_sync_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let sync_config: SyncConfig<Digest, Digest, Sha256, EightCap> = test_sync_config(
-                "sync_basic",
-                EightCap,
-                HashMap::new(), // No pinned nodes for empty case
-                0,              // No pruning
-                Vec::new(),     // No operations
-            );
+            let sync_config: SyncConfig<Digest, Digest, Sha256, EightCap> = SyncConfig {
+                config: any_db_config("sync_basic", EightCap),
+                mmr_pinned_nodes: HashMap::new(), // No pinned nodes for empty case
+                pruned_to_loc: 0,                 // No pruning
+                operations: Vec::new(),           // No operations
+            };
             let mut synced_db = Any::init_sync(context.clone(), sync_config).await.unwrap();
 
             // Verify empty database properties
@@ -1510,13 +1493,12 @@ mod test {
             let pinned_nodes = source_db.ops.get_pinned_nodes();
 
             // Initialize the synced db.
-            let sync_config: SyncConfig<Digest, Digest, Sha256, EightCap> = test_sync_config(
-                "sync_pruning",
-                EightCap,
-                pinned_nodes,
-                source_db.inactivity_floor_loc,
-                ops,
-            );
+            let sync_config: SyncConfig<Digest, Digest, Sha256, EightCap> = SyncConfig {
+                config: any_db_config("sync_pruning", EightCap),
+                mmr_pinned_nodes: pinned_nodes,
+                pruned_to_loc: source_db.inactivity_floor_loc,
+                operations: ops,
+            };
             let mut synced_db = Any::init_sync(context.clone(), sync_config).await.unwrap();
 
             // Verify the synced database matches the source
