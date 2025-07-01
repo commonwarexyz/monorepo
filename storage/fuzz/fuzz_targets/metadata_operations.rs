@@ -33,6 +33,7 @@ fn fuzz(input: FuzzInput) {
         // Initialize metadata store
         let cfg = Config {
             partition: "metadata_operations_fuzz_test".to_string(),
+            codec_config: ((0..).into(), ()),
         };
         let mut metadata = match Metadata::init(context.clone(), cfg).await {
             Ok(m) => Some(m),
