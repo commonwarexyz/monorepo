@@ -45,7 +45,7 @@ fn fuzz(data: FuzzInput) {
     runner.start(|context| async move {
         let cfg = Config {
             partition: "test".into(),
-            section_mask: 0xffff_ffff_ffff_ff00u64,
+            items_per_section: 256, // 2^8 items per section
             write_buffer: 1024,
             translator: EightCap,
             replay_buffer: 1024*1024,
@@ -186,7 +186,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 ArchiveOperation::Prune(min) => {
-                    let min = cfg.section_mask & min;
+                    let min = (*min / cfg.items_per_section) * cfg.items_per_section;
                     archive.prune(min).await.expect("prune failed");
                     match oldest_allowed {
                         None => {
