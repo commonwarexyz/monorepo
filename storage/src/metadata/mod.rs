@@ -570,7 +570,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_diffs() {
+    fn test_delta_writes() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -672,6 +672,312 @@ mod tests {
             );
 
             // Clean up
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_sync_with_no_changes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
+
+            // Put initial data
+            metadata.put(U64::new(1), b"hello".to_vec());
+            metadata.sync().await.unwrap();
+
+            // Sync again with no changes - will rewrite because key_order_changed is recent
+            // (on startup, key_order_changed is set to next_version)
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 2"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
+
+            // Sync again - now key order is stable, should do overwrite
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 2"));
+            assert!(buffer.contains("sync_overwrites_total 1"));
+
+            // Sync again - should continue doing overwrites
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 2"));
+            assert!(buffer.contains("sync_overwrites_total 2"));
+
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_get_mut_marks_modified() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Put initial data
+            metadata.put(U64::new(1), b"hello".to_vec());
+            metadata.sync().await.unwrap();
+
+            // Sync again to ensure both blobs are populated
+            metadata.sync().await.unwrap();
+
+            // Use get_mut to modify value
+            let value = metadata.get_mut(&U64::new(1)).unwrap();
+            value[0] = b'H';
+
+            // Sync should detect the modification and do a rewrite (due to recent key_order_changed)
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 2"));
+            assert!(buffer.contains("sync_overwrites_total 1"));
+
+            // Restart the metadata store
+            metadata.close().await.unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context, cfg)
+                .await
+                .unwrap();
+
+            // Verify the change persisted
+            let value = metadata.get(&U64::new(1)).unwrap();
+            assert_eq!(value[0], b'H');
+
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_mixed_operation_sequences() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            let key = U64::new(1);
+
+            // Test: put -> remove -> put same key
+            metadata.put(key.clone(), b"first".to_vec());
+            metadata.remove(&key);
+            metadata.put(key.clone(), b"second".to_vec());
+            metadata.sync().await.unwrap();
+            let value = metadata.get(&key).unwrap();
+            assert_eq!(value, b"second");
+
+            // Test: put -> get_mut -> remove -> put
+            metadata.put(key.clone(), b"third".to_vec());
+            let value = metadata.get_mut(&key).unwrap();
+            value[0] = b'T';
+            metadata.remove(&key);
+            metadata.put(key.clone(), b"fourth".to_vec());
+            metadata.sync().await.unwrap();
+            let value = metadata.get(&key).unwrap();
+            assert_eq!(value, b"fourth");
+
+            // Restart the metadata store
+            metadata.close().await.unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context, cfg)
+                .await
+                .unwrap();
+
+            // Verify the changes persisted
+            let value = metadata.get(&key).unwrap();
+            assert_eq!(value, b"fourth");
+
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_overwrite_vs_rewrite() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
+
+            // Set up initial data
+            metadata.put(U64::new(1), vec![1; 10]);
+            metadata.put(U64::new(2), vec![2; 10]);
+            metadata.sync().await.unwrap();
+
+            // Same size modification before both blobs are populated
+            metadata.put(U64::new(1), vec![0xFF; 10]);
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 2"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
+
+            // Let key order stabilize with another sync
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 2"));
+            assert!(buffer.contains("sync_overwrites_total 1"));
+
+            // Same size modification after both blobs are populated - should overwrite
+            metadata.put(U64::new(1), vec![0xAA; 10]);
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 2"));
+            assert!(buffer.contains("sync_overwrites_total 2"));
+
+            // Different size modification - should rewrite
+            metadata.put(U64::new(1), vec![0xFF; 20]);
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 3"));
+            assert!(buffer.contains("sync_overwrites_total 2"));
+
+            // Add new key - should rewrite (key order changed)
+            metadata.put(U64::new(3), vec![3; 10]);
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 4"));
+            assert!(buffer.contains("sync_overwrites_total 2"));
+
+            // Stabilize key order
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 5"));
+            assert!(buffer.contains("sync_overwrites_total 2"));
+
+            // Modify existing key with same size - should overwrite after stabilized
+            metadata.put(U64::new(2), vec![0xAA; 10]);
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 5"));
+            assert!(buffer.contains("sync_overwrites_total 3"));
+
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_blob_resize() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Start with large data
+            for i in 0..10 {
+                metadata.put(U64::new(i), vec![i as u8; 100]);
+            }
+            metadata.sync().await.unwrap();
+
+            // Stabilize key order
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 2"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
+
+            // Remove most data to make blob smaller
+            for i in 1..10 {
+                metadata.remove(&U64::new(i));
+            }
+            metadata.sync().await.unwrap();
+
+            // Verify the remaining data is still accessible
+            let value = metadata.get(&U64::new(0)).unwrap();
+            assert_eq!(value.len(), 100);
+            assert_eq!(value[0], 0);
+
+            // Check that sync properly handles blob resizing
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 3"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
+
+            // Restart the metadata store
+            metadata.close().await.unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context, cfg)
+                .await
+                .unwrap();
+
+            // Verify the changes persisted
+            let value = metadata.get(&U64::new(0)).unwrap();
+            assert_eq!(value.len(), 100);
+            assert_eq!(value[0], 0);
+
+            // Verify the removed keys are not present
+            for i in 1..10 {
+                assert!(metadata.get(&U64::new(i)).is_none());
+            }
+
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_clear_and_repopulate() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Initial data
+            metadata.put(U64::new(1), b"first".to_vec());
+            metadata.put(U64::new(2), b"second".to_vec());
+            metadata.sync().await.unwrap();
+
+            // Clear everything
+            metadata.clear();
+            metadata.sync().await.unwrap();
+
+            // Verify empty
+            assert!(metadata.get(&U64::new(1)).is_none());
+            assert!(metadata.get(&U64::new(2)).is_none());
+
+            // Restart the metadata store
+            metadata.close().await.unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context, cfg)
+                .await
+                .unwrap();
+
+            // Verify the changes persisted
+            assert!(metadata.get(&U64::new(1)).is_none());
+            assert!(metadata.get(&U64::new(2)).is_none());
+
+            // Repopulate with different data
+            metadata.put(U64::new(3), b"third".to_vec());
+            metadata.put(U64::new(4), b"fourth".to_vec());
+            metadata.sync().await.unwrap();
+
+            // Verify new data
+            assert_eq!(metadata.get(&U64::new(3)).unwrap(), b"third");
+            assert_eq!(metadata.get(&U64::new(4)).unwrap(), b"fourth");
+            assert!(metadata.get(&U64::new(1)).is_none());
+            assert!(metadata.get(&U64::new(2)).is_none());
+
             metadata.destroy().await.unwrap();
         });
     }
