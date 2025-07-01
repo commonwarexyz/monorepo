@@ -164,9 +164,12 @@ where
                     .resolver
                     .get_proof(current_global_pos, batch_size)
                     .await?;
+                let new_operations_len = new_operations.len() as u64;
 
                 // Validate that we didn't get more operations than requested
-                if new_operations.len() as u64 > batch_size.get() {
+                // or that we didn't get an empty proof. We should never get an empty proof
+                // because we will never request an empty proof (i.e. a proof over an empty database).
+                if new_operations_len > batch_size.get() || new_operations_len == 0 {
                     metrics.invalid_batches_received += 1;
                     if metrics.invalid_batches_received > config.max_retries {
                         return Err(Error::MaxRetriesExceeded);
@@ -180,10 +183,11 @@ where
                 }
 
                 debug!(
-                    num_ops = new_operations.len(),
+                    num_ops = new_operations_len,
                     "Received operations from resolver"
                 );
 
+                // Verify the proof is valid over the given operations
                 if !adb::any::Any::<E, K, V, H, T>::verify_proof(
                     &mut config.hasher,
                     &proof,
@@ -204,15 +208,12 @@ where
                         metrics,
                     });
                 }
-                let new_operations_len = new_operations.len() as u64;
                 operations.extend(new_operations);
 
                 // Only extract pinned nodes from the first batch (starting at pruning boundary)
                 if current_global_pos == config.lower_bound_ops {
                     // Convert locations to MMR positions before extracting pinned nodes
                     let start_pos = leaf_num_to_pos(current_global_pos);
-                    // TODO danlaine: handle empty proofs at current_global_pos 0
-                    // and new_operations_len == 0
                     let end_pos = leaf_num_to_pos(current_global_pos + new_operations_len - 1);
                     match proof.extract_pinned_nodes(start_pos, end_pos) {
                         Ok(new_pinned_nodes) => {
