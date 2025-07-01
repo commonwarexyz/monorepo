@@ -46,7 +46,6 @@ fn fuzz(data: FuzzInput) {
         let cfg = Config {
             partition: "test".into(),
             section_mask: 0xffff_ffff_ffff_ff00u64,
-            pending_writes: 1000, // Flush after 1000 writes
             write_buffer: 1024,
             translator: EightCap,
             replay_buffer: 1024*1024,

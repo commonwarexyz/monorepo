@@ -9,10 +9,10 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;
-use futures::{pin_mut, StreamExt};
+use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::collections::BTreeMap;
-use tracing::{debug, trace};
+use std::collections::{BTreeMap, BTreeSet};
+use tracing::debug;
 
 /// Location of a record in `Journal`.
 struct Location {
@@ -64,6 +64,7 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     // The section mask is used to determine which section of the journal to write to.
     section_mask: u64,
     journal: Journal<E, Record<K, V>>,
+    pending: BTreeSet<u64>,
 
     // Oldest allowed section to read from. This is updated when `prune` is called.
     oldest_allowed: Option<u64>,
@@ -74,10 +75,6 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
     keys: Index<T, u64>,
     indices: BTreeMap<u64, Location>,
     intervals: RMap,
-
-    // Track the number of writes pending for a section to determine when to sync.
-    pending_writes: usize,
-    pending: BTreeMap<u64, usize>,
 
     items_tracked: Gauge,
     indices_pruned: Counter,
@@ -158,14 +155,13 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
         // Return populated archive
         Ok(Self {
-            pending_writes: cfg.pending_writes,
             section_mask: cfg.section_mask,
             journal,
+            pending: BTreeSet::new(),
             oldest_allowed: None,
             indices,
             intervals,
             keys,
-            pending: BTreeMap::new(),
             items_tracked,
             indices_pruned,
             unnecessary_reads,
@@ -206,15 +202,8 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         self.keys
             .insert_and_prune(&key, index, |v| *v < oldest_allowed);
 
-        // Update pending writes
-        let pending_writes = self.pending.entry(section).or_default();
-        *pending_writes += 1;
-        if *pending_writes > self.pending_writes {
-            self.journal.sync(section).await.map_err(Error::Journal)?;
-            trace!(section, mode = "pending", "synced section");
-            *pending_writes = 0;
-            self.syncs.inc();
-        }
+        // Add section to pending
+        self.pending.insert(section);
 
         // Update metrics
         self.items_tracked.set(self.indices.len() as i64);
@@ -319,8 +308,8 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
         // Remove pending writes (no need to call `sync` as we are pruning)
         loop {
-            let next = match self.pending.first_key_value() {
-                Some((section, _)) if *section < min => *section,
+            let next = match self.pending.iter().next() {
+                Some(section) if *section < min => *section,
                 _ => break,
             };
             self.pending.remove(&next);
@@ -350,20 +339,13 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
     /// Forcibly sync all pending writes across all `Journals`.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        for (section, count) in self.pending.iter_mut() {
-            if *count == 0 {
-                continue;
-            }
-            self.journal.sync(*section).await.map_err(Error::Journal)?;
-            trace!(
-                section = *section,
-                count = *count,
-                mode = "force",
-                "synced section"
-            );
+        let mut syncs = Vec::with_capacity(self.pending.len());
+        for section in self.pending.iter() {
+            syncs.push(self.journal.sync(*section));
             self.syncs.inc();
-            *count = 0;
         }
+        try_join_all(syncs).await?;
+        self.pending.clear();
         Ok(())
     }
 
