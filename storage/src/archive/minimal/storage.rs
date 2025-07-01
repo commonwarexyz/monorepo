@@ -1,10 +1,10 @@
-use crate::journal::variable::Journal;
+use crate::{journal::variable::Journal, rmap::RMap};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::BloomFilter;
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::{Array, BitVec};
-use std::ops::Deref;
+use std::{collections::BTreeMap, ops::Deref};
 
 struct JournalRecord<K: Array, V: Codec> {
     key: K,
@@ -202,6 +202,8 @@ impl EncodeSize for MetadataRecord {
 
 pub struct Archive<E: Storage + Metrics, K: Array, V: Codec> {
     section_mask: u64,
-    journal: Journal<E, JournalRecord<K, V>>,
     metadata: Journal<E, MetadataRecord>,
+    journal: Journal<E, JournalRecord<K, V>>,
+    ordinal: BTreeMap<u64, E::Blob>,
+    rmap: RMap,
 }
