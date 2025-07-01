@@ -37,27 +37,33 @@ fn test_private_key(data: &[u8]) {
 
     // The reference P256 implements the following policy:
     // Deserialize secret key from an encoded secret scalar passed as a byte slice.
-    // The slice is expected to be a minimum of 24-bytes (192-bits) and at most C::FieldBytesSize bytes in length.
+    // The slice is expected to be a minimum of 24-bytes (192-bits)
+    // and at most C::FieldBytesSize bytes in length.
     // Byte slices shorter than the field size are handled by zero padding the input.
+    // But our implementation accepts only 32-byte input.
+    // The invariant is that on 32-byte input both implementations should generate
+    // the same key or return an error.
 
     match data.len() {
-        24..32 => {
-            assert!(ref_result.is_ok());
-            assert!(our_result.is_err());
-            return;
+        32 => {
+            assert_eq!(
+                ref_result.is_err(),
+                our_result.is_err(),
+                "32-byte input: implementations disagree on input validity"
+            );
+            if let (Ok(ref_key), Ok(our_key)) = (ref_result, our_result) {
+                assert_eq!(
+                    ref_key.to_bytes().as_slice(),
+                    our_key.as_ref(),
+                    "32-byte input: keys don't match"
+                );
+            }
         }
-        0..24 => {
-            assert!(ref_result.is_err());
-            assert!(our_result.is_err());
-            return;
-        }
-        _ => {
-            assert_eq!(ref_result.is_err(), our_result.is_err());
-        }
-    }
-
-    if let (Ok(ref_key), Ok(our_key)) = (ref_result, our_result) {
-        assert_eq!(ref_key.to_bytes().as_slice(), our_key.as_ref());
+        _ => assert!(
+            our_result.is_err(),
+            "Expected error for {}-byte input",
+            data.len()
+        ),
     }
 }
 
