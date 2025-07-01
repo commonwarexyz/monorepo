@@ -2,7 +2,10 @@
 
 use commonware_runtime::tokio::Context;
 use commonware_storage::{
-    archive::fast::{Archive, Config},
+    archive::{
+        fast::{Archive, Config},
+        Archive as _,
+    },
     translator::TwoCap,
 };
 use commonware_utils::array::FixedBytes;

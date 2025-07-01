@@ -64,10 +64,7 @@ pub trait Archive {
     /// the start of the next range after `index` (if it exists).
     ///
     /// This is useful for driving backfill operations over the archive.
-    fn next_gap(
-        &self,
-        index: u64,
-    ) -> impl Future<Output = Result<(Option<u64>, Option<u64>), Error>>;
+    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>);
 
     /// Sync all pending writes.
     fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;

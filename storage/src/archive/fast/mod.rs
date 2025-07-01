@@ -182,6 +182,7 @@ pub struct Config<T: Translator, C> {
 mod tests {
     use super::*;
     use crate::{
+        archive::Archive as _,
         journal::Error as JournalError,
         translator::{FourCap, TwoCap},
     };
