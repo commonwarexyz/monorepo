@@ -1,7 +1,7 @@
 use super::{Config, Error};
 use bytes::BufMut;
 use commonware_codec::{Codec, EncodeSize, FixedSize, ReadExt};
-use commonware_runtime::{Blob, Clock, Metrics, Storage};
+use commonware_runtime::{Blob, Clock, Error as RError, Metrics, Storage};
 use commonware_utils::Array;
 use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -388,7 +388,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         }
         match self.context.remove(&self.partition, None).await {
             Ok(()) => {}
-            Err(commonware_runtime::Error::PartitionMissing(_)) => {
+            Err(RError::PartitionMissing(_)) => {
                 // Partition already removed or never existed.
             }
             Err(err) => return Err(Error::Runtime(err)),
