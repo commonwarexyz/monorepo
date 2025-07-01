@@ -1,9 +1,10 @@
 //! Benchmark for syncing `Metadata` with overlapping keys.
 
+use crate::utils::get_modified_kvs;
+
 use super::utils::{get_random_kvs, init};
 use commonware_runtime::benchmarks::{context, tokio};
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 use std::time::{Duration, Instant};
 
 fn bench_sync(c: &mut Criterion) {
@@ -19,18 +20,7 @@ fn bench_sync(c: &mut Criterion) {
 
             // Generate key-value pairs for the benchmark
             let initial_kvs = get_random_kvs(num_keys);
-            let mut second_kvs = initial_kvs.clone();
-            if modified_pct > 0 {
-                let modified_count = (num_keys * modified_pct) / 100;
-                let mut rng = StdRng::seed_from_u64(0);
-                let mut indices: Vec<usize> = (0..num_keys).collect();
-                indices.shuffle(&mut rng);
-                for &idx in indices.iter().take(modified_count) {
-                    let mut val = vec![0; 100];
-                    rng.fill(&mut val[..]);
-                    second_kvs[idx].1 = val;
-                }
-            }
+            let second_kvs = get_modified_kvs(&initial_kvs, modified_pct);
 
             // Run the benchmark
             c.bench_function(&label, |b| {

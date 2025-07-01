@@ -3,7 +3,7 @@
 use commonware_runtime::tokio::Context;
 use commonware_storage::metadata::{Config, Metadata};
 use commonware_utils::array::U64;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 
 /// Partition used across all metadata benchmarks.
 pub const PARTITION: &str = "metadata_bench_partition";
@@ -24,8 +24,7 @@ pub async fn init(ctx: Context) -> MetadataType {
     Metadata::init(ctx, cfg).await.unwrap()
 }
 
-/// Put `count` random key-value pairs into the metadata store.
-/// Returns the generated keys and values.
+/// Generate `count` random key-value pairs.
 pub fn get_random_kvs(count: usize) -> Vec<(Key, Val)> {
     let mut rng = StdRng::seed_from_u64(0);
     let mut kvs = Vec::with_capacity(count);
@@ -36,4 +35,21 @@ pub fn get_random_kvs(count: usize) -> Vec<(Key, Val)> {
         kvs.push((key, val));
     }
     kvs
+}
+
+/// Modify `modified_pct` of keys and emit a new set of keys.
+pub fn get_modified_kvs(kvs: &[(Key, Val)], modified_pct: usize) -> Vec<(Key, Val)> {
+    let mut rng = StdRng::seed_from_u64(0);
+    let mut new_kvs = kvs.to_vec();
+    if modified_pct > 0 {
+        let modified_count = (kvs.len() * modified_pct) / 100;
+        let mut indices: Vec<usize> = (0..kvs.len()).collect();
+        indices.shuffle(&mut rng);
+        for &idx in indices.iter().take(modified_count) {
+            let mut val = vec![0; 100];
+            rng.fill(&mut val[..]);
+            new_kvs[idx].1 = val;
+        }
+    }
+    new_kvs
 }
