@@ -2,7 +2,7 @@ use crate::journal::variable::Journal;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, Read, ReadExt, Write};
 use commonware_runtime::{Metrics, Storage};
-use commonware_utils::Array;
+use commonware_utils::{Array, BitVec};
 
 struct JournalRecord<K: Array, V: Codec> {
     key: K,
@@ -42,7 +42,17 @@ impl<K: Array, V: Codec> EncodeSize for JournalRecord<K, V> {
     }
 }
 
+enum MetadataRecord {
+    /// The indices currently active in a section.
+    Active(BitVec),
+    /// The bloom filter of keys for the section.
+    Bloom,
+    /// The first item in the section for a given key.
+    Cursor(u32),
+}
+
 pub struct Archive<E: Storage + Metrics, K: Array, V: Codec> {
     section_mask: u64,
-    journal: Journal<E>,
+    journal: Journal<E, JournalRecord<K, V>>,
+    metadata: Journal<E, MetadataRecord>,
 }
