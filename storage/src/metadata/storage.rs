@@ -1,43 +1,57 @@
 use super::{Config, Error};
 use bytes::BufMut;
-use commonware_codec::{Codec, FixedSize, ReadExt};
+use commonware_codec::{Codec, EncodeSize, FixedSize, ReadExt};
 use commonware_runtime::{Blob, Clock, Metrics, Storage};
 use commonware_utils::Array;
 use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
 
 /// The names of the two blobs that store metadata.
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 
-/// The size of the block to fast-forward over.
-///
-/// This is set to the native word size for optimal performance on the target architecture.
-const BLOCK_SIZE: usize = std::mem::size_of::<usize>();
+/// Information about a value in a [Wrapper].
+struct Info {
+    start: usize,
+    length: usize,
+}
+
+impl Info {
+    /// Create a new [Info].
+    fn new(start: usize, length: usize) -> Self {
+        Self { start, length }
+    }
+}
 
 /// One of the two wrappers that store metadata.
-struct Wrapper<B: Blob> {
+struct Wrapper<B: Blob, K: Array> {
     blob: B,
     version: u64,
+    lengths: HashMap<K, Info>,
+    modified: BTreeSet<K>,
     data: Vec<u8>,
 }
 
-impl<B: Blob> Wrapper<B> {
-    /// Create a new wrapper with the given data.
-    fn new(blob: B, version: u64, data: Vec<u8>) -> Self {
+impl<B: Blob, K: Array> Wrapper<B, K> {
+    /// Create a new [Wrapper].
+    fn new(blob: B, version: u64, lengths: HashMap<K, Info>, data: Vec<u8>) -> Self {
         Self {
             blob,
             version,
+            lengths,
+            modified: BTreeSet::new(),
             data,
         }
     }
 
-    /// Create a new empty wrapper.
+    /// Create a new empty [Wrapper].
     fn empty(blob: B) -> Self {
         Self {
             blob,
             version: 0,
+            lengths: HashMap::new(),
+            modified: BTreeSet::new(),
             data: Vec::new(),
         }
     }
@@ -47,15 +61,16 @@ impl<B: Blob> Wrapper<B> {
 pub struct Metadata<E: Clock + Storage + Metrics, K: Array, V: Codec> {
     context: E,
 
-    // Data is stored in a BTreeMap to enable deterministic serialization.
     map: BTreeMap<K, V>,
     cursor: usize,
+    key_order_changed: u64,
+    next_version: u64,
     partition: String,
-    blobs: [Wrapper<E::Blob>; 2],
+    blobs: [Wrapper<E::Blob, K>; 2],
 
-    syncs: Counter,
+    sync_overwrites: Counter,
+    sync_rewrites: Counter,
     keys: Gauge,
-    skipped: Counter,
 }
 
 impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
@@ -74,22 +89,29 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         // Choose latest blob
         let mut map = left_map;
         let mut cursor = 0;
+        let mut version = left_wrapper.version;
         if right_wrapper.version > left_wrapper.version {
             cursor = 1;
             map = right_map;
+            version = right_wrapper.version;
         }
+        let next_version = version.checked_add(1).expect("version overflow");
 
         // Create metrics
-        let syncs = Counter::default();
+        let sync_rewrites = Counter::default();
+        let sync_overwrites = Counter::default();
         let keys = Gauge::default();
-        let skipped = Counter::default();
-        context.register("syncs", "number of syncs of data to disk", syncs.clone());
-        context.register("keys", "number of tracked keys", keys.clone());
         context.register(
-            "skipped",
-            "duplicate bytes not written to disk",
-            skipped.clone(),
+            "sync_rewrites",
+            "number of syncs that rewrote all data",
+            sync_rewrites.clone(),
         );
+        context.register(
+            "sync_overwrites",
+            "number of syncs that modified existing data",
+            sync_overwrites.clone(),
+        );
+        context.register("keys", "number of tracked keys", keys.clone());
 
         // Return metadata
         keys.set(map.len() as i64);
@@ -98,12 +120,14 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
 
             map,
             cursor,
+            key_order_changed: next_version, // rewrite on startup because we don't have a diff record
+            next_version,
             partition: cfg.partition,
             blobs: [left_wrapper, right_wrapper],
 
-            syncs,
+            sync_rewrites,
+            sync_overwrites,
             keys,
-            skipped,
         })
     }
 
@@ -112,7 +136,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         index: usize,
         blob: E::Blob,
         len: u64,
-    ) -> Result<(BTreeMap<K, V>, Wrapper<E::Blob>), Error> {
+    ) -> Result<(BTreeMap<K, V>, Wrapper<E::Blob, K>), Error> {
         // Get blob length
         if len == 0 {
             // Empty blob
@@ -164,23 +188,24 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         // If the checksum is correct, we assume data is correctly packed and we don't perform
         // length checks on the cursor.
         let mut data = BTreeMap::new();
+        let mut lengths = HashMap::new();
         let mut cursor = u64::SIZE;
         while cursor < checksum_index {
             // Read key
-            let next_cursor = cursor + K::SIZE;
-            let key = K::read(&mut buf.as_ref()[cursor..next_cursor].as_ref())
+            let key = K::read(&mut buf.as_ref()[cursor..].as_ref())
                 .expect("unable to read key from blob");
-            cursor = next_cursor;
+            cursor += key.encode_size();
 
             // Read value
             let value = V::read_cfg(&mut buf.as_ref()[cursor..].as_ref(), codec_config)
                 .expect("unable to read value from blob");
-            cursor = next_cursor + value.encode_size();
+            lengths.insert(key.clone(), Info::new(cursor, value.encode_size()));
+            cursor += value.encode_size();
             data.insert(key, value);
         }
 
         // Return info
-        Ok((data, Wrapper::new(blob, version, buf.into())))
+        Ok((data, Wrapper::new(blob, version, lengths, buf.into())))
     }
 
     /// Get a value from [Metadata] (if it exists).
@@ -190,13 +215,26 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
 
     /// Get a mutable reference to a value from [Metadata] (if it exists).
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
-        self.map.get_mut(key)
+        // Get value
+        let value = self.map.get_mut(key)?;
+
+        // Mark key as modified.
+        //
+        // We need to mark both blobs as modified because we may need to update both files.
+        self.blobs[self.cursor].modified.insert(key.clone());
+        self.blobs[1 - self.cursor].modified.insert(key.clone());
+
+        Some(value)
     }
 
     /// Clear all values from [Metadata]. The new state will not be persisted until [Self::sync] is
     /// called.
     pub fn clear(&mut self) {
+        // Clear map
         self.map.clear();
+
+        // Mark key order as changed
+        self.key_order_changed = self.next_version;
         self.keys.set(0);
     }
 
@@ -205,100 +243,127 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
     /// If the key already exists, the value will be overwritten. The
     /// value stored will not be persisted until [Self::sync] is called.
     pub fn put(&mut self, key: K, value: V) {
-        self.map.insert(key, value);
+        // Get value
+        let exists = self.map.insert(key.clone(), value).is_some();
+
+        // Mark key as modified.
+        //
+        // We need to mark both blobs as modified because we may need to update both files.
+        if exists {
+            self.blobs[self.cursor].modified.insert(key.clone());
+            self.blobs[1 - self.cursor].modified.insert(key.clone());
+        } else {
+            self.key_order_changed = self.next_version;
+        }
         self.keys.set(self.map.len() as i64);
     }
 
     /// Remove a value from [Metadata] (if it exists).
     pub fn remove(&mut self, key: &K) {
-        self.map.remove(key);
+        // Get value
+        let exists = self.map.remove(key).is_some();
+
+        // Mark key as modified.
+        if exists {
+            self.key_order_changed = self.next_version;
+        }
         self.keys.set(self.map.len() as i64);
     }
 
     /// Atomically commit the current state of [Metadata].
     pub async fn sync(&mut self) -> Result<(), Error> {
-        self.syncs.inc();
-
         // Compute next version.
         //
         // While it is possible that extremely high-frequency updates to metadata could cause an eventual
         // overflow of version, syncing once per millisecond would overflow in 584,942,417 years.
         let past_version = self.blobs[self.cursor].version;
-        let next_version = past_version.checked_add(1).expect("version overflow");
+        let next_next_version = self.next_version.checked_add(1).expect("version overflow");
 
-        // Create buffer
-        let past_length = self.blobs[self.cursor].data.len();
-        let mut next_data = Vec::with_capacity(past_length);
-        next_data.put_u64(next_version);
-        for (key, value) in &self.map {
-            next_data.put_slice(key.as_ref());
-            value.write(&mut next_data);
-        }
-        let checksum = crc32fast::hash(&next_data[..]);
-        next_data.put_u32(checksum);
-
-        // Get target blob (the one we will overwrite)
+        // Get target blob (the one we will modify)
         let target_cursor = 1 - self.cursor;
         let target = &mut self.blobs[target_cursor];
 
-        // Compute byte-level diff and only write changed segments
-        let mut i = 0;
-        let mut skipped = 0;
-        let mut writes = Vec::new();
-        while i < next_data.len() {
-            // Fast-forward over identical blocks
-            while i + BLOCK_SIZE <= next_data.len()
-                && i + BLOCK_SIZE <= target.data.len()
-                && next_data[i..i + BLOCK_SIZE] == target.data[i..i + BLOCK_SIZE]
-            {
-                i += BLOCK_SIZE;
-                skipped += BLOCK_SIZE as u64;
-            }
-
-            // Skip identical bytes
-            while i < next_data.len() && i < target.data.len() && next_data[i] == target.data[i] {
-                i += 1;
-                skipped += 1;
-            }
-
-            // Reached end of new data
-            if i >= next_data.len() {
-                break;
-            }
-
-            // Find end of differing segment
-            let diff_start = i;
-            while i < next_data.len() {
-                if i >= target.data.len() {
-                    i = next_data.len();
+        // Attempt to overwrite existing data if key order has not changed recently
+        let mut overwrite = true;
+        let mut writes = Vec::with_capacity(target.modified.len());
+        if self.key_order_changed < past_version {
+            for key in target.modified.iter() {
+                let info = target.lengths.get(key).expect("key must exist");
+                let new_value = self.map.get(key).expect("key must exist");
+                if info.length == new_value.encode_size() {
+                    // Overwrite existing value
+                    let encoded = new_value.encode();
+                    target.data[info.start..info.start + info.length].copy_from_slice(&encoded);
+                    writes.push(target.blob.write_at(encoded, info.start as u64));
+                } else {
+                    // Rewrite all
+                    overwrite = false;
                     break;
                 }
-                if next_data[i] == target.data[i] {
-                    break;
-                }
-                i += 1;
             }
+        } else {
+            // If the key order has changed, we need to rewrite all data
+            overwrite = false;
+        }
 
-            // Write the differing segment
+        // Clear modified keys to avoid writing the same data
+        target.modified.clear();
+
+        // Overwrite existing data
+        if overwrite {
+            // Update version
+            let version = self.next_version.to_be_bytes();
+            target.data[0..8].copy_from_slice(&version);
+            writes.push(target.blob.write_at(version.as_slice().into(), 0));
+
+            // Update checksum
+            let checksum_index = target.data.len() - 4;
+            let checksum = crc32fast::hash(&target.data[..checksum_index]).to_be_bytes();
+            target.data[checksum_index..].copy_from_slice(&checksum);
             writes.push(
                 target
                     .blob
-                    .write_at(next_data[diff_start..i].to_vec(), diff_start as u64),
+                    .write_at(checksum.as_slice().into(), checksum_index as u64),
             );
-        }
-        try_join_all(writes).await?;
-        self.skipped.inc_by(skipped);
 
-        // If the new file is shorter, truncate; if longer, resize was implicitly handled by write_at
+            // Persist changes
+            try_join_all(writes).await?;
+            target.blob.sync().await?;
+
+            // Update state
+            target.version = self.next_version;
+            self.cursor = target_cursor;
+            self.next_version = next_next_version;
+            self.sync_overwrites.inc();
+            return Ok(());
+        }
+
+        // Rewrite all data
+        let mut lengths = HashMap::new();
+        let mut next_data = Vec::with_capacity(target.data.len());
+        next_data.put_u64(self.next_version);
+        for (key, value) in &self.map {
+            key.write(&mut next_data);
+            let start = next_data.len();
+            value.write(&mut next_data);
+            lengths.insert(key.clone(), Info::new(start, value.encode_size()));
+        }
+        next_data.put_u32(crc32fast::hash(&next_data[..]));
+
+        // Persist changes
+        target.blob.write_at(next_data.clone(), 0).await?;
         if next_data.len() < target.data.len() {
             target.blob.resize(next_data.len() as u64).await?;
         }
         target.blob.sync().await?;
 
         // Update state
-        self.cursor = target_cursor;
-        target.version = next_version;
+        target.version = self.next_version;
+        target.lengths = lengths;
         target.data = next_data;
+        self.cursor = target_cursor;
+        self.next_version = next_next_version;
+        self.sync_rewrites.inc();
         Ok(())
     }
 
