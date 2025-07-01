@@ -49,8 +49,9 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array, V: Codec> {
     context: E,
 
     map: BTreeMap<K, V>,
-    unstable: u64, // last version where keys were modified
     cursor: usize,
+    last_key_modified: u64,
+    next_version: u64,
     partition: String,
     blobs: [Wrapper<E::Blob, K>; 2],
 
@@ -75,10 +76,13 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         // Choose latest blob
         let mut map = left_map;
         let mut cursor = 0;
+        let mut version = left_wrapper.version;
         if right_wrapper.version > left_wrapper.version {
             cursor = 1;
             map = right_map;
+            version = right_wrapper.version;
         }
+        let next_version = version.checked_add(1).expect("version overflow");
 
         // Create metrics
         let sync_rewrites = Counter::default();
@@ -102,8 +106,9 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             context,
 
             map,
-            unstable: 0,
             cursor,
+            last_key_modified: next_version, // rewrite on startup because we don't have a diff record
+            next_version,
             partition: cfg.partition,
             blobs: [left_wrapper, right_wrapper],
 
@@ -207,10 +212,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
     pub fn clear(&mut self) {
         self.map.clear();
         self.keys.set(0);
-        self.unstable = self.blobs[self.cursor]
-            .version
-            .checked_add(1)
-            .expect("version overflow");
+        self.last_key_modified = self.next_version;
     }
 
     /// Put a value into [Metadata].
@@ -224,10 +226,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             self.blobs[self.cursor].modified.insert(key.clone());
             self.blobs[1 - self.cursor].modified.insert(key.clone());
         } else {
-            self.unstable = self.blobs[self.cursor]
-                .version
-                .checked_add(1)
-                .expect("version overflow");
+            self.last_key_modified = self.next_version;
         }
     }
 
@@ -236,10 +235,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         let modified = self.map.remove(key).is_some();
         self.keys.set(self.map.len() as i64);
         if modified {
-            self.unstable = self.blobs[self.cursor]
-                .version
-                .checked_add(1)
-                .expect("version overflow");
+            self.last_key_modified = self.next_version;
         }
     }
 
@@ -250,7 +246,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         // While it is possible that extremely high-frequency updates to metadata could cause an eventual
         // overflow of version, syncing once per millisecond would overflow in 584,942,417 years.
         let past_version = self.blobs[self.cursor].version;
-        let next_version = past_version.checked_add(1).expect("version overflow");
+        let next_next_version = self.next_version.checked_add(1).expect("version overflow");
 
         // Get target blob (the one we will overwrite)
         let target_cursor = 1 - self.cursor;
@@ -259,7 +255,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         // Attempt to modify in-place (as long as values are unmodified)
         let mut rewrite = false;
         let mut writes = Vec::with_capacity(target.modified.len());
-        if self.unstable < past_version {
+        if self.last_key_modified < past_version {
             for key in target.modified.iter() {
                 let (value_cursor, prev_length) = target.lengths.get(key).expect("key must exist");
                 let new_value = self.map.get(key).expect("key must exist");
@@ -282,7 +278,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
 
         // If we can rewrite in-place, do so
         if !rewrite {
-            target.data[0..8].copy_from_slice(&next_version.to_be_bytes());
+            target.data[0..8].copy_from_slice(&self.next_version.to_be_bytes());
             writes.push(target.blob.write_at(target.data[0..8].into(), 0));
             let checksum = crc32fast::hash(&target.data[..target.data.len() - 4]);
             let target_len = target.data.len();
@@ -296,15 +292,16 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             try_join_all(writes).await?;
             target.blob.sync().await?;
             self.cursor = target_cursor;
-            target.version = next_version;
+            target.version = self.next_version;
             self.sync_overwrites.inc();
+            self.next_version = next_next_version;
             return Ok(());
         }
 
         // Handle rewrite
         let mut lengths = HashMap::new();
         let mut next_data = Vec::with_capacity(target.data.len());
-        next_data.put_u64(next_version);
+        next_data.put_u64(self.next_version);
         for (key, value) in &self.map {
             key.write(&mut next_data);
             let value_cursor = next_data.len();
@@ -322,10 +319,11 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         // Persist changes
         target.blob.sync().await?;
         self.cursor = target_cursor;
-        target.version = next_version;
+        target.version = self.next_version;
         target.lengths = lengths;
         target.data = next_data;
         self.sync_rewrites.inc();
+        self.next_version = next_next_version;
         Ok(())
     }
 
