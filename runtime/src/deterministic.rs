@@ -821,7 +821,7 @@ impl crate::Metrics for Context {
             if prefix.is_empty() {
                 label.to_string()
             } else {
-                format!("{}_{}", prefix, label)
+                format!("{prefix}_{label}")
             }
         };
         assert!(

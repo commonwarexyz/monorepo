@@ -686,7 +686,7 @@ mod tests {
                             assert_eq!(test_digest(pos), item);
                             items.push(pos);
                         }
-                        Err(err) => panic!("Failed to read item: {}", err),
+                        Err(err) => panic!("Failed to read item: {err}"),
                     }
                 }
                 assert_eq!(items, Vec::<u64>::new());
@@ -740,7 +740,7 @@ mod tests {
                             assert_eq!(test_digest(pos), item);
                             items.push(pos);
                         }
-                        Err(err) => panic!("Failed to read item: {}", err),
+                        Err(err) => panic!("Failed to read item: {err}"),
                     }
                 }
 
@@ -914,16 +914,15 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((pos, item)) => {
-                            assert!(pos >= START_POS, "pos={}", pos);
+                            assert!(pos >= START_POS, "pos={pos}");
                             assert_eq!(
                                 test_digest(pos),
                                 item,
-                                "Item at position {} did not match expected digest",
-                                pos
+                                "Item at position {pos} did not match expected digest"
                             );
                             items.push(pos);
                         }
-                        Err(err) => panic!("Failed to read item: {}", err),
+                        Err(err) => panic!("Failed to read item: {err}"),
                     }
                 }
 

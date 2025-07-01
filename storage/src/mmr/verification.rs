@@ -2,7 +2,7 @@
 //! the [Storage] trait, and functions for verifying them against a root digest.
 
 use crate::mmr::{
-    iterator::{leaf_pos_to_num, PathIterator, PeakIterator},
+    iterator::{leaf_num_to_pos, leaf_pos_to_num, PathIterator, PeakIterator},
     storage::Storage,
     Error, Hasher,
 };
@@ -19,6 +19,12 @@ pub(crate) enum ReconstructionError {
     MissingDigests,
     #[error("extra digests in proof")]
     ExtraDigests,
+    #[error("start position is not a leaf")]
+    InvalidStartPos,
+    #[error("end position exceeds MMR size")]
+    InvalidEndPos,
+    #[error("missing elements")]
+    MissingElements,
 }
 
 /// Contains the information necessary for proving the inclusion of an element, or some range of
@@ -77,6 +83,17 @@ impl<D: Digest> Read for Proof<D> {
     }
 }
 
+impl<D: Digest> Default for Proof<D> {
+    /// Create an empty proof. The empty proof will verify only against the root hash of an empty
+    /// (`size == 0`) MMR.
+    fn default() -> Self {
+        Self {
+            size: 0,
+            digests: vec![],
+        }
+    }
+}
+
 impl<D: Digest> Proof<D> {
     /// Return true if `proof` proves that `element` appears at position `element_pos` within the
     /// MMR with root `root_digest`.
@@ -91,35 +108,24 @@ impl<D: Digest> Proof<D> {
         I: CHasher<Digest = D>,
         H: Hasher<I>,
     {
-        self.verify_range_inclusion(hasher, &[element], element_pos, element_pos, root_digest)
+        self.verify_range_inclusion(hasher, &[element], element_pos, root_digest)
     }
 
-    /// Return true if `proof` proves that the `elements` appear consecutively between positions
-    /// `start_element_pos` through `end_element_pos` (inclusive) within the MMR with root
-    /// `root_digest`.
+    /// Return true if `proof` proves that the `elements` appear consecutively starting at position
+    /// `start_element_pos` within the MMR with root `root_digest`.
     pub fn verify_range_inclusion<I, H, E>(
         &self,
         hasher: &mut H,
-        elements: E,
+        elements: &[E],
         start_element_pos: u64,
-        end_element_pos: u64,
         root_digest: &D,
     ) -> bool
     where
         I: CHasher<Digest = D>,
         H: Hasher<I>,
-        E: IntoIterator<Item: AsRef<[u8]>>,
+        E: AsRef<[u8]>,
     {
-        if leaf_pos_to_num(start_element_pos).is_none() {
-            debug!(pos = start_element_pos, "start pos is not a leaf");
-            return false;
-        }
-        if end_element_pos != start_element_pos && leaf_pos_to_num(end_element_pos).is_none() {
-            debug!(pos = end_element_pos, "end pos is not a leaf");
-            return false;
-        }
-
-        match self.reconstruct_root(hasher, elements, start_element_pos, end_element_pos) {
+        match self.reconstruct_root(hasher, elements, start_element_pos) {
             Ok(reconstructed_root) => *root_digest == reconstructed_root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");
@@ -133,45 +139,59 @@ impl<D: Digest> Proof<D> {
     pub(crate) fn reconstruct_root<I, H, E>(
         &self,
         hasher: &mut H,
-        elements: E,
+        elements: &[E],
         start_element_pos: u64,
-        end_element_pos: u64,
     ) -> Result<D, ReconstructionError>
     where
         I: CHasher<Digest = D>,
         H: Hasher<I>,
-        E: IntoIterator<Item: AsRef<[u8]>>,
+        E: AsRef<[u8]>,
     {
-        let peak_digests =
-            self.reconstruct_peak_digests(hasher, elements, start_element_pos, end_element_pos)?;
+        let peak_digests = self.reconstruct_peak_digests(hasher, elements, start_element_pos)?;
 
         Ok(hasher.root_digest(self.size, peak_digests.iter()))
     }
 
     /// Reconstruct the peak digests of the MMR that produced this proof, returning
-    /// [ReconstructionError::MissingDigests] error if there are not enough proof digests, or
-    /// [ReconstructionError::ExtraDigests] error if not all proof digests were used in the
-    /// reconstruction.
+    /// [ReconstructionError] if the input data is invalid.
     fn reconstruct_peak_digests<I, H, E>(
         &self,
         hasher: &mut H,
-        elements: E,
+        elements: &[E],
         start_element_pos: u64,
-        end_element_pos: u64,
     ) -> Result<Vec<D>, ReconstructionError>
     where
         I: CHasher<Digest = D>,
         H: Hasher<I>,
-        E: IntoIterator<Item: AsRef<[u8]>>,
+        E: AsRef<[u8]>,
     {
+        if elements.is_empty() {
+            if start_element_pos == 0 {
+                return Ok(vec![]);
+            }
+            return Err(ReconstructionError::MissingElements);
+        }
+        let Some(start_leaf) = leaf_pos_to_num(start_element_pos) else {
+            debug!(pos = start_element_pos, "start pos is not a leaf");
+            return Err(ReconstructionError::InvalidStartPos);
+        };
+        let end_element_pos = if elements.len() == 1 {
+            start_element_pos
+        } else {
+            leaf_num_to_pos(start_leaf + elements.len() as u64 - 1)
+        };
+        if end_element_pos >= self.size {
+            return Err(ReconstructionError::InvalidEndPos);
+        }
+
         let mut proof_digests_iter = self.digests.iter();
         let mut siblings_iter = self.digests.iter().rev();
-        let mut elements_iter = elements.into_iter();
 
         // Include peak digests only for trees that have no elements from the range, and keep track
         // of the starting and ending trees of those that do contain some.
         let mut peak_digests: Vec<D> = Vec::new();
         let mut proof_digests_used = 0;
+        let mut elements_iter = elements.iter();
         for (peak_pos, height) in PeakIterator::new(self.size) {
             let leftmost_pos = peak_pos + 2 - (1 << (height + 1));
             if peak_pos >= start_element_pos && leftmost_pos <= end_element_pos {
@@ -296,8 +316,8 @@ impl<D: Digest> Proof<D> {
         positions
     }
 
-    /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints. Returns
-    /// ElementPruned error if some element needed to generate the proof has been pruned.
+    /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints.
+    /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
     pub async fn range_proof<S: Storage<D>>(
         mmr: &S,
         start_element_pos: u64,
@@ -341,7 +361,6 @@ where
 {
     assert_ne!(two_h, 0);
     if two_h == 1 {
-        // we are at a leaf
         match elements.next() {
             Some(element) => return Ok(hasher.leaf_digest(pos, element.as_ref())),
             None => return Err(ReconstructionError::MissingDigests),
@@ -401,13 +420,34 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{hash, sha256::Digest, Sha256};
+    use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
 
     fn test_digest(v: u8) -> Digest {
         hash(&[v])
     }
 
-    #[test]
+    #[test_traced]
+    fn test_verification_empty_proof() {
+        // Test that an empty proof authenticates an empty MMR.
+        let mmr = Mmr::new();
+        let mut hasher: Standard<Sha256> = Standard::new();
+        let root_digest = mmr.root(&mut hasher);
+        let proof = Proof::default();
+        assert!(proof.verify_range_inclusion(&mut hasher, &[] as &[Digest], 0, &root_digest));
+
+        // Any starting position other than 0 should fail to verify.
+        assert!(!proof.verify_range_inclusion(&mut hasher, &[] as &[Digest], 1, &root_digest));
+
+        // Invalid root should fail to verify.
+        let test_digest = test_digest(0);
+        assert!(!proof.verify_range_inclusion(&mut hasher, &[] as &[Digest], 0, &test_digest));
+
+        // Non-empty elements list should fail to verify.
+        assert!(!proof.verify_range_inclusion(&mut hasher, &[test_digest], 0, &root_digest));
+    }
+
+    #[test_traced]
     fn test_verification_verify_element() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -500,7 +540,7 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_traced]
     fn test_verification_verify_range() {
         let executor = deterministic::Runner::default();
 
@@ -527,7 +567,6 @@ mod tests {
                             &mut hasher,
                             &elements[i..j + 1],
                             start_pos,
-                            end_pos,
                             &root_digest,
                         ),
                         "valid range proof should verify successfully {i}:{j}",
@@ -547,7 +586,6 @@ mod tests {
                     &mut hasher,
                     valid_elements,
                     start_pos,
-                    end_pos,
                     &root_digest,
                 ),
                 "valid range proof should verify successfully"
@@ -558,9 +596,8 @@ mod tests {
                 assert!(
                     !range_proof.verify_range_inclusion(
                         &mut hasher,
-                        Vec::<&[u8]>::new(),
+                        &[] as &[Digest],
                         start_pos,
-                        end_pos,
                         &root_digest,
                     ),
                     "range proof with removed elements should fail"
@@ -578,7 +615,6 @@ mod tests {
                             &mut hasher,
                             &elements[i..j + 1],
                             start_pos,
-                            end_pos,
                             &root_digest,
                         ),
                         "range proof with invalid elements should fail {i}:{j}",
@@ -592,7 +628,6 @@ mod tests {
                     &mut hasher,
                     valid_elements,
                     start_pos,
-                    end_pos,
                     &invalid_root_digest,
                 ),
                 "range proof with invalid root should fail"
@@ -605,7 +640,6 @@ mod tests {
                     &mut hasher,
                     valid_elements,
                     start_pos,
-                    end_pos,
                     &root_digest,
                 ),
                 "mangled range proof should fail verification"
@@ -619,7 +653,6 @@ mod tests {
                         &mut hasher,
                         valid_elements,
                         start_pos,
-                        end_pos,
                         &root_digest,
                     ),
                     "mangled range proof should fail verification. inserted element at: {i}",
@@ -634,18 +667,16 @@ mod tests {
                         &mut hasher,
                         valid_elements,
                         start_pos,
-                        end_pos,
                         &root_digest,
                     ),
                     "shortened range proof should fail verification"
                 );
             }
             // bad element range should cause verification to fail
-            for i in 0..elements.len() {
-                for j in 0..elements.len() {
+            for (i, _) in elements.iter().enumerate() {
+                for (j, _) in elements.iter().enumerate() {
                     let start_pos2 = element_positions[i];
-                    let end_pos2 = element_positions[j];
-                    if start_pos2 == start_pos && end_pos2 == end_pos {
+                    if start_pos2 == start_pos {
                         continue;
                     }
                     assert!(
@@ -653,7 +684,6 @@ mod tests {
                             &mut hasher,
                             valid_elements,
                             start_pos2,
-                            end_pos2,
                             &root_digest,
                         ),
                         "bad element range should fail verification {i}:{j}",
@@ -663,7 +693,7 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_traced]
     fn test_verification_retained_nodes_provable_after_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -701,7 +731,7 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_traced]
     fn test_verification_ranges_provable_after_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -728,7 +758,6 @@ mod tests {
 
             // test range proofs over all possible ranges of at least 2 elements
             let root_digest = mmr.root(&mut hasher);
-                        let mut hasher: Standard<Sha256> = Standard::new();
             for i in 0..elements.len() {
                 for j in i + 1..elements.len() {
                     let start_pos = element_positions[i];
@@ -739,7 +768,6 @@ mod tests {
                             &mut hasher,
                             &elements[i..j + 1],
                             start_pos,
-                            end_pos,
                             &root_digest,
                         ),
                         "valid range proof over remaining elements should verify successfully",
@@ -769,9 +797,8 @@ mod tests {
             assert!(
                 range_proof.verify_range_inclusion(
                     &mut hasher,
-                    elements,
-                    start_pos,
-                    end_pos,
+                    &elements,
+                        start_pos,
                     &updated_root_digest,
                 ),
                 "valid range proof over remaining elements after 2 pruning rounds should verify successfully",
@@ -779,7 +806,7 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_traced]
     fn test_verification_proof_serialization() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {

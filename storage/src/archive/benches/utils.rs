@@ -33,7 +33,7 @@ pub type ArchiveType = Archive<TwoCap, Context, Key, Val>;
 /// Open (or create) a fresh archive with optional compression.
 ///
 /// The caller is responsible for closing or destroying it.
-pub async fn get_archive(ctx: Context, compression: Option<u8>) -> ArchiveType {
+pub async fn init(ctx: Context, compression: Option<u8>) -> ArchiveType {
     let cfg = Config {
         partition: PARTITION.into(),
         translator: TwoCap,

@@ -248,7 +248,7 @@ pub async fn create_security_group_binary(
 ) -> Result<String, Ec2Error> {
     let sg_resp = client
         .create_security_group()
-        .group_name(format!("{}-binary", tag))
+        .group_name(format!("{tag}-binary"))
         .description("Security group for binary instances")
         .vpc_id(vpc_id)
         .tag_specifications(
@@ -862,8 +862,7 @@ pub async fn assert_arm64_support(
     for instance_type in instance_types {
         if !supported_instance_types.contains(instance_type) {
             return Err(Ec2Error::from(BuildError::other(format!(
-                "instance type {} not ARM64-based",
-                instance_type
+                "instance type {instance_type} not ARM64-based"
             ))));
         }
     }
@@ -916,8 +915,7 @@ pub async fn find_availability_zone(
 
     // If no availability zone supports all instance types, return an error
     Err(Ec2Error::from(BuildError::other(format!(
-        "no availability zone supports all required instance types: {:?}",
-        instance_types
+        "no availability zone supports all required instance types: {instance_types:?}"
     ))))
 }
 

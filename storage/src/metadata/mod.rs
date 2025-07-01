@@ -1,23 +1,20 @@
 //! A key-value store optimized for atomically committing a small collection of metadata.
 //!
-//! `Metadata` is a key-value store optimized for tracking a small collection of metadata
+//! [Metadata] is a key-value store optimized for tracking a small collection of metadata
 //! that allows multiple updates to be committed in a single batch. It is commonly used with
 //! a variety of other underlying storage systems to persist application state across restarts.
 //!
 //! # Format
 //!
-//! Data stored in `Metadata` is serialized as a sequence of key-value pairs in either a
+//! Data stored in [Metadata] is serialized as a sequence of key-value pairs in either a
 //! "left" or "right" blob:
 //!
 //! ```text
 //! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 //! | 0 | 1 |    ...    | 8 | 9 |10 |11 |12 |13 |14 |15 |16 |  ...  |50 |...|90 |91 |92 |93 |
 //! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-//! |    Version (u64)  |  Key1 (u32)   | Len(V1) (u32) |    Value1     |...|  CRC32(u32)   |
+//! |    Version (u64)  |      Key1     |              Value1           |...|  CRC32(u32)   |
 //! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-//!
-//! Len(V1) = Length of Value1
-//! ... = Other key-value pairs (Key2|VLen2|Value2, Key3|VLen3|Value3, ...)
 //! ```
 //!
 //! _To ensure the integrity of the data, a CRC32 checksum is appended to the end of the blob.
@@ -25,12 +22,18 @@
 //!
 //! # Atomic Updates
 //!
-//! To provide support for atomic updates, `Metadata` maintains two blobs: a "left" and a "right"
+//! To provide support for atomic updates, [Metadata] maintains two blobs: a "left" and a "right"
 //! blob. When a new update is committed, it is written to the "older" of the two blobs (indicated
-//! by the version persisted). Writes to `Storage` are not atomic and may only complete partially,
-//! so we only overwrite the "newer" blob once the "older" blob has been synced (otherwise, we would
-//! not be guaranteed to recover the latest complete state from disk on restart as half of a blob
-//! could be old data and half new data).
+//! by the version persisted). Writes to [commonware_runtime::Blob] are not atomic and may only
+//! complete partially, so we only overwrite the "newer" blob once the "older" blob has been synced
+//! (otherwise, we would not be guaranteed to recover the latest complete state from disk on
+//! restart as half of a blob could be old data and half new data).
+//!
+//! # Efficient Writes
+//!
+//! When an update is committed, only updated bytes are actually written to disk. This makes [Metadata]
+//! a great choice for maintaining even large collections of data (there is only overhead to maintaining
+//! keys that aren't updated if the order of keys is unstable).
 //!
 //! # Example
 //!
@@ -43,18 +46,19 @@
 //! executor.start(|context| async move {
 //!     // Create a store
 //!     let mut metadata = Metadata::init(context, Config{
-//!         partition: "partition".to_string()
+//!         partition: "partition".to_string(),
+//!         codec_config: ((0..).into(), ()),
 //!     }).await.unwrap();
 //!
 //!     // Store metadata
-//!     metadata.put(U64::new(1), "hello".into());
-//!     metadata.put(U64::new(2), "world".into());
+//!     metadata.put(U64::new(1), b"hello".to_vec());
+//!     metadata.put(U64::new(2), b"world".to_vec());
 //!
 //!     // Sync the metadata store (batch write changes)
 //!     metadata.sync().await.unwrap();
 //!
 //!     // Retrieve some metadata
-//!     let value = metadata.get(&U64::new(1));
+//!     let value = metadata.get(&U64::new(1)).unwrap();
 //!
 //!     // Close the store
 //!     metadata.close().await.unwrap();
@@ -62,27 +66,26 @@
 //! ```
 
 mod storage;
-use commonware_utils::Array;
 pub use storage::Metadata;
 use thiserror::Error;
 
-/// Errors that can occur when interacting with `Metadata`.
+/// Errors that can occur when interacting with [Metadata].
 #[derive(Debug, Error)]
-pub enum Error<K: Array> {
+pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
     #[error("blob too large: {0}")]
     BlobTooLarge(u64),
-    #[error("value too big: {0}")]
-    ValueTooBig(K),
 }
 
-/// Configuration for `Metadata` storage.
+/// Configuration for [Metadata] storage.
 #[derive(Clone)]
-pub struct Config {
-    /// The `commonware_runtime::Storage` partition to
-    /// use for storing metadata.
+pub struct Config<C> {
+    /// The [commonware_runtime::Storage] partition to use for storing metadata.
     pub partition: String,
+
+    /// The codec configuration to use for the value stored in the metadata.
+    pub codec_config: C,
 }
 
 #[cfg(test)]
@@ -100,8 +103,11 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get a key that doesn't exist
             let key = U64::new(42);
@@ -137,8 +143,11 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Check metrics
             let buffer = context.encode();
@@ -171,8 +180,11 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -205,8 +217,11 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Check metrics
             let buffer = context.encode();
@@ -236,8 +251,11 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Check metrics
             let buffer = context.encode();
@@ -262,8 +280,11 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -291,8 +312,11 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key).unwrap();
@@ -310,8 +334,11 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -342,8 +369,11 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key);
@@ -366,6 +396,7 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
@@ -395,8 +426,11 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key).unwrap();
@@ -414,6 +448,7 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
@@ -443,8 +478,11 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key).unwrap();
@@ -465,6 +503,7 @@ mod tests {
                 // Create a metadata store
                 let cfg = Config {
                     partition: "test".to_string(),
+                    codec_config: ((0..).into(), ()),
                 };
                 let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
@@ -477,8 +516,11 @@ mod tests {
             // Reopen the metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
 
             // Get the key
             let value = metadata.get(&key);
@@ -494,6 +536,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[should_panic(expected = "usize value is larger than u32")]
     fn test_value_too_big_error() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
@@ -501,6 +544,7 @@ mod tests {
             // Create a metadata store
             let cfg = Config {
                 partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
@@ -509,9 +553,73 @@ mod tests {
             metadata.put(U64::new(1), value);
 
             // Assert
-            let result = metadata.sync().await;
-            assert!(matches!(result, Err(Error::ValueTooBig(_))));
+            metadata.sync().await.unwrap();
+        });
+    }
 
+    #[test_traced]
+    fn test_diffs() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a metadata store
+            let cfg = Config {
+                partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Put initial keys
+            for i in 0..100 {
+                metadata.put(U64::new(i), vec![i as u8; 100]);
+            }
+
+            // First sync - should write everything to the first blob
+            //
+            // 100 keys * (8 bytes for key + 1 bytes for len + 100 bytes for value) + 8 bytes for version + 4 bytes for checksum
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("skipped_total 0"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 10912"),
+                "{buffer}",
+            );
+
+            // Modify just one key
+            metadata.put(U64::new(51), vec![0xff; 100]);
+
+            // Sync again - should write everything to the second blob
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("skipped_total 0"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 21824"),
+                "{buffer}",
+            );
+
+            // Sync again - should write only diff from the first blob
+            //
+            // 100 bytes for value + 1 byte for version (first 7 bytes are same) + 4 bytes for checksum
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("skipped_total 10807"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 21929"),
+                "{buffer}",
+            );
+
+            // Sync again - should write only diff from the second blob
+            //
+            // 1 byte for version (first 7 bytes are same) + 4 bytes for checksum
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("skipped_total 21714"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 21934"),
+                "{buffer}",
+            );
+
+            // Clean up
             metadata.destroy().await.unwrap();
         });
     }

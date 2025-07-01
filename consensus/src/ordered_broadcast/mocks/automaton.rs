@@ -31,7 +31,7 @@ impl<P: PublicKey> A for Automaton<P> {
         let (sender, receiver) = oneshot::channel();
 
         let Self::Context { sequencer, height } = context;
-        let payload = Bytes::from(format!("hello world, {} {}", sequencer, height));
+        let payload = Bytes::from(format!("hello world, {sequencer} {height}"));
         let mut hasher = Sha256::default();
         hasher.update(&payload);
 

@@ -221,7 +221,7 @@ pub fn select(input: TokenStream) -> TokenStream {
     ) in branches.into_iter().enumerate()
     {
         // Generate a unique identifier for each future
-        let future_ident = Ident::new(&format!("__select_future_{}", index), pattern.span());
+        let future_ident = Ident::new(&format!("__select_future_{index}"), pattern.span());
 
         // Fuse and pin each future
         let stmt = quote! {
