@@ -5,7 +5,7 @@ use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
     archive::{
         fast::{Archive, Config},
-        Identifier,
+        Archive as _, Identifier,
     },
     translator::EightCap,
 };
