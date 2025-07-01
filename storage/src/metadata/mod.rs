@@ -588,7 +588,7 @@ mod tests {
 
             // First sync - should write everything to the first blob
             //
-            // 100 keys * (8 bytes for key + 1 bytes for len + 100 bytes for value) + 8 bytes for version + 4 bytes for checksum
+            // 100 keys * (8 bytes for key + 1 byte for len + 100 bytes for value) + 8 bytes for version + 4 bytes for checksum
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 1"), "{buffer}");
@@ -613,7 +613,7 @@ mod tests {
 
             // Sync again - should write only diff from the first blob
             //
-            // 100 bytes for value + 8 byte for version + 4 bytes for checksum
+            // 1 byte for len + 100 bytes for value + 8 byte for version + 4 bytes for checksum
             metadata.sync().await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("sync_rewrites_total 2"), "{buffer}");
@@ -633,6 +633,42 @@ mod tests {
             assert!(
                 buffer.contains("runtime_storage_write_bytes_total 21949"),
                 "{buffer}",
+            );
+
+            // Remove a key - should rewrite everything
+            //
+            // 99 keys * (8 bytes for key + 1 bytes for len + 100 bytes for value) + 8 bytes for version + 4 bytes for checksum
+            metadata.remove(&U64::new(51));
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 3"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 2"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 32752"),
+                "{buffer}"
+            );
+
+            // Sync again - should also rewrite
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 4"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 2"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 43555"),
+                "{buffer}"
+            );
+
+            // Modify in-place - should overwrite
+            //
+            // 1 byte for len + 100 bytes for value + 8 byte for version + 4 bytes for checksum
+            metadata.put(U64::new(50), vec![0xff; 100]);
+            metadata.sync().await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 4"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 3"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 43668"),
+                "{buffer}"
             );
 
             // Clean up
