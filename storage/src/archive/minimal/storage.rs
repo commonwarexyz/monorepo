@@ -5,18 +5,14 @@ use crate::{
     ordinal::{self, Ordinal},
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Codec, EncodeSize, Read, ReadExt, Write};
 use commonware_cryptography::BloomFilter;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{
-    array::{FixedBytes, U32, U64},
+    array::{U32, U64},
     Array, BitVec, NZUsize,
 };
-use futures::future::try_join_all;
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
-    ops::Deref,
-};
+use std::collections::{BTreeSet, HashMap};
 use tracing::debug;
 
 const FALSE_POSITIVE_NUMERATOR: usize = 1;
@@ -354,10 +350,28 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
     }
 
     async fn close(self) -> Result<(), Error> {
-        unimplemented!()
+        // Close journal
+        self.journal.close().await?;
+
+        // Close ordinal
+        self.ordinal.close().await?;
+
+        // Close metadata
+        self.metadata.close().await?;
+
+        Ok(())
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        unimplemented!()
+        // Destroy journal
+        self.journal.destroy().await?;
+
+        // Destroy ordinal
+        self.ordinal.destroy().await?;
+
+        // Destroy metadata
+        self.metadata.destroy().await?;
+
+        Ok(())
     }
 }
