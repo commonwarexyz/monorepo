@@ -94,6 +94,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::U64;
+    use rand::{Rng, RngCore};
 
     #[test_traced]
     fn test_put_get_clear() {
@@ -980,5 +981,72 @@ mod tests {
 
             metadata.destroy().await.unwrap();
         });
+    }
+
+    fn test_metadata_operations_and_restart(num_operations: usize) -> String {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let cfg = Config {
+                partition: "test_determinism".to_string(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Perform a series of deterministic operations
+            for i in 0..num_operations {
+                let key = U64::new(i as u64);
+                let mut value = vec![0u8; 64];
+                context.fill_bytes(&mut value);
+                metadata.put(key, value);
+
+                // Sync occasionally
+                if context.gen_bool(0.1) {
+                    metadata.sync().await.unwrap();
+                }
+
+                // Update some existing keys
+                if context.gen_bool(0.1) {
+                    let selected_index = context.gen_range(0..=i);
+                    let update_key = U64::new(selected_index as u64);
+                    let mut new_value = vec![0u8; 64];
+                    context.fill_bytes(&mut new_value);
+                    metadata.put(update_key, new_value);
+                }
+
+                // Remove some keys
+                if context.gen_bool(0.1) {
+                    let selected_index = context.gen_range(0..=i);
+                    let remove_key = U64::new(selected_index as u64);
+                    metadata.remove(&remove_key);
+                }
+
+                // Use get_mut occasionally
+                if context.gen_bool(0.1) {
+                    let selected_index = context.gen_range(0..=i);
+                    let mut_key = U64::new(selected_index as u64);
+                    if let Some(value) = metadata.get_mut(&mut_key) {
+                        if !value.is_empty() {
+                            value[0] = value[0].wrapping_add(1);
+                        }
+                    }
+                }
+            }
+            metadata.sync().await.unwrap();
+
+            // Destroy the metadata store
+            metadata.destroy().await.unwrap();
+
+            context.auditor().state()
+        })
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_determinism() {
+        let state1 = test_metadata_operations_and_restart(1_000);
+        let state2 = test_metadata_operations_and_restart(1_000);
+        assert_eq!(state1, state2);
     }
 }
