@@ -47,7 +47,6 @@ impl<B: Blob> Wrapper<B> {
 pub struct Metadata<E: Clock + Storage + Metrics, K: Array, V: Codec> {
     context: E,
 
-    // Data is stored in a BTreeMap to enable deterministic serialization.
     map: BTreeMap<K, V>,
     cursor: usize,
     partition: String,
@@ -231,7 +230,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         let mut next_data = Vec::with_capacity(past_length);
         next_data.put_u64(next_version);
         for (key, value) in &self.map {
-            next_data.put_slice(key.as_ref());
+            key.write(&mut next_data);
             value.write(&mut next_data);
         }
         let checksum = crc32fast::hash(&next_data[..]);
