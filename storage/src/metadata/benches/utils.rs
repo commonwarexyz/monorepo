@@ -16,7 +16,7 @@ pub type Val = Vec<u8>;
 /// Open (or create) a fresh metadata store.
 ///
 /// The caller is responsible for closing or destroying it.
-pub async fn get_metadata(ctx: Context) -> MetadataType {
+pub async fn init(ctx: Context) -> MetadataType {
     let cfg = Config {
         partition: PARTITION.into(),
         codec_config: ((0..).into(), ()),
@@ -26,11 +26,11 @@ pub async fn get_metadata(ctx: Context) -> MetadataType {
 
 /// Put `count` random key-value pairs into the metadata store.
 /// Returns the generated keys and values.
-pub fn get_random_kvs(count: usize, seed_offset: u64) -> Vec<(Key, Val)> {
-    let mut rng = StdRng::seed_from_u64(42 + seed_offset);
+pub fn get_random_kvs(count: usize) -> Vec<(Key, Val)> {
+    let mut rng = StdRng::seed_from_u64(0);
     let mut kvs = Vec::with_capacity(count);
-    for i in 0..count {
-        let key = U64::new(i as u64 + seed_offset);
+    for i in 0..(count as u64) {
+        let key = U64::new(i);
         let mut val = vec![0u8; 100];
         rng.fill(&mut val[..]);
         kvs.push((key, val));
