@@ -92,7 +92,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
     pub async fn init_align(
         context: E,
         config: Config,
-        bits: Option<HashMap<u64, BitVec>>,
+        bits: Option<HashMap<u64, &BitVec>>,
     ) -> Result<Self, Error> {
         // Scan for all blobs in the partition
         let mut blobs = BTreeMap::new();

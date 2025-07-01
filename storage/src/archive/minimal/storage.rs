@@ -10,7 +10,10 @@ use commonware_cryptography::BloomFilter;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{Array, BitVec};
 use futures::future::try_join_all;
-use std::{collections::BTreeMap, ops::Deref};
+use std::{
+    collections::{BTreeMap, HashMap},
+    ops::Deref,
+};
 
 struct JournalRecord<K: Array, V: Codec> {
     key: K,
@@ -162,6 +165,22 @@ enum MetadataRecord {
     Size(u64),
 }
 
+impl MetadataRecord {
+    fn size(&self) -> u64 {
+        match self {
+            Self::Size(size) => *size,
+            _ => panic!("wrong type"),
+        }
+    }
+
+    fn active(&self) -> &BitVec {
+        match self {
+            Self::Active(active) => active,
+            _ => panic!("wrong type"),
+        }
+    }
+}
+
 impl Write for MetadataRecord {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
@@ -227,7 +246,7 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metadata
-        let metadata = Metadata::init(
+        let metadata = Metadata::<E, MetadataKey, MetadataRecord>::init(
             context.with_label("metadata"),
             metadata::Config {
                 partition: cfg.metadata_partition,
@@ -236,7 +255,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         )
         .await?;
 
-        // Collect all journal lengths
+        // Collect all journal sizes
         let section_prefix = MetadataKey::purpose_prefix(METADATA_SIZE);
         let sections = metadata.keys(Some(&section_prefix));
         let mut section_sizes = BTreeMap::new();
@@ -246,7 +265,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         }
 
         // Initialize journal
-        let journal = Journal::init(
+        let mut journal = Journal::init(
             context.with_label("journal"),
             variable::Config {
                 partition: cfg.journal_partition,
@@ -258,14 +277,21 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         .await?;
 
         // Limit journal sizes to committed
-        let mut futures = Vec::with_capacity(section_sizes.len());
         for (section, size) in section_sizes {
-            futures.push(journal.rewind(section, size));
+            journal.rewind(section, size).await?;
         }
-        try_join_all(futures).await?;
+
+        // Collect all activity
+        let active_prefix = MetadataKey::purpose_prefix(METADATA_ACTIVE);
+        let sections = metadata.keys(Some(&active_prefix));
+        let mut section_bits = HashMap::new();
+        for section in sections {
+            let active = metadata.get(section).unwrap().active();
+            section_bits.insert(section.section(), active);
+        }
 
         // Initialize ordinal
-        let ordinal = Ordinal::init(
+        let ordinal = Ordinal::init_align(
             context.with_label("ordinal"),
             ordinal::Config {
                 partition: cfg.ordinal_partition,
@@ -273,6 +299,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
                 write_buffer: cfg.write_buffer,
                 replay_buffer: cfg.replay_buffer,
             },
+            Some(section_bits),
         )
         .await?;
 
