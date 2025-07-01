@@ -69,7 +69,6 @@
 
 use crate::mmr::hasher::Hasher;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_utils::array::prefixed_u64::U64;
 use std::future::Future;
 use thiserror::Error;
 
@@ -102,7 +101,7 @@ pub enum Error {
     #[error("an element required for this operation has been pruned: {0}")]
     ElementPruned(u64),
     #[error("metadata error: {0}")]
-    MetadataError(#[from] crate::metadata::Error<U64>),
+    MetadataError(#[from] crate::metadata::Error),
     #[error("journal error: {0}")]
     JournalError(#[from] crate::journal::Error),
     #[error("missing node: {0}")]
