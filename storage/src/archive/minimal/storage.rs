@@ -56,23 +56,34 @@ struct MetadataKey([u8; 12]);
 impl MetadataKey {
     fn new(section: u64, purpose: u8, extra: u32) -> Self {
         let mut arr = [0; Self::SIZE];
-        arr[0..8].copy_from_slice(&section.to_be_bytes());
-        arr[8] = purpose;
+        arr[0] = purpose;
+        arr[1..9].copy_from_slice(&section.to_be_bytes());
         arr[9..].copy_from_slice(&extra.to_be_bytes());
 
         Self(arr)
     }
 
     fn section(&self) -> u64 {
-        u64::from_be_bytes(self.0[0..8].try_into().unwrap())
+        u64::from_be_bytes(self.0[1..9].try_into().unwrap())
     }
 
     fn purpose(&self) -> u8 {
-        self.0[8]
+        self.0[0]
     }
 
     fn extra(&self) -> u32 {
         u32::from_be_bytes(self.0[9..].try_into().unwrap())
+    }
+
+    fn purpose_prefix(purpose: u8) -> [u8; 1] {
+        [purpose]
+    }
+
+    fn section_prefix(purpose: u8, section: u64) -> [u8; 9] {
+        let mut arr = [0; 9];
+        arr[0] = purpose;
+        arr[1..9].copy_from_slice(&section.to_be_bytes());
+        arr
     }
 }
 
