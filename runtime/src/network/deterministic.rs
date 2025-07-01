@@ -2,7 +2,6 @@ use crate::{mocks, Error, StableBuf};
 use futures::{channel::mpsc, SinkExt as _, StreamExt as _};
 use std::{
     collections::HashMap,
-    io::{Error as IoError, ErrorKind},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Range,
     sync::{Arc, Mutex},
@@ -44,13 +43,8 @@ impl crate::Listener for Listener {
     type Stream = Stream;
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
-        match self.listener.next().await {
-            Some((socket, sender, receiver)) => Ok((socket, Sink { sender }, Stream { receiver })),
-            None => Err(Error::ReadFailed(IoError::new(
-                ErrorKind::UnexpectedEof,
-                "listener closed",
-            ))),
-        }
+        let (socket, sender, receiver) = self.listener.next().await.ok_or(Error::ReadFailed)?;
+        Ok((socket, Sink { sender }, Stream { receiver }))
     }
 
     fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {

@@ -95,8 +95,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         let journal_cfg = JConfig {
             partition: cfg.journal_partition,
             items_per_blob: cfg.items_per_blob,
-            write_buffer: cfg.write_buffer,
             buffer_pool: cfg.buffer_pool,
+            write_buffer: cfg.write_buffer,
         };
         let mut journal =
             Journal::<E, H::Digest>::init(context.with_label("mmr_journal"), journal_cfg).await?;

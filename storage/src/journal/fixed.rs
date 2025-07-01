@@ -51,8 +51,8 @@ use bytes::BufMut;
 use commonware_codec::{Codec, DecodeExt, FixedSize};
 use commonware_runtime::{
     buffer::{
-        pool::{BufferPool, Immutable},
-        Read, Write,
+        pool::{Append, BufferPool, Immutable},
+        Read,
     },
     Blob, Error as RError, Metrics, RwLock, Storage,
 };
@@ -81,11 +81,11 @@ pub struct Config {
     /// Only the newest blob may contain fewer items.
     pub items_per_blob: u64,
 
-    /// The size of the write buffer to use for each blob.
-    pub write_buffer: usize,
-
     /// The buffer pool to use for caching data.
     pub buffer_pool: Arc<RwLock<BufferPool>>,
+
+    /// The size of the write buffer to use for each blob.
+    pub write_buffer: usize,
 }
 
 /// Implementation of `Journal` storage.
@@ -107,7 +107,7 @@ pub struct Journal<E: Storage + Metrics, A> {
     /// # Invariant
     ///
     /// Always has room for at least one more item (and may be empty).
-    tail: Write<E::Blob>,
+    tail: Append<E::Blob>,
 
     /// The index of the most recent blob.
     tail_index: u64,
@@ -200,7 +200,13 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         // Initialize the tail blob.
         let (mut tail_index, unbuffered_tail) = blobs.pop_last().unwrap();
         let mut tail_size = *sizes.get(&tail_index).unwrap();
-        let mut tail = Write::new(unbuffered_tail, tail_size, cfg.write_buffer);
+        let mut tail = Append::new(
+            unbuffered_tail,
+            tail_size,
+            cfg.write_buffer,
+            cfg.buffer_pool.clone(),
+        )
+        .await?;
 
         // Truncate the tail if it's not the expected length, which might happen from unclean
         // shutdown.
@@ -250,7 +256,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 .open(&cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
             assert_eq!(size, 0);
-            let next_blob = Write::new(next_blob, 0, cfg.write_buffer);
+            let next_blob =
+                Append::new(next_blob, 0, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
             blobs.insert(tail_index, tail.take_blob());
             (tail_index, tail) = (next_blob_index, next_blob);
             tracked.inc();
@@ -314,7 +321,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
         // Write the item to the blob
         let item_pos = (size / Self::CHUNK_SIZE_U64) + self.cfg.items_per_blob * self.tail_index;
-        self.tail.write_at(buf, size).await?;
+        self.tail.append(buf).await?;
         trace!(blob = self.tail_index, pos = item_pos, "appended item");
         size += Self::CHUNK_SIZE_U64;
 
@@ -329,7 +336,13 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 .open(&self.cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
             assert_eq!(size, 0);
-            let next_blob = Write::new(next_blob, size, self.cfg.write_buffer);
+            let next_blob = Append::new(
+                next_blob,
+                size,
+                self.cfg.write_buffer,
+                self.cfg.buffer_pool.clone(),
+            )
+            .await?;
 
             // Sync the previous blob before taking it and inserting it into the blobs map.
             self.tail.sync().await?;
@@ -394,7 +407,13 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         let raw_blob = unbuffered_tail.take_blob();
         raw_blob.resize(rewind_to_offset).await?;
         self.tail_index = tail_index;
-        self.tail = Write::new(raw_blob, rewind_to_offset, self.cfg.write_buffer);
+        self.tail = Append::new(
+            raw_blob,
+            rewind_to_offset,
+            self.cfg.write_buffer,
+            self.cfg.buffer_pool.clone(),
+        )
+        .await?;
 
         Ok(())
     }
@@ -631,6 +650,15 @@ mod tests {
         hash(&value.to_be_bytes())
     }
 
+    fn test_cfg(items_per_blob: u64) -> Config {
+        Config {
+            partition: "test_partition".into(),
+            items_per_blob,
+            buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
+            write_buffer: 2048,
+        }
+    }
+
     #[test_traced]
     fn test_fixed_journal_append_and_prune() {
         // Initialize the deterministic context
@@ -638,14 +666,8 @@ mod tests {
 
         // Start the test within the executor
         executor.start(|context| async move {
-            let buffer_pool = Arc::new(RwLock::new(BufferPool::new()));
             // Initialize the journal, allowing a max of 2 items per blob.
-            let cfg = Config {
-                partition: "test_partition".into(),
-                items_per_blob: 2,
-                write_buffer: 1024,
-                buffer_pool: buffer_pool.clone(),
-            };
+            let cfg = test_cfg(2);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -664,12 +686,7 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Re-initialize the journal to simulate a restart
-            let cfg = Config {
-                partition: "test_partition".into(),
-                items_per_blob: 2,
-                write_buffer: 1024,
-                buffer_pool: buffer_pool.clone(),
-            };
+            let cfg = test_cfg(2);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
@@ -793,6 +810,37 @@ mod tests {
         });
     }
 
+    /// Append a lot of data to make sure we exercise buffer pool paging boundaries.
+    #[test_traced]
+    fn test_fixed_journal_append_a_lot_of_data() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        const ITEMS_PER_BLOB: u64 = 10000;
+        executor.start(|context| async move {
+            let cfg = test_cfg(ITEMS_PER_BLOB);
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+            // Append 2 blobs worth of items.
+            for i in 0u64..ITEMS_PER_BLOB * 2 - 1 {
+                journal
+                    .append(test_digest(i))
+                    .await
+                    .expect("failed to append data");
+            }
+            // Close, reopen, then read back.
+            journal.close().await.expect("failed to close journal");
+            let journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to re-initialize journal");
+            for i in 0u64..10000 {
+                let item: Digest = journal.read(i).await.expect("failed to read data");
+                assert_eq!(item, test_digest(i));
+            }
+            journal.destroy().await.expect("failed to destroy journal");
+        });
+    }
+
     #[test_traced]
     fn test_fixed_journal_replay() {
         const ITEMS_PER_BLOB: u64 = 7;
@@ -802,12 +850,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
-            let cfg = Config {
-                partition: "test_partition".into(),
-                items_per_blob: ITEMS_PER_BLOB,
-                write_buffer: 1024,
-                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
-            };
+            let cfg = test_cfg(ITEMS_PER_BLOB);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -824,6 +867,12 @@ mod tests {
             let buffer = context.encode();
             assert!(buffer.contains("tracked 101"));
 
+            // Read them back the usual way.
+            for i in 0u64..(ITEMS_PER_BLOB * 100 + ITEMS_PER_BLOB / 2) {
+                let item: Digest = journal.read(i).await.expect("failed to read data");
+                assert_eq!(item, test_digest(i), "i={i}");
+            }
+
             // Replay should return all items
             {
                 let stream = journal
@@ -835,7 +884,7 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((pos, item)) => {
-                            assert_eq!(test_digest(pos), item);
+                            assert_eq!(test_digest(pos), item, "pos={pos}, item={item:?}");
                             items.push(pos);
                         }
                         Err(err) => panic!("Failed to read item: {err}"),
@@ -918,12 +967,7 @@ mod tests {
         const ITEMS_PER_BLOB: u64 = 7;
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
-            let cfg = Config {
-                partition: "test_partition".into(),
-                items_per_blob: ITEMS_PER_BLOB,
-                write_buffer: 1024,
-                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
-            };
+            let cfg = test_cfg(ITEMS_PER_BLOB);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -976,12 +1020,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
-            let cfg = Config {
-                partition: "test_partition".into(),
-                items_per_blob: ITEMS_PER_BLOB,
-                write_buffer: 1024,
-                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
-            };
+            let cfg = test_cfg(ITEMS_PER_BLOB);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1045,12 +1084,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
-            let cfg = Config {
-                partition: "test_partition".into(),
-                items_per_blob: 3,
-                write_buffer: 1024,
-                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
-            };
+            let cfg = test_cfg(3);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1106,12 +1140,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
-            let cfg = Config {
-                partition: "test_partition".into(),
-                items_per_blob: 10,
-                write_buffer: 1024,
-                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
-            };
+            let cfg = test_cfg(10);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1157,12 +1186,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
-            let cfg = Config {
-                partition: "test_partition".into(),
-                items_per_blob: 10,
-                write_buffer: 1024,
-                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
-            };
+            let cfg = test_cfg(10);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1220,12 +1244,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
-            let cfg = Config {
-                partition: "test_partition".into(),
-                items_per_blob: 2,
-                write_buffer: 1024,
-                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
-            };
+            let cfg = test_cfg(2);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1288,12 +1307,8 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Repeat with a different blob size (3 items per blob)
-            let cfg = Config {
-                partition: "test_partition_2".into(),
-                items_per_blob: 3,
-                write_buffer: 1024,
-                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
-            };
+            let mut cfg = test_cfg(3);
+            cfg.partition = "test_partition_2".into();
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1346,12 +1361,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Create a journal configuration
-            let cfg = Config {
-                partition: "test_partition".into(),
-                items_per_blob: 60,
-                write_buffer: 1024,
-                buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
-            };
+            let cfg = test_cfg(60);
 
             // Initialize the journal
             let mut journal = Journal::init(context.clone(), cfg.clone())
