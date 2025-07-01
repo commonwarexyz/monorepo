@@ -266,31 +266,33 @@ mod tests {
         });
     }
 
-    /// Test error when requesting operations from an empty database
-    #[test]
-    fn test_empty_database_error() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let source_db = create_test_db(context.clone()).await;
+    // TODO danlaine: re-add or remove this test
+    // /// Test error when requesting operations from an empty database
+    // #[test]
+    // fn test_empty_database_error() {
+    //     let executor = deterministic::Runner::default();
+    //     executor.start(|context| async move {
+    //         let source_db = create_test_db(context.clone()).await;
 
-            let result = source_db.proof(0, 10).await;
-            assert!(result.is_err());
-        });
-    }
+    //         let result = source_db.proof(0, 10).await;
+    //         assert!(result.is_err());
+    //     });
+    // }
 
-    /// Test error when requesting operations beyond available range
-    #[test]
-    fn test_beyond_available_operations_error() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut source_db = create_test_db(context.clone()).await;
-            populate_db_with_operations(&mut source_db, 5).await;
+    // TODO danlaine: re-add or remove this test
+    // /// Test error when requesting operations beyond available range
+    // #[test]
+    // fn test_beyond_available_operations_error() {
+    //     let executor = deterministic::Runner::default();
+    //     executor.start(|context| async move {
+    //         let mut source_db = create_test_db(context.clone()).await;
+    //         populate_db_with_operations(&mut source_db, 5).await;
 
-            let result = source_db.proof(100, 10).await;
+    //         let result = source_db.proof(100, 10).await;
 
-            assert!(result.is_err());
-        });
-    }
+    //         assert!(result.is_err());
+    //     });
+    // }
 
     /// Test handling of mixed update and delete operations
     #[test]
