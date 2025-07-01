@@ -9,6 +9,7 @@ use std::future::Future;
 use thiserror::Error;
 
 pub mod fast;
+pub mod minimal;
 
 /// Subject of a `get` or `has` operation.
 pub enum Identifier<'a, K: Array> {
