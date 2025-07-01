@@ -35,12 +35,12 @@ pub enum Error {
     /// Sync already completed
     #[error("Sync already completed")]
     AlreadyComplete,
-    /// Invalid resolver error
-    #[error("Invalid resolver error: {0}")]
-    InvalidResolver(String),
-    /// Exceeded target error
-    #[error("Exceeded target: target ops {target}, actual ops {actual}")]
-    ExceededTarget { target: u64, actual: u64 },
+    /// Database initialization failed during sync
+    #[error("Database initialization failed: {0}")]
+    DatabaseInitFailed(commonware_storage::adb::Error),
+    /// Maximum retries exceeded
+    #[error("Maximum retries exceeded")]
+    MaxRetriesExceeded,
 }
 
 /// Sync to the given database.

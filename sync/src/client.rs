@@ -164,12 +164,9 @@ where
 
                 // Validate that we didn't get more operations than requested
                 if new_operations.len() as u64 > batch_size.get() {
-                    // TODO danlaine: add more comprehensive retry logic
                     metrics.invalid_batches_received += 1;
                     if metrics.invalid_batches_received > config.max_retries {
-                        return Err(Error::InvalidResolver(
-                            "Max retries reached for fetching operations".to_string(),
-                        ));
+                        return Err(Error::MaxRetriesExceeded);
                     }
                     return Ok(Client::FetchData {
                         config,
@@ -194,9 +191,7 @@ where
                     debug!("Proof verification failed, retrying");
                     metrics.invalid_batches_received += 1;
                     if metrics.invalid_batches_received > config.max_retries {
-                        return Err(Error::InvalidResolver(
-                            "Max retries reached for verifying proof".to_string(),
-                        ));
+                        return Err(Error::MaxRetriesExceeded);
                     }
 
                     return Ok(Client::FetchData {
@@ -231,9 +226,7 @@ where
                             warn!("Failed to extract pinned nodes, retrying");
                             metrics.invalid_batches_received += 1;
                             if metrics.invalid_batches_received > config.max_retries {
-                                return Err(Error::InvalidResolver(
-                                    "Max retries reached for extracting pinned nodes".to_string(),
-                                ));
+                                return Err(Error::MaxRetriesExceeded);
                             }
 
                             return Ok(Client::FetchData {
@@ -288,7 +281,7 @@ where
                     },
                 )
                 .await
-                .map_err(|e| Error::InvalidResolver(e.to_string()))?; // TODO danlaine: handle this error
+                .map_err(Error::DatabaseInitFailed)?;
 
                 let got_hash = db.root(&mut config.hasher);
                 if got_hash != config.target_hash {
@@ -548,8 +541,8 @@ mod tests {
 
             // Should fail after max_retries attempts
             match result {
-                Err(Error::InvalidResolver(_)) => {}
-                _ => panic!("Expected InvalidResolver error for max retries exceeded"),
+                Err(Error::MaxRetriesExceeded) => {}
+                _ => panic!("Expected MaxRetriesExceeded error for max retries exceeded"),
             }
             // Verify we made max_retries + 1 calls before giving up
             assert_eq!(
