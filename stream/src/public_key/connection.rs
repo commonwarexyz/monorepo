@@ -113,12 +113,12 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         }
     }
 
-    /// Attempt to upgrade a raw connection we initiated.
+    /// Attempt to upgrade a raw connection we initiated as the dialer.
     ///
     /// This implements the 3-message handshake protocol where the dialer:
     /// 1. Sends initial `hello` message to the listener
     /// 2. Receives listener response with `hello + confirmation`
-    /// 3. Sends own `confirmation` to complete mutual auth
+    /// 3. Sends `confirmation` to the listener
     pub async fn upgrade_dialer<R: Rng + CryptoRng + Spawner + Clock, C: Signer>(
         mut context: R,
         mut config: Config<C>,
@@ -140,7 +140,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         // Send hello (Message 1)
         let dialer_timestamp = context.current().epoch_millis();
         let dialer_ephemeral = x25519::PublicKey::from_secret(&secret);
-        let d2l_msg = handshake::Hello::sign(
+        let hello_msg = handshake::Hello::sign(
             &mut config.crypto,
             &config.namespace,
             handshake::Info::new(peer.clone(), dialer_ephemeral, dialer_timestamp),
@@ -152,7 +152,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             _ = context.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
-            result = send_frame(&mut sink, &d2l_msg, config.max_message_size) => {
+            result = send_frame(&mut sink, &hello_msg, config.max_message_size) => {
                 result?;
             },
         }
@@ -192,28 +192,24 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             return Err(Error::SharedSecretNotContributory);
         }
 
-        // Encode the listener's hello and create the complete transcript
-        // The transcript consists of: dialer_hello || listener_hello
-        let transcript = union(&d2l_msg, &listener_hello.encode());
-
         // Create ciphers
+        let transcript_hellos = union(&hello_msg, &listener_hello.encode());
         let cipher::Full {
-            confirmation:
-                cipher::Directional {
-                    d2l: d2l_confirmation,
-                    l2d: l2d_confirmation,
-                },
+            confirmation,
             traffic,
-        } = cipher::derive_directional(shared_secret.as_bytes(), &config.namespace, &transcript)?;
+        } = cipher::derive_directional(
+            shared_secret.as_bytes(),
+            &config.namespace,
+            &transcript_hellos,
+        )?;
 
-        // Verify listener's `confirmation` proves they can derive the shared secret
-        // This uses the l2d_confirmation cipher with the handshake transcript as associated data
-        listener_confirmation.verify(l2d_confirmation, &transcript)?;
+        // Verify listener's `confirmation`
+        let cipher::Directional { d2l, l2d } = confirmation;
+        listener_confirmation.verify(l2d, &transcript_hellos)?;
 
-        // Create our own `confirmation` to prove we can derive the shared secret (Message 3)
-        // This uses the d2l_confirmation cipher with the full transcript as associated data
-        let confirmation_msg = Confirmation::create(d2l_confirmation, &transcript)?.encode();
-
+        // Create our own `confirmation` (Message 3)
+        let transcript_all = union(&hello_msg, &listener_response_msg);
+        let confirmation_msg = Confirmation::create(d2l, &transcript_all)?.encode();
         select! {
             _ = context.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout)
@@ -227,7 +223,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             },
         }
 
-        // Connection successfully established with mutual authentication
+        // Connection successfully established
         Ok(Self {
             sink,
             stream,
@@ -237,12 +233,14 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         })
     }
 
-    /// Attempt to upgrade a connection initiated by some peer.
+    /// Attempt to upgrade a connection we received as the listener.
     ///
-    /// This implements the 3-message handshake protocol where the listener:
-    /// 1. Sends a response containing their `hello + confirmation`
-    /// 2. Waits for the dialer's `confirmation` with their `confirmation`
-    /// 3. Verifies the dialer's `confirmation` to complete mutual authentication
+    /// This implements the last two steps of the 3-message handshake protocol. The first step,
+    /// where the listener receives the dialer's `hello`, is handled by [IncomingConnection::verify].
+    ///
+    /// The last two steps are:
+    /// 2. Sends a response with `hello + confirmation`
+    /// 3. Receives the dialer's `confirmation`
     pub async fn upgrade_listener<R: Rng + CryptoRng + Spawner + Clock, C: Signer>(
         mut context: R,
         incoming: IncomingConnection<C, Si, St>,
@@ -253,12 +251,11 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let namespace = incoming.config.namespace;
         let mut sink = incoming.sink;
         let mut stream = incoming.stream;
-        let dialer_hello_msg = incoming.dialer_hello_msg;
 
         // Generate personal secret
         let secret = x25519::new(&mut context);
 
-        // Create handshake
+        // Create `hello`
         let timestamp = context.current().epoch_millis();
         let listener_ephemeral = x25519::PublicKey::from_secret(&secret);
         let hello = handshake::Hello::sign(
@@ -273,25 +270,16 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             return Err(Error::SharedSecretNotContributory);
         }
 
-        // Create the complete handshake transcript
-        // The transcript consists of: dialer_hello || listener_hello
-        let transcript = union(&dialer_hello_msg, &hello.encode());
-
         // Create ciphers
+        let transcript_hellos = union(&incoming.dialer_hello_msg, &hello.encode());
         let cipher::Full {
-            confirmation:
-                cipher::Directional {
-                    d2l: d2l_confirmation,
-                    l2d: l2d_confirmation,
-                },
+            confirmation,
             traffic,
-        } = cipher::derive_directional(shared_secret.as_bytes(), &namespace, &transcript)?;
-
-        // Create `confirmation` to prove we can derive the shared secret
-        // This uses the l2d_confirmation cipher with the handshake transcript as associated data
-        let confirmation = Confirmation::create(l2d_confirmation, &transcript)?;
+        } = cipher::derive_directional(shared_secret.as_bytes(), &namespace, &transcript_hellos)?;
 
         // Create and send listener `hello + confirmation` (Message 2)
+        let cipher::Directional { l2d, d2l } = confirmation;
+        let confirmation = Confirmation::create(l2d, &transcript_hellos)?;
         let response_msg = (hello, confirmation).encode();
         select! {
             _ = context.sleep_until(incoming.deadline) => {
@@ -312,15 +300,13 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             },
         };
 
-        // Decode and verify dialer confirmation
-        let dialer_confirmation =
-            Confirmation::decode(confirmation_msg.as_ref()).map_err(Error::UnableToDecode)?;
+        // Verify dialer's `confirmation`
+        let transcript_all = union(&incoming.dialer_hello_msg, &response_msg);
+        Confirmation::decode(confirmation_msg.as_ref())
+            .map_err(Error::UnableToDecode)?
+            .verify(d2l, &transcript_all)?;
 
-        // Verify dialer's `confirmation` proves they can derive the shared secret
-        // This uses the d2l_confirmation cipher with the handshake transcript as associated data
-        dialer_confirmation.verify(d2l_confirmation, &transcript)?;
-
-        // Connection successfully established with mutual authentication
+        // Connection successfully established
         Ok(Connection {
             sink,
             stream,
