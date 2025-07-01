@@ -61,7 +61,6 @@ impl<K: Array, V: Codec> EncodeSize for Record<K, V> {
 
 /// Implementation of `Archive` storage.
 pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
-    // The number of items per section determines which section of the journal to write to.
     items_per_section: u64,
     journal: Journal<E, Record<K, V>>,
     pending: BTreeSet<u64>,
