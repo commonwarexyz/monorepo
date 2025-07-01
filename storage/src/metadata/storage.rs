@@ -11,18 +11,31 @@ use tracing::{debug, warn};
 /// The names of the two blobs that store metadata.
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 
+/// Information about a value in a [Wrapper].
+struct Info {
+    start: usize,
+    length: usize,
+}
+
+impl Info {
+    /// Create a new [Info].
+    fn new(start: usize, length: usize) -> Self {
+        Self { start, length }
+    }
+}
+
 /// One of the two wrappers that store metadata.
 struct Wrapper<B: Blob, K: Array> {
     blob: B,
     version: u64,
-    lengths: HashMap<K, (usize, usize)>,
+    lengths: HashMap<K, Info>,
     modified: BTreeSet<K>,
     data: Vec<u8>,
 }
 
 impl<B: Blob, K: Array> Wrapper<B, K> {
-    /// Create a new wrapper with the given data.
-    fn new(blob: B, version: u64, lengths: HashMap<K, (usize, usize)>, data: Vec<u8>) -> Self {
+    /// Create a new [Wrapper].
+    fn new(blob: B, version: u64, lengths: HashMap<K, Info>, data: Vec<u8>) -> Self {
         Self {
             blob,
             version,
@@ -32,7 +45,7 @@ impl<B: Blob, K: Array> Wrapper<B, K> {
         }
     }
 
-    /// Create a new empty wrapper.
+    /// Create a new empty [Wrapper].
     fn empty(blob: B) -> Self {
         Self {
             blob,
@@ -186,7 +199,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             // Read value
             let value = V::read_cfg(&mut buf.as_ref()[cursor..].as_ref(), codec_config)
                 .expect("unable to read value from blob");
-            lengths.insert(key.clone(), (cursor, value.encode_size()));
+            lengths.insert(key.clone(), Info::new(cursor, value.encode_size()));
             cursor += value.encode_size();
             data.insert(key, value);
         }
@@ -275,14 +288,13 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         let mut writes = Vec::with_capacity(target.modified.len());
         if self.key_order_changed < past_version {
             for key in target.modified.iter() {
-                let (value_cursor, prev_length) = target.lengths.get(key).expect("key must exist");
+                let info = target.lengths.get(key).expect("key must exist");
                 let new_value = self.map.get(key).expect("key must exist");
-                if *prev_length == new_value.encode_size() {
+                if info.length == new_value.encode_size() {
                     // Overwrite existing value
                     let encoded = new_value.encode();
-                    target.data[*value_cursor..*value_cursor + *prev_length]
-                        .copy_from_slice(&encoded);
-                    writes.push(target.blob.write_at(encoded, *value_cursor as u64));
+                    target.data[info.start..info.start + info.length].copy_from_slice(&encoded);
+                    writes.push(target.blob.write_at(encoded, info.start as u64));
                 } else {
                     // Rewrite all
                     overwrite = false;
@@ -332,9 +344,9 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         next_data.put_u64(self.next_version);
         for (key, value) in &self.map {
             key.write(&mut next_data);
-            let value_cursor = next_data.len();
+            let start = next_data.len();
             value.write(&mut next_data);
-            lengths.insert(key.clone(), (value_cursor, value.encode_size()));
+            lengths.insert(key.clone(), Info::new(start, value.encode_size()));
         }
         next_data.put_u32(crc32fast::hash(&next_data[..]));
 
