@@ -308,6 +308,8 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             // Persist changes
             try_join_all(writes).await?;
             target.blob.sync().await?;
+
+            // Update state
             target.version = self.next_version;
             self.cursor = target_cursor;
             self.next_version = next_next_version;
@@ -327,14 +329,14 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         }
         next_data.put_u32(crc32fast::hash(&next_data[..]));
 
-        // Overwrite blob
+        // Persist changes
         target.blob.write_at(next_data.clone(), 0).await?;
         if next_data.len() < target.data.len() {
             target.blob.resize(next_data.len() as u64).await?;
         }
-
-        // Persist changes
         target.blob.sync().await?;
+
+        // Update state
         target.version = self.next_version;
         target.lengths = lengths;
         target.data = next_data;
