@@ -619,7 +619,7 @@ mod tests {
             assert!(buffer.contains("sync_rewrites_total 2"), "{buffer}");
             assert!(buffer.contains("sync_overwrites_total 1"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 21836"),
+                buffer.contains("runtime_storage_write_bytes_total 21937"),
                 "{buffer}",
             );
 
@@ -631,7 +631,7 @@ mod tests {
             assert!(buffer.contains("sync_rewrites_total 2"), "{buffer}");
             assert!(buffer.contains("sync_overwrites_total 2"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 21848"),
+                buffer.contains("runtime_storage_write_bytes_total 21949"),
                 "{buffer}",
             );
 

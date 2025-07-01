@@ -16,6 +16,7 @@ struct Wrapper<B: Blob, K: Array> {
     blob: B,
     version: u64,
     lengths: HashMap<K, (usize, usize)>,
+    modified: BTreeSet<K>,
     data: Vec<u8>,
 }
 
@@ -26,6 +27,7 @@ impl<B: Blob, K: Array> Wrapper<B, K> {
             blob,
             version,
             lengths,
+            modified: BTreeSet::new(),
             data,
         }
     }
@@ -36,6 +38,7 @@ impl<B: Blob, K: Array> Wrapper<B, K> {
             blob,
             version: 0,
             lengths: HashMap::new(),
+            modified: BTreeSet::new(),
             data: Vec::new(),
         }
     }
@@ -46,7 +49,6 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array, V: Codec> {
     context: E,
 
     map: BTreeMap<K, V>,
-    modified: BTreeSet<K>,
     unstable: u64, // last version where keys were modified
     cursor: usize,
     partition: String,
@@ -100,7 +102,6 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             context,
 
             map,
-            modified: BTreeSet::new(),
             unstable: 0,
             cursor,
             partition: cfg.partition,
@@ -196,7 +197,8 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
 
     /// Get a mutable reference to a value from [Metadata] (if it exists).
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
-        self.modified.insert(key.clone());
+        self.blobs[self.cursor].modified.insert(key.clone());
+        self.blobs[1 - self.cursor].modified.insert(key.clone());
         self.map.get_mut(key)
     }
 
@@ -219,7 +221,8 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         let modified = self.map.insert(key.clone(), value).is_some();
         self.keys.set(self.map.len() as i64);
         if modified {
-            self.modified.insert(key);
+            self.blobs[self.cursor].modified.insert(key.clone());
+            self.blobs[1 - self.cursor].modified.insert(key.clone());
         } else {
             self.unstable = self.blobs[self.cursor]
                 .version
@@ -255,9 +258,9 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
 
         // Attempt to modify in-place (as long as values are unmodified)
         let mut rewrite = false;
-        let mut writes = Vec::with_capacity(self.modified.len());
+        let mut writes = Vec::with_capacity(target.modified.len());
         if self.unstable < past_version {
-            for key in self.modified.iter() {
+            for key in target.modified.iter() {
                 let (value_cursor, prev_length) = target.lengths.get(key).expect("key must exist");
                 let new_value = self.map.get(key).expect("key must exist");
                 if *prev_length == new_value.encode_size() {
@@ -275,7 +278,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         } else {
             rewrite = true;
         }
-        self.modified.clear();
+        target.modified.clear();
 
         // If we can rewrite in-place, do so
         if !rewrite {
