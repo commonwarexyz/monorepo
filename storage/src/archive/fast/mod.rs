@@ -146,19 +146,6 @@ pub use crate::{archive::Identifier, translator::Translator};
 pub use storage::Archive;
 use thiserror::Error;
 
-/// Errors that can occur when interacting with the archive.
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("journal error: {0}")]
-    Journal(#[from] crate::journal::Error),
-    #[error("record corrupted")]
-    RecordCorrupted,
-    #[error("already pruned to: {0}")]
-    AlreadyPrunedTo(u64),
-    #[error("record too large")]
-    RecordTooLarge,
-}
-
 /// Configuration for `Archive` storage.
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
