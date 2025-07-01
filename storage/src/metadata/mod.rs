@@ -591,7 +591,8 @@ mod tests {
             // 100 keys * (8 bytes for key + 1 bytes for len + 100 bytes for value) + 8 bytes for version + 4 bytes for checksum
             metadata.sync().await.unwrap();
             let buffer = context.encode();
-            assert!(buffer.contains("skipped_total 0"), "{buffer}");
+            assert!(buffer.contains("sync_rewrites_total 1"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 0"), "{buffer}");
             assert!(
                 buffer.contains("runtime_storage_write_bytes_total 10912"),
                 "{buffer}",
@@ -603,7 +604,8 @@ mod tests {
             // Sync again - should write everything to the second blob
             metadata.sync().await.unwrap();
             let buffer = context.encode();
-            assert!(buffer.contains("skipped_total 0"), "{buffer}");
+            assert!(buffer.contains("sync_rewrites_total 2"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 0"), "{buffer}");
             assert!(
                 buffer.contains("runtime_storage_write_bytes_total 21824"),
                 "{buffer}",
@@ -611,23 +613,25 @@ mod tests {
 
             // Sync again - should write only diff from the first blob
             //
-            // 100 bytes for value + 1 byte for version (first 7 bytes are same) + 4 bytes for checksum
+            // 100 bytes for value + 8 byte for version + 4 bytes for checksum
             metadata.sync().await.unwrap();
             let buffer = context.encode();
-            assert!(buffer.contains("skipped_total 10807"), "{buffer}");
+            assert!(buffer.contains("sync_rewrites_total 2"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 1"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 21929"),
+                buffer.contains("runtime_storage_write_bytes_total 21836"),
                 "{buffer}",
             );
 
             // Sync again - should write only diff from the second blob
             //
-            // 1 byte for version (first 7 bytes are same) + 4 bytes for checksum
+            // 8 byte for version + 4 bytes for checksum
             metadata.sync().await.unwrap();
             let buffer = context.encode();
-            assert!(buffer.contains("skipped_total 21714"), "{buffer}");
+            assert!(buffer.contains("sync_rewrites_total 2"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 2"), "{buffer}");
             assert!(
-                buffer.contains("runtime_storage_write_bytes_total 21934"),
+                buffer.contains("runtime_storage_write_bytes_total 21848"),
                 "{buffer}",
             );
 

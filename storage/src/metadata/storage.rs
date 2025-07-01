@@ -275,6 +275,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         } else {
             rewrite = true;
         }
+        self.modified.clear();
 
         // If we can rewrite in-place, do so
         if !rewrite {
