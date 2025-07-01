@@ -1,4 +1,8 @@
-use super::{cipher, handshake, nonce, x25519, Config, AUTHENTICATION_TAG_LENGTH};
+use super::{
+    cipher,
+    handshake::{self, KeyConfirmation},
+    nonce, x25519, Config, AUTHENTICATION_TAG_LENGTH,
+};
 use crate::{
     public_key::cipher::DirectionalCipher,
     utils::codec::{recv_frame, send_frame},
@@ -10,20 +14,9 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
-use commonware_utils::SystemTimeExt as _;
+use commonware_utils::{union, SystemTimeExt as _};
 use rand::{CryptoRng, Rng};
 use std::time::SystemTime;
-
-/// Creates a handshake transcript by concatenating dialer and listener handshake messages.
-///
-/// The transcript format is: dialer_handshake || listener_handshake
-/// This ordering is critical for consistency between dialer and listener.
-fn create_handshake_transcript(dialer_handshake: &[u8], listener_handshake: &[u8]) -> Vec<u8> {
-    let mut transcript = Vec::with_capacity(dialer_handshake.len() + listener_handshake.len());
-    transcript.extend_from_slice(dialer_handshake);
-    transcript.extend_from_slice(listener_handshake);
-    transcript
-}
 
 /// An incoming connection with a verified peer handshake.
 pub struct IncomingConnection<C: Signer, Si: Sink, St: Stream> {
@@ -204,7 +197,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         // Encode the listener's handshake and create the complete transcript
         // The transcript consists of: dialer_handshake || listener_handshake
         let l2d_msg = signed_handshake.encode();
-        let transcript = create_handshake_transcript(&d2l_msg, &l2d_msg);
+        let transcript = union(&d2l_msg, &l2d_msg);
 
         // Create ciphers
         let DirectionalCipher {
@@ -220,9 +213,8 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Create our own key confirmation to prove we can derive the shared secret (Message 3)
         // This uses the d2l_confirmation cipher with the full transcript as associated data
-        let transcript = create_handshake_transcript(&d2l_msg, &listener_response_msg);
-        let dialer_key_confirmation =
-            handshake::KeyConfirmation::create(d2l_confirmation, &transcript)?;
+        let transcript = union(&d2l_msg, &listener_response_msg);
+        let dialer_key_confirmation = KeyConfirmation::create(d2l_confirmation, &transcript)?;
         let confirmation_bytes = dialer_key_confirmation.encode();
 
         select! {
@@ -287,7 +279,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Create the complete handshake transcript
         // The transcript consists of: dialer_handshake || listener_handshake
-        let transcript = create_handshake_transcript(&d2l_msg, &l2d_msg);
+        let transcript = union(&d2l_msg, &l2d_msg);
 
         // Create ciphers
         let DirectionalCipher {
@@ -299,7 +291,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Create key confirmation to prove we can derive the shared secret
         // This uses the l2d_confirmation cipher with the handshake transcript as associated data
-        let key_confirmation = handshake::KeyConfirmation::create(l2d_confirmation, &transcript)?;
+        let key_confirmation = KeyConfirmation::create(l2d_confirmation, &transcript)?;
 
         // Create and send listener response (Message 2)
         let listener_response = handshake::ListenerResponse::new(l2d_handshake, key_confirmation);
@@ -325,12 +317,12 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         };
 
         // Decode and verify dialer confirmation
-        let dialer_confirmation = handshake::KeyConfirmation::decode(confirmation_msg.as_ref())
-            .map_err(Error::UnableToDecode)?;
+        let dialer_confirmation =
+            KeyConfirmation::decode(confirmation_msg.as_ref()).map_err(Error::UnableToDecode)?;
 
         // Verify dialer's key confirmation proves they can derive the shared secret
         // This uses the d2l_confirmation cipher with the handshake transcript as associated data
-        let transcript = create_handshake_transcript(&d2l_msg, &response_bytes);
+        let transcript = union(&d2l_msg, &response_bytes);
         dialer_confirmation.verify(d2l_confirmation, &transcript)?;
 
         // Connection successfully established with mutual authentication
@@ -708,7 +700,7 @@ mod tests {
                     // Create fake key confirmation (using fake transcript)
                     let fake_transcript = b"fake_transcript_data";
                     let key_confirmation =
-                        handshake::KeyConfirmation::create(mock_cipher, fake_transcript).unwrap();
+                        KeyConfirmation::create(mock_cipher, fake_transcript).unwrap();
                     let listener_response =
                         handshake::ListenerResponse::new(signed_handshake, key_confirmation);
 
@@ -786,7 +778,7 @@ mod tests {
                     // Create fake key confirmation and ListenerResponse (using fake transcript)
                     let fake_transcript = b"fake_transcript_for_non_contributory_test";
                     let key_confirmation =
-                        handshake::KeyConfirmation::create(mock_cipher, fake_transcript).unwrap();
+                        KeyConfirmation::create(mock_cipher, fake_transcript).unwrap();
                     let listener_response =
                         handshake::ListenerResponse::new(signed_handshake, key_confirmation);
 
