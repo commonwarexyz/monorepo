@@ -201,7 +201,8 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("syncs_total 1"));
+            assert!(buffer.contains("sync_rewrites_total 1"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
             assert!(buffer.contains("keys 1"));
 
             // Put an overlapping key and a new key
@@ -216,7 +217,8 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("syncs_total 2"));
+            assert!(buffer.contains("sync_rewrites_total 2"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
             assert!(buffer.contains("keys 2"));
 
             // Reopen the metadata store
@@ -230,7 +232,8 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("syncs_total 0"));
+            assert!(buffer.contains("sync_rewrites_total 0"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
             assert!(buffer.contains("keys 2"));
 
             // Get the key
@@ -247,7 +250,8 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("syncs_total 1"));
+            assert!(buffer.contains("sync_rewrites_total 1"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
             assert!(buffer.contains("keys 1"));
 
             // Close the metadata store
@@ -264,7 +268,8 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("syncs_total 0"));
+            assert!(buffer.contains("sync_rewrites_total 0"));
+            assert!(buffer.contains("sync_overwrites_total 0"));
             assert!(buffer.contains("keys 1"));
 
             // Get the key
