@@ -17,6 +17,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ops::Deref,
 };
+use tracing::debug;
 
 const FALSE_POSITIVE_NUMERATOR: usize = 1;
 const FALSE_POSITIVE_DENOMINATOR: usize = 100;
@@ -254,7 +255,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
             cursors,
             size,
         };
+        let size = record.encode_size();
         self.metadata.put(section.into(), record);
+        debug!(section, size, "initialized section");
     }
 }
 
