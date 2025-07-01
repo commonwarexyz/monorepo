@@ -182,7 +182,21 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     }
 
     async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
-        unimplemented!()
+        // Get section
+        let section = index / self.items_per_section;
+
+        // Get ordinal
+        let Some(offset) = self.ordinal.get(index).await? else {
+            return Ok(None);
+        };
+
+        // Get journal entry
+        let Some(entry) = self.journal.get(section, offset.to_u32()).await? else {
+            return Ok(None);
+        };
+
+        // Get value
+        Ok(Some(entry.value))
     }
 
     async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
