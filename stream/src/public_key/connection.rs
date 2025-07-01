@@ -254,7 +254,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let namespace = incoming.config.namespace;
         let mut sink = incoming.sink;
         let mut stream = incoming.stream;
-        let d2l_msg = incoming.dialer_handshake_bytes.clone();
+        let d2l_msg = incoming.dialer_handshake_bytes;
 
         // Generate personal secret
         let secret = x25519::new(&mut context);
@@ -262,7 +262,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         // Create handshake
         let timestamp = context.current().epoch_millis();
         let listener_ephemeral = x25519::PublicKey::from_secret(&secret);
-        let l2d_handshake = handshake::Signed::sign(
+        let handshake = handshake::Signed::sign(
             &mut crypto,
             &namespace,
             handshake::Info::new(incoming.peer_public_key, listener_ephemeral, timestamp),
@@ -276,7 +276,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Create the complete handshake transcript
         // The transcript consists of: dialer_handshake || listener_handshake
-        let transcript = union(&d2l_msg, &l2d_handshake.encode());
+        let transcript = union(&d2l_msg, &handshake.encode());
 
         // Create ciphers
         let DirectionalCipher {
@@ -291,7 +291,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let confirmation = KeyConfirmation::create(l2d_confirmation, &transcript)?;
 
         // Create and send listener response (Message 2)
-        let response_bytes = (l2d_handshake, confirmation).encode();
+        let response_bytes = (handshake, confirmation).encode();
         select! {
             _ = context.sleep_until(incoming.deadline) => {
                 return Err(Error::HandshakeTimeout)
