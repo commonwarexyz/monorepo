@@ -1,4 +1,5 @@
-//! An implementation of a bloom filter.
+//! An implementation of a [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
+
 use crate::{hash, sha256::Digest};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -10,11 +11,11 @@ use commonware_codec::{
 use commonware_utils::BitVec;
 use std::num::{NonZeroU8, NonZeroUsize};
 
-/// A bloom filter.
+/// A [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 ///
 /// This implementation uses the Kirsch-Mitzenmacher optimization to derive `k` hash functions
 /// from two hash values, which are in turn derived from a single SHA-256 digest. This provides
-/// efficient hashing for `insert` and `contains` operations.
+/// efficient hashing for [BloomFilter::insert] and [BloomFilter::contains] operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BloomFilter {
     hashers: u8,
@@ -30,7 +31,7 @@ impl BloomFilter {
         }
     }
 
-    /// Inserts an item into the bloom filter.
+    /// Inserts an item into the [BloomFilter].
     pub fn insert(&mut self, item: &[u8]) {
         let hashes = self.hashes(item);
         for hash in hashes {
@@ -39,7 +40,7 @@ impl BloomFilter {
         }
     }
 
-    /// Checks if an item is possibly in the bloom filter.
+    /// Checks if an item is possibly in the [BloomFilter].
     ///
     /// Returns `true` if the item is probably in the set, and `false` if it is definitely not.
     pub fn contains(&self, item: &[u8]) -> bool {
@@ -53,17 +54,17 @@ impl BloomFilter {
         true
     }
 
-    /// Returns the number of bits in the filter.
+    /// Returns the number of bits in the [BloomFilter].
     pub fn bits(&self) -> usize {
         self.bits.len()
     }
 
-    /// Returns the number of hash functions used.
+    /// Returns the number of hash functions used in the [BloomFilter].
     pub fn hashers(&self) -> u8 {
         self.hashers
     }
 
-    /// Get two 128-bit hash values from a 32-byte digest.
+    /// Get two 128-bit hash values from a 32-byte [Digest].
     fn get_two_hashes(digest: &Digest) -> (u128, u128) {
         let mut h1_bytes = [0u8; 16];
         h1_bytes.copy_from_slice(&digest[0..16]);
