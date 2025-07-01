@@ -1,29 +1,35 @@
 //! Benchmark for syncing `Metadata` with overlapping keys.
 
-use super::utils::{get_random_kvs, init, Key, Val};
+use super::utils::{get_random_kvs, init};
 use commonware_runtime::benchmarks::{context, tokio};
 use criterion::{criterion_group, Criterion};
+use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 use std::time::{Duration, Instant};
 
 fn bench_sync(c: &mut Criterion) {
     let runner = tokio::Runner::default();
     for &num_keys in &[100, 1_000, 10_000] {
-        for &overlap_pct in &[0, 25, 50, 75, 100] {
+        for &modified_pct in &[0, 5, 25, 50, 75, 100] {
             let label = format!(
-                "{}/keys={} overlap={}",
+                "{}/keys={} modified_pct={}",
                 module_path!(),
                 num_keys,
-                overlap_pct
+                modified_pct
             );
 
             // Generate key-value pairs for the benchmark
             let initial_kvs = get_random_kvs(num_keys);
-            let overlap_count = (num_keys * overlap_pct) / 100;
-            let mut second_kvs: Vec<(Key, Val)> =
-                initial_kvs.iter().take(overlap_count).cloned().collect();
-            if num_keys > overlap_count {
-                let new_kvs = get_random_kvs(num_keys - overlap_count);
-                second_kvs.extend(new_kvs);
+            let mut second_kvs = initial_kvs.clone();
+            if modified_pct > 0 {
+                let modified_count = (num_keys * modified_pct) / 100;
+                let mut rng = StdRng::seed_from_u64(0);
+                let mut indices: Vec<usize> = (0..num_keys).collect();
+                indices.shuffle(&mut rng);
+                for &idx in indices.iter().take(modified_count) {
+                    let mut val = vec![0; 100];
+                    rng.fill(&mut val[..]);
+                    second_kvs[idx].1 = val;
+                }
             }
 
             // Run the benchmark
@@ -37,17 +43,22 @@ fn bench_sync(c: &mut Criterion) {
                         for _ in 0..iters {
                             let mut metadata = init(ctx.clone()).await;
 
-                            // Sync 1: Initial state
+                            // Put initial state
                             for (k, v) in &initial_kvs {
                                 metadata.put(k.clone(), v.clone());
                             }
+
+                            // Sync twice to ensure both blobs populated
+                            metadata.sync().await.unwrap();
                             metadata.sync().await.unwrap();
 
-                            // Sync 2: Benchmarked operation
-                            let start = Instant::now();
+                            // Update some keys
                             for (k, v) in &second_kvs {
                                 metadata.put(k.clone(), v.clone());
                             }
+
+                            // Sync new data
+                            let start = Instant::now();
                             metadata.sync().await.unwrap();
                             total += start.elapsed();
 
