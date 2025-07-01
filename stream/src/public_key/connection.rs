@@ -29,7 +29,7 @@ pub struct IncomingConnection<C: Signer, Si: Sink, St: Stream> {
 
     /// Stores the raw bytes of the dialer handshake message.
     /// Necessary for the cipher derivation.
-    dialer_handshake_bytes: Bytes,
+    dialer_handshake_msg: Bytes,
 }
 
 impl<C: Signer, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
@@ -64,7 +64,7 @@ impl<C: Signer, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
             deadline,
             ephemeral_public_key: handshake.ephemeral(),
             peer_public_key: handshake.signer(),
-            dialer_handshake_bytes: msg,
+            dialer_handshake_msg: msg,
         })
     }
 
@@ -254,7 +254,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let namespace = incoming.config.namespace;
         let mut sink = incoming.sink;
         let mut stream = incoming.stream;
-        let d2l_msg = incoming.dialer_handshake_bytes;
+        let d2l_msg = incoming.dialer_handshake_msg;
 
         // Generate personal secret
         let secret = x25519::new(&mut context);
@@ -291,12 +291,12 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let confirmation = KeyConfirmation::create(l2d_confirmation, &transcript)?;
 
         // Create and send listener response (Message 2)
-        let response_bytes = (handshake, confirmation).encode();
+        let response_msg = (handshake, confirmation).encode();
         select! {
             _ = context.sleep_until(incoming.deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
-            result = send_frame(&mut sink, &response_bytes, max_message_size) => {
+            result = send_frame(&mut sink, &response_msg, max_message_size) => {
                 result?;
             },
         }
@@ -317,7 +317,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Verify dialer's key confirmation proves they can derive the shared secret
         // This uses the d2l_confirmation cipher with the handshake transcript as associated data
-        let transcript = union(&d2l_msg, &response_bytes);
+        let transcript = union(&d2l_msg, &response_msg);
         dialer_confirmation.verify(d2l_confirmation, &transcript)?;
 
         // Connection successfully established with mutual authentication
