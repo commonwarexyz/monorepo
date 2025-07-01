@@ -18,7 +18,7 @@ pub const PARTITION: &str = "archive_bench_partition";
 const WRITE_BUFFER: usize = 1024;
 
 /// Number of items per section.
-const ITEMS_PER_SECTION: u64 = 256; // 2^8 items per section
+const ITEMS_PER_SECTION: u64 = 256;
 
 /// Number of bytes to buffer when replaying.
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
