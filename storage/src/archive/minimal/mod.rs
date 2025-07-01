@@ -1,3 +1,6 @@
+mod storage;
+pub use storage::Archive;
+
 /// Configuration for `Archive` storage.
 #[derive(Clone)]
 pub struct Config<C> {
