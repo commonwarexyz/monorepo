@@ -1,4 +1,9 @@
-use crate::{journal::variable::Journal, rmap::RMap};
+use crate::{
+    archive::{minimal::Config, Error},
+    journal::variable::Journal,
+    metadata::{self, Metadata},
+    rmap::RMap,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::BloomFilter;
@@ -217,4 +222,30 @@ pub struct Archive<E: Storage + Metrics, K: Array, V: Codec> {
     journal: Journal<E, JournalRecord<K, V>>,
     ordinal: BTreeMap<u64, E::Blob>,
     rmap: RMap,
+}
+
+impl<E: Storage + Metrics, K: Array, V: Codec> Archive<E, K, V> {
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        // Initialize metadata
+        let mut metadata = Metadata::init(
+            context.with_label("metadata"),
+            metadata::Config {
+                partition: cfg.metadata_partition,
+                codec_config: &(),
+            },
+        )
+        .await?;
+
+        // Initialize journal
+        let journal = Journal::init(
+            context.with_label("journal"),
+            journal::variable::Config {
+                partition: cfg.journal_partition,
+                compression: cfg.compression,
+                codec_config: cfg.codec_config,
+                write_buffer: cfg.write_buffer,
+            },
+        )
+        .await?;
+    }
 }

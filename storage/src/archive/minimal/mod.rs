@@ -10,6 +10,9 @@ pub struct Config<C> {
     /// The partition to use for the archive's journal.
     pub journal_partition: String,
 
+    /// The partition to use for the archive's ordinal.
+    pub ordinal_partition: String,
+
     /// The compression level to use for the archive's [crate::journal] storage.
     pub compression: Option<u8>,
 
