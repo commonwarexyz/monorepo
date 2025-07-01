@@ -61,7 +61,7 @@ pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher> {
     /// Stores all "pinned nodes" (pruned nodes required for proving & root generation) for the MMR,
     /// and the corresponding pruning boundary used to generate them. The metadata remains empty
     /// until pruning is invoked, and its contents change only when the pruning boundary moves.
-    metadata: Metadata<E, U64>,
+    metadata: Metadata<E, U64, Vec<u8>>,
 
     /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
     /// pruned.
@@ -98,8 +98,11 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         let metadata_cfg = MConfig {
             partition: cfg.metadata_partition,
+            codec_config: ((0..).into(), ()),
         };
-        let metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
+        let metadata =
+            Metadata::<_, U64, Vec<u8>>::init(context.with_label("mmr_metadata"), metadata_cfg)
+                .await?;
 
         if journal_size == 0 {
             return Ok(Self {
@@ -235,7 +238,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     /// Assumes the node should exist in at least one of these sources and returns a `MissingNode`
     /// error otherwise.
     async fn get_from_metadata_or_journal(
-        metadata: &Metadata<E, U64>,
+        metadata: &Metadata<E, U64, Vec<u8>>,
         journal: &Journal<E, H::Digest>,
         pos: u64,
     ) -> Result<H::Digest, Error> {
