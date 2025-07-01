@@ -19,7 +19,6 @@ const BLOCK_SIZE: usize = std::mem::size_of::<usize>();
 /// One of the two wrappers that store metadata.
 struct Wrapper<B: Blob> {
     blob: B,
-
     version: u64,
     data: Vec<u8>,
 }
