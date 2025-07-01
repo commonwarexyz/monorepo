@@ -226,7 +226,8 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         let next_version = past_version.checked_add(1).expect("version overflow");
 
         // Create buffer
-        let mut next_data = Vec::new();
+        let past_length = self.blobs[self.cursor].data.len();
+        let mut next_data = Vec::with_capacity(past_length);
         next_data.put_u64(next_version);
         for (key, value) in &self.map {
             next_data.put_slice(key.as_ref());
