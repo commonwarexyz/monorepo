@@ -24,8 +24,11 @@ pub enum Error {
         actual: Box<dyn fmt::Debug + Send + Sync>,
     },
     /// Invalid target parameters
-    #[error("Invalid target: current ops {current} is already >= target ops {target}")]
-    InvalidTarget { current: u64, target: u64 },
+    #[error("Invalid bounds: lower bound {lower_bound_pos} > upper bound {upper_bound_pos}")]
+    InvalidTarget {
+        lower_bound_pos: u64,
+        upper_bound_pos: u64,
+    },
     /// Invalid client state
     #[error("Invalid client state")]
     InvalidState,

@@ -31,8 +31,11 @@ where
     /// Target hash of the database.
     pub target_hash: H::Digest,
 
-    /// Target operations to sync.
-    pub target_ops: u64,
+    /// Lower bound of operations to sync (pruning boundary, inclusive).
+    pub lower_bound_ops: u64,
+
+    /// Upper bound of operations to sync (inclusive).
+    pub upper_bound_ops: u64,
 
     /// Context for the database.
     pub context: E,
@@ -93,6 +96,14 @@ where
 {
     /// Create a new sync client
     pub(crate) fn new(config: Config<E, K, V, H, T, R>) -> Result<Self, Error> {
+        // Validate bounds (inclusive)
+        if config.lower_bound_ops > config.upper_bound_ops {
+            return Err(Error::InvalidTarget {
+                lower_bound_pos: config.lower_bound_ops,
+                upper_bound_pos: config.upper_bound_ops,
+            });
+        }
+
         Ok(Client::FetchData {
             config,
             operations: vec![],
@@ -111,26 +122,40 @@ where
                 mut operations,
                 mut metrics,
             } => {
-                // Calculate how many operations we need
-                let current_ops = operations.len() as u64;
-                let remaining_ops = config
-                    .target_ops
-                    .checked_sub(current_ops)
-                    .and_then(NonZeroU64::new)
+                // Calculate total operations needed and current position (inclusive bounds)
+                let total_ops_needed = config
+                    .upper_bound_ops
+                    .checked_sub(config.lower_bound_ops)
+                    .ok_or(Error::InvalidTarget {
+                    lower_bound_pos: config.lower_bound_ops,
+                    upper_bound_pos: config.upper_bound_ops,
+                })? + 1;
+                let current_ops_fetched = operations.len() as u64;
+                let remaining_ops = total_ops_needed
+                    .checked_sub(current_ops_fetched)
                     .ok_or(Error::InvalidState)?;
-                let batch_size = std::cmp::min(config.max_ops_per_batch, remaining_ops);
+
+                let batch_size = std::cmp::min(config.max_ops_per_batch.get(), remaining_ops);
+                let batch_size = NonZeroU64::new(batch_size).ok_or(Error::InvalidState)?;
+
+                // Current position in the global operation sequence
+                let current_global_pos = config.lower_bound_ops + current_ops_fetched;
 
                 debug!(
-                    ?config.target_hash,
-                    config.target_ops,
-                    remaining_ops,
-                    batch_size,
+                    target_hash = ?config.target_hash,
+                    lower_bound_pos = config.lower_bound_ops,
+                    upper_bound_pos = config.upper_bound_ops,
+                    current_global_pos = current_global_pos,
+                    remaining_ops = remaining_ops,
+                    batch_size = batch_size.get(),
                     "Fetching proof and operations"
                 );
 
                 // Get proof and operations from resolver.
-                let (proof, new_operations) =
-                    config.resolver.get_proof(current_ops, batch_size).await?;
+                let (proof, new_operations) = config
+                    .resolver
+                    .get_proof(current_global_pos, batch_size)
+                    .await?;
 
                 // Validate that we didn't get more operations than requested
                 if new_operations.len() as u64 > batch_size.get() {
@@ -141,7 +166,6 @@ where
                             "Max retries reached for fetching operations".to_string(),
                         ));
                     }
-
                     return Ok(Client::FetchData {
                         config,
                         operations,
@@ -157,7 +181,7 @@ where
                 if !adb::any::Any::<E, K, V, H, T>::verify_proof(
                     &mut config.hasher,
                     &proof,
-                    current_ops,
+                    current_global_pos,
                     &new_operations,
                     &config.target_hash,
                 ) {
@@ -178,7 +202,7 @@ where
                 operations.extend(new_operations);
 
                 metrics.valid_batches_received += 1;
-                let next_state = if operations.len() as u64 >= config.target_ops {
+                let next_state = if operations.len() as u64 >= total_ops_needed {
                     Client::ApplyData {
                         config,
                         operations,
@@ -204,7 +228,7 @@ where
                     adb::any::SyncConfig {
                         config: config.db_config,
                         mmr_pinned_nodes: Default::default(), // TODO danlaine: support pruning
-                        pruned_to_loc: 0,                     // TODO danlaine: support pruning
+                        pruned_to_loc: config.lower_bound_ops,
                         operations,
                     },
                 )
@@ -357,7 +381,8 @@ mod tests {
                 max_ops_per_batch,
                 max_retries: 0,
                 target_hash,
-                target_ops,
+                lower_bound_ops: 0,
+                upper_bound_ops: target_ops - 1, // target_ops is the count, operations are 0-indexed
                 context,
                 resolver: target_db,
                 hasher,
@@ -453,7 +478,8 @@ mod tests {
                 max_ops_per_batch: NZU64!(10),
                 max_retries: MAX_RETRIES,
                 target_hash: Digest::from([1u8; 32]),
-                target_ops: 100,
+                lower_bound_ops: 0,
+                upper_bound_ops: 100,
                 context,
                 resolver,
                 hasher: create_test_hasher(),
@@ -472,6 +498,39 @@ mod tests {
                 get_proof_call_count.load(std::sync::atomic::Ordering::SeqCst),
                 MAX_RETRIES + 1
             );
+        });
+    }
+
+    /// Test that invalid bounds are rejected
+    #[test]
+    fn test_sync_invalid_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let target_db = create_test_db(context.clone()).await;
+
+            let config = Config {
+                db_config: create_test_config(context.next_u64()),
+                max_ops_per_batch: NZU64!(10),
+                max_retries: 0,
+                target_hash: Digest::from([1u8; 32]),
+                lower_bound_ops: 31, // Invalid: lower > upper
+                upper_bound_ops: 30,
+                context,
+                resolver: target_db,
+                hasher: create_test_hasher(),
+                _phantom: PhantomData,
+            };
+
+            let result = Client::new(config);
+            match result {
+                Err(Error::InvalidTarget {
+                    lower_bound_pos: 31,
+                    upper_bound_pos: 30,
+                }) => {
+                    // Expected error
+                }
+                _ => panic!("Expected InvalidTarget error for invalid bounds"),
+            }
         });
     }
 }
