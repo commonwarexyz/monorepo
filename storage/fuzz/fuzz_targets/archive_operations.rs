@@ -3,7 +3,10 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
-    archive::{Archive, Config, Identifier},
+    archive::{
+        single::{Archive, Config},
+        Identifier,
+    },
     index::translator::EightCap,
 };
 use commonware_utils::array::FixedBytes;

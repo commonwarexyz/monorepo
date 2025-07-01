@@ -1,5 +1,6 @@
 use super::{Config, Error, Translator};
 use crate::{
+    archive::Identifier,
     index::Index,
     journal::variable::{Config as JConfig, Journal},
     rmap::RMap,
@@ -12,12 +13,6 @@ use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::BTreeMap;
 use tracing::{debug, trace};
-
-/// Subject of a `get` or `has` operation.
-pub enum Identifier<'a, K: Array> {
-    Index(u64),
-    Key(&'a K),
-}
 
 /// Location of a record in `Journal`.
 struct Location {
