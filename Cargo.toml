@@ -20,7 +20,8 @@ members = [
     # Fuzz builds
     "codec/fuzz",
     "cryptography/fuzz",
-    "stream/fuzz"
+    "stream/fuzz",
+    "storage/fuzz"
 ]
 resolver = "2"
 

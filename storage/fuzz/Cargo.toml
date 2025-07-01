@@ -1,0 +1,73 @@
+[package]
+name = "commonware-storage-fuzz"
+version = "0.0.1"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+commonware-cryptography = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-storage = { workspace = true }
+commonware-utils = { workspace = true }
+arbitrary = { workspace = true, features = ["derive"] }
+libfuzzer-sys = { workspace = true }
+futures = { workspace = true }
+
+[[bin]]
+name = "adb_operations"
+path = "fuzz_targets/adb_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "archive_operations"
+path = "fuzz_targets/archive_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rmap_operations"
+path = "fuzz_targets/rmap_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mmr_operations"
+path = "fuzz_targets/mmr_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metadata_operations"
+path = "fuzz_targets/metadata_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "journal_operations"
+path = "fuzz_targets/journal_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "index_operations"
+path = "fuzz_targets/index_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bmt_operations"
+path = "fuzz_targets/bmt_operations.rs"
+test = false
+doc = false
+bench = false

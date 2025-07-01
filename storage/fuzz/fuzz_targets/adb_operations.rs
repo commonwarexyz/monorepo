@@ -1,0 +1,255 @@
+#![no_main]
+
+use arbitrary::Arbitrary;
+use commonware_cryptography::Sha256;
+use commonware_runtime::{deterministic, Runner};
+use commonware_storage::{
+    adb::any::{Any, Config},
+    index::translator::EightCap,
+    mmr::hasher::Standard,
+};
+use commonware_utils::array::FixedBytes;
+use libfuzzer_sys::fuzz_target;
+use std::collections::{HashMap, HashSet};
+
+type Key = FixedBytes<32>;
+type Value = FixedBytes<64>;
+type RawKey = [u8; 32];
+type RawValue = [u8; 64];
+
+#[derive(Arbitrary, Debug, Clone)]
+enum AdbOperation {
+    Update { key: RawKey, value: RawValue },
+    Delete { key: RawKey },
+    Commit,
+    OpCount,
+    OldestRetainedLoC,
+    Root,
+    Proof { start_loc: u64, max_ops: u64 },
+    Get { key: RawKey },
+}
+
+#[derive(Arbitrary, Debug)]
+struct FuzzInput {
+    operations: Vec<AdbOperation>,
+}
+
+fn fuzz(data: FuzzInput) {
+    let mut hasher = Standard::<Sha256>::new();
+    let runner = deterministic::Runner::default();
+
+    runner.start(|context| async move {
+        let cfg = Config::<EightCap> {
+            mmr_journal_partition: "test_adb_mmr_journal".into(),
+            mmr_items_per_blob: 500000,
+            mmr_write_buffer: 1024,
+            mmr_metadata_partition: "test_adb_mmr_metadata".into(),
+            log_journal_partition: "test_adb_log_journal".into(),
+            log_items_per_blob: 500000,
+            log_write_buffer: 1024,
+            translator: EightCap,
+            pool: None,
+        };
+
+        let mut adb = Any::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
+            .await
+            .expect("init adb");
+
+        let mut expected_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
+        let mut all_keys: HashSet<RawKey> = HashSet::new();
+        let mut uncommitted_ops = 0;
+        let mut last_known_op_count = 0;
+
+        for op in &data.operations {
+            match op {
+                AdbOperation::Update { key, value } => {
+                    let k = Key::new(*key);
+                    let v = Value::new(*value);
+
+                    let update_result = adb.update(k, v).await.expect("update should not fail");
+
+                    match update_result {
+                        commonware_storage::adb::any::UpdateResult::Inserted(_) => {
+                            expected_state.insert(*key, Some(*value));
+                            all_keys.insert(*key);
+                            uncommitted_ops += 1;
+                        }
+                        commonware_storage::adb::any::UpdateResult::Updated(..) => {
+                            expected_state.insert(*key, Some(*value));
+                            all_keys.insert(*key);
+                            uncommitted_ops += 1;
+                        }
+                        commonware_storage::adb::any::UpdateResult::NoOp => {
+                            // The key already has this value, so this is a no-op.
+                        }
+                    }
+                }
+
+                AdbOperation::Delete { key } => {
+                    let k = Key::new(*key);
+                    let result = adb.delete(k).await.expect("delete should not fail");
+
+                    if result.is_some() {
+                        // Delete succeeded - mark as deleted, not remove
+                        assert!(all_keys.contains(key), "there was no key");
+                        expected_state.insert(*key, None);
+                        uncommitted_ops += 1;
+                    }
+                }
+
+                AdbOperation::OpCount => {
+                    let actual_count = adb.op_count();
+                    // The count should have increased by the number of uncommitted operations
+                    let expected_count = last_known_op_count + uncommitted_ops;
+                    assert_eq!(actual_count, expected_count,
+                        "Operation count mismatch: expected {expected_count} (last_known={last_known_op_count} + uncommitted={uncommitted_ops}), got {actual_count}");
+                }
+
+                AdbOperation::OldestRetainedLoC => {
+                    let oldest_loc = adb.oldest_retained_loc();
+                    // The oldest retained location should be None if no operations exist
+                    // or Some value >= 0 if operations exist
+                    let actual_op_count = adb.op_count();
+                    if actual_op_count == 0 {
+                        assert_eq!(oldest_loc, None, "Expected no oldest location when no operations exist");
+                    } else {
+                        // The oldest retained location should be Some value
+                        // It might not be 0 because commits can cause pruning
+                        assert!(oldest_loc.is_some(), "Expected Some oldest location when operations exist");
+                        if let Some(loc) = oldest_loc {
+                            assert!(loc < actual_op_count,
+                                "Oldest retained location {loc} should be less than op count {actual_op_count}", 
+                            );
+                        }
+                    }
+                }
+
+                AdbOperation::Commit => {
+                    adb.commit().await.expect("commit should not fail");
+                    // After commit, update our last known count since commit may add more operations
+                    last_known_op_count = adb.op_count();
+                    uncommitted_ops = 0; // Reset uncommitted operations counter
+                }
+
+                AdbOperation::Root => {
+                    // root requires all operations to be committed
+                    if uncommitted_ops > 0 {
+                        adb.commit().await.expect("commit should not fail");
+                        last_known_op_count = adb.op_count();
+                        uncommitted_ops = 0;
+                    }
+                    adb.root(&mut hasher);
+                }
+
+                AdbOperation::Proof { start_loc, max_ops } => {
+                    let actual_op_count = adb.op_count();
+
+                    // Only generate proof if ADB has operations and valid parameters
+                    if actual_op_count > 0 && *max_ops > 0 {
+                        // Ensure all operations are committed before generating proof
+                        if uncommitted_ops > 0 {
+                            adb.commit().await.expect("commit should not fail");
+                            last_known_op_count = adb.op_count();
+                            uncommitted_ops = 0;
+                        }
+
+                        let current_root = adb.root(&mut hasher);
+                        // Adjust start_loc to be within valid range
+                        // Locations are 0-indexed (first operation is at location 0)
+                        let adjusted_start = *start_loc % actual_op_count;
+                        let adjusted_max_ops = (*max_ops % 100).max(1); // Ensure at least 1
+
+                        let (proof, log) = adb
+                            .proof(adjusted_start, adjusted_max_ops)
+                            .await
+                            .expect("proof should not fail");
+
+                        assert!(
+                            Any::<deterministic::Context, _, _, _, EightCap>::verify_proof(
+                                &mut hasher,
+                                &proof,
+                                adjusted_start,
+                                &log,
+                                &current_root
+                            ),
+                            "Proof verification failed for start_loc={adjusted_start}, max_ops={adjusted_max_ops}",
+                        );
+                    }
+                }
+
+                AdbOperation::Get { key } => {
+                    let k = Key::new(*key);
+                    let result = adb.get(&k).await.expect("get should not fail");
+
+                    // Verify against expected state
+                    match expected_state.get(key) {
+                        Some(Some(expected_value)) => {
+                            // Key should exist with this value
+                            assert!(result.is_some(), "Expected value for key {key:?}");
+                            let v = result.expect("get should not fail");
+                            let v_bytes: &[u8; 64] = v.as_ref().try_into().expect("bytes");
+                            assert_eq!(v_bytes, expected_value, "Value mismatch for key {key:?}");
+                        }
+                        Some(None) => {
+                            // Key was explicitly deleted
+                            assert!(
+                                result.is_none(),
+                                "Expected no value for deleted key {key:?}, but found one",
+                            );
+                        }
+                        None => {
+                            // Key was never set or deleted
+                            assert!(
+                                result.is_none(),
+                                "Found unexpected value for key {key:?} that was never touched",
+                            );
+                        }
+                    }
+
+                    // Track that we accessed this key
+                    all_keys.insert(*key);
+                }
+            }
+        }
+
+        // Final commit to ensure all operations are persisted
+        if uncommitted_ops > 0 {
+            adb.commit().await.expect("final commit should not fail");
+        }
+
+        // Comprehensive final verification - check ALL keys ever touched
+        for key in &all_keys {
+            let k = Key::new(*key);
+            let result = adb.get(&k).await.expect("final get should not fail");
+
+            match expected_state.get(key) {
+                Some(Some(expected_value)) => {
+                    assert!(result.is_some(), "Lost value for key {key:?} at end");
+                    let v = result.expect("get should not fail");
+                    let v_bytes: &[u8; 64] = v.as_ref().try_into().expect("bytes");
+                    assert_eq!(
+                        v_bytes, expected_value,
+                        "Final value mismatch for key {key:?}"
+                    );
+                }
+                Some(None) => {
+                    assert!(
+                        result.is_none(),
+                        "Deleted key {key:?} should remain deleted, but found value",
+                    );
+                }
+                None => {
+                    // This case shouldn't happen in final verification since we're
+                    // iterating over all_keys, but include for completeness
+                    assert!(result.is_none(), "Key {key:?} should not exist");
+                }
+            }
+        }
+
+        adb.close().await.expect("close should not fail");
+    });
+}
+
+fuzz_target!(|input: FuzzInput| {
+    fuzz(input);
+});

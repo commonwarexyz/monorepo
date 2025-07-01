@@ -1,5 +1,4 @@
 #![no_main]
-extern crate core;
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, Encode};
@@ -147,7 +146,7 @@ fn test_public_key_derivation(private_key_data: &[u8]) {
     }
 }
 
-fuzz_target!(|input: FuzzInput| {
+fn fuzz(input: FuzzInput) {
     match input.case_selector % 10 {
         0 => test_private_key(&input.private_key_32),
         1 => test_public_key(&input.public_key_33),
@@ -161,4 +160,8 @@ fuzz_target!(|input: FuzzInput| {
         9 => test_public_key_roundtrip(&input.variable_data),
         _ => unreachable!(),
     }
+}
+
+fuzz_target!(|input: FuzzInput| {
+    fuzz(input);
 });
