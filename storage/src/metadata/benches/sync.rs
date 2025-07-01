@@ -27,9 +27,8 @@ fn bench_sync(c: &mut Criterion) {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
                         let mut total = Duration::ZERO;
                         for _ in 0..iters {
-                            let mut metadata = init(ctx.clone()).await;
-
                             // Put initial state
+                            let mut metadata = init(ctx.clone()).await;
                             for (k, v) in &initial_kvs {
                                 metadata.put(k.clone(), v.clone());
                             }
