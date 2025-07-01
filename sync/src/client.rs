@@ -128,6 +128,7 @@ where
                     "Fetching proof and operations"
                 );
 
+                // Get proof and operations from resolver.
                 let (proof, new_operations) =
                     config.resolver.get_proof(current_ops, batch_size).await?;
 
@@ -393,7 +394,8 @@ mod tests {
         });
     }
 
-    /// A simple resolver that always returns too many operations to trigger retry logic
+    /// A simple resolver that always returns too many operations to trigger retry logic.
+    /// Increments `call_count` on each call to `get_proof`.
     struct FailingResolver {
         call_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
     }
