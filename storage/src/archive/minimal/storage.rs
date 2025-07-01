@@ -1,5 +1,5 @@
 use crate::{
-    archive::{minimal::Config, Error},
+    archive::{minimal::Config, Error, Identifier},
     journal::variable::{self, Journal},
     metadata::{self, Metadata},
     ordinal::{self, Ordinal},
@@ -309,5 +309,44 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
             journal,
             ordinal,
         })
+    }
+}
+
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
+    for Archive<E, K, V>
+{
+    type Key = K;
+    type Value = V;
+
+    async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
+        unimplemented!()
+    }
+
+    async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
+        unimplemented!()
+    }
+
+    async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
+        unimplemented!()
+    }
+
+    async fn prune(&mut self, min: u64) -> Result<(), Error> {
+        unimplemented!()
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        unimplemented!()
+    }
+
+    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+        unimplemented!()
+    }
+
+    async fn close(self) -> Result<(), Error> {
+        unimplemented!()
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        unimplemented!()
     }
 }
