@@ -53,6 +53,7 @@ impl<K: Array, V: Codec> EncodeSize for JournalRecord<K, V> {
     }
 }
 
+// TODO: use a single U64 for key with a joint field for all (will modify all during a put)
 const METADATA_ACTIVE: u8 = 0;
 const METADATA_BLOOM: u8 = 1;
 const METADATA_CURSOR: u8 = 2;
