@@ -159,8 +159,8 @@ enum MetadataRecord {
     Active(BitVec),
     /// The bloom filter of keys for the section.
     Bloom(BloomFilter),
-    /// The first item in the section for a given key.
-    Cursor(Option<u32>),
+    /// The cursors for a given section.
+    Cursor(Vec<u32>),
     /// The size of the journal for a given section.
     Size(u64),
 }
@@ -180,9 +180,9 @@ impl MetadataRecord {
         }
     }
 
-    fn cursor(&self) -> Option<u32> {
+    fn cursor(&self) -> &Vec<u32> {
         match self {
-            Self::Cursor(cursor) => *cursor,
+            Self::Cursor(cursor) => cursor,
             _ => panic!("wrong type"),
         }
     }
@@ -225,7 +225,10 @@ impl Read for MetadataRecord {
                 buf,
                 &((..=usize::MAX).into(), (..=usize::MAX).into()),
             )?)),
-            METADATA_CURSOR => Ok(Self::Cursor(Option::<u32>::read_cfg(buf, &())?)),
+            METADATA_CURSOR => Ok(Self::Cursor(Vec::<u32>::read_cfg(
+                buf,
+                &((..=usize::MAX).into(), ()),
+            )?)),
             METADATA_SIZE => Ok(Self::Size(u64::read_cfg(buf, &())?)),
             _ => Err(commonware_codec::Error::InvalidEnum(tag)),
         }
