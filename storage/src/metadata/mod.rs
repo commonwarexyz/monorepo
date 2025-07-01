@@ -46,18 +46,19 @@
 //! executor.start(|context| async move {
 //!     // Create a store
 //!     let mut metadata = Metadata::init(context, Config{
-//!         partition: "partition".to_string()
+//!         partition: "partition".to_string(),
+//!         codec_config: ((0..).into(), ()),
 //!     }).await.unwrap();
 //!
 //!     // Store metadata
-//!     metadata.put(U64::new(1), "hello".into());
-//!     metadata.put(U64::new(2), "world".into());
+//!     metadata.put(U64::new(1), b"hello".to_vec());
+//!     metadata.put(U64::new(2), b"world".to_vec());
 //!
 //!     // Sync the metadata store (batch write changes)
 //!     metadata.sync().await.unwrap();
 //!
 //!     // Retrieve some metadata
-//!     let value = metadata.get(&U64::new(1));
+//!     let value = metadata.get(&U64::new(1)).unwrap();
 //!
 //!     // Close the store
 //!     metadata.close().await.unwrap();
