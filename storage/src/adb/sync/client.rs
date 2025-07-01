@@ -1,3 +1,4 @@
+use crate::mmr::iterator::leaf_num_to_pos;
 use crate::{
     adb::{
         self,
@@ -209,19 +210,18 @@ where
 
                 // Only extract pinned nodes from the first batch (starting at pruning boundary)
                 if current_global_pos == config.lower_bound_ops {
-                    match proof.extract_pinned_nodes(
-                        current_global_pos,
-                        current_global_pos + new_operations_len - 1,
-                    ) {
+                    // Convert locations to MMR positions before extracting pinned nodes
+                    let start_pos = leaf_num_to_pos(current_global_pos);
+                    // TODO danlaine: handle empty proofs at current_global_pos 0
+                    // and new_operations_len == 0
+                    let end_pos = leaf_num_to_pos(current_global_pos + new_operations_len - 1);
+                    match proof.extract_pinned_nodes(start_pos, end_pos) {
                         Ok(new_pinned_nodes) => {
-                            let nodes_to_pin = Proof::<H::Digest>::nodes_to_pin(current_global_pos)
-                                .collect::<Vec<_>>();
-                            if nodes_to_pin.len() == new_pinned_nodes.len() {
-                                for (loc, digest) in
-                                    nodes_to_pin.iter().zip(new_pinned_nodes.iter())
-                                {
-                                    pinned_nodes.insert(*loc, *digest);
-                                }
+                            let nodes_to_pin =
+                                Proof::<H::Digest>::nodes_to_pin(start_pos).collect::<Vec<_>>();
+                            assert_eq!(nodes_to_pin.len(), new_pinned_nodes.len());
+                            for (loc, digest) in nodes_to_pin.iter().zip(new_pinned_nodes.iter()) {
+                                pinned_nodes.insert(*loc, *digest);
                             }
                         }
                         Err(_) => {
@@ -230,7 +230,6 @@ where
                             if metrics.invalid_batches_received > config.max_retries {
                                 return Err(Error::MaxRetriesExceeded);
                             }
-
                             return Ok(Client::FetchData {
                                 config,
                                 operations,
