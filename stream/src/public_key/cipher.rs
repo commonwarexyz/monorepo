@@ -40,7 +40,7 @@ pub struct Directional {
 pub fn derive_directional(
     ikm: &[u8],
     namespace: &[u8],
-    handshake_transcript: &[u8],
+    hello_transcript: &[u8],
 ) -> Result<Full, Error> {
     let infos = [
         TRAFFIC_INFO_D2L,
@@ -48,7 +48,7 @@ pub fn derive_directional(
         CONFIRMATION_INFO_D2L,
         CONFIRMATION_INFO_L2D,
     ];
-    let salts = [namespace, handshake_transcript];
+    let salts = [namespace, hello_transcript];
     let ciphers = derive::<4>(ikm, &salts, &infos)?;
     let [d2l_traffic, l2d_traffic, d2l_confirmation, l2d_confirmation] = ciphers;
     Ok(Full {
@@ -367,12 +367,12 @@ mod tests {
     fn test_derive_directional_functionality() {
         let ikm = b"directional_test_ikm";
         let namespace = b"test_namespace";
-        let transcript = b"test_handshake_transcript_data";
+        let hello_transcript = b"test_handshake_transcript_data";
 
         let Full {
             traffic,
             confirmation,
-        } = derive_directional(ikm, namespace, transcript)
+        } = derive_directional(ikm, namespace, hello_transcript)
             .expect("derive_directional should succeed");
 
         // Test that all four ciphers produce different outputs

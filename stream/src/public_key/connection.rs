@@ -38,7 +38,7 @@ impl<C: Signer, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
         sink: Si,
         mut stream: St,
     ) -> Result<Self, Error> {
-        // Set handshake deadline (Message 1)
+        // Set handshake deadline
         let deadline = context.current() + config.handshake_timeout;
 
         // Wait for up to handshake timeout for response (Message 1)
@@ -157,7 +157,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             },
         }
 
-        // Wait for listener `hello + confirmation` (Message 2)
+        // Wait for listener's hello + confirmation (Message 2)
         let listener_response_msg = select! {
             _ = context.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout)
@@ -167,7 +167,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             },
         };
 
-        // Verify listener `hello`
+        // Verify listener's hello
         let (listener_hello, listener_confirmation) =
             <(handshake::Hello<C::PublicKey>, Confirmation)>::decode(
                 listener_response_msg.as_ref(),
@@ -193,23 +193,23 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         }
 
         // Create ciphers
-        let transcript_hellos = union(&hello_msg, &listener_hello.encode());
+        let hello_transcript = union(&hello_msg, &listener_hello.encode());
         let cipher::Full {
             confirmation,
             traffic,
         } = cipher::derive_directional(
             shared_secret.as_bytes(),
             &config.namespace,
-            &transcript_hellos,
+            &hello_transcript,
         )?;
 
-        // Verify listener's `confirmation`
+        // Verify listener's confirmation
         let cipher::Directional { d2l, l2d } = confirmation;
-        listener_confirmation.verify(l2d, &transcript_hellos)?;
+        listener_confirmation.verify(l2d, &hello_transcript)?;
 
-        // Create our own `confirmation` (Message 3)
-        let transcript_all = union(&hello_msg, &listener_response_msg);
-        let confirmation_msg = Confirmation::create(d2l, &transcript_all)?.encode();
+        // Create our own confirmation (Message 3)
+        let full_transcript = union(&hello_msg, &listener_response_msg);
+        let confirmation_msg = Confirmation::create(d2l, &full_transcript)?.encode();
         select! {
             _ = context.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout)
@@ -255,7 +255,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         // Generate personal secret
         let secret = x25519::new(&mut context);
 
-        // Create `hello`
+        // Create hello
         let timestamp = context.current().epoch_millis();
         let listener_ephemeral = x25519::PublicKey::from_secret(&secret);
         let hello = handshake::Hello::sign(
@@ -271,15 +271,15 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         }
 
         // Create ciphers
-        let transcript_hellos = union(&incoming.dialer_hello_msg, &hello.encode());
+        let hello_transcript = union(&incoming.dialer_hello_msg, &hello.encode());
         let cipher::Full {
             confirmation,
             traffic,
-        } = cipher::derive_directional(shared_secret.as_bytes(), &namespace, &transcript_hellos)?;
+        } = cipher::derive_directional(shared_secret.as_bytes(), &namespace, &hello_transcript)?;
 
-        // Create and send listener `hello + confirmation` (Message 2)
+        // Create and send hello + confirmation (Message 2)
         let cipher::Directional { l2d, d2l } = confirmation;
-        let confirmation = Confirmation::create(l2d, &transcript_hellos)?;
+        let confirmation = Confirmation::create(l2d, &hello_transcript)?;
         let response_msg = (hello, confirmation).encode();
         select! {
             _ = context.sleep_until(incoming.deadline) => {
@@ -290,7 +290,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             },
         }
 
-        // Wait for dialer `confirmation` (Message 3)
+        // Wait for dialer confirmation (Message 3)
         let confirmation_msg = select! {
             _ = context.sleep_until(incoming.deadline) => {
                 return Err(Error::HandshakeTimeout)
@@ -300,11 +300,11 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             },
         };
 
-        // Verify dialer's `confirmation`
-        let transcript_all = union(&incoming.dialer_hello_msg, &response_msg);
+        // Verify dialer's confirmation
+        let full_transcript = union(&incoming.dialer_hello_msg, &response_msg);
         Confirmation::decode(confirmation_msg.as_ref())
             .map_err(Error::UnableToDecode)?
-            .verify(d2l, &transcript_all)?;
+            .verify(d2l, &full_transcript)?;
 
         // Connection successfully established
         Ok(Connection {
@@ -850,9 +850,9 @@ mod tests {
                 handshake_timeout: Duration::from_secs(1),
             };
 
-            // Initial hello travels: dialer_sink -> listener_stream (Message 1)
+            // Initial hello travels: dialer_sink -> listener_stream
             let (mut dialer_sink, listener_stream) = mocks::Channel::init();
-            // Reply hello would travel: listener_reply_sink -> dialer_stream (Message 2)
+            // Reply hello would travel: listener_reply_sink -> dialer_stream
             let (listener_reply_sink, _dialer_stream) = mocks::Channel::init();
 
             let listener_config = config.clone();
