@@ -8,7 +8,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::BloomFilter;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{Array, BitVec};
+use commonware_utils::{array::U64, Array, BitVec};
 use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -53,162 +53,23 @@ impl<K: Array, V: Codec> EncodeSize for JournalRecord<K, V> {
     }
 }
 
-// TODO: use a single U64 for key with a joint field for all (will modify all during a put)
-const METADATA_ACTIVE: u8 = 0;
-const METADATA_BLOOM: u8 = 1;
-const METADATA_CURSOR: u8 = 2;
-const METADATA_SIZE: u8 = 3;
-
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
-#[repr(transparent)]
-struct MetadataKey([u8; 12]);
-
-impl MetadataKey {
-    fn new(section: u64, purpose: u8, extra: u32) -> Self {
-        let mut arr = [0; Self::SIZE];
-        arr[0] = purpose;
-        arr[1..9].copy_from_slice(&section.to_be_bytes());
-        arr[9..].copy_from_slice(&extra.to_be_bytes());
-
-        Self(arr)
-    }
-
-    fn section(&self) -> u64 {
-        u64::from_be_bytes(self.0[1..9].try_into().unwrap())
-    }
-
-    fn purpose(&self) -> u8 {
-        self.0[0]
-    }
-
-    fn extra(&self) -> u32 {
-        u32::from_be_bytes(self.0[9..].try_into().unwrap())
-    }
-
-    fn purpose_prefix(purpose: u8) -> [u8; 1] {
-        [purpose]
-    }
-
-    fn section_prefix(purpose: u8, section: u64) -> [u8; 9] {
-        let mut arr = [0; 9];
-        arr[0] = purpose;
-        arr[1..9].copy_from_slice(&section.to_be_bytes());
-        arr
-    }
-}
-
-impl Write for MetadataKey {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-    }
-}
-
-impl Read for MetadataKey {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self(<[u8; Self::SIZE]>::read(buf)?))
-    }
-}
-
-impl FixedSize for MetadataKey {
-    const SIZE: usize = 12;
-}
-
-impl Array for MetadataKey {}
-
-impl AsRef<[u8]> for MetadataKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl Deref for MetadataKey {
-    type Target = [u8];
-
-    fn deref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for MetadataKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "MetadataKey(section={}, purpose={}, extra={})",
-            self.section(),
-            self.purpose(),
-            self.extra()
-        )
-    }
-}
-
-impl std::fmt::Display for MetadataKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "MetadataKey(section={}, purpose={}, extra={})",
-            self.section(),
-            self.purpose(),
-            self.extra()
-        )
-    }
-}
-
-enum MetadataRecord {
+pub struct MetadataRecord {
     /// The indices currently active in a section.
-    Active(BitVec),
+    active: BitVec,
     /// The bloom filter of keys for the section.
-    Bloom(BloomFilter),
+    bloom: BloomFilter,
     /// The cursors for a given section.
-    Cursor(Vec<u32>),
+    cursors: Vec<u32>,
     /// The size of the journal for a given section.
-    Size(u64),
-}
-
-impl MetadataRecord {
-    fn size(&self) -> u64 {
-        match self {
-            Self::Size(size) => *size,
-            _ => panic!("wrong type"),
-        }
-    }
-
-    fn active(&self) -> &BitVec {
-        match self {
-            Self::Active(active) => active,
-            _ => panic!("wrong type"),
-        }
-    }
-
-    fn cursor(&self) -> &Vec<u32> {
-        match self {
-            Self::Cursor(cursor) => cursor,
-            _ => panic!("wrong type"),
-        }
-    }
+    size: u64,
 }
 
 impl Write for MetadataRecord {
     fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Active(active) => {
-                buf.put_u8(METADATA_ACTIVE);
-                active.write(buf)
-            }
-            Self::Bloom(bloom) => {
-                buf.put_u8(METADATA_BLOOM);
-                bloom.write(buf)
-            }
-            Self::Cursor(cursor) => {
-                buf.put_u8(METADATA_CURSOR);
-                cursor.write(buf)
-            }
-            Self::Size(size) => {
-                buf.put_u8(METADATA_SIZE);
-                size.write(buf)
-            }
-        }
+        self.active.write(buf);
+        self.bloom.write(buf);
+        self.cursors.write(buf);
+        self.size.write(buf);
     }
 }
 
@@ -216,34 +77,25 @@ impl Read for MetadataRecord {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let tag = buf.get_u8();
-        match tag {
-            METADATA_ACTIVE => Ok(Self::Active(BitVec::read_cfg(
-                buf,
-                &(..=usize::MAX).into(),
-            )?)),
-            METADATA_BLOOM => Ok(Self::Bloom(BloomFilter::read_cfg(
-                buf,
-                &((..=usize::MAX).into(), (..=usize::MAX).into()),
-            )?)),
-            METADATA_CURSOR => Ok(Self::Cursor(Vec::<u32>::read_cfg(
-                buf,
-                &((..=usize::MAX).into(), ()),
-            )?)),
-            METADATA_SIZE => Ok(Self::Size(u64::read_cfg(buf, &())?)),
-            _ => Err(commonware_codec::Error::InvalidEnum(tag)),
-        }
+        let active = BitVec::read_cfg(buf, &(..=usize::MAX).into())?;
+        let bloom = BloomFilter::read_cfg(buf, &((..=usize::MAX).into(), (..=usize::MAX).into()))?;
+        let cursors = Vec::<u32>::read_cfg(buf, &((..=usize::MAX).into(), (..=usize::MAX).into()))?;
+        let size = u64::read_cfg(buf, &())?;
+        Ok(Self {
+            active,
+            bloom,
+            cursors,
+            size,
+        })
     }
 }
 
 impl EncodeSize for MetadataRecord {
     fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Active(active) => active.encode_size(),
-            Self::Bloom(bloom) => bloom.encode_size(),
-            Self::Cursor(cursor) => cursor.encode_size(),
-            Self::Size(size) => size.encode_size(),
-        }
+        self.active.encode_size()
+            + self.bloom.encode_size()
+            + self.cursors.encode_size()
+            + self.size.encode_size()
     }
 }
 
@@ -252,7 +104,7 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     cursor_heads: u32,
 
     sections: BTreeSet<u64>,
-    metadata: Metadata<E, MetadataKey, MetadataRecord>,
+    metadata: Metadata<E, U64, MetadataRecord>,
     journal: Journal<E, JournalRecord<K, V>>,
     ordinal: Ordinal<E, K>,
 }
@@ -260,7 +112,7 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metadata
-        let metadata = Metadata::<E, MetadataKey, MetadataRecord>::init(
+        let metadata = Metadata::<E, U64, MetadataRecord>::init(
             context.with_label("metadata"),
             metadata::Config {
                 partition: cfg.metadata_partition,
@@ -268,17 +120,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
             },
         )
         .await?;
-
-        // Collect all journal sizes
-        let section_prefix = MetadataKey::purpose_prefix(METADATA_SIZE);
-        let sections = metadata.keys(Some(&section_prefix));
-        let mut section_set = BTreeSet::new();
-        let mut section_sizes = BTreeMap::new();
-        for section in sections {
-            let length = metadata.get(section).unwrap().size();
-            section_sizes.insert(section.section(), length);
-            section_set.insert(section.section());
-        }
 
         // Initialize journal
         let mut journal = Journal::init(
@@ -292,18 +133,23 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         )
         .await?;
 
-        // Limit journal sizes to committed
-        for (section, size) in section_sizes {
-            journal.rewind(section, size).await?;
-        }
-
-        // Collect all activity
-        let active_prefix = MetadataKey::purpose_prefix(METADATA_ACTIVE);
-        let sections = metadata.keys(Some(&active_prefix));
+        // Collect sections
+        let sections = metadata.keys(None).collect::<Vec<_>>();
+        let mut section_set = BTreeSet::new();
         let mut section_bits = HashMap::new();
         for section in sections {
-            let active = metadata.get(section).unwrap().active();
-            section_bits.insert(section.section(), active);
+            // Get record
+            let active = metadata.get(&section).unwrap();
+
+            // Get active bits
+            let section = section.to_u64();
+            section_bits.insert(section, &active.active);
+
+            // Rewind journal
+            journal.rewind(section, active.size).await?;
+
+            // Add section to set
+            section_set.insert(section);
         }
 
         // Initialize ordinal
@@ -342,14 +188,27 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         unimplemented!()
     }
 
-    async fn initialize_section(&self, section: u64) -> Result<(), Error> {
+    async fn initialize_section(&self, section: u64) {
         // Create active bit vector
+        let active = BitVec::with_capacity(self.items_per_section as usize);
 
         // Create size vector
+        let size = 0;
 
-        // Create a bunch of cursors
+        // Create bloom filter
+        let bloom = BloomFilter::with_capacity(self.items_per_section as usize);
 
-        unimplemented!()
+        // Create cursors
+        let cursors = vec![0; self.cursor_heads as usize];
+
+        // Store record
+        let record = MetadataRecord {
+            active,
+            bloom,
+            cursors,
+            size,
+        };
+        self.metadata.put(section.into(), record);
     }
 }
 
