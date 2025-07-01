@@ -1,8 +1,6 @@
 //! Benchmark for syncing `Metadata` with overlapping keys.
 
-use crate::utils::get_modified_kvs;
-
-use super::utils::{get_random_kvs, init};
+use super::utils::{get_modified_kvs, get_random_kvs, init};
 use commonware_runtime::benchmarks::{context, tokio};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
