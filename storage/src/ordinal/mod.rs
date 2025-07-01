@@ -77,8 +77,8 @@
 //!     // Put values at specific indices
 //!     let value1 = FixedBytes::new([1u8; 32]);
 //!     let value2 = FixedBytes::new([2u8; 32]);
-//!     store.put(0, value1).unwrap();
-//!     store.put(5, value2).unwrap();
+//!     store.put(0, value1).await.unwrap();
+//!     store.put(5, value2).await.unwrap();
 //!
 //!     // Sync to disk
 //!     store.sync().await.unwrap();
