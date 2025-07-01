@@ -29,11 +29,11 @@
 //! (otherwise, we would not be guaranteed to recover the latest complete state from disk on
 //! restart as half of a blob could be old data and half new data).
 //!
-//! # Efficient Writes
+//! # Delta Writes
 //!
-//! When an update is committed, only updated bytes are actually written to disk. This makes [Metadata]
-//! a great choice for maintaining even large collections of data (there is only overhead to maintaining
-//! keys that aren't updated if the order of keys is unstable).
+//! If the set of keys and the length of values are stable, [Metadata] will only write an update's
+//! delta to disk (rather than rewriting the entire metadata). This makes [Metadata] a great choice
+//! for maintaining even large collections of data (with the majority rarely modified).
 //!
 //! # Example
 //!
