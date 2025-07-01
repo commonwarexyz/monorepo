@@ -219,7 +219,8 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         listener_key_confirmation.verify(l2d_confirmation, &transcript)?;
 
         // Create our own key confirmation to prove we can derive the shared secret (Message 3)
-        // This uses the d2l_confirmation cipher with the handshake transcript as associated data
+        // This uses the d2l_confirmation cipher with the full transcript as associated data
+        let transcript = create_handshake_transcript(&d2l_msg, &listener_response_msg);
         let dialer_key_confirmation =
             handshake::KeyConfirmation::create(d2l_confirmation, &transcript)?;
         let confirmation_bytes = dialer_key_confirmation.encode();
@@ -329,6 +330,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Verify dialer's key confirmation proves they can derive the shared secret
         // This uses the d2l_confirmation cipher with the handshake transcript as associated data
+        let transcript = create_handshake_transcript(&d2l_msg, &response_bytes);
         dialer_confirmation.verify(d2l_confirmation, &transcript)?;
 
         // Connection successfully established with mutual authentication
