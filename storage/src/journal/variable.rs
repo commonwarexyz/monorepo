@@ -626,6 +626,58 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         blob.sync().await.map_err(Error::Runtime)
     }
 
+    /// Gets the size of the journal for a specific section.
+    ///
+    /// Returns 0 if the section does not exist.
+    pub async fn size(&self, section: u64) -> Result<u64, Error> {
+        self.prune_guard(section, false)?;
+        match self.blobs.get(&section) {
+            Some(blob) => Ok(blob.size().await),
+            None => Ok(0),
+        }
+    }
+
+    /// Rewinds the journal to the given `section` and `size`.
+    ///
+    /// This removes any data beyond the specified `section` and `size`.
+    pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        self.prune_guard(section, false)?;
+
+        // Remove any sections beyond the given section
+        let trailing: Vec<u64> = self
+            .blobs
+            .range((
+                std::ops::Bound::Excluded(section),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(|(&s, _)| s)
+            .collect();
+        for index in trailing {
+            if let Some(blob) = self.blobs.remove(&index) {
+                // Remove the underlying blob from storage.
+                blob.close().await?;
+                self.context
+                    .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
+                    .await?;
+                debug!(section = index, "removed section");
+                self.tracked.dec();
+            }
+        }
+
+        // If the section exists, truncate it to the given offset
+        let blob = match self.blobs.get_mut(&section) {
+            Some(blob) => blob,
+            None => return Ok(()),
+        };
+        let current = blob.size().await;
+        if size >= current {
+            return Ok(()); // Already smaller than or equal to target size
+        }
+        blob.resize(size).await?;
+        debug!(section, from = current, to = size, "rewound journal");
+        Ok(())
+    }
+
     /// Prunes all `sections` less than `min`.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         // Check if we already ran this prune
@@ -1679,6 +1731,42 @@ mod tests {
             let data = 1;
             let result = journal.append(1, data).await;
             assert!(matches!(result, Err(Error::OffsetOverflow)));
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_rewind() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create journal
+            let cfg = Config {
+                partition: "test_partition".to_string(),
+                compression: None,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+            let mut journal = Journal::init(context, cfg).await.unwrap();
+
+            // Check size of non-existent section
+            let size = journal.size(1).await.unwrap();
+            assert_eq!(size, 0);
+
+            // Append data to section 1
+            journal.append(1, 42i32).await.unwrap();
+
+            // Check size of section 1 - should be greater than 0
+            let size = journal.size(1).await.unwrap();
+            assert!(size > 0);
+
+            // Check size of different section - should still be 0
+            let size = journal.size(2).await.unwrap();
+            assert_eq!(size, 0);
+
+            // Append more data and verify size increases
+            journal.append(1, 43i32).await.unwrap();
+            let new_size = journal.size(1).await.unwrap();
+            assert!(new_size > size);
         });
     }
 

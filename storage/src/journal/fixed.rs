@@ -295,21 +295,20 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         Ok(item_pos)
     }
 
-    /// Rewind the journal to the given `journal_size`.
+    /// Rewind the journal to the given `size`.
     ///
     /// The journal is not synced after rewinding.
-    pub async fn rewind(&mut self, journal_size: u64) -> Result<(), Error> {
-        let size = self.size().await?;
-        match journal_size.cmp(&size) {
-            std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(journal_size)),
+    pub async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+        match size.cmp(&self.size().await?) {
+            std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(size)),
             std::cmp::Ordering::Equal => return Ok(()),
             std::cmp::Ordering::Less => {}
         }
-        let rewind_to_blob_index = journal_size / self.cfg.items_per_blob;
+        let rewind_to_blob_index = size / self.cfg.items_per_blob;
         if rewind_to_blob_index < *self.oldest_blob().0 {
-            return Err(Error::InvalidRewind(journal_size));
+            return Err(Error::InvalidRewind(size));
         }
-        let rewind_to_offset = (journal_size % self.cfg.items_per_blob) * Self::CHUNK_SIZE_U64;
+        let rewind_to_offset = (size % self.cfg.items_per_blob) * Self::CHUNK_SIZE_U64;
         let mut current_blob_index = *self.newest_blob().0;
 
         // Remove blobs until we reach the rewind point.

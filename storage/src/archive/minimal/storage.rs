@@ -235,6 +235,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         )
         .await?;
 
+        // Collect all journal lengths
+        let section_prefix = MetadataKey::purpose_prefix(METADATA_SIZE);
+        let sections = metadata.keys(Some(&section_prefix));
+        let mut section_sizes = BTreeMap::new();
+        for section in sections {
+            let length = metadata.get(section).unwrap().size();
+            section_sizes.insert(section.section(), length);
+        }
+
         // Initialize journal
         let journal = Journal::init(
             context.with_label("journal"),
@@ -246,6 +255,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
             },
         )
         .await?;
+
+        // Limit journal sizes to committed
+
 
         // Initialize ordinal
         let ordinal = Ordinal::init(
