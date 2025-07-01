@@ -161,7 +161,10 @@ mod tests {
             assert!(!store.has(0));
 
             // Put the value at index 0
-            store.put(0, value.clone()).expect("Failed to put data");
+            store
+                .put(0, value.clone())
+                .await
+                .expect("Failed to put data");
 
             // Check index exists
             assert!(store.has(0));
@@ -223,6 +226,7 @@ mod tests {
             for (index, value) in &indices {
                 store
                     .put(*index, value.clone())
+                    .await
                     .expect("Failed to put data");
             }
 
@@ -268,6 +272,7 @@ mod tests {
             for (index, value) in &indices {
                 store
                     .put(*index, value.clone())
+                    .await
                     .expect("Failed to put data");
             }
 
@@ -308,10 +313,10 @@ mod tests {
                 .expect("Failed to initialize store");
 
             // Insert values with gaps
-            store.put(1, FixedBytes::new([1u8; 32])).unwrap();
-            store.put(10, FixedBytes::new([10u8; 32])).unwrap();
-            store.put(11, FixedBytes::new([11u8; 32])).unwrap();
-            store.put(14, FixedBytes::new([14u8; 32])).unwrap();
+            store.put(1, FixedBytes::new([1u8; 32])).await.unwrap();
+            store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
+            store.put(11, FixedBytes::new([11u8; 32])).await.unwrap();
+            store.put(14, FixedBytes::new([14u8; 32])).await.unwrap();
 
             // Check gaps
             let (current_end, start_next) = store.next_gap(0);
@@ -367,6 +372,7 @@ mod tests {
                 for (index, value) in &values {
                     store
                         .put(*index, value.clone())
+                        .await
                         .expect("Failed to put data");
                 }
 
@@ -420,7 +426,10 @@ mod tests {
                     .await
                     .expect("Failed to initialize store");
 
-                store.put(0, FixedBytes::new([42u8; 32])).unwrap();
+                store
+                    .put(0, FixedBytes::new([42u8; 32]))
+                    .await
+                    .expect("Failed to put data");
                 store.close().await.expect("Failed to close store");
             }
 
@@ -494,8 +503,14 @@ mod tests {
                     .await
                     .expect("Failed to initialize store");
 
-                store.put(0, FixedBytes::new([0u8; 32])).unwrap();
-                store.put(1000, FixedBytes::new([100u8; 32])).unwrap();
+                store
+                    .put(0, FixedBytes::new([0u8; 32]))
+                    .await
+                    .expect("Failed to put data");
+                store
+                    .put(1000, FixedBytes::new([100u8; 32]))
+                    .await
+                    .expect("Failed to put data");
 
                 // Destroy the store
                 store.destroy().await.expect("Failed to destroy store");
@@ -534,8 +549,14 @@ mod tests {
                     .await
                     .expect("Failed to initialize store");
 
-                store.put(0, FixedBytes::new([42u8; 32])).unwrap();
-                store.put(1, FixedBytes::new([43u8; 32])).unwrap();
+                store
+                    .put(0, FixedBytes::new([42u8; 32]))
+                    .await
+                    .expect("Failed to put data");
+                store
+                    .put(1, FixedBytes::new([43u8; 32]))
+                    .await
+                    .expect("Failed to put data");
                 store.close().await.expect("Failed to close store");
             }
 
@@ -568,7 +589,7 @@ mod tests {
 
                 // Store should still be functional
                 let mut store_mut = store;
-                store_mut.put(1, FixedBytes::new([44u8; 32])).unwrap();
+                store_mut.put(1, FixedBytes::new([44u8; 32])).await.unwrap();
                 assert_eq!(
                     store_mut.get(1).await.unwrap().unwrap(),
                     FixedBytes::new([44u8; 32])
@@ -595,8 +616,14 @@ mod tests {
                     .await
                     .expect("Failed to initialize store");
 
-                store.put(0, FixedBytes::new([42u8; 32])).unwrap();
-                store.put(1, FixedBytes::new([43u8; 32])).unwrap();
+                store
+                    .put(0, FixedBytes::new([42u8; 32]))
+                    .await
+                    .expect("Failed to put data");
+                store
+                    .put(1, FixedBytes::new([43u8; 32]))
+                    .await
+                    .expect("Failed to put data");
                 store.close().await.expect("Failed to close store");
             }
 
@@ -651,10 +678,10 @@ mod tests {
                     .expect("Failed to initialize store");
 
                 // Add values across 2 blobs
-                store.put(0, FixedBytes::new([0u8; 32])).unwrap();
-                store.put(5, FixedBytes::new([5u8; 32])).unwrap();
-                store.put(10, FixedBytes::new([10u8; 32])).unwrap();
-                store.put(15, FixedBytes::new([15u8; 32])).unwrap();
+                store.put(0, FixedBytes::new([0u8; 32])).await.unwrap();
+                store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
+                store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
+                store.put(15, FixedBytes::new([15u8; 32])).await.unwrap();
                 store.close().await.expect("Failed to close store");
             }
 
@@ -720,8 +747,14 @@ mod tests {
                     .await
                     .expect("Failed to initialize store");
 
-                store.put(0, FixedBytes::new([42u8; 32])).unwrap();
-                store.put(1, FixedBytes::new([43u8; 32])).unwrap();
+                store
+                    .put(0, FixedBytes::new([42u8; 32]))
+                    .await
+                    .expect("Failed to put data");
+                store
+                    .put(1, FixedBytes::new([43u8; 32]))
+                    .await
+                    .expect("Failed to put data");
                 store.close().await.expect("Failed to close store");
             }
 
@@ -761,7 +794,7 @@ mod tests {
 
                 // Store should still be functional
                 let mut store_mut = store;
-                store_mut.put(2, FixedBytes::new([44u8; 32])).unwrap();
+                store_mut.put(2, FixedBytes::new([44u8; 32])).await.unwrap();
                 assert_eq!(
                     store_mut.get(2).await.unwrap().unwrap(),
                     FixedBytes::new([44u8; 32])
@@ -856,7 +889,10 @@ mod tests {
                 context.fill_bytes(&mut value);
                 let value = FixedBytes::<128>::new(value);
 
-                store.put(index, value.clone()).expect("Failed to put data");
+                store
+                    .put(index, value.clone())
+                    .await
+                    .expect("Failed to put data");
                 values.push((index, value));
             }
 
@@ -906,7 +942,7 @@ mod tests {
                 context.fill_bytes(&mut value);
                 let value = FixedBytes::<128>::new(value);
 
-                store.put(index, value).expect("Failed to put data");
+                store.put(index, value).await.expect("Failed to put data");
             }
 
             // Final sync
@@ -952,7 +988,10 @@ mod tests {
             ];
 
             for (index, value) in &values {
-                store.put(*index, value.clone()).unwrap();
+                store
+                    .put(*index, value.clone())
+                    .await
+                    .expect("Failed to put data");
             }
             store.sync().await.unwrap();
 
@@ -1018,9 +1057,9 @@ mod tests {
                 .expect("Failed to initialize store");
 
             // Insert sparse data with gaps
-            store.put(5, FixedBytes::new([5u8; 32])).unwrap();
-            store.put(105, FixedBytes::new([105u8; 32])).unwrap();
-            store.put(305, FixedBytes::new([49u8; 32])).unwrap();
+            store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
+            store.put(105, FixedBytes::new([105u8; 32])).await.unwrap();
+            store.put(305, FixedBytes::new([49u8; 32])).await.unwrap();
             store.sync().await.unwrap();
 
             // Check gaps before pruning
@@ -1070,8 +1109,8 @@ mod tests {
                 .expect("Failed to initialize store");
 
             // Insert data
-            store.put(100, FixedBytes::new([100u8; 32])).unwrap();
-            store.put(200, FixedBytes::new([200u8; 32])).unwrap();
+            store.put(100, FixedBytes::new([100u8; 32])).await.unwrap();
+            store.put(200, FixedBytes::new([200u8; 32])).await.unwrap();
             store.sync().await.unwrap();
 
             // Try to prune before any data - should be no-op
@@ -1114,7 +1153,7 @@ mod tests {
             store.prune(1000).await.unwrap();
 
             // Store should still be functional
-            store.put(0, FixedBytes::new([0u8; 32])).unwrap();
+            store.put(0, FixedBytes::new([0u8; 32])).await.unwrap();
             assert!(store.has(0));
         });
     }
@@ -1137,9 +1176,9 @@ mod tests {
                     .await
                     .expect("Failed to initialize store");
 
-                store.put(0, FixedBytes::new([0u8; 32])).unwrap();
-                store.put(100, FixedBytes::new([100u8; 32])).unwrap();
-                store.put(200, FixedBytes::new([200u8; 32])).unwrap();
+                store.put(0, FixedBytes::new([0u8; 32])).await.unwrap();
+                store.put(100, FixedBytes::new([100u8; 32])).await.unwrap();
+                store.put(200, FixedBytes::new([200u8; 32])).await.unwrap();
                 store.close().await.unwrap();
             }
 
@@ -1204,7 +1243,7 @@ mod tests {
             for i in 0..10 {
                 let index = i * 50 + 25; // Middle of each blob
                 let value = FixedBytes::new([i as u8; 32]);
-                store.put(index, value.clone()).unwrap();
+                store.put(index, value.clone()).await.unwrap();
                 values.push((index, value));
             }
             store.sync().await.unwrap();
@@ -1257,11 +1296,11 @@ mod tests {
                 .expect("Failed to initialize store");
 
             // Insert data at blob boundaries
-            store.put(0, FixedBytes::new([0u8; 32])).unwrap(); // Start of blob 0
-            store.put(99, FixedBytes::new([99u8; 32])).unwrap(); // End of blob 0
-            store.put(100, FixedBytes::new([100u8; 32])).unwrap(); // Start of blob 1
-            store.put(199, FixedBytes::new([199u8; 32])).unwrap(); // End of blob 1
-            store.put(200, FixedBytes::new([200u8; 32])).unwrap(); // Start of blob 2
+            store.put(0, FixedBytes::new([0u8; 32])).await.unwrap(); // Start of blob 0
+            store.put(99, FixedBytes::new([99u8; 32])).await.unwrap(); // End of blob 0
+            store.put(100, FixedBytes::new([100u8; 32])).await.unwrap(); // Start of blob 1
+            store.put(199, FixedBytes::new([199u8; 32])).await.unwrap(); // End of blob 1
+            store.put(200, FixedBytes::new([200u8; 32])).await.unwrap(); // Start of blob 2
             store.sync().await.unwrap();
 
             // Test various pruning points around boundaries
@@ -1308,10 +1347,10 @@ mod tests {
                 .expect("Failed to initialize store");
 
             // Insert data in non-contiguous sections (0, 2, 5, 7)
-            store.put(0, FixedBytes::new([0u8; 32])).unwrap(); // Section 0
-            store.put(250, FixedBytes::new([50u8; 32])).unwrap(); // Section 2 (250/100 = 2)
-            store.put(500, FixedBytes::new([44u8; 32])).unwrap(); // Section 5 (500/100 = 5)
-            store.put(750, FixedBytes::new([45u8; 32])).unwrap(); // Section 7 (750/100 = 7)
+            store.put(0, FixedBytes::new([0u8; 32])).await.unwrap(); // Section 0
+            store.put(250, FixedBytes::new([50u8; 32])).await.unwrap(); // Section 2 (250/100 = 2)
+            store.put(500, FixedBytes::new([44u8; 32])).await.unwrap(); // Section 5 (500/100 = 5)
+            store.put(750, FixedBytes::new([45u8; 32])).await.unwrap(); // Section 7 (750/100 = 7)
             store.sync().await.unwrap();
 
             // Verify all data exists initially
@@ -1370,12 +1409,12 @@ mod tests {
                 .expect("Failed to initialize store");
 
             // Insert and sync some data in blob 0
-            store.put(5, FixedBytes::new([5u8; 32])).unwrap();
+            store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
             store.sync().await.unwrap();
 
             // Add pending entries to blob 0 and blob 1
-            store.put(10, FixedBytes::new([10u8; 32])).unwrap(); // blob 0
-            store.put(110, FixedBytes::new([110u8; 32])).unwrap(); // blob 1
+            store.put(10, FixedBytes::new([10u8; 32])).await.unwrap(); // blob 0
+            store.put(110, FixedBytes::new([110u8; 32])).await.unwrap(); // blob 1
 
             // Verify all data is visible before pruning
             assert!(store.has(5));

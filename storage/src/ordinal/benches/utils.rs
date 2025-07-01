@@ -38,7 +38,7 @@ pub async fn append_random(store: &mut Ordinal, count: u64) -> Vec<u64> {
     for i in 0..count {
         indices.push(i);
         rng.fill_bytes(&mut val_buf);
-        store.put(i, FixedBytes::new(val_buf)).unwrap();
+        store.put(i, FixedBytes::new(val_buf)).await.unwrap();
     }
     store.sync().await.unwrap();
     indices
