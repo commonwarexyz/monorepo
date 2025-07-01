@@ -1223,9 +1223,9 @@ mod tests {
                 // Verify appropriate data is pruned
                 for (index, _) in &values {
                     if *index < prune_index {
-                        assert!(!store.has(*index), "Index {} should be pruned", index);
+                        assert!(!store.has(*index), "Index {index} should be pruned");
                     } else {
-                        assert!(store.has(*index), "Index {} should not be pruned", index);
+                        assert!(store.has(*index), "Index {index} should not be pruned");
                     }
                 }
             }
