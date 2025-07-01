@@ -18,19 +18,19 @@
 //! accepts incoming connections. Much like a SYN / SYN-ACK / ACK handshake, the dialer and listener
 //! exchange messages in three rounds.
 //!
-//! The SYN-equivalent is a handshake message that contains:
+//! The SYN-equivalent is a [handshake::Hello] message that contains:
 //! - The recipient's expected public key (prevents wrong-target attacks)
 //! - The sender's ephemeral public key (for Diffie-Hellman key exchange)
 //! - The current timestamp (prevents replay attacks)
 //! - The sender's static public key and signature
 //!
-//! The ACK-equivalent is a key confirmation message that proves that each party can derive the
-//! correct shared secret.
+//! The ACK-equivalent is a [handshake::Confirmation] message that proves that each party can derive
+//! the correct shared secret.
 //!
 //! Thus:
-//! - Message 1 is a handshake message from the dialer to the listener
-//! - Message 2 is a handshake and key confirmation message from the listener to the dialer
-//! - Message 3 is a key confirmation message from the dialer to the listener
+//! - Message 1 is a `Hello` message from the dialer to the listener
+//! - Message 2 is a `Hello` and `Confirmation` message from the listener to the dialer
+//! - Message 3 is a `Confirmation` message from the dialer to the listener
 //!
 //! ### Security Properties
 //!
@@ -38,9 +38,9 @@
 //!
 //! - **Mutual Authentication**: Both parties prove existence of their static private keys through
 //!   signatures.
-//! - **Replay Protection**: Key confirmations are bound to the complete handshake exchange to
-//!   prevent replay attacks by confirming that the peer that sent the handshake message (with the
-//!   cryptographic signature) also had possession of the ephemeral key.
+//! - **Replay Protection**: Confirmations are bound to the handshake transcript to prevent replay
+//!   attacks by confirming that the peer that sent the `Hello` message (with the cryptographic
+//!   signature) also had possession of the ephemeral key.
 //! - **Forward Secrecy**: Ephemeral keys ensure that any compromise of long-term static keys
 //!   doesn't affect other sessions.
 //! - **DoS Protection**: A configurable deadline is enforced for handshake completion to protect
@@ -48,9 +48,9 @@
 //!
 //! ## Encryption
 //!
-//! During the handshake, a shared X25519 secret is established using
-//! Diffie-Hellman key exchange. This secret is combined with the handshake
-//! transcript to derive four separate ChaCha20-Poly1305 ciphers:
+//! During the handshake, a shared X25519 secret is established using Diffie-Hellman key exchange.
+//! This secret is combined with the handshake transcript to derive four separate ChaCha20-Poly1305
+//! ciphers:
 //!
 //! - **Confirmation Ciphers**: One cipher per direction for key confirmation during the handshake
 //! - **Traffic Ciphers**: One cipher per direction for encrypting post-handshake traffic
