@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 fn bench_sync(c: &mut Criterion) {
     let runner = tokio::Runner::default();
     for &num_keys in &[100, 1_000, 10_000] {
-        for &modified_pct in &[0, 5, 25, 50, 75, 100] {
+        for &modified_pct in &[0, 1, 5, 25, 50, 75, 100] {
             let label = format!(
                 "{}/keys={} modified_pct={}",
                 module_path!(),
