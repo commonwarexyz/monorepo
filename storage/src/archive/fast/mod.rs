@@ -191,7 +191,7 @@ mod tests {
     use rand::Rng;
     use std::collections::BTreeMap;
 
-    const DEFAULT_ITEMS_PER_SECTION: u64 = 65536; // 2^16 items per section
+    const DEFAULT_ITEMS_PER_SECTION: u64 = 65536;
     const DEFAULT_WRITE_BUFFER: usize = 1024;
     const DEFAULT_REPLAY_BUFFER: usize = 4096;
 
