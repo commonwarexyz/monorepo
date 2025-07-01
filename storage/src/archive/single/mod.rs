@@ -142,7 +142,7 @@
 //! ```
 
 mod storage;
-pub use crate::{archive::Identifier, index::Translator};
+pub use crate::{archive::Identifier, translator::Translator};
 pub use storage::Archive;
 use thiserror::Error;
 
@@ -198,8 +198,8 @@ pub struct Config<T: Translator, C> {
 mod tests {
     use super::*;
     use crate::{
-        index::translator::{FourCap, TwoCap},
         journal::Error as JournalError,
+        translator::{FourCap, TwoCap},
     };
     use commonware_codec::{varint::UInt, DecodeExt, EncodeSize, Error as CodecError};
     use commonware_macros::test_traced;

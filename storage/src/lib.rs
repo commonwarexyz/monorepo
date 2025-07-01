@@ -13,3 +13,4 @@ pub mod journal;
 pub mod metadata;
 pub mod mmr;
 pub mod rmap;
+pub mod translator;
