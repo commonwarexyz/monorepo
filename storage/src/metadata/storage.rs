@@ -1,6 +1,6 @@
 use super::{Config, Error};
 use bytes::BufMut;
-use commonware_codec::{Codec, FixedSize, ReadExt};
+use commonware_codec::{Codec, EncodeSize, FixedSize, ReadExt};
 use commonware_runtime::{Blob, Clock, Metrics, Storage};
 use commonware_utils::Array;
 use futures::future::try_join_all;
@@ -166,15 +166,14 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         let mut cursor = u64::SIZE;
         while cursor < checksum_index {
             // Read key
-            let next_cursor = cursor + K::SIZE;
-            let key = K::read(&mut buf.as_ref()[cursor..next_cursor].as_ref())
+            let key = K::read(&mut buf.as_ref()[cursor..].as_ref())
                 .expect("unable to read key from blob");
-            cursor = next_cursor;
+            cursor += key.encode_size();
 
             // Read value
             let value = V::read_cfg(&mut buf.as_ref()[cursor..].as_ref(), codec_config)
                 .expect("unable to read value from blob");
-            cursor = next_cursor + value.encode_size();
+            cursor += value.encode_size();
             data.insert(key, value);
         }
 
