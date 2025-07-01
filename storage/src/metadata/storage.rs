@@ -267,7 +267,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         let target = &mut self.blobs[target_cursor];
 
         // Attempt to modify in-place (as long as values are unmodified)
-        let mut rewrite = false;
+        let mut overwrite = true;
         let mut writes = Vec::with_capacity(target.modified.len());
         if self.key_order_changed < past_version {
             for key in target.modified.iter() {
@@ -281,29 +281,31 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
                     writes.push(target.blob.write_at(encoded, *value_cursor as u64));
                 } else {
                     // Rewrite all
-                    rewrite = true;
+                    overwrite = false;
                     break;
                 }
             }
         } else {
-            rewrite = true;
+            overwrite = false;
         }
         target.modified.clear();
 
-        // Modify in-place
-        if !rewrite {
+        // Overwrite existing data
+        if overwrite {
             // Update version
-            target.data[0..8].copy_from_slice(&self.next_version.to_be_bytes());
-            writes.push(target.blob.write_at(target.data[0..8].into(), 0));
+            let version = self.next_version.to_be_bytes();
+            target.data[0..8].copy_from_slice(&version);
+            writes.push(target.blob.write_at(version.as_slice().into(), 0));
 
             // Update checksum
-            let checksum = crc32fast::hash(&target.data[..target.data.len() - 4]);
-            let target_len = target.data.len();
-            target.data[target_len - 4..].copy_from_slice(&checksum.to_be_bytes());
-            writes.push(target.blob.write_at(
-                target.data[target_len - 4..].into(),
-                (target_len - 4) as u64,
-            ));
+            let checksum_start = target.data.len() - 4;
+            let checksum = crc32fast::hash(&target.data[..checksum_start]).to_be_bytes();
+            target.data[checksum_start..].copy_from_slice(&checksum);
+            writes.push(
+                target
+                    .blob
+                    .write_at(checksum.as_slice().into(), checksum_start as u64),
+            );
 
             // Persist changes
             try_join_all(writes).await?;
@@ -317,7 +319,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             return Ok(());
         }
 
-        // Handle rewrite
+        // Rewrite all data
         let mut lengths = HashMap::new();
         let mut next_data = Vec::with_capacity(target.data.len());
         next_data.put_u64(self.next_version);
