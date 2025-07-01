@@ -1,5 +1,3 @@
-//! Benchmark for syncing `Metadata` with overlapping keys.
-
 use super::utils::{get_modified_kvs, get_random_kvs, init};
 use commonware_runtime::benchmarks::{context, tokio};
 use criterion::{criterion_group, Criterion};

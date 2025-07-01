@@ -1,5 +1,3 @@
-//! Benchmark for `Metadata` restart performance.
-
 use super::utils::{get_random_kvs, init};
 use commonware_runtime::{
     benchmarks::{context, tokio},

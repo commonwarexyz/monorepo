@@ -1,5 +1,3 @@
-//! Helpers shared by the Metadata benchmarks.
-
 use commonware_runtime::tokio::Context;
 use commonware_storage::metadata::{Config, Metadata};
 use commonware_utils::array::U64;
