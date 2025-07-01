@@ -1,10 +1,9 @@
 use super::{
     cipher,
-    handshake::{self, KeyConfirmation},
+    handshake::{self, Confirmation},
     nonce, x25519, Config, AUTHENTICATION_TAG_LENGTH,
 };
 use crate::{
-    public_key::cipher::DirectionalCipher,
     utils::codec::{recv_frame, send_frame},
     Error,
 };
@@ -27,9 +26,9 @@ pub struct IncomingConnection<C: Signer, Si: Sink, St: Stream> {
     ephemeral_public_key: x25519::PublicKey,
     peer_public_key: C::PublicKey,
 
-    /// Stores the raw bytes of the dialer handshake message.
+    /// Stores the raw bytes of the dialer hello message.
     /// Necessary for the cipher derivation.
-    dialer_handshake_msg: Bytes,
+    dialer_hello_msg: Bytes,
 }
 
 impl<C: Signer, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
@@ -39,18 +38,18 @@ impl<C: Signer, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
         sink: Si,
         mut stream: St,
     ) -> Result<Self, Error> {
-        // Set handshake deadline
+        // Set handshake deadline (Message 1)
         let deadline = context.current() + config.handshake_timeout;
 
-        // Wait for up to handshake timeout for response
+        // Wait for up to handshake timeout for response (Message 1)
         let msg = select! {
             _ = context.sleep_until(deadline) => { return Err(Error::HandshakeTimeout) },
             result = recv_frame(&mut stream, config.max_message_size) => { result? },
         };
 
-        // Verify handshake message from peer
-        let handshake = handshake::Signed::decode(msg.as_ref()).map_err(Error::UnableToDecode)?;
-        handshake.verify(
+        // Verify hello message from peer
+        let hello = handshake::Hello::decode(msg.as_ref()).map_err(Error::UnableToDecode)?;
+        hello.verify(
             context,
             &config.crypto.public_key(),
             &config.namespace,
@@ -62,9 +61,9 @@ impl<C: Signer, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
             sink,
             stream,
             deadline,
-            ephemeral_public_key: handshake.ephemeral(),
-            peer_public_key: handshake.signer(),
-            dialer_handshake_msg: msg,
+            ephemeral_public_key: hello.ephemeral(),
+            peer_public_key: hello.signer(),
+            dialer_hello_msg: msg,
         })
     }
 
@@ -117,9 +116,9 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     /// Attempt to upgrade a raw connection we initiated.
     ///
     /// This implements the 3-message handshake protocol where the dialer:
-    /// 1. Sends initial handshake message to the listener
-    /// 2. Receives listener response with handshake + key confirmation
-    /// 3. Sends confirmation with own key confirmation to complete mutual auth
+    /// 1. Sends initial `hello` message to the listener
+    /// 2. Receives listener response with `hello + confirmation`
+    /// 3. Sends own `confirmation` to complete mutual auth
     pub async fn upgrade_dialer<R: Rng + CryptoRng + Spawner + Clock, C: Signer>(
         mut context: R,
         mut config: Config<C>,
@@ -138,10 +137,10 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         // Generate shared secret
         let secret = x25519::new(&mut context);
 
-        // Send handshake (Message 1)
+        // Send hello (Message 1)
         let dialer_timestamp = context.current().epoch_millis();
         let dialer_ephemeral = x25519::PublicKey::from_secret(&secret);
-        let d2l_msg = handshake::Signed::sign(
+        let d2l_msg = handshake::Hello::sign(
             &mut config.crypto,
             &config.namespace,
             handshake::Info::new(peer.clone(), dialer_ephemeral, dialer_timestamp),
@@ -158,7 +157,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             },
         }
 
-        // Wait for listener response (Message 2)
+        // Wait for listener `hello + confirmation` (Message 2)
         let listener_response_msg = select! {
             _ = context.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout)
@@ -168,13 +167,13 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             },
         };
 
-        // Verify listener handshake
-        let (listener_handshake, listener_confirmation) =
-            <(handshake::Signed<C::PublicKey>, KeyConfirmation)>::decode(
+        // Verify listener `hello`
+        let (listener_hello, listener_confirmation) =
+            <(handshake::Hello<C::PublicKey>, Confirmation)>::decode(
                 listener_response_msg.as_ref(),
             )
             .map_err(Error::UnableToDecode)?;
-        listener_handshake.verify(
+        listener_hello.verify(
             &context,
             &config.crypto.public_key(),
             &config.namespace,
@@ -183,37 +182,37 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         )?;
 
         // Ensure we connected to the right peer
-        if peer != listener_handshake.signer() {
+        if peer != listener_hello.signer() {
             return Err(Error::WrongPeer);
         }
 
         // Derive shared secret and ensure it is contributory
-        let shared_secret = secret.diffie_hellman(listener_handshake.ephemeral().as_ref());
+        let shared_secret = secret.diffie_hellman(listener_hello.ephemeral().as_ref());
         if !shared_secret.was_contributory() {
             return Err(Error::SharedSecretNotContributory);
         }
 
-        // Encode the listener's handshake and create the complete transcript
-        // The transcript consists of: dialer_handshake || listener_handshake
-        let l2d_msg = listener_handshake.encode();
-        let transcript = union(&d2l_msg, &l2d_msg);
+        // Encode the listener's hello and create the complete transcript
+        // The transcript consists of: dialer_hello || listener_hello
+        let transcript = union(&d2l_msg, &listener_hello.encode());
 
         // Create ciphers
-        let DirectionalCipher {
-            l2d_confirmation,
-            d2l_confirmation,
-            l2d,
-            d2l,
+        let cipher::Full {
+            confirmation:
+                cipher::Directional {
+                    d2l: d2l_confirmation,
+                    l2d: l2d_confirmation,
+                },
+            traffic,
         } = cipher::derive_directional(shared_secret.as_bytes(), &config.namespace, &transcript)?;
 
-        // Verify listener's key confirmation proves they can derive the shared secret
+        // Verify listener's `confirmation` proves they can derive the shared secret
         // This uses the l2d_confirmation cipher with the handshake transcript as associated data
         listener_confirmation.verify(l2d_confirmation, &transcript)?;
 
-        // Create our own key confirmation to prove we can derive the shared secret (Message 3)
+        // Create our own `confirmation` to prove we can derive the shared secret (Message 3)
         // This uses the d2l_confirmation cipher with the full transcript as associated data
-        let transcript = union(&d2l_msg, &listener_response_msg);
-        let confirmation_msg = KeyConfirmation::create(d2l_confirmation, &transcript)?.encode();
+        let confirmation_msg = Confirmation::create(d2l_confirmation, &transcript)?.encode();
 
         select! {
             _ = context.sleep_until(deadline) => {
@@ -233,17 +232,17 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             sink,
             stream,
             max_message_size: config.max_message_size,
-            cipher_send: d2l,
-            cipher_recv: l2d,
+            cipher_send: traffic.d2l,
+            cipher_recv: traffic.l2d,
         })
     }
 
     /// Attempt to upgrade a connection initiated by some peer.
     ///
     /// This implements the 3-message handshake protocol where the listener:
-    /// 1. Sends a response containing their handshake + key confirmation
-    /// 2. Waits for the dialer's confirmation with their key confirmation
-    /// 3. Verifies the dialer's confirmation to complete mutual authentication
+    /// 1. Sends a response containing their `hello + confirmation`
+    /// 2. Waits for the dialer's `confirmation` with their `confirmation`
+    /// 3. Verifies the dialer's `confirmation` to complete mutual authentication
     pub async fn upgrade_listener<R: Rng + CryptoRng + Spawner + Clock, C: Signer>(
         mut context: R,
         incoming: IncomingConnection<C, Si, St>,
@@ -254,7 +253,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let namespace = incoming.config.namespace;
         let mut sink = incoming.sink;
         let mut stream = incoming.stream;
-        let d2l_msg = incoming.dialer_handshake_msg;
+        let dialer_hello_msg = incoming.dialer_hello_msg;
 
         // Generate personal secret
         let secret = x25519::new(&mut context);
@@ -262,7 +261,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         // Create handshake
         let timestamp = context.current().epoch_millis();
         let listener_ephemeral = x25519::PublicKey::from_secret(&secret);
-        let handshake = handshake::Signed::sign(
+        let hello = handshake::Hello::sign(
             &mut crypto,
             &namespace,
             handshake::Info::new(incoming.peer_public_key, listener_ephemeral, timestamp),
@@ -275,23 +274,25 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         }
 
         // Create the complete handshake transcript
-        // The transcript consists of: dialer_handshake || listener_handshake
-        let transcript = union(&d2l_msg, &handshake.encode());
+        // The transcript consists of: dialer_hello || listener_hello
+        let transcript = union(&dialer_hello_msg, &hello.encode());
 
         // Create ciphers
-        let DirectionalCipher {
-            l2d_confirmation,
-            d2l_confirmation,
-            l2d,
-            d2l,
+        let cipher::Full {
+            confirmation:
+                cipher::Directional {
+                    d2l: d2l_confirmation,
+                    l2d: l2d_confirmation,
+                },
+            traffic,
         } = cipher::derive_directional(shared_secret.as_bytes(), &namespace, &transcript)?;
 
-        // Create key confirmation to prove we can derive the shared secret
+        // Create `confirmation` to prove we can derive the shared secret
         // This uses the l2d_confirmation cipher with the handshake transcript as associated data
-        let confirmation = KeyConfirmation::create(l2d_confirmation, &transcript)?;
+        let confirmation = Confirmation::create(l2d_confirmation, &transcript)?;
 
-        // Create and send listener response (Message 2)
-        let response_msg = (handshake, confirmation).encode();
+        // Create and send listener `hello + confirmation` (Message 2)
+        let response_msg = (hello, confirmation).encode();
         select! {
             _ = context.sleep_until(incoming.deadline) => {
                 return Err(Error::HandshakeTimeout)
@@ -301,7 +302,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             },
         }
 
-        // Wait for dialer confirmation (Message 3)
+        // Wait for dialer `confirmation` (Message 3)
         let confirmation_msg = select! {
             _ = context.sleep_until(incoming.deadline) => {
                 return Err(Error::HandshakeTimeout)
@@ -313,11 +314,10 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Decode and verify dialer confirmation
         let dialer_confirmation =
-            KeyConfirmation::decode(confirmation_msg.as_ref()).map_err(Error::UnableToDecode)?;
+            Confirmation::decode(confirmation_msg.as_ref()).map_err(Error::UnableToDecode)?;
 
-        // Verify dialer's key confirmation proves they can derive the shared secret
+        // Verify dialer's `confirmation` proves they can derive the shared secret
         // This uses the d2l_confirmation cipher with the handshake transcript as associated data
-        let transcript = union(&d2l_msg, &response_msg);
         dialer_confirmation.verify(d2l_confirmation, &transcript)?;
 
         // Connection successfully established with mutual authentication
@@ -325,8 +325,8 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
             sink,
             stream,
             max_message_size,
-            cipher_send: l2d,
-            cipher_recv: d2l,
+            cipher_send: traffic.l2d,
+            cipher_recv: traffic.d2l,
         })
     }
 
@@ -673,15 +673,15 @@ mod tests {
                 move |mut context| async move {
                     use chacha20poly1305::KeyInit;
 
-                    // Read the handshake from dialer
+                    // Read the hello from dialer
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
-                    let _ = handshake::Signed::<PublicKey>::decode(msg).unwrap(); // Simulate reading
+                    let _ = handshake::Hello::<PublicKey>::decode(msg).unwrap();
 
-                    // Create mock shared secret and cipher for key confirmation
+                    // Create mock shared secret and cipher for `confirmation`
                     let mock_secret = [1u8; 32];
                     let mock_cipher = ChaCha20Poly1305::new(&mock_secret.into());
 
-                    // Create and send own handshake as listener response
+                    // Create and send own hello as listener response
                     let secret = x25519::new(&mut context);
                     let timestamp = context.current().epoch_millis();
                     let info = handshake::Info::new(
@@ -689,15 +689,14 @@ mod tests {
                         x25519::PublicKey::from_secret(&secret),
                         timestamp,
                     );
-                    let handshake =
-                        handshake::Signed::sign(&mut actual_peer, &peer_config.namespace, info);
+                    let hello =
+                        handshake::Hello::sign(&mut actual_peer, &peer_config.namespace, info);
 
-                    // Create fake key confirmation (using fake transcript)
+                    // Create fake `confirmation` (using fake transcript)
                     let fake_transcript = b"fake_transcript_data";
-                    let confirmation =
-                        KeyConfirmation::create(mock_cipher, fake_transcript).unwrap();
+                    let confirmation = Confirmation::create(mock_cipher, fake_transcript).unwrap();
 
-                    send_frame(&mut peer_sink, &(handshake, confirmation).encode(), 1024)
+                    send_frame(&mut peer_sink, &(hello, confirmation).encode(), 1024)
                         .await
                         .unwrap();
                 }
@@ -748,15 +747,15 @@ mod tests {
                 move |context| async move {
                     use chacha20poly1305::KeyInit;
 
-                    // Read the handshake from dialer
+                    // Read the hello from dialer
                     let msg = recv_frame(&mut peer_stream, 1024).await.unwrap();
-                    let _ = handshake::Signed::<PublicKey>::decode(msg).unwrap();
+                    let _ = handshake::Hello::<PublicKey>::decode(msg).unwrap();
 
-                    // Create mock cipher for key confirmation
+                    // Create mock cipher for `confirmation`
                     let mock_secret = [1u8; 32];
                     let mock_cipher = ChaCha20Poly1305::new(&mock_secret.into());
 
-                    // Create a custom handshake info bytes with zero ephemeral key
+                    // Create a custom hello info bytes with zero ephemeral key
                     let timestamp = context.current().epoch_millis();
                     let info = handshake::Info::new(
                         recipient_pk,
@@ -764,16 +763,15 @@ mod tests {
                         timestamp,
                     );
 
-                    // Create the signed handshake
-                    let handshake = handshake::Signed::sign(&mut listener_crypto, &namespace, info);
+                    // Create the signed `hello`
+                    let hello = handshake::Hello::sign(&mut listener_crypto, &namespace, info);
 
                     // Create fake listener response (using fake transcript)
                     let fake_transcript = b"fake_transcript_for_non_contributory_test";
-                    let confirmation =
-                        KeyConfirmation::create(mock_cipher, fake_transcript).unwrap();
+                    let confirmation = Confirmation::create(mock_cipher, fake_transcript).unwrap();
 
                     // Send the listener response
-                    send_frame(&mut peer_sink, &(handshake, confirmation).encode(), 1024)
+                    send_frame(&mut peer_sink, &(hello, confirmation).encode(), 1024)
                         .await
                         .unwrap();
                 }
@@ -823,12 +821,12 @@ mod tests {
                 context.current().epoch_millis(),
             );
 
-            // Create the signed handshake
-            let handshake =
-                handshake::Signed::sign(&mut dialer_crypto, &listener_config.namespace, info);
+            // Create the signed hello
+            let hello =
+                handshake::Hello::sign(&mut dialer_crypto, &listener_config.namespace, info);
 
-            // Send the handshake
-            send_frame(&mut dialer_sink, &handshake.encode(), 1024)
+            // Send the hello
+            send_frame(&mut dialer_sink, &hello.encode(), 1024)
                 .await
                 .unwrap();
 
@@ -851,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn test_listener_rejects_handshake_signed_with_own_key() {
+    fn test_listener_rejects_hello_signed_with_own_key() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let self_crypto = PrivateKey::from_seed(0);
@@ -866,9 +864,9 @@ mod tests {
                 handshake_timeout: Duration::from_secs(1),
             };
 
-            // Initial handshake travels: dialer_sink -> listener_stream
+            // Initial hello travels: dialer_sink -> listener_stream (Message 1)
             let (mut dialer_sink, listener_stream) = mocks::Channel::init();
-            // Reply handshake would travel: listener_reply_sink -> dialer_stream
+            // Reply hello would travel: listener_reply_sink -> dialer_stream (Message 2)
             let (listener_reply_sink, _dialer_stream) = mocks::Channel::init();
 
             let listener_config = config.clone();
@@ -899,25 +897,25 @@ mod tests {
                             let timestamp = task_ctx.current().epoch_millis();
                             let info =
                                 super::handshake::Info::new(recipient_pk, ephemeral_pk, timestamp);
-                            let handshake = super::handshake::Signed::sign(
+                            let hello = super::handshake::Hello::sign(
                                 &mut crypto_for_signing,
                                 &namespace,
                                 info,
                             );
                             crate::utils::codec::send_frame(
                                 &mut dialer_sink,
-                                &handshake.encode(),
+                                &hello.encode(),
                                 max_msg_size,
                             )
                             .await
                         }
                     });
 
-            // Ensure handshake is sent
+            // Ensure hello is sent
             handshake_sender_handle.await.unwrap().unwrap();
 
             let listener_result = listener_handle.await.unwrap();
-            assert!(matches!(listener_result, Err(Error::HandshakeUsesOurKey)));
+            assert!(matches!(listener_result, Err(Error::HelloUsesOurKey)));
         });
     }
 
