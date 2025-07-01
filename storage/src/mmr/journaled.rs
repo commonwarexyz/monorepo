@@ -246,6 +246,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Set up metadata
         let metadata_cfg = MConfig {
             partition: cfg.config.metadata_partition,
+            codec_config: ((0..).into(), ()),
         };
         let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
 
