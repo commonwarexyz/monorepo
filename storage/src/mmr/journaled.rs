@@ -571,11 +571,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Some(self.pruned_to_pos)
     }
 
-    /// Get the pinned nodes from the memory MMR.
-    pub fn get_pinned_nodes(&self) -> HashMap<u64, H::Digest> {
-        self.mem_mmr.pinned_nodes.clone()
-    }
-
     /// Close the MMR, syncing any cached elements to disk and closing the journal.
     pub async fn close(mut self, h: &mut impl Hasher<H>) -> Result<(), Error> {
         self.sync(h).await?;
@@ -618,6 +613,11 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         self.journal.sync().await?;
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn get_pinned_nodes(&self) -> HashMap<u64, H::Digest> {
+        self.mem_mmr.pinned_nodes.clone()
     }
 
     #[cfg(test)]

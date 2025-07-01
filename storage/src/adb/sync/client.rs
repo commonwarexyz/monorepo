@@ -208,8 +208,7 @@ where
                 operations.extend(new_operations);
 
                 // Only extract pinned nodes from the first batch (starting at pruning boundary)
-                if current_global_pos == config.lower_bound_ops && config.lower_bound_ops == 0 {
-                    // When syncing from position 0, extract pinned nodes from the proof
+                if current_global_pos == config.lower_bound_ops {
                     match proof.extract_pinned_nodes(
                         current_global_pos,
                         current_global_pos + new_operations_len - 1,
@@ -239,13 +238,6 @@ where
                                 metrics,
                             });
                         }
-                    }
-                } else if current_global_pos == config.lower_bound_ops && config.lower_bound_ops > 0
-                {
-                    // When syncing from a pruning boundary, get pinned nodes from the resolver
-                    let target_pinned_nodes = config.resolver.get_pinned_nodes();
-                    for (pos, digest) in target_pinned_nodes {
-                        pinned_nodes.insert(pos, digest);
                     }
                 }
 
@@ -515,10 +507,6 @@ mod tests {
                 },
                 ops,
             ))
-        }
-
-        fn get_pinned_nodes(&self) -> HashMap<u64, <TestHash as Hasher>::Digest> {
-            HashMap::new()
         }
     }
 
