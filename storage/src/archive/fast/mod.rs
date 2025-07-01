@@ -142,9 +142,11 @@
 //! ```
 
 mod storage;
-pub use crate::{archive::Identifier, translator::Translator};
+pub use crate::{
+    archive::{Error, Identifier},
+    translator::Translator,
+};
 pub use storage::Archive;
-use thiserror::Error;
 
 /// Configuration for `Archive` storage.
 #[derive(Clone)]

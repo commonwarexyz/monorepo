@@ -1,6 +1,6 @@
-use super::{Config, Error, Translator};
+use super::{Config, Translator};
 use crate::{
-    archive::Identifier,
+    archive::{Error, Identifier},
     index::Index,
     journal::variable::{Config as JConfig, Journal},
     rmap::RMap,
