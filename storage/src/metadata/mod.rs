@@ -65,19 +65,16 @@
 //! ```
 
 mod storage;
-use commonware_utils::Array;
 pub use storage::Metadata;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with [Metadata].
 #[derive(Debug, Error)]
-pub enum Error<K: Array> {
+pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
     #[error("blob too large: {0}")]
     BlobTooLarge(u64),
-    #[error("value too big: {0}")]
-    ValueTooBig(K),
 }
 
 /// Configuration for [Metadata] storage.

@@ -60,7 +60,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Array, V: Codec> {
 
 impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
     /// Initialize a new [Metadata] instance.
-    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error<K>> {
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Open dedicated blobs
         let (left_blob, left_len) = context.open(&cfg.partition, BLOB_NAMES[0]).await?;
         let (right_blob, right_len) = context.open(&cfg.partition, BLOB_NAMES[1]).await?;
@@ -112,7 +112,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         index: usize,
         blob: E::Blob,
         len: u64,
-    ) -> Result<(BTreeMap<K, V>, Wrapper<E::Blob>), Error<K>> {
+    ) -> Result<(BTreeMap<K, V>, Wrapper<E::Blob>), Error> {
         // Get blob length
         if len == 0 {
             // Empty blob
@@ -214,7 +214,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
     }
 
     /// Atomically commit the current state of [Metadata].
-    pub async fn sync(&mut self) -> Result<(), Error<K>> {
+    pub async fn sync(&mut self) -> Result<(), Error> {
         self.syncs.inc();
 
         // Compute next version.
@@ -301,7 +301,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
     }
 
     /// Sync outstanding data and close [Metadata].
-    pub async fn close(mut self) -> Result<(), Error<K>> {
+    pub async fn close(mut self) -> Result<(), Error> {
         // Sync and close blobs
         self.sync().await?;
         for wrapper in self.blobs.into_iter() {
@@ -311,7 +311,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
     }
 
     /// Close and remove the underlying blobs.
-    pub async fn destroy(self) -> Result<(), Error<K>> {
+    pub async fn destroy(self) -> Result<(), Error> {
         for (i, wrapper) in self.blobs.into_iter().enumerate() {
             wrapper.blob.close().await?;
             self.context
