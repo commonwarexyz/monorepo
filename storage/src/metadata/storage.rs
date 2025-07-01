@@ -286,8 +286,11 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
                 }
             }
         } else {
+            // If the key order has changed, we need to rewrite all data
             overwrite = false;
         }
+
+        // Clear modified keys to avoid writing the same data
         target.modified.clear();
 
         // Overwrite existing data
