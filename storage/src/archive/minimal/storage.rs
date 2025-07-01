@@ -8,7 +8,10 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::BloomFilter;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{array::U64, Array, BitVec, NZUsize};
+use commonware_utils::{
+    array::{FixedBytes, U32, U64},
+    Array, BitVec, NZUsize,
+};
 use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -62,7 +65,7 @@ pub struct MetadataRecord {
     /// The bloom filter of keys for the section.
     bloom: BloomFilter,
     /// The cursors for a given section.
-    cursors: Vec<u32>,
+    cursors: Vec<Option<u32>>,
     /// The size of the journal for a given section.
     size: u64,
 }
@@ -82,7 +85,7 @@ impl Read for MetadataRecord {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let active = BitVec::read_cfg(buf, &(..=usize::MAX).into())?;
         let bloom = BloomFilter::read_cfg(buf, &((..=usize::MAX).into(), (..=usize::MAX).into()))?;
-        let cursors = Vec::<u32>::read_cfg(buf, &((..=usize::MAX).into(), (..=usize::MAX).into()))?;
+        let cursors = Vec::<Option<u32>>::read_cfg(buf, &((..=usize::MAX).into(), ()))?;
         let size = u64::read_cfg(buf, &())?;
         Ok(Self {
             active,
@@ -109,7 +112,7 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     sections: BTreeSet<u64>,
     metadata: Metadata<E, U64, MetadataRecord>,
     journal: Journal<E, JournalRecord<K, V>>,
-    ordinal: Ordinal<E, K>,
+    ordinal: Ordinal<E, U32>,
 }
 
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
@@ -179,12 +182,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     }
 
     async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
-        let key = self.ordinal.get(index).await?;
-        if let Some(key) = key {
-            self.get_key(&key).await
-        } else {
-            Ok(None)
-        }
+        unimplemented!()
     }
 
     async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
@@ -207,7 +205,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         .unwrap();
 
         // Create cursors
-        let cursors = vec![0; self.cursor_heads as usize];
+        let cursors = vec![None; self.cursor_heads as usize];
 
         // Store record
         let record = MetadataRecord {
@@ -232,28 +230,26 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         if !self.sections.contains(&section) {
             self.initialize_section(section).await;
         }
+        let record = self.metadata.get_mut(&section.into()).unwrap();
 
         // Get head for key
         let head = crc32fast::hash(key.as_ref()) % self.cursor_heads;
-        let cursor_key = MetadataKey::new(section, METADATA_CURSOR, head);
-        let cursor = self
-            .metadata
-            .get(&cursor_key)
-            .expect("cursor should exist")
-            .cursor();
+        let cursor = record.cursors[head as usize];
 
         // Put item in journal
-        let record = JournalRecord::new(key.clone(), data, cursor);
-        let (offset, _) = self.journal.append(section, record).await?;
+        let entry = JournalRecord::new(key.clone(), data, cursor);
+        let (offset, _) = self.journal.append(section, entry).await?;
 
         // Put cursor in metadata
-        self.metadata
-            .put(cursor_key, MetadataRecord::Cursor(Some(offset)));
+        record.cursors[head as usize] = Some(offset);
+
+        // Insert key into bloom filter
+        record.bloom.insert(key.as_ref());
 
         // Put section and offset in ordinal
-        self.ordinal.put(index, (section, offset)).await?;
+        self.ordinal.put(index, offset.into()).await?;
 
-        unimplemented!()
+        Ok(())
     }
 
     async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
