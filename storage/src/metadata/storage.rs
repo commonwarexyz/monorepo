@@ -205,7 +205,9 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         // Get value
         let value = self.map.get_mut(key)?;
 
-        // Mark key as modified
+        // Mark key as modified.
+        //
+        // We need to mark both blobs as modified because we may need to update both files.
         self.blobs[self.cursor].modified.insert(key.clone());
         self.blobs[1 - self.cursor].modified.insert(key.clone());
 
@@ -231,7 +233,9 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         // Get value
         let exists = self.map.insert(key.clone(), value).is_some();
 
-        // Mark key as modified
+        // Mark key as modified.
+        //
+        // We need to mark both blobs as modified because we may need to update both files.
         if exists {
             self.blobs[self.cursor].modified.insert(key.clone());
             self.blobs[1 - self.cursor].modified.insert(key.clone());
@@ -246,7 +250,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         // Get value
         let exists = self.map.remove(key).is_some();
 
-        // Mark key as modified
+        // Mark key as modified.
         if exists {
             self.key_order_changed = self.next_version;
         }
@@ -266,7 +270,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         let target_cursor = 1 - self.cursor;
         let target = &mut self.blobs[target_cursor];
 
-        // Attempt to overwrite existing data
+        // Attempt to overwrite existing data if key order has not changed recently
         let mut overwrite = true;
         let mut writes = Vec::with_capacity(target.modified.len());
         if self.key_order_changed < past_version {
