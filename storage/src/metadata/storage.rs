@@ -233,8 +233,6 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         let modified = self.map.remove(key).is_some();
         self.keys.set(self.map.len() as i64);
         if modified {
-            self.modified.insert(key.clone());
-        } else {
             self.unstable = self.blobs[self.cursor]
                 .version
                 .checked_add(1)
