@@ -4,10 +4,10 @@ use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
     archive::{
-        single::{Archive, Config},
+        fast::{Archive, Config},
         Identifier,
     },
-    index::translator::EightCap,
+    translator::EightCap,
 };
 use commonware_utils::array::FixedBytes;
 use libfuzzer_sys::fuzz_target;
