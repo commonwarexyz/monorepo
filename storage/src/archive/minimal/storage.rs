@@ -278,6 +278,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         // Put item in journal
         let entry = JournalRecord::new(key.clone(), data, cursor);
         let (offset, _) = self.journal.append(section, entry).await?;
+        record.size = self.journal.size(section).await?;
 
         // Put cursor in metadata
         record.cursors[head as usize] = Some(offset);
