@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{buffer::pool::BufferPool, deterministic, Runner, RwLock};
 use commonware_storage::{
     adb::any::{Any, Config},
     index::translator::EightCap,
@@ -10,7 +10,10 @@ use commonware_storage::{
 };
 use commonware_utils::array::FixedBytes;
 use libfuzzer_sys::fuzz_target;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
@@ -49,6 +52,7 @@ fn fuzz(data: FuzzInput) {
             log_write_buffer: 1024,
             translator: EightCap,
             pool: None,
+            buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
         };
 
         let mut adb = Any::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
@@ -118,7 +122,7 @@ fn fuzz(data: FuzzInput) {
                         assert!(oldest_loc.is_some(), "Expected Some oldest location when operations exist");
                         if let Some(loc) = oldest_loc {
                             assert!(loc < actual_op_count,
-                                "Oldest retained location {loc} should be less than op count {actual_op_count}", 
+                                "Oldest retained location {loc} should be less than op count {actual_op_count}",
                             );
                         }
                     }

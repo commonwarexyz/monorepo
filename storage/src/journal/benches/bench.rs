@@ -1,4 +1,6 @@
-use commonware_runtime::tokio::Context;
+use std::sync::Arc;
+
+use commonware_runtime::{buffer::pool::BufferPool, tokio::Context, RwLock};
 use commonware_storage::journal::fixed::{Config as JConfig, Journal};
 use commonware_utils::array::FixedBytes;
 use criterion::criterion_main;
@@ -8,8 +10,6 @@ mod fixed_append;
 mod fixed_read_random;
 mod fixed_read_sequential;
 mod fixed_replay;
-
-const WRITE_BUFFER: usize = 1_024 * 1024; // 1MB
 
 criterion_main!(
     fixed_append::benches,
@@ -28,7 +28,7 @@ async fn get_journal<const ITEM_SIZE: usize>(
     let journal_config = JConfig {
         partition: partition_name.to_string(),
         items_per_blob,
-        write_buffer: WRITE_BUFFER,
+        buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
     };
     Journal::init(context, journal_config).await.unwrap()
 }
