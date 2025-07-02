@@ -1282,6 +1282,7 @@ name = "commonware-stream-fuzz"
 version = "0.0.1"
 dependencies = [
  "arbitrary",
+ "chacha20poly1305",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-runtime",

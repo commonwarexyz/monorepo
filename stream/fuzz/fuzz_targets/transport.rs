@@ -12,7 +12,7 @@ use std::time::Duration;
 static NAMESPACE: &[u8] = b"fuzz_transport";
 const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB buffer
 
-fuzz_target!(|data: &[u8]| {
+fn fuzz(data: &[u8]) {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let dialer_crypto = PrivateKey::from_seed(42);
@@ -75,4 +75,8 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(recv_result, chunk);
         }
     });
+}
+
+fuzz_target!(|input: &[u8]| {
+    fuzz(input);
 });
