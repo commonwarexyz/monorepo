@@ -422,6 +422,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         Ok(self.get(key).await?.is_some())
     }
 
+    pub async fn get_location(&self, section: u64, offset: u32) -> Result<Option<V>, Error> {
+        let entry = self.journal.get(section, offset).await?;
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
+
+        Ok(Some(entry.value))
+    }
+
     /// Sync all data to the underlying store.
     /// First syncs all journal sections, then flushes pending table updates, and finally syncs the table.
     pub async fn sync(&mut self) -> Result<(u64, u64, u64), Error> {

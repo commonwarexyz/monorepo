@@ -31,6 +31,14 @@ impl OrdinalRecord {
         buf[u64::SIZE..].copy_from_slice(&offset.to_be_bytes());
         Self(buf)
     }
+
+    fn index(&self) -> u64 {
+        u64::from_be_bytes(self.0[..u64::SIZE].try_into().unwrap())
+    }
+
+    fn offset(&self) -> u32 {
+        u32::from_be_bytes(self.0[u64::SIZE..].try_into().unwrap())
+    }
 }
 
 impl Write for OrdinalRecord {
@@ -256,21 +264,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     }
 
     async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
-        // Get section
-        let section = index / self.items_per_section;
-
         // Get ordinal
-        let Some(offset) = self.ordinal.get(index).await? else {
+        let Some(record) = self.ordinal.get(index).await? else {
             return Ok(None);
         };
 
         // Get journal entry
-        let Some(entry) = self.journal.get(section, offset.to_u32()).await? else {
-            return Ok(None);
-        };
+        let result = self
+            .table
+            .get_location(record.index(), record.offset())
+            .await?;
 
         // Get value
-        Ok(Some(entry.value))
+        Ok(result)
     }
 
     async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
