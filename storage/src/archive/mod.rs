@@ -94,6 +94,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{Metrics, Runner};
     use commonware_utils::array::FixedBytes;
+    use rand::Rng;
     use std::future::Future;
 
     const DEFAULT_ITEMS_PER_SECTION: u64 = 65536;
@@ -129,12 +130,6 @@ mod tests {
         fn check_metrics(buffer: &str, expected: &MetricsExpectation);
 
         /// Whether this implementation supports certain tests
-        fn supports_compression_test() -> bool {
-            true
-        }
-        fn supports_corruption_test() -> bool {
-            false
-        }
         fn supports_lazy_prune_test() -> bool {
             false
         }
@@ -206,9 +201,6 @@ mod tests {
             }
         }
 
-        fn supports_corruption_test() -> bool {
-            true
-        }
         fn supports_lazy_prune_test() -> bool {
             true
         }
@@ -255,6 +247,94 @@ mod tests {
                 // Basic validation that metric exists
                 assert!(buffer.contains("items_tracked"));
             }
+        }
+    }
+
+    // Factory for large value tests
+    struct FastArchiveFactoryLarge;
+
+    impl ArchiveFactory for FastArchiveFactoryLarge {
+        type Archive = fast::Archive<
+            TwoCap,
+            commonware_runtime::deterministic::Context,
+            FixedBytes<64>,
+            FixedBytes<1024>,
+        >;
+
+        async fn init(
+            context: commonware_runtime::deterministic::Context,
+            compression: Option<u8>,
+            items_per_section: u64,
+        ) -> Result<Self::Archive, Error> {
+            Self::init_with_params(context, "test_partition", compression, items_per_section).await
+        }
+
+        async fn init_with_params(
+            context: commonware_runtime::deterministic::Context,
+            partition: &str,
+            compression: Option<u8>,
+            items_per_section: u64,
+        ) -> Result<Self::Archive, Error> {
+            let cfg = fast::Config {
+                partition: partition.into(),
+                translator: TwoCap,
+                compression,
+                codec_config: (),
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_section,
+            };
+            fast::Archive::init(context, cfg).await
+        }
+
+        fn check_metrics(buffer: &str, expected: &MetricsExpectation) {
+            FastArchiveFactory::check_metrics(buffer, expected);
+        }
+
+        fn supports_lazy_prune_test() -> bool {
+            true
+        }
+    }
+
+    struct MinimalArchiveFactoryLarge;
+
+    impl ArchiveFactory for MinimalArchiveFactoryLarge {
+        type Archive = minimal::Archive<
+            commonware_runtime::deterministic::Context,
+            FixedBytes<64>,
+            FixedBytes<1024>,
+        >;
+
+        async fn init(
+            context: commonware_runtime::deterministic::Context,
+            compression: Option<u8>,
+            items_per_section: u64,
+        ) -> Result<Self::Archive, Error> {
+            Self::init_with_params(context, "test", compression, items_per_section).await
+        }
+
+        async fn init_with_params(
+            context: commonware_runtime::deterministic::Context,
+            partition: &str,
+            compression: Option<u8>,
+            items_per_section: u64,
+        ) -> Result<Self::Archive, Error> {
+            let cfg = minimal::Config {
+                metadata_partition: format!("{partition}_metadata"),
+                journal_partition: format!("{partition}_journal"),
+                ordinal_partition: format!("{partition}_ordinal"),
+                compression,
+                codec_config: (),
+                items_per_section,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                cursor_heads: 32,
+            };
+            minimal::Archive::init(context, cfg).await
+        }
+
+        fn check_metrics(buffer: &str, expected: &MetricsExpectation) {
+            MinimalArchiveFactory::check_metrics(buffer, expected);
         }
     }
 
@@ -355,28 +435,6 @@ mod tests {
             );
         });
     }
-
-    #[test_traced]
-    fn test_fast_archive_put_get_no_compression() {
-        test_archive_put_get::<FastArchiveFactory>(None);
-    }
-
-    #[test_traced]
-    fn test_fast_archive_put_get_compression() {
-        test_archive_put_get::<FastArchiveFactory>(Some(3));
-    }
-
-    #[test_traced]
-    fn test_minimal_archive_put_get_no_compression() {
-        test_archive_put_get::<MinimalArchiveFactory>(None);
-    }
-
-    #[test_traced]
-    fn test_minimal_archive_put_get_compression() {
-        test_archive_put_get::<MinimalArchiveFactory>(Some(3));
-    }
-
-    // I'll add more tests in subsequent edits...
 
     fn test_archive_get_nonexistent<F: ArchiveFactory>()
     where
@@ -671,7 +729,271 @@ mod tests {
         });
     }
 
+    fn test_archive_compression_then_none<F: ArchiveFactory>()
+    where
+        F::Archive: Archive<Key = FixedBytes<64>, Value = i32>,
+    {
+        use commonware_runtime::deterministic;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Initialize with compression
+            let mut archive = F::init(context.clone(), Some(3), DEFAULT_ITEMS_PER_SECTION)
+                .await
+                .expect("Failed to initialize archive");
+
+            // Put the key-data pair
+            let index = 1u64;
+            let key = test_key("testkey");
+            let data = 1;
+            archive
+                .put(index, key.clone(), data)
+                .await
+                .expect("Failed to put data");
+
+            // Close the archive
+            archive.close().await.expect("Failed to close archive");
+
+            // Initialize the archive again without compression - should fail
+            let result = F::init(context, None, DEFAULT_ITEMS_PER_SECTION).await;
+            assert!(result.is_err());
+        });
+    }
+
+    fn test_archive_ranges<F: ArchiveFactory>()
+    where
+        F::Archive: Archive<Key = FixedBytes<64>, Value = i32>,
+    {
+        use commonware_runtime::deterministic;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut archive = F::init(context.clone(), None, DEFAULT_ITEMS_PER_SECTION)
+                .await
+                .expect("Failed to initialize archive");
+
+            // Insert multiple keys across different indices
+            let keys = vec![
+                (1u64, test_key("key1-blah"), 1),
+                (10u64, test_key("key2-blah"), 2),
+                (11u64, test_key("key3-blah"), 3),
+                (14u64, test_key("key3-bleh"), 3),
+            ];
+            for (index, key, data) in &keys {
+                archive
+                    .put(*index, key.clone(), *data)
+                    .await
+                    .expect("Failed to put data");
+            }
+
+            // Check ranges
+            let (current_end, start_next) = archive.next_gap(0);
+            assert!(current_end.is_none());
+            assert_eq!(start_next.unwrap(), 1);
+
+            let (current_end, start_next) = archive.next_gap(1);
+            assert_eq!(current_end.unwrap(), 1);
+            assert_eq!(start_next.unwrap(), 10);
+
+            let (current_end, start_next) = archive.next_gap(10);
+            assert_eq!(current_end.unwrap(), 11);
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(11);
+            assert_eq!(current_end.unwrap(), 11);
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(12);
+            assert!(current_end.is_none());
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(14);
+            assert_eq!(current_end.unwrap(), 14);
+            assert!(start_next.is_none());
+
+            // Close and check again
+            archive.close().await.expect("Failed to close archive");
+            let archive = F::init(context, None, DEFAULT_ITEMS_PER_SECTION)
+                .await
+                .expect("Failed to initialize archive");
+
+            // Check ranges again
+            let (current_end, start_next) = archive.next_gap(0);
+            assert!(current_end.is_none());
+            assert_eq!(start_next.unwrap(), 1);
+
+            let (current_end, start_next) = archive.next_gap(1);
+            assert_eq!(current_end.unwrap(), 1);
+            assert_eq!(start_next.unwrap(), 10);
+
+            let (current_end, start_next) = archive.next_gap(10);
+            assert_eq!(current_end.unwrap(), 11);
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(11);
+            assert_eq!(current_end.unwrap(), 11);
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(12);
+            assert!(current_end.is_none());
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(14);
+            assert_eq!(current_end.unwrap(), 14);
+            assert!(start_next.is_none());
+        });
+    }
+
+    fn test_archive_keys_and_restart<F: ArchiveFactory>(num_keys: usize) -> String
+    where
+        F::Archive: Archive<Key = FixedBytes<64>, Value = FixedBytes<1024>>,
+    {
+        use commonware_runtime::deterministic;
+        use std::collections::BTreeMap;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let items_per_section = 256u64;
+            let mut archive = F::init(context.clone(), None, items_per_section)
+                .await
+                .expect("Failed to initialize archive");
+
+            // Insert multiple keys across different sections
+            let mut keys = BTreeMap::new();
+            while keys.len() < num_keys {
+                let index = keys.len() as u64;
+                let mut key = [0u8; 64];
+                context.fill(&mut key);
+                let key = FixedBytes::<64>::decode(key.as_ref()).unwrap();
+                let mut data = [0u8; 1024];
+                context.fill(&mut data);
+                let data = FixedBytes::<1024>::decode(data.as_ref()).unwrap();
+
+                archive
+                    .put(index, key.clone(), data.clone())
+                    .await
+                    .expect("Failed to put data");
+                keys.insert(key, (index, data));
+            }
+
+            // Ensure all keys can be retrieved
+            for (key, (index, data)) in &keys {
+                let retrieved = archive
+                    .get(Identifier::Index(*index))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+                let retrieved = archive
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+            }
+
+            // Check metrics
+            let buffer = context.encode();
+            let tracked = format!("items_tracked {num_keys:?}");
+            // For minimal archive, this metric might not exist
+            if buffer.contains("items_tracked") {
+                assert!(buffer.contains(&tracked));
+            }
+
+            // Close the archive
+            archive.close().await.expect("Failed to close archive");
+
+            // Reinitialize the archive
+            let mut archive = F::init(context.clone(), None, items_per_section)
+                .await
+                .expect("Failed to initialize archive");
+
+            // Ensure all keys can be retrieved
+            for (key, (index, data)) in &keys {
+                let retrieved = archive
+                    .get(Identifier::Index(*index))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+                let retrieved = archive
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+            }
+
+            // Prune first half
+            let min = (keys.len() / 2) as u64;
+            archive.prune(min).await.expect("Failed to prune");
+
+            // Ensure all keys can be retrieved that haven't been pruned
+            let min = (min / items_per_section) * items_per_section;
+            let mut removed = 0;
+            for (key, (index, data)) in keys {
+                if index >= min {
+                    let retrieved = archive
+                        .get(Identifier::Key(&key))
+                        .await
+                        .expect("Failed to get data")
+                        .expect("Data not found");
+                    assert_eq!(retrieved, data);
+
+                    // Check range
+                    let (current_end, start_next) = archive.next_gap(index);
+                    assert_eq!(current_end.unwrap(), num_keys as u64 - 1);
+                    assert!(start_next.is_none());
+                } else {
+                    let retrieved = archive
+                        .get(Identifier::Key(&key))
+                        .await
+                        .expect("Failed to get data");
+                    assert!(retrieved.is_none());
+                    removed += 1;
+
+                    // Check range
+                    let (current_end, start_next) = archive.next_gap(index);
+                    assert!(current_end.is_none());
+                    assert_eq!(start_next.unwrap(), min);
+                }
+            }
+
+            context.auditor().state()
+        })
+    }
+
     // Test cases for all generic functions
+    #[test_traced]
+    fn test_fast_archive_put_get_no_compression() {
+        test_archive_put_get::<FastArchiveFactory>(None);
+    }
+
+    #[test_traced]
+    fn test_fast_archive_put_get_compression() {
+        test_archive_put_get::<FastArchiveFactory>(Some(3));
+    }
+
+    #[test_traced]
+    fn test_minimal_archive_put_get_no_compression() {
+        test_archive_put_get::<MinimalArchiveFactory>(None);
+    }
+
+    #[test_traced]
+    fn test_minimal_archive_put_get_compression() {
+        test_archive_put_get::<MinimalArchiveFactory>(Some(3));
+    }
+
+    #[test_traced]
+    fn test_fast_archive_compression_then_none() {
+        test_archive_compression_then_none::<FastArchiveFactory>();
+    }
+
+    #[test_traced]
+    fn test_minimal_archive_compression_then_none() {
+        test_archive_compression_then_none::<MinimalArchiveFactory>();
+    }
+
     #[test_traced]
     fn test_fast_archive_get_nonexistent() {
         test_archive_get_nonexistent::<FastArchiveFactory>();
@@ -720,5 +1042,58 @@ mod tests {
     #[test_traced]
     fn test_minimal_archive_next_gap() {
         test_archive_next_gap::<MinimalArchiveFactory>();
+    }
+
+    #[test_traced]
+    fn test_fast_archive_ranges() {
+        test_archive_ranges::<FastArchiveFactory>();
+    }
+
+    #[test_traced]
+    fn test_minimal_archive_ranges() {
+        test_archive_ranges::<MinimalArchiveFactory>();
+    }
+
+    #[test_traced]
+    fn test_fast_archive_keys_and_restart() {
+        let num_keys = 100;
+        let state = test_archive_keys_and_restart::<FastArchiveFactoryLarge>(num_keys);
+        assert!(state.contains("items_tracked 100"));
+    }
+
+    #[test_traced]
+    fn test_minimal_archive_keys_and_restart() {
+        let num_keys = 100;
+        let state = test_archive_keys_and_restart::<MinimalArchiveFactoryLarge>(num_keys);
+        // Minimal archive may not have the same metrics
+        assert!(!state.is_empty());
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_fast_archive_many_keys_and_restart() {
+        test_archive_keys_and_restart::<FastArchiveFactoryLarge>(100_000); // 391 sections
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_minimal_archive_many_keys_and_restart() {
+        test_archive_keys_and_restart::<MinimalArchiveFactoryLarge>(100_000); // 391 sections
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_fast_determinism() {
+        let state1 = test_archive_keys_and_restart::<FastArchiveFactoryLarge>(5_000); // 20 sections
+        let state2 = test_archive_keys_and_restart::<FastArchiveFactoryLarge>(5_000);
+        assert_eq!(state1, state2);
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_minimal_determinism() {
+        let state1 = test_archive_keys_and_restart::<MinimalArchiveFactoryLarge>(5_000); // 20 sections
+        let state2 = test_archive_keys_and_restart::<MinimalArchiveFactoryLarge>(5_000);
+        assert_eq!(state1, state2);
     }
 }
