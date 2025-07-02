@@ -373,20 +373,23 @@ mod tests {
     fn test_with_capacity() {
         // Test with 1% false positive rate (1/100)
         let bf = BloomFilter::with_capacity(NZUsize!(1000), NZUsize!(1), NZUsize!(100)).unwrap();
-        assert!(bf.bits() >= 1000); // Should have at least as many bits as items
-        assert!(bf.bits() <= 100000); // Should not exceed reasonable limit
-        assert!(bf.hashers() >= 1);
-        assert!(bf.hashers() <= 30);
+        assert_eq!(bf.bits(), 9826);
+        assert_eq!(bf.hashers(), 6);
 
         // Test with 0.1% false positive rate (1/1000)
         let bf = BloomFilter::with_capacity(NZUsize!(1000), NZUsize!(1), NZUsize!(1000)).unwrap();
-        assert!(bf.bits() > 1000); // Should have more bits for lower FP rate
-        assert!(bf.hashers() > 1); // Should have more hash functions
+        assert_eq!(bf.bits(), 14968);
+        assert_eq!(bf.hashers(), 10);
 
         // Test with very small capacity
         let bf = BloomFilter::with_capacity(NZUsize!(10), NZUsize!(1), NZUsize!(100)).unwrap();
-        assert!(bf.bits() >= 10);
-        assert!(bf.hashers() >= 1);
+        assert_eq!(bf.bits(), 98);
+        assert_eq!(bf.hashers(), 6);
+
+        // Test with 5% false positive rate (5/100)
+        let bf = BloomFilter::with_capacity(NZUsize!(131_072), NZUsize!(5), NZUsize!(100)).unwrap();
+        assert_eq!(bf.bits(), 841640);
+        assert_eq!(bf.hashers(), 4);
     }
 
     #[test]
