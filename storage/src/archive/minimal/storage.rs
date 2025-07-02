@@ -16,7 +16,7 @@ use futures::{future::try_join_all, join};
 use std::collections::{BTreeSet, HashMap};
 use tracing::debug;
 
-const FALSE_POSITIVE_NUMERATOR: usize = 1;
+const FALSE_POSITIVE_NUMERATOR: usize = 5;
 const FALSE_POSITIVE_DENOMINATOR: usize = 100;
 
 struct JournalRecord<K: Array, V: Codec> {
@@ -226,7 +226,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
 
     async fn initialize_section(&mut self, section: u64) {
         // Create active bit vector
-        let active = BitVec::with_capacity(self.items_per_section as usize);
+        let active = BitVec::zeroes(self.items_per_section as usize);
 
         // Create bloom filter
         let bloom = BloomFilter::with_capacity(
@@ -259,6 +259,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
     type Value = V;
 
     async fn put(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {
+        // Ignore duplicates
+        if self.ordinal.has(index) {
+            return Ok(());
+        }
+
         // Check if section exists
         let section = index / self.items_per_section;
         self.modified.insert(section);
