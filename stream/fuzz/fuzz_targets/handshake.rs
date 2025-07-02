@@ -93,7 +93,7 @@ fuzz_target!(|input: FuzzInput| {
         let (sink, _) = mocks::Channel::init();
         let (mut stream_sender, stream) = mocks::Channel::init();
 
-        context
+        let sender = context
             .with_label("stream_sender")
             .spawn(move |_| async move {
                 // Our target is panic.
@@ -112,5 +112,7 @@ fuzz_target!(|input: FuzzInput| {
 
         // Our target is panic.
         let _ = IncomingConnection::verify(&context, config, sink, stream).await;
+        sender.abort();
+        let _ = sender.await;
     });
 });
