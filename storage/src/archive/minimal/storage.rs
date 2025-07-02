@@ -338,8 +338,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         let sections = self.metadata.keys(None).cloned().collect::<Vec<_>>();
 
         // Remove old sections from metadata
+        let min_section = min / self.items_per_section;
         for section in sections {
-            if section.to_u64() >= min {
+            if section.to_u64() >= min_section {
                 break;
             }
             self.metadata.remove(&section).unwrap();
@@ -349,7 +350,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         self.metadata.sync().await?;
 
         // Remove journal
-        self.journal.prune(min).await?;
+        self.journal.prune(min_section).await?;
 
         // Remove ordinal
         self.ordinal.prune(min).await?;
