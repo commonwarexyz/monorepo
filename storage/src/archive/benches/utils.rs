@@ -16,13 +16,13 @@ pub const PARTITION: &str = "archive_bench_partition";
 const WRITE_BUFFER: usize = 1024;
 
 /// Number of items per section.
-const ITEMS_PER_SECTION: u64 = 256;
+const ITEMS_PER_SECTION: u64 = 65_536;
 
 /// Number of bytes to buffer when replaying.
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
 /// Number of cursor heads for minimal archive.
-const CURSOR_HEADS: u32 = 32;
+const CURSOR_HEADS: u32 = 16_384;
 
 /// Fixed-length key and value types.
 pub type Key = FixedBytes<64>;
