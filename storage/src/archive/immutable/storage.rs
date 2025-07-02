@@ -104,6 +104,9 @@ impl EncodeSize for MetadataRecord {
     }
 }
 
+const CURSOR_PREFIX: u8 = 0;
+const INDICES_PREFIX: u8 = 1;
+
 pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     items_per_section: u64,
     cursor_heads: u32,
