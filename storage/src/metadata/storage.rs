@@ -336,8 +336,37 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
                 if info.length == new_value.encode_size() {
                     // Overwrite existing value
                     let encoded = new_value.encode();
-                    target.data[info.start..info.start + info.length].copy_from_slice(&encoded);
-                    writes.push(target.blob.write_at(encoded, info.start as u64));
+
+                    // Find chunks that differ and write them
+                    let mut diff_start = None;
+                    for i in 0..encoded.len() {
+                        if target.data[info.start + i] != encoded[i] {
+                            if diff_start.is_none() {
+                                diff_start = Some(i);
+                            }
+                        } else if let Some(start) = diff_start {
+                            // End of diff range - write to disk
+                            target.data[info.start + start..info.start + i]
+                                .copy_from_slice(&encoded[start..i]);
+                            writes.push(
+                                target.blob.write_at(
+                                    encoded[start..i].to_vec(),
+                                    (info.start + start) as u64,
+                                ),
+                            );
+                            diff_start = None;
+                        }
+                    }
+
+                    // Handle case where diff extends to the end
+                    if let Some(start) = diff_start {
+                        target.data[info.start + start..info.start + encoded.len()]
+                            .copy_from_slice(&encoded[start..encoded.len()]);
+                        writes.push(target.blob.write_at(
+                            encoded[start..encoded.len()].to_vec(),
+                            (info.start + start) as u64,
+                        ));
+                    }
                 } else {
                     // Rewrite all
                     overwrite = false;
