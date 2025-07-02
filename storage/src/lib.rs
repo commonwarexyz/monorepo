@@ -14,4 +14,5 @@ pub mod metadata;
 pub mod mmr;
 pub mod ordinal;
 pub mod rmap;
+pub mod table;
 pub mod translator;

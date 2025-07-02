@@ -17,9 +17,6 @@ use prometheus_client::metrics::counter::Counter;
 use std::collections::{BTreeSet, HashMap};
 use tracing::debug;
 
-const FALSE_POSITIVE_NUMERATOR: usize = 5;
-const FALSE_POSITIVE_DENOMINATOR: usize = 100;
-
 struct JournalRecord<K: Array, V: Codec> {
     key: K,
     value: V,
