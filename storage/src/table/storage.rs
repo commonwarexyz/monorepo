@@ -1,19 +1,12 @@
 use super::{Config, Error};
-use crate::{
-    journal::variable::{Config as JournalConfig, Journal},
-    metadata::{self, Metadata},
-};
+use crate::journal::variable::{Config as JournalConfig, Journal};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{Blob, Clock, Metrics, Storage};
-use commonware_utils::{array::U64, Array};
+use commonware_utils::Array;
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
-    marker::PhantomData,
-};
+use std::{cmp::Ordering, collections::BTreeSet, marker::PhantomData};
 use tracing::debug;
 
 const COMMITTED_EPOCH: u64 = 0;
@@ -165,6 +158,7 @@ pub struct Store<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 
     // Current section for new writes
     current_section: u64,
+    next_epoch: u64,
 
     // Metrics
     puts: Counter,
@@ -172,7 +166,6 @@ pub struct Store<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 
     // Pending table updates to be written on sync (table_index -> (section, offset))
     modified_sections: BTreeSet<u64>,
-    pending: BTreeMap<u32, (u64 /*section*/, u32 /*offset*/)>,
 
     // Phantom data to satisfy the compiler about generic types
     _phantom: PhantomData<(K, V)>,
@@ -260,10 +253,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
             journal,
             target_journal_size: config.target_journal_size,
             current_section: size.0,
+            next_epoch: epoch.checked_add(1).expect("epoch overflow"),
             puts,
             gets,
             modified_sections: BTreeSet::new(),
-            pending: BTreeMap::new(),
             _phantom: PhantomData,
         })
     }
@@ -295,11 +288,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
 
     /// Get the head of the journal chain for a given table index.
     async fn get_head(&self, table_index: u32) -> Result<Option<(u64, u32)>, Error> {
-        // Check if there's a pending update first
-        if let Some(&(section, offset)) = self.pending.get(&table_index) {
-            return Ok(Some((section, offset)));
-        }
-
         // Read the table entry
         let offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
         let buf = vec![0u8; FULL_TABLE_ENTRY_SIZE];
@@ -333,7 +321,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
         let entry2 = TableEntry::read(&mut buf2)?;
 
         // Determine where to start writing the new entry
-        let start = if entry1.is_empty() || entry1.epoch < entry2.epoch {
+        let start = if !entry1.is_empty() && entry1.epoch == epoch {
+            // Overwrite existing entry for this epoch
+            0
+        } else if !entry2.is_empty() && entry2.epoch == epoch {
+            // Overwrite existing entry for this epoch
+            TABLE_ENTRY_SIZE
+        } else if entry1.is_empty() || entry1.epoch < entry2.epoch {
             0
         } else if entry2.is_empty() || entry2.epoch < entry1.epoch {
             TABLE_ENTRY_SIZE
@@ -381,10 +375,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
         // Append entry to the variable journal
         let (offset, _) = self.journal.append(self.current_section, entry).await?;
 
-        // Stage table update
+        // Push table update
         self.modified_sections.insert(self.current_section);
-        self.pending
-            .insert(table_index, (self.current_section, offset));
+        self.update_head(self.next_epoch, table_index, self.current_section, offset)
+            .await?;
 
         Ok(())
     }
@@ -430,14 +424,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
 
     /// Sync all data to the underlying store.
     /// First syncs all journal sections, then flushes pending table updates, and finally syncs the table.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&mut self) -> Result<(u64, u64, u64), Error> {
         // Compute the next epoch, max section, and max offset
-        let committed_epoch = self
-            .metadata
-            .get(&COMMITTED_EPOCH.into())
-            .map(|v| u64::from_be_bytes(v.as_slice().try_into().unwrap()))
-            .unwrap_or(0);
-        let next_epoch = committed_epoch.checked_add(1).expect("epoch overflow");
+        let next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
         let max_section = self.current_section;
         let max_section_size = self.journal.size(max_section).await?;
 
@@ -449,38 +438,20 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
         try_join_all(updates).await?;
         self.modified_sections.clear();
 
-        // Write updated table entries
-        let mut updates = Vec::with_capacity(self.pending.len());
-        for (&table_index, &(section, offset)) in &self.pending {
-            updates.push(self.update_head(next_epoch, table_index, section, offset));
-        }
-        try_join_all(updates).await?;
+        // Sync updated table entries
         self.table.sync().await?;
-        self.pending.clear();
 
-        // Update committed data
-        self.metadata
-            .put(COMMITTED_EPOCH.into(), next_epoch.to_be_bytes().to_vec());
-        self.metadata
-            .put(COMMITTED_SECTION.into(), max_section.to_be_bytes().to_vec());
-        self.metadata.put(
-            COMMITTED_SIZE.into(),
-            max_section_size.to_be_bytes().to_vec(),
-        );
-        self.metadata.sync().await?;
-
-        Ok(())
+        Ok((next_epoch, max_section, max_section_size))
     }
 
     /// Close the store and underlying journal.
-    pub async fn close(mut self) -> Result<(), Error> {
+    pub async fn close(mut self) -> Result<(u64, u64, u64), Error> {
         // Sync any pending updates before closing
-        self.sync().await?;
+        let result = self.sync().await?;
 
         self.journal.close().await?;
         self.table.close().await?;
-        self.metadata.close().await?;
-        Ok(())
+        Ok(result)
     }
 
     /// Close and remove any underlying blobs created by the store.
@@ -493,9 +464,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
         self.context
             .remove(&self.table_partition, Some(TABLE_BLOB_NAME))
             .await?;
-
-        // Remove the metadata blob
-        self.metadata.destroy().await?;
 
         Ok(())
     }
