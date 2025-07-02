@@ -20,7 +20,7 @@ use crate::{
     },
 };
 use commonware_codec::Encode as _;
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::{
@@ -71,12 +71,9 @@ pub struct Config<T: Translator> {
 
 /// Configuration for syncing an [Any] to a pruned target state.
 #[derive(Clone)]
-pub struct SyncConfig<D: Digest, T: Translator> {
+pub struct SyncConfig<T: Translator> {
     /// Base configuration for the database.
     pub config: Config<T>,
-
-    /// Location -> digest of the pinned nodes needed for proofs.
-    pub mmr_pinned_nodes: HashMap<u64, D>,
 
     /// The location in the [Any] up to which operations have been pruned.
     /// This serves as both the log pruning boundary and the inactivity floor.
@@ -184,7 +181,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Initialize an [Any] database in a pruned state.
     /// Removes all existing persisted data and applies the state given in `cfg`.
-    pub async fn init_sync(context: E, cfg: SyncConfig<H::Digest, T>) -> Result<Self, Error> {
+    pub(super) async fn init_sync(context: E, cfg: SyncConfig<T>) -> Result<Self, Error> {
         let mut hasher = Standard::<H>::new();
 
         let mmr_config = crate::mmr::journaled::SyncConfig {
@@ -195,11 +192,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 write_buffer: cfg.config.mmr_write_buffer,
                 pool: cfg.config.pool.clone(),
             },
-            pinned_nodes: cfg.mmr_pinned_nodes,
-            // Convert log index (location) to MMR index (position)
             pruned_to_pos: leaf_num_to_pos(cfg.pruned_to_loc),
         };
-        let mmr = Mmr::init_sync(context.with_label("mmr"), &mut hasher, mmr_config).await?;
+        let mmr = Mmr::init_sync(context.with_label("mmr"), &mut hasher, mmr_config)
+            .await
+            .map_err(Error::MmrError)?;
 
         // Initialize the log with the pruned state
         let log = Journal::<E, Operation<K, V>>::init_sync(
@@ -808,6 +805,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         }
 
         Ok(())
+    }
+
+    /// Set the pinned nodes for the MMR.
+    pub(super) fn set_pinned_nodes(&mut self, nodes: HashMap<u64, H::Digest>) {
+        self.ops.set_pinned_nodes(nodes);
     }
 }
 
@@ -1419,10 +1421,9 @@ mod test {
     pub fn test_any_db_init_sync_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let sync_config: SyncConfig<Digest, EightCap> = SyncConfig {
+            let sync_config: SyncConfig<EightCap> = SyncConfig {
                 config: any_db_config("sync_basic", EightCap),
-                mmr_pinned_nodes: HashMap::new(), // No pinned nodes for empty case
-                pruned_to_loc: 0,                 // No pruning
+                pruned_to_loc: 0, // No pruning
             };
             let mut synced_db: Any<_, Digest, Digest, Sha256, EightCap> =
                 Any::init_sync(context.clone(), sync_config).await.unwrap();
@@ -1496,15 +1497,16 @@ mod test {
                 )
             );
             assert_eq!(ops.len(), need_ops as usize);
-            let pinned_nodes = source_db.ops.get_pinned_nodes();
 
             // Initialize the synced db.
-            let sync_config: SyncConfig<Digest, EightCap> = SyncConfig {
+            let sync_config: SyncConfig<EightCap> = SyncConfig {
                 config: any_db_config("sync_pruning", EightCap),
-                mmr_pinned_nodes: pinned_nodes,
                 pruned_to_loc: source_db.inactivity_floor_loc,
             };
             let mut synced_db = Any::init_sync(context.clone(), sync_config).await.unwrap();
+
+            let pinned_nodes = source_db.ops.get_pinned_nodes();
+            synced_db.set_pinned_nodes(pinned_nodes);
 
             // Replay live operations so the synced_db state is equivalent to the source.
             for op in &ops {

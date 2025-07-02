@@ -60,5 +60,5 @@ where
     T: Translator,
     R: Resolver<H, K, V>,
 {
-    Client::new(config)?.sync().await
+    Client::new(config).await?.sync().await
 }

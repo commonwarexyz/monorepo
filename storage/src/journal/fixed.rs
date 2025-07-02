@@ -248,7 +248,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     /// - Blob is filled with dummy data up to its size -- this shouldn't be read.
     /// - This represents a journal that had operations 0-24, with operations 0-19 pruned,
     ///   leaving operations 20-24 in blob 2
-    pub async fn init_sync(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
+    pub(crate) async fn init_sync(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         // Remove all existing blobs
         match context.scan(&cfg.partition).await {
             Ok(blobs) => {
