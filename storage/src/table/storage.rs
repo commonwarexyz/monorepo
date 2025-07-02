@@ -199,8 +199,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
         let current_section = if table_len == 0 {
             // buckets
             let table_data_size = config.table_size as u64 * FULL_TABLE_ENTRY_SIZE as u64;
-            let table_data = vec![0u8; table_data_size as usize];
-            table.write_at(table_data, 0).await?;
+            table.resize(table_data_size).await?;
             table.sync().await?;
             0
         } else {
