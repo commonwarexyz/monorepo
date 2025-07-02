@@ -269,11 +269,16 @@ impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BytesMut;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
-        bls12381::primitives::{ops::sign_message, variant::MinSig},
+        bls12381::{
+            dkg::ops,
+            primitives::{ops::sign_message, variant::MinSig},
+        },
         sha256,
     };
+    use commonware_runtime::deterministic;
 
     #[test]
     fn test_ack_namespace() {
@@ -284,9 +289,6 @@ mod tests {
 
     #[test]
     fn test_codec_serialization() {
-        use commonware_cryptography::bls12381::dkg::ops;
-        use commonware_runtime::deterministic;
-
         let namespace = b"test";
         let mut context = deterministic::Context::default();
         let (public, shares) = ops::generate_shares::<_, MinSig>(&mut context, None, 4, 3);
@@ -329,19 +331,16 @@ mod tests {
 
     #[test]
     fn test_activity_invalid_enum() {
-        use bytes::BytesMut;
-
         let mut buf = BytesMut::new();
         3u8.write(&mut buf); // Invalid discriminant
 
         let result = Activity::<MinSig, sha256::Digest>::decode(&buf[..]);
-        assert!(result.is_err());
-
-        if let Err(CodecError::Invalid(context, msg)) = result {
-            assert_eq!(context, "consensus::aggregation::Activity");
-            assert_eq!(msg, "Invalid type");
-        } else {
-            panic!("Expected CodecError::Invalid");
-        }
+        assert!(matches!(
+            result,
+            Err(CodecError::Invalid(
+                "consensus::aggregation::Activity",
+                "Invalid type"
+            ))
+        ));
     }
 }

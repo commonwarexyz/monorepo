@@ -462,52 +462,19 @@ mod tests {
             assert_eq!(safe_tip.get(), 0, "Failed for {}", case.description);
 
             if case.f == 0 {
-                assert_eq!(
-                    safe_tip.hi.len(),
-                    0,
-                    "f=0 should have empty hi heap for {}",
-                    case.description
-                );
-                assert_eq!(
-                    safe_tip.lo.len(),
-                    1,
-                    "f=0 should have all validators in lo for {}",
-                    case.description
-                );
+                assert_eq!(safe_tip.hi.len(), 0,);
+                assert_eq!(safe_tip.lo.len(), 1,);
 
                 // When f=0, updates should immediately change safe tip
                 safe_tip.update(validators[0].clone(), 10);
-                assert_eq!(
-                    safe_tip.get(),
-                    10,
-                    "f=0 should immediately reflect updates for {}",
-                    case.description
-                );
+                assert_eq!(safe_tip.get(), 10,);
             } else {
-                assert_eq!(
-                    safe_tip.hi.len(),
-                    1,
-                    "f>0 should have entries in hi for {}",
-                    case.description
-                );
-                assert_eq!(
-                    safe_tip.lo.len(),
-                    1,
-                    "Should have entries in lo for {}",
-                    case.description
-                );
+                assert_eq!(safe_tip.hi.len(), 1,);
+                assert_eq!(safe_tip.lo.len(), 1,);
 
                 if case.n == 7 && case.f == 2 {
-                    assert_eq!(
-                        safe_tip.hi.get(&0),
-                        Some(&2),
-                        "Should have f=2 validators in hi"
-                    );
-                    assert_eq!(
-                        safe_tip.lo.get(&0),
-                        Some(&5),
-                        "Should have n-f=5 validators in lo"
-                    );
+                    assert_eq!(safe_tip.hi.get(&0), Some(&2),);
+                    assert_eq!(safe_tip.lo.get(&0), Some(&5),);
                 }
             }
         }
