@@ -180,7 +180,12 @@ pub struct Store<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
     /// Initialize a new [Store] instance.
-    pub async fn init(context: E, config: Config<V::Cfg>) -> Result<Self, Error> {
+    pub async fn init(
+        context: E,
+        config: Config<V::Cfg>,
+        epoch: u64,
+        size: (u64, u64),
+    ) -> Result<Self, Error> {
         // Initialize variable journal with a separate partition
         let journal_config = JournalConfig {
             partition: config.journal_partition,
@@ -196,29 +201,16 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
             .await?;
 
         // If the blob is brand new, create header + zeroed buckets.
-        let current_section = if table_len == 0 {
-            // buckets
+        if table_len == 0 {
+            assert_eq!(epoch, 0);
+            assert_eq!(size.0, 0);
+            assert_eq!(size.1, 0);
             let table_data_size = config.table_size as u64 * FULL_TABLE_ENTRY_SIZE as u64;
             table.resize(table_data_size).await?;
             table.sync().await?;
-            0
         } else {
-            // Load committed data from metadata
-            let committed_epoch = metadata
-                .get(&COMMITTED_EPOCH.into())
-                .map(|v| u64::from_be_bytes(v.as_slice().try_into().unwrap()))
-                .unwrap_or(0u64);
-            let committed_section = metadata
-                .get(&COMMITTED_SECTION.into())
-                .map(|v| u64::from_be_bytes(v.as_slice().try_into().unwrap()))
-                .unwrap_or(0u64);
-            let committed_size = metadata
-                .get(&COMMITTED_SIZE.into())
-                .map(|v| u64::from_be_bytes(v.as_slice().try_into().unwrap()))
-                .unwrap_or(0u64);
-
             // Rewind the journal to the committed section and offset
-            journal.rewind(committed_section, committed_size).await?;
+            journal.rewind(size.0, size.1).await?;
 
             // Zero out any table entries whose epoch is greater than the committed epoch
             let mut sync = false;
@@ -231,24 +223,16 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
 
                 let mut buf1 = &result.as_ref()[0..TABLE_ENTRY_SIZE];
                 let entry1 = TableEntry::read(&mut buf1)?;
-                if entry1.epoch > committed_epoch {
-                    debug!(
-                        committed_epoch,
-                        epoch = entry1.epoch,
-                        "found invalid table entry"
-                    );
+                if entry1.epoch > epoch {
+                    debug!(epoch, epoch = entry1.epoch, "found invalid table entry");
                     table.write_at(zero_buf.clone(), offset).await?;
                     sync = true;
                 }
 
                 let mut buf2 = &result.as_ref()[TABLE_ENTRY_SIZE..FULL_TABLE_ENTRY_SIZE];
                 let entry2 = TableEntry::read(&mut buf2)?;
-                if entry2.epoch > committed_epoch {
-                    debug!(
-                        committed_epoch,
-                        epoch = entry2.epoch,
-                        "found invalid table entry"
-                    );
+                if entry2.epoch > epoch {
+                    debug!(epoch, epoch = entry2.epoch, "found invalid table entry");
                     table
                         .write_at(zero_buf.clone(), offset + TABLE_ENTRY_SIZE as u64)
                         .await?;
@@ -260,7 +244,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
             if sync {
                 table.sync().await?;
             }
-            committed_section
         };
 
         // Create metrics
@@ -272,12 +255,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
         Ok(Self {
             context,
             table_size: config.table_size,
-            metadata,
             table,
             table_partition: config.table_partition,
             journal,
             target_journal_size: config.target_journal_size,
-            current_section,
+            current_section: size.0,
             puts,
             gets,
             modified_sections: BTreeSet::new(),
