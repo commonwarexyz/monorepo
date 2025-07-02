@@ -59,17 +59,33 @@ impl<K: Array, V: Codec> EncodeSize for JournalRecord<K, V> {
 }
 
 enum MetadataRecord {
-    Cursor(u64, u32),
+    Cursor(u64, u64),
     Indices(Option<BitVec>),
+}
+
+impl MetadataRecord {
+    fn cursor(&self) -> (u64, u64) {
+        match self {
+            Self::Cursor(index, size) => (*index, *size),
+            _ => panic!("incorrect record"),
+        }
+    }
+
+    fn indices(&self) -> &Option<BitVec> {
+        match self {
+            Self::Indices(indices) => indices,
+            _ => panic!("incorrect record"),
+        }
+    }
 }
 
 impl Write for MetadataRecord {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Self::Cursor(index, offset) => {
+            Self::Cursor(index, size) => {
                 buf.put_u8(0);
                 buf.put_u64(*index);
-                buf.put_u32(*offset);
+                buf.put_u64(*size);
             }
             Self::Indices(indices) => {
                 buf.put_u8(1);
@@ -85,7 +101,7 @@ impl Read for MetadataRecord {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let tag = buf.get_u8();
         match tag {
-            0 => Ok(Self::Cursor(buf.get_u64(), buf.get_u32())),
+            0 => Ok(Self::Cursor(buf.get_u64(), buf.get_u64())),
             1 => Ok(Self::Indices(Option::<BitVec>::read_cfg(
                 buf,
                 &(0..=usize::MAX).into(),
@@ -98,7 +114,7 @@ impl Read for MetadataRecord {
 impl EncodeSize for MetadataRecord {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::Cursor(_, _) => u64::SIZE + u32::SIZE,
+            Self::Cursor(_, _) => u64::SIZE + u64::SIZE,
             Self::Indices(indices) => indices.encode_size(),
         }
     }
@@ -126,7 +142,7 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metadata
-        let metadata = Metadata::<E, U64, MetadataRecord>::init(
+        let mut metadata = Metadata::<E, U64, MetadataRecord>::init(
             context.with_label("metadata"),
             metadata::Config {
                 partition: cfg.metadata_partition,
@@ -147,19 +163,27 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         )
         .await?;
 
+        // Rewind journal
+        let cursor_key = U64::new(CURSOR_PREFIX, 0);
+        let cursor = match metadata.get(&cursor_key) {
+            Some(cursor) => cursor.cursor(),
+            None => {
+                metadata.put(cursor_key.clone(), MetadataRecord::Cursor(0, 0));
+                metadata.get(&cursor_key).unwrap().cursor()
+            }
+        };
+        journal.rewind(cursor.0, cursor.1).await?;
+
         // Collect sections
-        let sections = metadata.keys(None).collect::<Vec<_>>();
+        let sections = metadata.keys(Some(&[INDICES_PREFIX])).collect::<Vec<_>>();
         let mut section_bits = HashMap::new();
         for section in sections {
             // Get record
-            let active = metadata.get(section).unwrap();
+            let indices = metadata.get(section).unwrap().indices();
 
-            // Get active bits
+            // Get indices
             let section = section.to_u64();
-            section_bits.insert(section, &active.active);
-
-            // Rewind journal
-            journal.rewind(section, active.size).await?;
+            section_bits.insert(section, indices);
         }
 
         // Initialize ordinal
