@@ -13,6 +13,7 @@ use commonware_utils::{
     Array, BitVec, NZUsize,
 };
 use futures::{future::try_join_all, join};
+use prometheus_client::metrics::counter::Counter;
 use std::collections::{BTreeSet, HashMap};
 use tracing::debug;
 
@@ -112,6 +113,11 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     ordinal: Ordinal<E, U32>,
 
     modified: BTreeSet<u64>,
+
+    // Metrics
+    gets: Counter,
+    has: Counter,
+    syncs: Counter,
 }
 
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
@@ -166,6 +172,14 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         )
         .await?;
 
+        // Initialize metrics
+        let gets = Counter::default();
+        let has = Counter::default();
+        let syncs = Counter::default();
+        context.register("gets", "Number of gets performed", gets.clone());
+        context.register("has", "Number of has performed", has.clone());
+        context.register("syncs", "Number of syncs called", syncs.clone());
+
         Ok(Self {
             items_per_section: cfg.items_per_section,
             cursor_heads: cfg.cursor_heads,
@@ -173,6 +187,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
             journal,
             ordinal,
             modified: BTreeSet::new(),
+            gets,
+            has,
+            syncs,
         })
     }
 
@@ -299,6 +316,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
     }
 
     async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
+        self.gets.inc();
+
         match identifier {
             Identifier::Index(index) => self.get_index(index).await,
             Identifier::Key(key) => self.get_key(key).await,
@@ -306,6 +325,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
     }
 
     async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
+        self.has.inc();
+
         match identifier {
             Identifier::Index(index) => Ok(self.ordinal.has(index)),
             Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
@@ -337,6 +358,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
+        self.syncs.inc();
+
         // Sync journal and ordinal
         let mut futures = Vec::new();
         for section in self.modified.iter() {
