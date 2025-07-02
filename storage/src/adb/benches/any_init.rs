@@ -22,13 +22,16 @@ const DELETE_FREQUENCY: u32 = 10; // 1/10th of the updates will be deletes.
 const ITEMS_PER_BLOB: u64 = 500_000;
 const PARTITION_SUFFIX: &str = "any_bench_partition";
 
+/// Use a "prod sized" page size to test the performance of the journal.
+const PAGE_SIZE: usize = 16384;
+
 /// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
 /// configured to provide 8 cores. This speeds up benchmark setup, but doesn't affect the benchmark
 /// timing itself since any::init is single threaded.
 const THREADS: usize = 8;
 
-fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
-    AConfig::<EightCap> {
+fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, PAGE_SIZE> {
+    AConfig::<EightCap, PAGE_SIZE> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
@@ -53,7 +56,7 @@ fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
         info!("Starting DB generation...");
         let pool = create_pool(ctx.clone(), THREADS).unwrap();
         let any_cfg = any_cfg(pool);
-        let mut db = Any::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
+        let mut db = Any::<_, _, _, Sha256, EightCap, PAGE_SIZE>::init(ctx, any_cfg)
             .await
             .unwrap();
 
@@ -118,6 +121,7 @@ fn bench_any_init(c: &mut Criterion) {
                                 <Sha256 as Hasher>::Digest,
                                 Sha256,
                                 EightCap,
+                                PAGE_SIZE,
                             >::init(
                                 ctx.clone(), any_cfg.clone()
                             )
@@ -144,6 +148,7 @@ fn bench_any_init(c: &mut Criterion) {
                     <Sha256 as Hasher>::Digest,
                     Sha256,
                     EightCap,
+                    PAGE_SIZE,
                 >::init(ctx.clone(), any_cfg.clone())
                 .await
                 .unwrap();

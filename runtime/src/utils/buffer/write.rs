@@ -67,16 +67,6 @@ impl<B: Blob> Write<B> {
         let buffer = self.buffer.read().await;
         buffer.size()
     }
-
-    /// Clones and returns the underlying blob.
-    pub fn clone_blob(&self) -> B {
-        self.blob.clone()
-    }
-
-    /// Consumes the [Write] and returns the underlying blob.
-    pub fn take_blob(self) -> B {
-        self.blob
-    }
 }
 
 impl<B: Blob> Blob for Write<B> {

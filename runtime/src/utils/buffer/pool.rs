@@ -2,21 +2,22 @@ use crate::{buffer::Buffer, Blob, Error, RwLock};
 use commonware_utils::StableBuf;
 use std::{collections::HashMap, sync::Arc};
 
-/// Size of a buffer pool page in bytes.
-const PAGE_SIZE: usize = 16384;
-//const PAGE_SIZE: usize = 100; // for testing
-const PAGE_SIZE_U64: u64 = PAGE_SIZE as u64;
-
+/// A [BufferPool] caches pages of [Blob] data in memory.
+///
+/// A single buffer pool can be used to cache data from multiple blobs by assigning a unique id to
+/// each.
 #[derive(Default)]
-pub struct BufferPool {
+pub struct BufferPool<const PAGE_SIZE: usize> {
     /// The page cache, indexed by the blob id and the page number.
-    cache: HashMap<(u32, u64), [u8; PAGE_SIZE]>,
+    cache: HashMap<(u32, u64), Box<[u8; PAGE_SIZE]>>,
 
-    /// For assigning unique ids to blobs managed by this buffer pool.
+    /// The next id to assign to a blob that will be managed by this pool.
     next_id: u32,
 }
 
-impl BufferPool {
+impl<const PAGE_SIZE: usize> BufferPool<PAGE_SIZE> {
+    const PAGE_SIZE_U64: u64 = PAGE_SIZE as u64;
+
     /// Return a new empty buffer pool with an initial next-blob id of 0.
     pub fn new() -> Self {
         Self::default()
@@ -31,7 +32,10 @@ impl BufferPool {
 
     /// Convert an offset into the number of the page it belongs to and the offset within that page.
     fn offset_to_page(offset: u64) -> (u64, usize) {
-        (offset / PAGE_SIZE_U64, (offset % PAGE_SIZE_U64) as usize)
+        (
+            offset / Self::PAGE_SIZE_U64,
+            (offset % Self::PAGE_SIZE_U64) as usize,
+        )
     }
 
     /// Attempt to read blob data from the buffer pool. Returns the number of bytes read, which
@@ -63,13 +67,13 @@ impl BufferPool {
             page.try_into().unwrap()
         };
 
-        self.cache.insert((blob_id, page_num), page_array);
+        self.cache.insert((blob_id, page_num), Box::new(page_array));
     }
 
     /// Read the specified bytes, preferentially from the buffer pool cache. Bytes not found in the
     /// buffer pool will be read from the provided `blob` and cached for future reads.
-    pub async fn read<B: Blob>(
-        pool: Arc<RwLock<BufferPool>>,
+    async fn read<B: Blob>(
+        pool: Arc<RwLock<BufferPool<PAGE_SIZE>>>,
         blob: &B,
         blob_id: u32,
         blob_len: u64,
@@ -91,13 +95,13 @@ impl BufferPool {
             }
 
             // Fetch the page from the blob since it wasn't in the buffer pool.
-            let (page_num, offset_in_page) = BufferPool::offset_to_page(offset);
-            let page_offset = page_num * PAGE_SIZE_U64;
+            let (page_num, offset_in_page) = Self::offset_to_page(offset);
+            let page_offset = page_num * Self::PAGE_SIZE_U64;
 
-            let bytes_to_read = if page_offset + PAGE_SIZE_U64 > blob_len {
+            let bytes_to_read = if page_offset + Self::PAGE_SIZE_U64 > blob_len {
                 blob_len - page_offset
             } else {
-                PAGE_SIZE_U64
+                Self::PAGE_SIZE_U64
             };
             let mut page_buf = vec![0; bytes_to_read as usize];
             page_buf = blob.read_at(page_buf, page_offset).await?.into();
@@ -122,7 +126,7 @@ impl BufferPool {
 
 /// A blob wrapper providing buffer-pool managed caching of data for immutable blobs.
 #[derive(Clone)]
-pub struct Immutable<B: Blob> {
+pub struct Immutable<B: Blob, const PAGE_SIZE: usize> {
     blob: B,
 
     /// Unique id assigned by the buffer pool.
@@ -132,12 +136,12 @@ pub struct Immutable<B: Blob> {
     size: u64,
 
     /// Buffer pool to consult for caching.
-    pool: Arc<RwLock<BufferPool>>,
+    pool: Arc<RwLock<BufferPool<PAGE_SIZE>>>,
 }
 
-impl<B: Blob> Immutable<B> {
+impl<B: Blob, const PAGE_SIZE: usize> Immutable<B, PAGE_SIZE> {
     /// Return a new [Immutable] wrapper that uses `pool` to provide read caching for `blob`.
-    pub async fn new(blob: B, size: u64, pool: Arc<RwLock<BufferPool>>) -> Self {
+    pub async fn new(blob: B, size: u64, pool: Arc<RwLock<BufferPool<PAGE_SIZE>>>) -> Self {
         let id = {
             let mut pool_guard = pool.write().await;
             pool_guard.next_id().await
@@ -160,7 +164,7 @@ impl<B: Blob> Immutable<B> {
     }
 }
 
-impl<B: Blob> Blob for Immutable<B> {
+impl<B: Blob, const PAGE_SIZE: usize> Blob for Immutable<B, PAGE_SIZE> {
     async fn read_at(
         &self,
         buf: impl Into<StableBuf> + Send,
@@ -212,14 +216,14 @@ impl<B: Blob> Blob for Immutable<B> {
 /// A [Blob] wrapper that supports appending new data that is both read and write cached, and
 /// provides buffer-pool managed read caching of older data.
 #[derive(Clone)]
-pub struct Append<B: Blob> {
+pub struct Append<B: Blob, const PAGE_SIZE: usize> {
     blob: B,
 
     /// Unique id assigned by the buffer pool.
     id: u32,
 
     /// Buffer pool to consult for caching.
-    pool: Arc<RwLock<BufferPool>>,
+    pool: Arc<RwLock<BufferPool<PAGE_SIZE>>>,
 
     /// The buffer containing the data yet to be appended to the tip of the underlying blob, as well
     /// up to the final PAGE_SIZE-1 bytes from the underlying blob (to ensure the buffer's offset is
@@ -232,12 +236,14 @@ pub struct Append<B: Blob> {
     buffer: Arc<RwLock<Buffer>>,
 }
 
-impl<B: Blob> Append<B> {
+impl<B: Blob, const PAGE_SIZE: usize> Append<B, PAGE_SIZE> {
+    const PAGE_SIZE_U64: u64 = PAGE_SIZE as u64;
+
     pub async fn new(
         blob: B,
         size: u64,
         mut buffer_size: usize,
-        pool: Arc<RwLock<BufferPool>>,
+        pool: Arc<RwLock<BufferPool<PAGE_SIZE>>>,
     ) -> Result<Self, Error> {
         // Set a floor on the write buffer size to make sure we always write at least 1 page of new
         // data with each flush. We multiply PAGE_SIZE by two here since we could be storing up to
@@ -247,7 +253,7 @@ impl<B: Blob> Append<B> {
 
         // Initialize the append buffer to contain the last non-full page of bytes from the blob to
         // ensure its offset into the blob is always page aligned.
-        let leftover_size = size % PAGE_SIZE_U64;
+        let leftover_size = size % Self::PAGE_SIZE_U64;
         let page_aligned_size = size - leftover_size;
         let mut buffer = Buffer::new(page_aligned_size, buffer_size);
         if leftover_size != 0 {
@@ -313,16 +319,19 @@ impl<B: Blob> Append<B> {
             return Ok(());
         };
 
-        // Insert the data into the buffer pool a page at a time to ensure it's cached.
+        // Insert the flushed data into the buffer pool. This step isn't absolutely necessary, but
+        // in general it's a good policy to keep recently written data cached for reads.
         let mut buf_slice: &mut [u8] = buf.as_mut();
-        let (mut page_num, offset_in_page) = BufferPool::offset_to_page(offset);
+        let (mut page_num, offset_in_page) = BufferPool::<PAGE_SIZE>::offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
-
-        let mut buffer_pool = self.pool.write().await;
-        while buf_slice.len() >= PAGE_SIZE {
-            buffer_pool.cache(&mut buf_slice[..PAGE_SIZE], self.id, page_num);
-            buf_slice = &mut buf_slice[PAGE_SIZE..];
-            page_num += 1;
+        {
+            // Write lock the buffer pool.
+            let mut buffer_pool = self.pool.write().await;
+            while buf_slice.len() >= PAGE_SIZE {
+                buffer_pool.cache(&mut buf_slice[..PAGE_SIZE], self.id, page_num);
+                buf_slice = &mut buf_slice[PAGE_SIZE..];
+                page_num += 1;
+            }
         }
 
         // If there's any data left over that doesn't constitute an entire page, re-buffer it into
@@ -349,7 +358,7 @@ impl<B: Blob> Append<B> {
     }
 }
 
-impl<B: Blob> Blob for Append<B> {
+impl<B: Blob, const PAGE_SIZE: usize> Blob for Append<B, PAGE_SIZE> {
     async fn read_at(
         &self,
         buf: impl Into<StableBuf> + Send,
@@ -416,7 +425,7 @@ impl<B: Blob> Blob for Append<B> {
         self.blob.resize(size).await?;
 
         // Reset the append buffer to the new size, ensuring its page alignment.
-        let leftover_size = size % PAGE_SIZE_U64;
+        let leftover_size = size % Self::PAGE_SIZE_U64;
         buffer.offset = size - leftover_size; // page aligned size
         buffer.data.clear();
         if leftover_size != 0 {
