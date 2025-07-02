@@ -24,11 +24,11 @@ struct JournalRecord<K: Array, V: Codec> {
     key: K,
     value: V,
 
-    next: Option<u32>,
+    next: Option<(u64, u32)>,
 }
 
 impl<K: Array, V: Codec> JournalRecord<K, V> {
-    fn new(key: K, value: V, next: Option<u32>) -> Self {
+    fn new(key: K, value: V, next: Option<(u64, u32)>) -> Self {
         Self { key, value, next }
     }
 }
@@ -47,7 +47,7 @@ impl<K: Array, V: Codec> Read for JournalRecord<K, V> {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let key = K::read(buf)?;
         let value = V::read_cfg(buf, cfg)?;
-        let next = Option::<u32>::read_cfg(buf, &())?;
+        let next = Option::<(u64, u32)>::read_cfg(buf, &((), ()))?;
         Ok(Self { key, value, next })
     }
 }
