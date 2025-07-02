@@ -1287,6 +1287,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-runtime",
  "commonware-stream",
+ "commonware-utils",
  "futures",
  "libfuzzer-sys",
 ]
