@@ -5,7 +5,7 @@ use crate::{
     table::{self, Table},
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::BloomFilter;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{
@@ -14,8 +14,79 @@ use commonware_utils::{
 };
 use futures::{future::try_join_all, join};
 use prometheus_client::metrics::counter::Counter;
-use std::collections::{BTreeSet, HashMap};
+use std::{
+    collections::{BTreeSet, HashMap},
+    ops::Deref,
+};
 use tracing::debug;
+
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
+#[repr(transparent)]
+pub struct OrdinalRecord([u8; u64::SIZE + u32::SIZE]);
+
+impl OrdinalRecord {
+    fn new(index: u64, offset: u32) -> Self {
+        let mut buf = [0u8; u64::SIZE + u32::SIZE];
+        buf[..u64::SIZE].copy_from_slice(&index.to_be_bytes());
+        buf[u64::SIZE..].copy_from_slice(&offset.to_be_bytes());
+        Self(buf)
+    }
+}
+
+impl Write for OrdinalRecord {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
+    }
+}
+
+impl Read for OrdinalRecord {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        <[u8; u64::SIZE + u32::SIZE]>::read(buf).map(Self)
+    }
+}
+
+impl FixedSize for OrdinalRecord {
+    const SIZE: usize = u64::SIZE + u32::SIZE;
+}
+
+impl Array for OrdinalRecord {}
+
+impl Deref for OrdinalRecord {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for OrdinalRecord {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for OrdinalRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "OrdinalRecord(section={}, offset={})",
+            u64::from_be_bytes(self.0[..u64::SIZE].try_into().unwrap()),
+            u32::from_be_bytes(self.0[u64::SIZE..].try_into().unwrap())
+        )
+    }
+}
+
+impl std::fmt::Display for OrdinalRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "OrdinalRecord(section={}, offset={})",
+            u64::from_be_bytes(self.0[..u64::SIZE].try_into().unwrap()),
+            u32::from_be_bytes(self.0[u64::SIZE..].try_into().unwrap())
+        )
+    }
+}
 
 enum MetadataRecord {
     Cursor(u64, u64, u64),
@@ -89,7 +160,7 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 
     metadata: Metadata<E, U64, MetadataRecord>,
     table: Table<E, K, V>,
-    ordinal: Ordinal<E, U32>,
+    ordinal: Ordinal<E, OrdinalRecord>,
 
     modified: BTreeSet<u64>,
 
