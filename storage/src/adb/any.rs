@@ -20,7 +20,7 @@ use crate::{
     },
 };
 use commonware_codec::Encode as _;
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::{
@@ -71,20 +71,17 @@ pub struct Config<T: Translator> {
 
 /// Configuration for syncing an [Any] to a pruned target state.
 #[derive(Clone)]
-pub struct SyncConfig<K: Array, V: Array, H: CHasher, T: Translator> {
+pub struct SyncConfig<D: Digest, T: Translator> {
     /// Base configuration for the database.
     pub config: Config<T>,
 
     /// Location -> digest of the pinned nodes needed for proofs.
-    pub mmr_pinned_nodes: HashMap<u64, H::Digest>,
+    pub mmr_pinned_nodes: HashMap<u64, D>,
 
     /// The location in the [Any] up to which operations have been pruned.
     /// This serves as both the log pruning boundary and the inactivity floor.
     /// Everything before this location is considered pruned/inactive.
     pub pruned_to_loc: u64,
-
-    /// The live set of operations to be applied to the [Any] starting at `pruned_to_loc`.
-    pub operations: Vec<Operation<K, V>>,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
@@ -187,14 +184,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Initialize an [Any] database in a pruned state.
     /// Removes all existing persisted data and applies the state given in `cfg`.
-    pub async fn init_sync(context: E, cfg: SyncConfig<K, V, H, T>) -> Result<Self, Error> {
-        // Convert log operations to MMR digests
+    pub async fn init_sync(context: E, cfg: SyncConfig<H::Digest, T>) -> Result<Self, Error> {
         let mut hasher = Standard::<H>::new();
-        let operations: Vec<H::Digest> = cfg
-            .operations
-            .iter()
-            .map(|op| Self::op_digest(&mut hasher, op))
-            .collect();
 
         let mmr_config = crate::mmr::journaled::SyncConfig {
             config: MmrConfig {
@@ -207,12 +198,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             pinned_nodes: cfg.mmr_pinned_nodes,
             // Convert log index (location) to MMR index (position)
             pruned_to_pos: leaf_num_to_pos(cfg.pruned_to_loc),
-            operations,
         };
         let mmr = Mmr::init_sync(context.with_label("mmr"), &mut hasher, mmr_config).await?;
 
         // Initialize the log with the pruned state
-        let mut log = Journal::<E, Operation<K, V>>::init_sync(
+        let log = Journal::<E, Operation<K, V>>::init_sync(
             context.with_label("log"),
             JConfig {
                 partition: cfg.config.log_journal_partition,
@@ -222,32 +212,20 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             cfg.pruned_to_loc,
         )
         .await?;
-        for operation in cfg.operations {
-            log.append(operation).await.map_err(Error::JournalError)?;
-        }
-
-        // Build the snapshot from the log operations
-        let mut snapshot: Index<T, u64> = Index::init(
-            context.with_label("snapshot"),
-            cfg.config.translator.clone(),
-        );
-        let inactivity_floor_loc = Self::build_snapshot_from_log(
-            cfg.pruned_to_loc,
-            &log,
-            &mut snapshot,
-            None::<&mut Bitmap<_, UNUSED_N>>,
-        )
-        .await?;
-        assert!(inactivity_floor_loc >= cfg.pruned_to_loc);
 
         let mut db = Any {
             ops: mmr,
             log,
-            snapshot,
-            inactivity_floor_loc,
+            snapshot: Index::init(
+                context.with_label("snapshot"),
+                cfg.config.translator.clone(),
+            ),
+            inactivity_floor_loc: cfg.pruned_to_loc,
             uncommitted_ops: 0,
             hasher,
         };
+        // Ensure on-disk state is consistent post-initialisation.
+        // TODO danlaine: should we sync here?
         db.sync().await?;
         Ok(db)
     }
@@ -800,6 +778,34 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         // Rewind the operation log over the commit op to force rollback to the previous commit.
         self.log.rewind(self.log.size().await? - 1).await?;
         self.log.close().await?;
+
+        Ok(())
+    }
+
+    /// Replay a historical operation that already occurred in the target database.
+    ///
+    /// This helper is intended _exclusively_ for the sync client. It replays the operation
+    /// verbatim, ensuring that the local database transitions through the exact same sequence of
+    /// log/MMR updates as the target _without_ re-executing higher-level behaviours that would
+    /// otherwise modify the state (e.g. raising the inactivity floor during a commit).
+    pub(crate) async fn replay_logged_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
+        match op {
+            Operation::Update(key, value) => {
+                // Use the public helper so the snapshot is updated consistently.
+                let _ = self.update(key, value).await?;
+            }
+            Operation::Deleted(key) => {
+                let _ = self.delete(key).await?;
+            }
+            Operation::Commit(loc) => {
+                // Append the commit op directly to the log/MMR without raising the inactivity
+                // floor again (it has already been raised in the target db). We must, however,
+                // mirror the side-effect of advancing the `inactivity_floor_loc` so that future
+                // operations observe the correct pruning boundary.
+                self.apply_op(Operation::Commit(loc)).await?;
+                self.inactivity_floor_loc = loc;
+            }
+        }
 
         Ok(())
     }
@@ -1413,13 +1419,13 @@ mod test {
     pub fn test_any_db_init_sync_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let sync_config: SyncConfig<Digest, Digest, Sha256, EightCap> = SyncConfig {
+            let sync_config: SyncConfig<Digest, EightCap> = SyncConfig {
                 config: any_db_config("sync_basic", EightCap),
                 mmr_pinned_nodes: HashMap::new(), // No pinned nodes for empty case
                 pruned_to_loc: 0,                 // No pruning
-                operations: Vec::new(),           // No operations
             };
-            let mut synced_db = Any::init_sync(context.clone(), sync_config).await.unwrap();
+            let mut synced_db: Any<_, Digest, Digest, Sha256, EightCap> =
+                Any::init_sync(context.clone(), sync_config).await.unwrap();
 
             // Verify empty database properties
             assert_eq!(synced_db.op_count(), 0);
@@ -1493,13 +1499,18 @@ mod test {
             let pinned_nodes = source_db.ops.get_pinned_nodes();
 
             // Initialize the synced db.
-            let sync_config: SyncConfig<Digest, Digest, Sha256, EightCap> = SyncConfig {
+            let sync_config: SyncConfig<Digest, EightCap> = SyncConfig {
                 config: any_db_config("sync_pruning", EightCap),
                 mmr_pinned_nodes: pinned_nodes,
                 pruned_to_loc: source_db.inactivity_floor_loc,
-                operations: ops,
             };
             let mut synced_db = Any::init_sync(context.clone(), sync_config).await.unwrap();
+
+            // Replay live operations so the synced_db state is equivalent to the source.
+            for op in &ops {
+                synced_db.apply_op(op.clone()).await.unwrap();
+            }
+            synced_db.sync().await.unwrap();
 
             // Verify the synced database matches the source
             assert_eq!(synced_db.root(&mut hasher), source_root);

@@ -69,22 +69,24 @@ where
     T: Translator,
     R: Resolver<H, K, V>,
 {
-    /// The next step is to fetch data.
+    /// Next step is to fetch data from resolver.
     FetchData {
         config: Config<E, K, V, H, T, R>,
-        operations: Vec<Operation<K, V>>,
-        pinned_nodes: HashMap<u64, H::Digest>,
+        db: Option<adb::any::Any<E, K, V, H, T>>,
+        pinned_nodes: Option<HashMap<u64, H::Digest>>,
+        applied_ops: u64,
         metrics: Metrics,
     },
-    /// We're done fetching data.
-    /// The next step is to apply the fetched data to the local database.
+    /// Apply operations of the latest verified batch.
     ApplyData {
         config: Config<E, K, V, H, T, R>,
-        operations: Vec<Operation<K, V>>,
-        pinned_nodes: HashMap<u64, H::Digest>,
+        db: adb::any::Any<E, K, V, H, T>,
+        pinned_nodes: Option<HashMap<u64, H::Digest>>,
+        batch_ops: Vec<Operation<K, V>>,
+        applied_ops: u64,
         metrics: Metrics,
     },
-    /// We're done syncing.
+    /// Sync completed.
     Done {
         db: adb::any::Any<E, K, V, H, T>,
         metrics: Metrics,
@@ -112,8 +114,9 @@ where
 
         Ok(Client::FetchData {
             config,
-            operations: vec![],
-            pinned_nodes: HashMap::new(),
+            db: None,
+            pinned_nodes: None,
+            applied_ops: 0,
             metrics: Metrics {
                 valid_batches_received: 0,
                 invalid_batches_received: 0,
@@ -126,8 +129,9 @@ where
         match self {
             Client::FetchData {
                 mut config,
-                mut operations,
-                mut pinned_nodes,
+                db: mut db_opt,
+                pinned_nodes: mut pinned_nodes_opt,
+                applied_ops,
                 mut metrics,
             } => {
                 // Calculate total operations needed and current position (inclusive bounds)
@@ -138,16 +142,15 @@ where
                     lower_bound_pos: config.lower_bound_ops,
                     upper_bound_pos: config.upper_bound_ops,
                 })? + 1;
-                let current_ops_fetched = operations.len() as u64;
                 let remaining_ops = total_ops_needed
-                    .checked_sub(current_ops_fetched)
+                    .checked_sub(applied_ops)
                     .ok_or(Error::InvalidState)?;
 
                 let batch_size = std::cmp::min(config.max_ops_per_batch.get(), remaining_ops);
                 let batch_size = NonZeroU64::new(batch_size).ok_or(Error::InvalidState)?;
 
                 // Current position in the global operation sequence
-                let current_global_pos = config.lower_bound_ops + current_ops_fetched;
+                let current_global_pos = config.lower_bound_ops + applied_ops;
 
                 debug!(
                     target_hash = ?config.target_hash,
@@ -176,8 +179,9 @@ where
                     }
                     return Ok(Client::FetchData {
                         config,
-                        operations,
-                        pinned_nodes,
+                        db: db_opt,
+                        pinned_nodes: pinned_nodes_opt,
+                        applied_ops,
                         metrics,
                     });
                 }
@@ -203,15 +207,15 @@ where
 
                     return Ok(Client::FetchData {
                         config,
-                        operations,
-                        pinned_nodes,
+                        db: db_opt,
+                        pinned_nodes: pinned_nodes_opt,
+                        applied_ops,
                         metrics,
                     });
                 }
-                operations.extend(new_operations);
 
-                // Only extract pinned nodes from the first batch (starting at pruning boundary)
-                if current_global_pos == config.lower_bound_ops {
+                // Only extract pinned nodes (and create DB) for the first batch.
+                if pinned_nodes_opt.is_none() {
                     // Convert locations to MMR positions before extracting pinned nodes
                     let start_pos = leaf_num_to_pos(current_global_pos);
                     let end_pos = leaf_num_to_pos(current_global_pos + new_operations_len - 1);
@@ -220,9 +224,24 @@ where
                             let nodes_to_pin =
                                 Proof::<H::Digest>::nodes_to_pin(start_pos).collect::<Vec<_>>();
                             assert_eq!(nodes_to_pin.len(), new_pinned_nodes.len());
+                            let mut map = HashMap::new();
                             for (loc, digest) in nodes_to_pin.iter().zip(new_pinned_nodes.iter()) {
-                                pinned_nodes.insert(*loc, *digest);
+                                map.insert(*loc, *digest);
                             }
+                            pinned_nodes_opt = Some(map);
+
+                            // Initialize empty pruned DB now that we have pinned nodes.
+                            let db = adb::any::Any::<E, K, V, H, T>::init_sync(
+                                config.context.clone(),
+                                crate::adb::any::SyncConfig {
+                                    config: config.db_config.clone(),
+                                    mmr_pinned_nodes: pinned_nodes_opt.as_ref().unwrap().clone(),
+                                    pruned_to_loc: config.lower_bound_ops,
+                                },
+                            )
+                            .await
+                            .map_err(Error::DatabaseInitFailed)?;
+                            db_opt = Some(db);
                         }
                         Err(_) => {
                             warn!("Failed to extract pinned nodes, retrying");
@@ -232,8 +251,9 @@ where
                             }
                             return Ok(Client::FetchData {
                                 config,
-                                operations,
-                                pinned_nodes,
+                                db: db_opt,
+                                pinned_nodes: pinned_nodes_opt,
+                                applied_ops,
                                 metrics,
                             });
                         }
@@ -241,51 +261,56 @@ where
                 }
 
                 metrics.valid_batches_received += 1;
-                let next_state = if operations.len() as u64 >= total_ops_needed {
-                    Client::ApplyData {
-                        config,
-                        operations,
-                        pinned_nodes,
-                        metrics,
-                    }
-                } else {
-                    Client::FetchData {
-                        config,
-                        operations,
-                        pinned_nodes,
-                        metrics,
-                    }
-                };
-                Ok(next_state)
+
+                Ok(Client::ApplyData {
+                    config,
+                    db: db_opt.ok_or(Error::InvalidState)?,
+                    pinned_nodes: pinned_nodes_opt.clone(),
+                    batch_ops: new_operations,
+                    applied_ops,
+                    metrics,
+                })
             }
 
             Client::ApplyData {
                 mut config,
-                operations,
+                mut db,
                 pinned_nodes,
+                batch_ops,
+                mut applied_ops,
                 metrics,
             } => {
-                let db = adb::any::Any::<E, K, V, H, T>::init_sync(
-                    config.context,
-                    adb::any::SyncConfig {
-                        config: config.db_config,
-                        mmr_pinned_nodes: pinned_nodes,
-                        pruned_to_loc: config.lower_bound_ops,
-                        operations,
-                    },
-                )
-                .await
-                .map_err(Error::DatabaseInitFailed)?;
+                // Apply each operation
+                let batch_len = batch_ops.len() as u64;
+                for op in batch_ops.into_iter() {
+                    db.replay_logged_op(op)
+                        .await
+                        .map_err(Error::DatabaseInitFailed)?;
+                }
+                applied_ops += batch_len;
 
-                let got_hash = db.root(&mut config.hasher);
-                if got_hash != config.target_hash {
-                    return Err(Error::HashMismatch {
-                        expected: Box::new(config.target_hash),
-                        actual: Box::new(got_hash),
-                    });
+                // Flush dirty nodes so that future root computations won't panic.
+                db.sync().await.map_err(Error::DatabaseInitFailed)?;
+
+                if applied_ops >= (config.upper_bound_ops - config.lower_bound_ops + 1) {
+                    let got_hash = db.root(&mut config.hasher);
+                    if got_hash != config.target_hash {
+                        return Err(Error::HashMismatch {
+                            expected: Box::new(config.target_hash),
+                            actual: Box::new(got_hash),
+                        });
+                    }
+                    return Ok(Client::Done { db, metrics });
                 }
 
-                Ok(Client::Done { db, metrics })
+                // Need to fetch more
+                Ok(Client::FetchData {
+                    config,
+                    db: Some(db),
+                    pinned_nodes,
+                    applied_ops,
+                    metrics,
+                })
             }
 
             Client::Done { .. } => Err(Error::AlreadyComplete),
