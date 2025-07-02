@@ -111,7 +111,7 @@ where
         }
 
         // Create an empty pruned database. Pinned nodes will be installed after the first proof.
-        let db = adb::any::Any::<E, K, V, H, T>::init_sync(
+        let db = adb::any::Any::<E, K, V, H, T>::init_pruned(
             config.context.clone(),
             crate::adb::any::SyncConfig {
                 config: config.db_config.clone(),

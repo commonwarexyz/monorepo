@@ -219,13 +219,10 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Ok(s)
     }
 
-    /// Initialize a new [Mmr] instance in a pruned state.
-    pub async fn init_sync(
-        context: E,
-        _hasher: &mut impl Hasher<H>,
-        cfg: SyncConfig,
-    ) -> Result<Self, Error> {
-        let journal = Journal::<E, H::Digest>::init_sync(
+    /// Initialize a new [Mmr] instance in an empty, pruned state.
+    pub async fn init_pruned(context: E, cfg: SyncConfig) -> Result<Self, Error> {
+        // Initialize the journal in an empty, pruned state.
+        let journal = Journal::<E, H::Digest>::init_pruned(
             context.with_label("mmr_journal"),
             JConfig {
                 partition: cfg.config.journal_partition,
@@ -1108,7 +1105,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_mmr_init_sync() {
+    fn test_journaled_mmr_init_pruned() {
         const PRUNED_TO_POS: u64 = 7;
         const NUM_OPERATIONS: usize = 10;
         const PRUNED_OPS: usize = 4;
@@ -1151,7 +1148,7 @@ mod tests {
                 }
             }
 
-            // Now create a new MMR using init_sync
+            // Now create a new MMR using init_pruned
             // After pruning to position 7, the remaining leaves are at positions 7, 8, 10, 11, 15, 16
             // These correspond to operations 4, 5, 6, 7, 8, 9 (0-indexed)
             let sync_config = test_sync_config(
@@ -1159,7 +1156,7 @@ mod tests {
                 "sync_metadata_partition".into(),
                 PRUNED_TO_POS,
             );
-            let mut synced_mmr = Mmr::init_sync(context.clone(), &mut hasher, sync_config)
+            let mut synced_mmr = Mmr::init_pruned(context.clone(), sync_config)
                 .await
                 .unwrap();
 
@@ -1209,7 +1206,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_init_sync_prune_all() {
+    fn test_init_pruned_prune_all() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
@@ -1240,7 +1237,7 @@ mod tests {
                 source_mmr_size, // Everything is pruned
             );
 
-            let mut synced_mmr = Mmr::init_sync(context.clone(), &mut hasher, sync_config)
+            let mut synced_mmr = Mmr::init_pruned(context.clone(), sync_config)
                 .await
                 .unwrap();
 

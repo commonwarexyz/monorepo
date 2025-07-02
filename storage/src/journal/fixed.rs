@@ -230,25 +230,30 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         })
     }
 
-    /// Initialize a new [Journal] instance in a pruned state.
+    /// Initialize a new [Journal] instance in an empty, pruned state.
     ///
     /// # Arguments
     /// * `context` - The storage context
     /// * `cfg` - Configuration for the journal
-    /// * `size` - The target size (number of operations) the journal should appear to have.
+    /// * `num_pruned` - The number of operations that have been pruned.
     ///
     /// # Behavior
     /// 1. Removes all existing blobs in the partition
-    /// 2. Creates a single blob at the index that would contain the operation at `size`
+    /// 2. Creates a single blob at the index that would contain the operation at `num_pruned`
     /// 3. Sets the blob size to represent the "leftover" operations within that blob.
+    /// The [Journal] is not `sync`ed before being returned.
     ///
-    /// For example, if `items_per_blob = 10` and `size = 25`:
+    /// For example, if `items_per_blob = 10` and `num_pruned = 25`:
     /// - Blob index would be 25 / 10 = 2 (third blob, 0-indexed)
     /// - Blob size would be (25 % 10) * CHUNK_SIZE = 5 * CHUNK_SIZE
     /// - Blob is filled with dummy data up to its size -- this shouldn't be read.
-    /// - This represents a journal that had operations 0-24, with operations 0-19 pruned,
-    ///   leaving operations 20-24 in blob 2
-    pub(crate) async fn init_sync(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
+    ///   This represents a journal that had operations 0-24, with operations 0-19 pruned,
+    ///   leaving operations 20-24 in blob 2.
+    pub(crate) async fn init_pruned(
+        context: E,
+        cfg: Config,
+        num_pruned: u64,
+    ) -> Result<Self, Error> {
         // Remove all existing blobs
         match context.scan(&cfg.partition).await {
             Ok(blobs) => {
@@ -267,8 +272,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             Err(err) => return Err(Error::Runtime(err)),
         }
 
-        let blob_index = size / cfg.items_per_blob;
-        let blob_num_items = size % cfg.items_per_blob;
+        let blob_index = num_pruned / cfg.items_per_blob;
+        let blob_num_items = num_pruned % cfg.items_per_blob;
         let blob_size = blob_num_items * Self::CHUNK_SIZE_U64;
         debug!(
             blob_index,
@@ -1383,7 +1388,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_init_sync_empty() {
+    fn test_init_pruned_empty() {
         const ITEMS_PER_BLOB: u64 = 5;
         const WRITE_BUFFER: usize = 1024;
 
@@ -1398,7 +1403,7 @@ mod tests {
                 };
 
                 let synced_journal =
-                    Journal::<Context, Digest>::init_sync(context.clone(), cfg.clone(), 0)
+                    Journal::<Context, Digest>::init_pruned(context.clone(), cfg.clone(), 0)
                         .await
                         .expect("Failed to init with pruned state at size 0");
 
@@ -1424,7 +1429,7 @@ mod tests {
                     write_buffer: WRITE_BUFFER,
                 };
 
-                let synced_journal = Journal::<Context, Digest>::init_sync(
+                let synced_journal = Journal::<Context, Digest>::init_pruned(
                     context.clone(),
                     cfg.clone(),
                     PRUNED_SIZE,
@@ -1455,7 +1460,7 @@ mod tests {
                     write_buffer: WRITE_BUFFER,
                 };
 
-                let synced_journal = Journal::<Context, Digest>::init_sync(
+                let synced_journal = Journal::<Context, Digest>::init_pruned(
                     context.clone(),
                     cfg.clone(),
                     ITEMS_PER_BLOB, // Exactly one full blob
@@ -1485,7 +1490,7 @@ mod tests {
                     write_buffer: WRITE_BUFFER,
                 };
 
-                let synced_journal = Journal::<Context, Digest>::init_sync(
+                let synced_journal = Journal::<Context, Digest>::init_pruned(
                     context.clone(),
                     cfg.clone(),
                     MULTI_BLOB_SIZE,
@@ -1523,7 +1528,7 @@ mod tests {
                 };
 
                 // Initialize journal in pruned state
-                let mut synced_journal = Journal::<Context, Digest>::init_sync(
+                let mut synced_journal = Journal::<Context, Digest>::init_pruned(
                     context.clone(),
                     cfg.clone(),
                     PRUNED_OPS_SIZE,
@@ -1611,7 +1616,7 @@ mod tests {
 
             // Now initialize with pruned state - this should clean up all existing blobs
             let pruned_journal =
-                Journal::<Context, Digest>::init_sync(context.clone(), cfg.clone(), 5)
+                Journal::<Context, Digest>::init_pruned(context.clone(), cfg.clone(), 5)
                     .await
                     .expect("Failed to init with pruned state");
 
@@ -1639,7 +1644,7 @@ mod tests {
             };
 
             // Initialize journal in pruned state
-            let mut journal = Journal::<Context, Digest>::init_sync(
+            let mut journal = Journal::<Context, Digest>::init_pruned(
                 context.clone(),
                 cfg.clone(),
                 6, // 1 full blob + 2 items in second blob

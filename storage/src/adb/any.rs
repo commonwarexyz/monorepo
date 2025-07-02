@@ -181,9 +181,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Initialize an [Any] database in a pruned state.
     /// Removes all existing persisted data and applies the state given in `cfg`.
-    pub(super) async fn init_sync(context: E, cfg: SyncConfig<T>) -> Result<Self, Error> {
-        let mut hasher = Standard::<H>::new();
-
+    pub(super) async fn init_pruned(context: E, cfg: SyncConfig<T>) -> Result<Self, Error> {
         let mmr_config = crate::mmr::journaled::SyncConfig {
             config: MmrConfig {
                 journal_partition: cfg.config.mmr_journal_partition,
@@ -194,12 +192,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             },
             pruned_to_pos: leaf_num_to_pos(cfg.pruned_to_loc),
         };
-        let mmr = Mmr::init_sync(context.with_label("mmr"), &mut hasher, mmr_config)
+        let mmr = Mmr::init_pruned(context.with_label("mmr"), mmr_config)
             .await
             .map_err(Error::MmrError)?;
 
-        // Initialize the log with the pruned state
-        let log = Journal::<E, Operation<K, V>>::init_sync(
+        // Initialize the log in an empty, pruned state.
+        let log = Journal::<E, Operation<K, V>>::init_pruned(
             context.with_label("log"),
             JConfig {
                 partition: cfg.config.log_journal_partition,
@@ -210,7 +208,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         )
         .await?;
 
-        let mut db = Any {
+        Ok(Any {
             ops: mmr,
             log,
             snapshot: Index::init(
@@ -219,12 +217,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             ),
             inactivity_floor_loc: cfg.pruned_to_loc,
             uncommitted_ops: 0,
-            hasher,
-        };
-        // Ensure on-disk state is consistent post-initialisation.
-        // TODO danlaine: should we sync here?
-        db.sync().await?;
-        Ok(db)
+            hasher: Standard::<H>::new(),
+        })
     }
 
     /// Initialize and return the mmr and log from the given config, correcting any inconsistencies
@@ -1416,9 +1410,9 @@ mod test {
         });
     }
 
-    /// Test init_sync where the target state is empty and unpruned.
+    /// Test init_pruned where the target state is empty and unpruned.
     #[test_traced("WARN")]
-    pub fn test_any_db_init_sync_empty() {
+    pub fn test_any_db_init_pruned_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let sync_config: SyncConfig<EightCap> = SyncConfig {
@@ -1426,7 +1420,9 @@ mod test {
                 pruned_to_loc: 0, // No pruning
             };
             let mut synced_db: Any<_, Digest, Digest, Sha256, EightCap> =
-                Any::init_sync(context.clone(), sync_config).await.unwrap();
+                Any::init_pruned(context.clone(), sync_config)
+                    .await
+                    .unwrap();
 
             // Verify empty database properties
             assert_eq!(synced_db.op_count(), 0);
@@ -1453,9 +1449,9 @@ mod test {
         });
     }
 
-    /// Test init_sync where the target state is pruned.
+    /// Test init_pruned where the target state is pruned.
     #[test_traced("WARN")]
-    pub fn test_any_db_init_sync_with_pruning() {
+    pub fn test_any_db_init_pruned_with_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut source_db = Any::<_, Digest, Digest, Sha256, EightCap>::init(
@@ -1503,7 +1499,9 @@ mod test {
                 config: any_db_config("sync_pruning", EightCap),
                 pruned_to_loc: source_db.inactivity_floor_loc,
             };
-            let mut synced_db = Any::init_sync(context.clone(), sync_config).await.unwrap();
+            let mut synced_db = Any::init_pruned(context.clone(), sync_config)
+                .await
+                .unwrap();
 
             let pinned_nodes = source_db.ops.get_pinned_nodes();
             synced_db.set_pinned_nodes(pinned_nodes);
