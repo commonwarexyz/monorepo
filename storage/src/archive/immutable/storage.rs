@@ -330,11 +330,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         // Put cursor in metadata
         record.cursors[head as usize] = Some(offset);
 
-        // Insert key into bloom filter
-        record.bloom.insert(key.as_ref());
-
         // Update active bits
         record.active.set((index % self.items_per_section) as usize);
+        if record.active.ones() == self.items_per_section as usize {
+            record.active = None;
+        }
 
         // Put section and offset in ordinal
         self.ordinal.put(index, offset.into()).await?;
