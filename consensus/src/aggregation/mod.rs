@@ -80,7 +80,7 @@ mod tests {
     };
     use commonware_utils::NonZeroDuration;
     use futures::{channel::oneshot, future::join_all};
-    use rand::Rng;
+    use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         collections::{BTreeMap, HashMap},
         sync::{Arc, Mutex},
@@ -333,27 +333,46 @@ mod tests {
     }
 
     fn unclean_shutdown<V: Variant>() {
+        // Test parameters
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
-        let target_index = 3; // Target multiple rounds of signing
-        let max_shutdowns = 5;
+        let target_index = 200; // Target multiple rounds of signing
+        let max_shutdowns = 10; // Maximum number of shutdowns per validator
+        let min_shutdowns = 4; // Minimum number of shutdowns per validator
+        let shutdown_range_min = Duration::from_millis(100);
+        let shutdown_range_max = Duration::from_millis(1_000);
+
+        // Must be shorter than the maximum shutdown range to make progress after restarting
+        let rebroadcast_timeout = NonZeroDuration::new_panic(Duration::from_millis(20));
 
         let mut prev_ctx = None;
-        let mut shutdown_count = 0;
+        let shutdown_counts = Arc::new(Mutex::new(HashMap::<PublicKey, u32>::new()));
         let completed_validators = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let all_validators = Arc::new(Mutex::new(Vec::new()));
+
+        // Generate shares once
+        let mut rng = StdRng::seed_from_u64(0);
+        let (polynomial, mut shares_vec) =
+            ops::generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
+        shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
         // Continue until all validators reach target or max shutdowns exceeded
         while completed_validators.lock().unwrap().len() < num_validators as usize
-            && shutdown_count < max_shutdowns
+            && shutdown_counts.lock().unwrap().values().max().unwrap_or(&0) < &max_shutdowns
         {
             let completed_clone = completed_validators.clone();
+            let shutdown_counts_clone = shutdown_counts.clone();
+            let all_validators_clone = all_validators.clone();
+            let shares_vec_clone = shares_vec.clone();
+            let polynomial_clone = polynomial.clone();
+
             let f = move |mut context: Context| {
                 let completed = completed_clone;
+                let shutdown_counts = shutdown_counts_clone;
+                let all_validators = all_validators_clone;
+                let mut shares_vec = shares_vec_clone;
+                let polynomial = polynomial_clone;
                 async move {
-                    let (polynomial, mut shares_vec) =
-                        ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
-                    shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
-
                     let (oracle, validators, pks, mut registrations) = initialize_simulation(
                         context.with_label("simulation"),
                         num_validators,
@@ -361,6 +380,11 @@ mod tests {
                         RELIABLE_LINK,
                     )
                     .await;
+                    // Store all validator public keys if not already done
+                    if all_validators.lock().unwrap().is_empty() {
+                        let mut pks_lock = all_validators.lock().unwrap();
+                        *pks_lock = pks.clone();
+                    }
                     let automatons =
                         Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
                     let mut reporters =
@@ -403,9 +427,7 @@ mod tests {
                                 blocker,
                                 namespace: namespace.to_vec(),
                                 priority_acks: false,
-                                rebroadcast_timeout: NonZeroDuration::new_panic(
-                                    Duration::from_secs(3),
-                                ),
+                                rebroadcast_timeout,
                                 epoch_bounds: (1, 1),
                                 window: std::num::NonZeroU64::new(10).unwrap(),
                                 // Use validator-specific partition for journal recovery
@@ -423,16 +445,16 @@ mod tests {
 
                     // Create completion watchers for all validators
                     let mut completion_tasks = Vec::new();
-                    for (validator_pk, mut reporter_mailbox) in reporters {
+                    for (validator_pk, mut reporter_mailbox) in reporters.clone() {
                         let validator = validator_pk.clone();
                         let completed_ref = completed.clone();
                         let task = context.with_label("completion_watcher").spawn(
                             move |context| async move {
                                 loop {
-                                    if let Some((tip_index, tip_epoch)) =
+                                    if let Some((tip_index, _epoch)) =
                                         reporter_mailbox.get_tip().await
                                     {
-                                        if tip_index >= target_index && tip_epoch >= 111 {
+                                        if tip_index >= target_index {
                                             // Verify that validator has signed messages at all indices
                                             for check_index in 0..=tip_index {
                                                 if let Some((digest, epoch)) =
@@ -466,12 +488,18 @@ mod tests {
                     }
 
                     // Random shutdown timing to simulate unclean shutdown
-                    let shutdown_wait =
-                        context.gen_range(Duration::from_millis(100)..Duration::from_millis(8_000));
+                    let shutdown_wait = context.gen_range(shutdown_range_min..shutdown_range_max);
 
                     select! {
                         _ = context.sleep(shutdown_wait) => {
                             debug!(shutdown_wait = ?shutdown_wait, "Simulating unclean shutdown");
+                            // Track which validators were running when shutdown occurred
+                            let mut counts = shutdown_counts.lock().unwrap();
+                            for (pk, _) in reporters {
+                                if !completed.lock().unwrap().contains(&pk) {
+                                    *counts.entry(pk).or_insert(0) += 1;
+                                }
+                            }
                             (false, context) // Unclean shutdown
                         },
                         _ = join_all(completion_tasks) => {
@@ -483,6 +511,7 @@ mod tests {
             };
 
             let (complete, context) = if let Some(prev_ctx) = prev_ctx {
+                let shutdown_count = shutdown_counts.lock().unwrap().values().sum::<u32>();
                 debug!(shutdown_count, "Restarting from previous context");
                 deterministic::Runner::from(prev_ctx)
             } else {
@@ -492,13 +521,13 @@ mod tests {
             .start(f);
 
             prev_ctx = Some(context.recover());
-            shutdown_count += 1;
 
             if complete {
                 debug!("Test completed successfully");
                 break;
             }
 
+            let shutdown_count = shutdown_counts.lock().unwrap().values().sum::<u32>();
             debug!(
                 shutdown_count,
                 completed = completed_validators.lock().unwrap().len(),
@@ -508,14 +537,28 @@ mod tests {
 
         // Verify that all validators eventually reached the target
         let final_completed = completed_validators.lock().unwrap().len();
+        let total_shutdowns = shutdown_counts.lock().unwrap().values().sum::<u32>();
         assert_eq!(
             final_completed, num_validators as usize,
             "All validators should reach target index {} despite unclean shutdowns. Only {} completed after {} shutdowns",
-            target_index, final_completed, shutdown_count
+            target_index, final_completed, total_shutdowns
         );
 
+        // Verify that each validator experienced a minimum number of shutdowns
+        let counts = shutdown_counts.lock().unwrap();
+        for pk in all_validators.lock().unwrap().iter() {
+            let count = counts.get(pk).copied().unwrap_or(0);
+            assert!(
+                count >= min_shutdowns,
+                "Validator {:?} should have at least {} shutdowns, but had {}",
+                pk,
+                min_shutdowns,
+                count
+            );
+        }
+
         debug!(
-            shutdown_count,
+            total_shutdowns,
             target_index, "Unclean shutdown test completed successfully"
         );
     }

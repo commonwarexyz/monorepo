@@ -35,7 +35,7 @@ use std::{
     marker::PhantomData,
     time::{Duration, SystemTime},
 };
-use tracing::{debug, error, warn};
+use tracing::{debug, error, trace, warn};
 
 /// An entry for an index that does not yet have a threshold signature.
 enum Pending<V: Variant, D: Digest> {
@@ -255,6 +255,7 @@ impl<
             // Propose a new digest if we are processing less than the window
             let next = self.next();
             if next < self.tip + self.window {
+                trace!("requesting new digest: index {}", next);
                 self.get_digest(next);
                 continue;
             }
@@ -379,6 +380,7 @@ impl<
                 _ = rebroadcast => {
                     // Get the next index to rebroadcast
                     let (index, _) = self.rebroadcast_deadlines.pop().expect("no rebroadcast deadline");
+                    trace!("rebroadcasting: index {}", index);
                     if let Err(err) = self.handle_rebroadcast(index, &mut net_sender).await {
                         warn!(?err, ?index, "rebroadcast failed");
                     };
@@ -517,21 +519,21 @@ impl<
         index: Index,
         sender: &mut WrappedSender<NetS, PeerAck<V, D>>,
     ) -> Result<(), Error> {
+        let Some(Pending::Verified(digest, acks)) = self.pending.get(&index) else {
+            // The index may already be confirmed; continue silently if so
+            return Ok(());
+        };
+
         // Get our signature
         let Some(share) = self.validators.share(self.epoch) else {
             return Err(Error::UnknownShare(self.epoch));
-        };
-        let Some(Pending::Verified(digest, acks)) = self.pending.get(&index) else {
-            // The index may already be confirmed; continue silently
-            return Ok(());
         };
         let ack = acks
             .get(&self.epoch)
             .and_then(|acks| acks.get(&share.index).cloned());
         let ack = match ack {
             Some(ack) => ack,
-            // unwrap is safe here; we checked that the share exists above
-            None => self.sign_ack(index, *digest).await.unwrap(),
+            None => self.sign_ack(index, *digest).await?,
         };
 
         // Reinsert the index with a new deadline
@@ -740,21 +742,21 @@ impl<
                 }
             }
         }
+        // Update the tip to the highest index in the journal
         self.tip = tip;
         // Add recovered signatures
         recovered
             .iter()
-            .filter(|(item, _)| item.index > tip)
+            .filter(|(item, _)| item.index >= tip)
             .for_each(|(item, signature)| {
                 self.confirmed.insert(item.index, (item.digest, *signature));
             });
         // Add any acks that haven't resulted in a threshold signature
         acks = acks
             .into_iter()
-            .filter(|ack| ack.item.index > tip && !self.confirmed.contains_key(&ack.item.index))
+            .filter(|ack| ack.item.index >= tip && !self.confirmed.contains_key(&ack.item.index))
             .collect::<Vec<_>>();
         acks.iter().for_each(|ack| {
-            self.set_rebroadcast_deadline(ack.item.index);
             assert!(self
                 .pending
                 .insert(
@@ -768,6 +770,7 @@ impl<
                     ),
                 )
                 .is_none());
+            self.set_rebroadcast_deadline(ack.item.index);
         });
     }
 
