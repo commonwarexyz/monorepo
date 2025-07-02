@@ -21,9 +21,6 @@ const ITEMS_PER_SECTION: u64 = 65_536;
 /// Number of bytes to buffer when replaying.
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
-/// Number of cursor heads for minimal archive.
-const CURSOR_HEADS: u32 = 16_384;
-
 /// Fixed-length key and value types.
 pub type Key = FixedBytes<64>;
 pub type Val = FixedBytes<32>;
@@ -67,14 +64,16 @@ impl ArchiveFactory for ImmutableArchiveFactory {
     async fn init(context: Context, compression: Option<u8>) -> Result<Self::Archive, Error> {
         let cfg = commonware_storage::archive::immutable::Config {
             metadata_partition: format!("{PARTITION}_metadata"),
+            table_partition: format!("{PARTITION}_table"),
+            table_size: 1024,
             journal_partition: format!("{PARTITION}_journal"),
+            target_journal_size: 1024 * 1024 * 1024,
             ordinal_partition: format!("{PARTITION}_ordinal"),
             compression,
             codec_config: (),
             items_per_section: ITEMS_PER_SECTION,
             write_buffer: WRITE_BUFFER,
             replay_buffer: REPLAY_BUFFER,
-            cursor_heads: CURSOR_HEADS,
         };
         commonware_storage::archive::immutable::Archive::init(context, cfg).await
     }

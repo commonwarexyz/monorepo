@@ -184,6 +184,9 @@ mod tests {
         ) -> Result<Self::Archive, Error> {
             let cfg = immutable::Config {
                 metadata_partition: format!("{partition}_metadata"),
+                table_partition: format!("{partition}_table"),
+                table_size: 1024,
+                target_journal_size: 1024 * 1024 * 1024,
                 journal_partition: format!("{partition}_journal"),
                 ordinal_partition: format!("{partition}_ordinal"),
                 compression,
@@ -191,7 +194,6 @@ mod tests {
                 items_per_section,
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 replay_buffer: DEFAULT_REPLAY_BUFFER,
-                cursor_heads: 32,
             };
             immutable::Archive::init(context, cfg).await
         }

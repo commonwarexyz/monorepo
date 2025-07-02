@@ -9,10 +9,6 @@ use prometheus_client::metrics::counter::Counter;
 use std::{cmp::Ordering, collections::BTreeSet, marker::PhantomData};
 use tracing::debug;
 
-const COMMITTED_EPOCH: u64 = 0;
-const COMMITTED_SECTION: u64 = 1;
-const COMMITTED_SIZE: u64 = 2;
-
 // -------------------------------------------------------------------------------------------------
 // Table layout
 // -------------------------------------------------------------------------------------------------
