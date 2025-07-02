@@ -81,7 +81,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
             .map(|_| u8::arbitrary(u))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let max_message_size = u.int_in_range(177..=8192)?;
+        let max_message_size = u.int_in_range(150..=8192)?;
         let synchrony_bound_secs = u.int_in_range(1..=10)?;
         let max_handshake_age_secs = u.int_in_range(1..=10)?;
         let handshake_timeout_secs = u.int_in_range(1..=10)?;
@@ -141,6 +141,7 @@ enum ProtocolState {
     WaitingForResponse,
     WaitingForConfirmation,
     Failed,
+    Upgraded,
 }
 
 struct StateMachine {
@@ -148,7 +149,6 @@ struct StateMachine {
     crypto: PrivateKey,
     config: Config<PrivateKey>,
     is_dialer: bool,
-    messages_pending: bool,
 }
 
 impl StateMachine {
@@ -162,7 +162,6 @@ impl StateMachine {
             crypto,
             config,
             is_dialer,
-            messages_pending: false,
         }
     }
 
@@ -170,23 +169,22 @@ impl StateMachine {
         self.state = new_state;
     }
 
-    fn mark_message_consumed(&mut self) {
-        self.messages_pending = false;
-    }
-
     fn is_valid_transition(&self, action: StateAction, peer_has_sent_messages: bool) -> bool {
         // First check ReceiveMessage availability regardless of state
         if action == StateAction::ReceiveMessage {
-            return peer_has_sent_messages && !self.messages_pending;
+            return peer_has_sent_messages;
         }
 
         match (&self.state, action, self.is_dialer) {
             // Dialer states and actions
+            (ProtocolState::Initial, StateAction::AttemptUpgrade, true) => true,
             (ProtocolState::Initial, StateAction::SendValidHello, true) => true,
             (ProtocolState::Initial, StateAction::SendInvalidHello, true) => true,
             (ProtocolState::WaitingForResponse, StateAction::SendInvalidConfirmation, true) => true,
+            // We can model sending invalid confirmations only.
 
             // Listener states and actions
+            (ProtocolState::Initial, StateAction::AttemptUpgrade, false) => true,
             (ProtocolState::WaitingForHello, StateAction::SendValidHello, false) => true,
             (ProtocolState::WaitingForHello, StateAction::SendInvalidHello, false) => true,
             (ProtocolState::WaitingForHello, StateAction::SendInvalidConfirmation, false) => true,
@@ -194,7 +192,6 @@ impl StateMachine {
             // Universal actions valid from any state
             (_, StateAction::SendRandomData, _) => true,
             (_, StateAction::CloseConnection, _) => true,
-            (_, StateAction::AttemptUpgrade, _) => true,
 
             // Everything else is invalid
             _ => false,
@@ -245,8 +242,8 @@ fn fuzz(input: FuzzInput) {
         let mut dialer_stream = dialer_stream;
         let mut listener_stream = listener_stream;
 
-        let mut pending_dialer_to_listener_messages = 0;
-        let mut pending_listener_to_dialer_messages = 0;
+        let mut pending_dialer_to_listener_messages: u32 = 0;
+        let mut pending_listener_to_dialer_messages: u32 = 0;
 
         let max_actions = input.dialer_actions.len().max(input.listener_actions.len());
 
@@ -295,6 +292,7 @@ fn fuzz(input: FuzzInput) {
                                 {
                                     pending_dialer_to_listener_messages += 1;
                                 }
+                                dialer_state.transition_to(ProtocolState::Failed);
                             } else {
                                 let wrong_peer = wrong_peer_crypto.public_key();
                                 let ephemeral_public_key =
@@ -347,8 +345,10 @@ fn fuzz(input: FuzzInput) {
                             }
                         }
                         StateAction::ReceiveMessage => {
-                            pending_listener_to_dialer_messages -= 1;
-                            dialer_state.mark_message_consumed();
+                            pending_listener_to_dialer_messages =
+                                pending_listener_to_dialer_messages
+                                    .checked_sub(1)
+                                    .expect("ReceiveMessage but no peer frame is pending");
 
                             match recv_frame(&mut dialer_stream, input.max_message_size).await {
                                 Ok(msg) => {
@@ -395,7 +395,7 @@ fn fuzz(input: FuzzInput) {
                             .await
                             {
                                 Ok(_connection) => {
-                                    dialer_state.transition_to(ProtocolState::Failed);
+                                    dialer_state.transition_to(ProtocolState::Upgraded);
                                     return;
                                 }
                                 Err(_) => {
@@ -446,15 +446,41 @@ fn fuzz(input: FuzzInput) {
                             }
                         }
                         StateAction::SendInvalidHello => {
-                            if send_frame(
-                                &mut listener_sink,
-                                &input.corrupt_hello_data,
-                                input.max_message_size,
-                            )
-                            .await
-                            .is_ok()
-                            {
-                                pending_listener_to_dialer_messages += 1;
+                            if !input.corrupt_hello_data.is_empty() {
+                                if send_frame(
+                                    &mut listener_sink,
+                                    &input.corrupt_hello_data,
+                                    input.max_message_size,
+                                )
+                                .await
+                                .is_ok()
+                                {
+                                    pending_listener_to_dialer_messages += 1;
+                                }
+                                listener_state.transition_to(ProtocolState::Failed);
+                            } else {
+                                let wrong_peer = wrong_peer_crypto.public_key();
+                                let ephemeral_public_key =
+                                    x25519::PublicKey::from_bytes(input.corrupt_ephemeral_key);
+                                let hello = Hello::sign(
+                                    &mut listener_state.crypto.clone(),
+                                    &listener_state.config.namespace,
+                                    Info::new(
+                                        wrong_peer,
+                                        ephemeral_public_key,
+                                        input.corrupt_timestamp,
+                                    ),
+                                );
+                                if send_frame(
+                                    &mut listener_sink,
+                                    &hello.encode(),
+                                    input.max_message_size,
+                                )
+                                .await
+                                .is_ok()
+                                {
+                                    pending_listener_to_dialer_messages += 1;
+                                }
                             }
                             listener_state.transition_to(ProtocolState::Failed);
                         }
@@ -484,8 +510,10 @@ fn fuzz(input: FuzzInput) {
                             }
                         }
                         StateAction::ReceiveMessage => {
-                            pending_dialer_to_listener_messages -= 1;
-                            listener_state.mark_message_consumed();
+                            pending_dialer_to_listener_messages =
+                                pending_dialer_to_listener_messages
+                                    .checked_sub(1)
+                                    .expect("ReceiveMessage but no peer frame is pending");
 
                             match recv_frame(&mut listener_stream, input.max_message_size).await {
                                 Ok(msg) => {
@@ -536,7 +564,7 @@ fn fuzz(input: FuzzInput) {
                                         .await
                                     {
                                         Ok(_connection) => {
-                                            listener_state.transition_to(ProtocolState::Failed);
+                                            listener_state.transition_to(ProtocolState::Upgraded);
                                             return;
                                         }
                                         Err(_) => {

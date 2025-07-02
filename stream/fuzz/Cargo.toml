@@ -54,8 +54,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "stream_state_machine"
-path = "fuzz_targets/stream_state_machine.rs"
+name = "e2e"
+path = "fuzz_targets/e2e.rs"
 test = false
 doc = false
 bench = false
