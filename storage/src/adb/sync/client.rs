@@ -73,7 +73,6 @@ where
     FetchData {
         config: Config<E, K, V, H, T, R>,
         db: Option<adb::any::Any<E, K, V, H, T>>,
-        pinned_nodes: Option<HashMap<u64, H::Digest>>,
         applied_ops: u64,
         metrics: Metrics,
     },
@@ -81,7 +80,6 @@ where
     ApplyData {
         config: Config<E, K, V, H, T, R>,
         db: adb::any::Any<E, K, V, H, T>,
-        pinned_nodes: Option<HashMap<u64, H::Digest>>,
         batch_ops: Vec<Operation<K, V>>,
         applied_ops: u64,
         metrics: Metrics,
@@ -115,7 +113,6 @@ where
         Ok(Client::FetchData {
             config,
             db: None,
-            pinned_nodes: None,
             applied_ops: 0,
             metrics: Metrics {
                 valid_batches_received: 0,
@@ -130,7 +127,6 @@ where
             Client::FetchData {
                 mut config,
                 db: mut db_opt,
-                pinned_nodes: mut pinned_nodes_opt,
                 applied_ops,
                 mut metrics,
             } => {
@@ -180,7 +176,6 @@ where
                     return Ok(Client::FetchData {
                         config,
                         db: db_opt,
-                        pinned_nodes: pinned_nodes_opt,
                         applied_ops,
                         metrics,
                     });
@@ -208,14 +203,13 @@ where
                     return Ok(Client::FetchData {
                         config,
                         db: db_opt,
-                        pinned_nodes: pinned_nodes_opt,
                         applied_ops,
                         metrics,
                     });
                 }
 
                 // Only extract pinned nodes (and create DB) for the first batch.
-                if pinned_nodes_opt.is_none() {
+                if db_opt.is_none() {
                     // Convert locations to MMR positions before extracting pinned nodes
                     let start_pos = leaf_num_to_pos(current_global_pos);
                     let end_pos = leaf_num_to_pos(current_global_pos + new_operations_len - 1);
@@ -224,18 +218,17 @@ where
                             let nodes_to_pin =
                                 Proof::<H::Digest>::nodes_to_pin(start_pos).collect::<Vec<_>>();
                             assert_eq!(nodes_to_pin.len(), new_pinned_nodes.len());
-                            let mut map = HashMap::new();
+                            let mut mmr_pinned_nodes = HashMap::new();
                             for (loc, digest) in nodes_to_pin.iter().zip(new_pinned_nodes.iter()) {
-                                map.insert(*loc, *digest);
+                                mmr_pinned_nodes.insert(*loc, *digest);
                             }
-                            pinned_nodes_opt = Some(map);
 
                             // Initialize empty pruned DB now that we have pinned nodes.
                             let db = adb::any::Any::<E, K, V, H, T>::init_sync(
                                 config.context.clone(),
                                 crate::adb::any::SyncConfig {
                                     config: config.db_config.clone(),
-                                    mmr_pinned_nodes: pinned_nodes_opt.as_ref().unwrap().clone(),
+                                    mmr_pinned_nodes,
                                     pruned_to_loc: config.lower_bound_ops,
                                 },
                             )
@@ -252,7 +245,6 @@ where
                             return Ok(Client::FetchData {
                                 config,
                                 db: db_opt,
-                                pinned_nodes: pinned_nodes_opt,
                                 applied_ops,
                                 metrics,
                             });
@@ -265,7 +257,6 @@ where
                 Ok(Client::ApplyData {
                     config,
                     db: db_opt.ok_or(Error::InvalidState)?,
-                    pinned_nodes: pinned_nodes_opt.clone(),
                     batch_ops: new_operations,
                     applied_ops,
                     metrics,
@@ -275,7 +266,6 @@ where
             Client::ApplyData {
                 mut config,
                 mut db,
-                pinned_nodes,
                 batch_ops,
                 mut applied_ops,
                 metrics,
@@ -307,7 +297,6 @@ where
                 Ok(Client::FetchData {
                     config,
                     db: Some(db),
-                    pinned_nodes,
                     applied_ops,
                     metrics,
                 })
