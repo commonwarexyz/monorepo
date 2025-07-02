@@ -5,11 +5,11 @@ use crate::{
     ordinal::{self, Ordinal},
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::BloomFilter;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{
-    array::{U32, U64},
+    array::{prefixed_u64::U64, U32},
     Array, BitVec, NZUsize,
 };
 use futures::{future::try_join_all, join};
@@ -58,23 +58,24 @@ impl<K: Array, V: Codec> EncodeSize for JournalRecord<K, V> {
     }
 }
 
-pub struct MetadataRecord {
-    /// The indices currently active in a section.
-    active: BitVec,
-    /// The bloom filter of keys for the section.
-    bloom: BloomFilter,
-    /// The cursors for a given section.
-    cursors: Vec<Option<u32>>,
-    /// The size of the journal for a given section.
-    size: u64,
+enum MetadataRecord {
+    Cursor(u64, u32),
+    Indices(Option<BitVec>),
 }
 
 impl Write for MetadataRecord {
     fn write(&self, buf: &mut impl BufMut) {
-        self.active.write(buf);
-        self.bloom.write(buf);
-        self.cursors.write(buf);
-        self.size.write(buf);
+        match self {
+            Self::Cursor(index, offset) => {
+                buf.put_u8(0);
+                buf.put_u64(*index);
+                buf.put_u32(*offset);
+            }
+            Self::Indices(indices) => {
+                buf.put_u8(1);
+                indices.write(buf);
+            }
+        }
     }
 }
 
@@ -82,25 +83,24 @@ impl Read for MetadataRecord {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let active = BitVec::read_cfg(buf, &(..=usize::MAX).into())?;
-        let bloom = BloomFilter::read_cfg(buf, &((..=usize::MAX).into(), (..=usize::MAX).into()))?;
-        let cursors = Vec::<Option<u32>>::read_cfg(buf, &((..=usize::MAX).into(), ()))?;
-        let size = u64::read_cfg(buf, &())?;
-        Ok(Self {
-            active,
-            bloom,
-            cursors,
-            size,
-        })
+        let tag = buf.get_u8();
+        match tag {
+            0 => Ok(Self::Cursor(buf.get_u64(), buf.get_u32())),
+            1 => Ok(Self::Indices(Option::<BitVec>::read_cfg(
+                buf,
+                &(0..=usize::MAX).into(),
+            )?)),
+            _ => Err(commonware_codec::Error::InvalidEnum(tag)),
+        }
     }
 }
 
 impl EncodeSize for MetadataRecord {
     fn encode_size(&self) -> usize {
-        self.active.encode_size()
-            + self.bloom.encode_size()
-            + self.cursors.encode_size()
-            + self.size.encode_size()
+        1 + match self {
+            Self::Cursor(_, _) => u64::SIZE + u32::SIZE,
+            Self::Indices(indices) => indices.encode_size(),
+        }
     }
 }
 
