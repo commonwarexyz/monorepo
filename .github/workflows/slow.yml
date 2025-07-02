@@ -103,5 +103,5 @@ jobs:
     - name: Test all targets
       run: |
         for target in $(cargo +nightly fuzz list --fuzz-dir ${{ matrix.fuzz_dir }}); do
-          cargo +nightly fuzz run $target --fuzz-dir ${{ matrix.fuzz_dir }} -- -max_total_time=60 -detect_leaks=0
+          cargo +nightly fuzz run $target --fuzz-dir ${{ matrix.fuzz_dir }} -- -max_total_time=60
         done
