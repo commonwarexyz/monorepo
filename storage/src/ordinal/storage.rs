@@ -160,7 +160,10 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
                 let mut must_exist = false;
                 if let Some(bits) = &bits {
                     let bits = bits.get(section).unwrap();
-                    if !bits.get(offset as usize).expect("bitvec is too short") {
+                    if !bits
+                        .get(offset as usize / Record::<V>::SIZE)
+                        .expect("bitvec is too short")
+                    {
                         offset += Record::<V>::SIZE as u64;
                         continue;
                     }

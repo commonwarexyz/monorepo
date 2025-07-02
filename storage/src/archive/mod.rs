@@ -807,12 +807,11 @@ mod tests {
                 assert_eq!(retrieved, *data);
             }
 
-            // Basic gap check - implementations may differ in exact behavior
+            // Basic gap check
             let (current_end, start_next) = archive.next_gap(0);
             if current_end.is_none() {
                 assert!(start_next.is_some());
             }
-
             let (current_end, start_next) = archive.next_gap(14);
             if current_end == Some(14) {
                 assert!(start_next.is_none());
