@@ -66,8 +66,8 @@ fn bench_get_for_factory<F: ArchiveFactory>(
     impl_name: &str,
 ) {
     let runner = tokio::Runner::new(cfg.clone());
-    for mode in ["serial", "concurrent"] {
-        for pattern in ["key", "index"] {
+    for pattern in ["key", "index"] {
+        for mode in ["serial", "concurrent"] {
             for reads in [1_000, 10_000, 50_000] {
                 let label = format!(
                     "{}/impl={} mode={} pattern={} comp={} reads={}",
