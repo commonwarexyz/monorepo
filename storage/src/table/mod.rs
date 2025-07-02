@@ -145,6 +145,9 @@ pub struct Config<C> {
     pub table_partition: String,
 
     /// The number of items in the table.
+    ///
+    /// To tune this value, consider how many hops you'd like each lookup to take for a key.
+    /// If the keyspace is uniformly distributed, this is simply total keys divided by table_size.
     pub table_size: u32,
 
     /// The codec configuration to use for the value stored in the store.
