@@ -26,6 +26,8 @@ pub enum Error {
     Ordinal(#[from] crate::ordinal::Error),
     #[error("metadata error: {0}")]
     Metadata(#[from] crate::metadata::Error),
+    #[error("table error: {0}")]
+    Table(#[from] crate::table::Error),
     #[error("record corrupted")]
     RecordCorrupted,
     #[error("already pruned to: {0}")]

@@ -88,7 +88,7 @@
 //!         write_buffer: 1024 * 1024,
 //!         target_journal_size: 100 * 1024 * 1024, // 100MB journals
 //!     };
-//!     let mut store = Store::<_, FixedBytes<32>, i32>::init(context, cfg).await.unwrap();
+//!     let mut store = Table::<_, FixedBytes<32>, i32>::init(context, cfg).await.unwrap();
 //!
 //!     // Put a key-value pair
 //!     let key = FixedBytes::new([1u8; 32]);
@@ -108,7 +108,7 @@
 
 mod storage;
 
-pub use storage::Store;
+pub use storage::Table;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the [Store].
@@ -194,7 +194,7 @@ mod tests {
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
             let mut store =
-                Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
                     .await
                     .expect("Failed to initialize store");
 
@@ -259,7 +259,7 @@ mod tests {
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
             let mut store =
-                Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
                     .await
                     .expect("Failed to initialize store");
 
@@ -307,7 +307,7 @@ mod tests {
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
             let mut store =
-                Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
                     .await
                     .expect("Failed to initialize store");
 
@@ -363,7 +363,7 @@ mod tests {
             // Insert data and close
             let result = {
                 let mut store =
-                    Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                    Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
                         .await
                         .expect("Failed to initialize store");
 
@@ -385,7 +385,7 @@ mod tests {
 
             // Reopen and verify data persisted
             {
-                let store = Store::<_, FixedBytes<64>, i32>::init(
+                let store = Table::<_, FixedBytes<64>, i32>::init(
                     context.clone(),
                     cfg.clone(),
                     result.0,
@@ -430,7 +430,7 @@ mod tests {
             // First, create some committed data
             let result = {
                 let mut store =
-                    Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                    Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
                         .await
                         .expect("Failed to initialize store");
 
@@ -462,7 +462,7 @@ mod tests {
 
             // Reopen and verify only committed data is present
             {
-                let store = Store::<_, FixedBytes<64>, i32>::init(
+                let store = Table::<_, FixedBytes<64>, i32>::init(
                     context.clone(),
                     cfg.clone(),
                     result.0,
@@ -503,7 +503,7 @@ mod tests {
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
             let store =
-                Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
                     .await
                     .expect("Failed to initialize store");
 
@@ -536,7 +536,7 @@ mod tests {
             // Create store with data
             {
                 let mut store =
-                    Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                    Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
                         .await
                         .expect("Failed to initialize store");
 
@@ -556,7 +556,7 @@ mod tests {
             // Try to create a new store - it should be empty
             {
                 let store =
-                    Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                    Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
                         .await
                         .expect("Failed to initialize store");
 
@@ -585,7 +585,7 @@ mod tests {
             // Create store with data and sync
             let result = {
                 let mut store =
-                    Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                    Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
                         .await
                         .expect("Failed to initialize store");
 
@@ -604,7 +604,7 @@ mod tests {
 
             // Reopen and verify it handles the corruption
             {
-                let store = Store::<_, FixedBytes<64>, i32>::init(
+                let store = Table::<_, FixedBytes<64>, i32>::init(
                     context.clone(),
                     cfg.clone(),
                     result.0,
@@ -639,7 +639,7 @@ mod tests {
             // Create store with data
             let result = {
                 let mut store =
-                    Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                    Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
                         .await
                         .expect("Failed to initialize store");
 
@@ -662,7 +662,7 @@ mod tests {
 
             // Reopen and verify it handles invalid CRC
             {
-                let store = Store::<_, FixedBytes<64>, i32>::init(
+                let store = Table::<_, FixedBytes<64>, i32>::init(
                     context.clone(),
                     cfg.clone(),
                     result.0,
@@ -697,7 +697,7 @@ mod tests {
             // Create store with data
             let result = {
                 let mut store =
-                    Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                    Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
                         .await
                         .expect("Failed to initialize store");
 
@@ -718,7 +718,7 @@ mod tests {
 
             // Reopen and verify it handles extra bytes gracefully
             {
-                let store = Store::<_, FixedBytes<64>, i32>::init(
+                let store = Table::<_, FixedBytes<64>, i32>::init(
                     context.clone(),
                     cfg.clone(),
                     result.0,
@@ -753,7 +753,7 @@ mod tests {
             };
 
             // Initialize the store
-            let mut store = Store::<_, FixedBytes<96>, FixedBytes<256>>::init(
+            let mut store = Table::<_, FixedBytes<96>, FixedBytes<256>>::init(
                 context.clone(),
                 cfg.clone(),
                 0,
@@ -813,7 +813,7 @@ mod tests {
             let result = store.close().await.expect("Failed to close store");
 
             // Reopen the store
-            let mut store = Store::<_, FixedBytes<96>, FixedBytes<256>>::init(
+            let mut store = Table::<_, FixedBytes<96>, FixedBytes<256>>::init(
                 context.clone(),
                 cfg.clone(),
                 result.0,

@@ -1,8 +1,8 @@
 use crate::{
     archive::{immutable::Config, Error, Identifier},
-    journal::variable::{self, Journal},
     metadata::{self, Metadata},
     ordinal::{self, Ordinal},
+    table::{self, Table},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write};
@@ -17,53 +17,15 @@ use prometheus_client::metrics::counter::Counter;
 use std::collections::{BTreeSet, HashMap};
 use tracing::debug;
 
-struct JournalRecord<K: Array, V: Codec> {
-    key: K,
-    value: V,
-
-    next: Option<(u64, u32)>,
-}
-
-impl<K: Array, V: Codec> JournalRecord<K, V> {
-    fn new(key: K, value: V, next: Option<(u64, u32)>) -> Self {
-        Self { key, value, next }
-    }
-}
-
-impl<K: Array, V: Codec> Write for JournalRecord<K, V> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.key.write(buf);
-        self.value.write(buf);
-        self.next.write(buf);
-    }
-}
-
-impl<K: Array, V: Codec> Read for JournalRecord<K, V> {
-    type Cfg = V::Cfg;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let key = K::read(buf)?;
-        let value = V::read_cfg(buf, cfg)?;
-        let next = Option::<(u64, u32)>::read_cfg(buf, &((), ()))?;
-        Ok(Self { key, value, next })
-    }
-}
-
-impl<K: Array, V: Codec> EncodeSize for JournalRecord<K, V> {
-    fn encode_size(&self) -> usize {
-        self.key.encode_size() + self.value.encode_size() + self.next.encode_size()
-    }
-}
-
 enum MetadataRecord {
-    Cursor(u64, u64),
+    Cursor(u64, u64, u64),
     Indices(Option<BitVec>),
 }
 
 impl MetadataRecord {
-    fn cursor(&self) -> (u64, u64) {
+    fn cursor(&self) -> (u64, u64, u64) {
         match self {
-            Self::Cursor(index, size) => (*index, *size),
+            Self::Cursor(index, size, offset) => (*index, *size, *offset),
             _ => panic!("incorrect record"),
         }
     }
@@ -79,10 +41,11 @@ impl MetadataRecord {
 impl Write for MetadataRecord {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Self::Cursor(index, size) => {
+            Self::Cursor(index, size, offset) => {
                 buf.put_u8(0);
                 buf.put_u64(*index);
                 buf.put_u64(*size);
+                buf.put_u64(*offset);
             }
             Self::Indices(indices) => {
                 buf.put_u8(1);
@@ -98,7 +61,7 @@ impl Read for MetadataRecord {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let tag = buf.get_u8();
         match tag {
-            0 => Ok(Self::Cursor(buf.get_u64(), buf.get_u64())),
+            0 => Ok(Self::Cursor(buf.get_u64(), buf.get_u64(), buf.get_u64())),
             1 => Ok(Self::Indices(Option::<BitVec>::read_cfg(
                 buf,
                 &(0..=usize::MAX).into(),
@@ -111,7 +74,7 @@ impl Read for MetadataRecord {
 impl EncodeSize for MetadataRecord {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::Cursor(_, _) => u64::SIZE + u64::SIZE,
+            Self::Cursor(_, _, _) => u64::SIZE * 3,
             Self::Indices(indices) => indices.encode_size(),
         }
     }
@@ -125,7 +88,7 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     cursor_heads: u32,
 
     metadata: Metadata<E, U64, MetadataRecord>,
-    journal: Journal<E, JournalRecord<K, V>>,
+    table: Table<E, K, V>,
     ordinal: Ordinal<E, U32>,
 
     modified: BTreeSet<u64>,
@@ -148,28 +111,32 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         )
         .await?;
 
-        // Initialize journal
-        let mut journal = Journal::init(
-            context.with_label("journal"),
-            variable::Config {
-                partition: cfg.journal_partition,
-                compression: cfg.compression,
-                codec_config: cfg.codec_config,
-                write_buffer: cfg.write_buffer,
-            },
-        )
-        .await?;
-
-        // Rewind journal
+        // Get cursor
         let cursor_key = U64::new(CURSOR_PREFIX, 0);
         let cursor = match metadata.get(&cursor_key) {
             Some(cursor) => cursor.cursor(),
             None => {
-                metadata.put(cursor_key.clone(), MetadataRecord::Cursor(0, 0));
+                metadata.put(cursor_key.clone(), MetadataRecord::Cursor(0, 0, 0));
                 metadata.get(&cursor_key).unwrap().cursor()
             }
         };
-        journal.rewind(cursor.0, cursor.1).await?;
+
+        // Initialize table
+        let table = Table::init(
+            context.with_label("table"),
+            table::Config {
+                journal_partition: cfg.journal_partition,
+                journal_compression: cfg.compression,
+                table_partition: cfg.table_partition,
+                table_size: cfg.table_size,
+                codec_config: cfg.codec_config,
+                write_buffer: cfg.write_buffer,
+                target_journal_size: cfg.target_journal_size,
+            },
+            cursor.0,
+            (cursor.1, cursor.2),
+        )
+        .await?;
 
         // Collect sections
         let sections = metadata.keys(Some(&[INDICES_PREFIX])).collect::<Vec<_>>();
@@ -208,7 +175,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
             items_per_section: cfg.items_per_section,
             cursor_heads: cfg.cursor_heads,
             metadata,
-            journal,
+            table,
             ordinal,
             modified: BTreeSet::new(),
             gets,

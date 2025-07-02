@@ -139,7 +139,7 @@ impl<K: Array, V: Codec> EncodeSize for JournalEntry<K, V> {
 }
 
 /// Implementation of immutable key-value storage.
-pub struct Store<E: Storage + Metrics + Clock, K: Array, V: Codec> {
+pub struct Table<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Context for storage operations
     context: E,
 
@@ -171,8 +171,8 @@ pub struct Store<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     _phantom: PhantomData<(K, V)>,
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Store<E, K, V> {
-    /// Initialize a new [Store] instance.
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
+    /// Initialize a new [Table] instance.
     pub async fn init(
         context: E,
         config: Config<V::Cfg>,

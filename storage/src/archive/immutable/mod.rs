@@ -7,8 +7,17 @@ pub struct Config<C> {
     /// The partition to use for the archive's metadata.
     pub metadata_partition: String,
 
+    /// The partition to use for the archive's table.
+    pub table_partition: String,
+
+    /// The size of the archive's table.
+    pub table_size: u32,
+
     /// The partition to use for the archive's journal.
     pub journal_partition: String,
+
+    /// The target size of the archive's journal.
+    pub target_journal_size: u64,
 
     /// The partition to use for the archive's ordinal.
     pub ordinal_partition: String,
