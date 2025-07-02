@@ -144,8 +144,7 @@ pub struct Config<C> {
     /// The `commonware-runtime::Storage` partition to use for storing the hash table.
     pub table_partition: String,
 
-    /// The size of the table. Should be a power of 2 and much larger than
-    /// the expected number of buckets for better distribution.
+    /// The number of items in the table.
     pub table_size: u32,
 
     /// The codec configuration to use for the value stored in the store.
