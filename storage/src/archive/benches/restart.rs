@@ -1,4 +1,6 @@
-use super::utils::{append_random, ArchiveFactory, FastArchiveFactory, MinimalArchiveFactory};
+use super::utils::{
+    append_random, ArchiveFactory, ImmutableArchiveFactory, PrunableArchiveFactory,
+};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
@@ -62,14 +64,24 @@ fn bench_restart(c: &mut Criterion) {
     // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
     let cfg = Config::default();
 
-    // Test fast implementation
+    // Test prunable implementation
     for compression in [None, Some(3)] {
-        bench_restart_for_factory::<FastArchiveFactory>(c, cfg.clone(), compression, "fast");
+        bench_restart_for_factory::<PrunableArchiveFactory>(
+            c,
+            cfg.clone(),
+            compression,
+            "prunable",
+        );
     }
 
-    // Test minimal implementation
+    // Test immutable implementation
     for compression in [None, Some(3)] {
-        bench_restart_for_factory::<MinimalArchiveFactory>(c, cfg.clone(), compression, "minimal");
+        bench_restart_for_factory::<ImmutableArchiveFactory>(
+            c,
+            cfg.clone(),
+            compression,
+            "immutable",
+        );
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::{
-    archive::{minimal::Config, Error, Identifier},
+    archive::{immutable::Config, Error, Identifier},
     journal::variable::{self, Journal},
     metadata::{self, Metadata},
     ordinal::{self, Ordinal},
@@ -331,31 +331,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
             Identifier::Index(index) => Ok(self.ordinal.has(index)),
             Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
         }
-    }
-
-    async fn prune(&mut self, min: u64) -> Result<(), Error> {
-        // Get sections
-        let sections = self.metadata.keys(None).cloned().collect::<Vec<_>>();
-
-        // Remove old sections from metadata
-        let min_section = min / self.items_per_section;
-        for section in sections {
-            if section.to_u64() >= min_section {
-                break;
-            }
-            self.metadata.remove(&section).unwrap();
-        }
-
-        // Sync metadata before removing any other data to ensure we can always recover
-        self.metadata.sync().await?;
-
-        // Remove journal
-        self.journal.prune(min_section).await?;
-
-        // Remove ordinal
-        self.ordinal.prune(min).await?;
-
-        Ok(())
     }
 
     async fn sync(&mut self) -> Result<(), Error> {

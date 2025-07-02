@@ -38,14 +38,14 @@ pub trait ArchiveFactory: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Self::Archive, Error>> + Send;
 }
 
-/// Factory for fast archive implementation.
-pub struct FastArchiveFactory;
+/// Factory for fast prunable implementation.
+pub struct PrunableArchiveFactory;
 
-impl ArchiveFactory for FastArchiveFactory {
-    type Archive = commonware_storage::archive::fast::Archive<TwoCap, Context, Key, Val>;
+impl ArchiveFactory for PrunableArchiveFactory {
+    type Archive = commonware_storage::archive::prunable::Archive<TwoCap, Context, Key, Val>;
 
     async fn init(context: Context, compression: Option<u8>) -> Result<Self::Archive, Error> {
-        let cfg = commonware_storage::archive::fast::Config {
+        let cfg = commonware_storage::archive::prunable::Config {
             partition: PARTITION.into(),
             translator: TwoCap,
             compression,
@@ -54,18 +54,18 @@ impl ArchiveFactory for FastArchiveFactory {
             write_buffer: WRITE_BUFFER,
             replay_buffer: REPLAY_BUFFER,
         };
-        commonware_storage::archive::fast::Archive::init(context, cfg).await
+        commonware_storage::archive::prunable::Archive::init(context, cfg).await
     }
 }
 
-/// Factory for minimal archive implementation.
-pub struct MinimalArchiveFactory;
+/// Factory for immutable archive implementation.
+pub struct ImmutableArchiveFactory;
 
-impl ArchiveFactory for MinimalArchiveFactory {
-    type Archive = commonware_storage::archive::minimal::Archive<Context, Key, Val>;
+impl ArchiveFactory for ImmutableArchiveFactory {
+    type Archive = commonware_storage::archive::immutable::Archive<Context, Key, Val>;
 
     async fn init(context: Context, compression: Option<u8>) -> Result<Self::Archive, Error> {
-        let cfg = commonware_storage::archive::minimal::Config {
+        let cfg = commonware_storage::archive::immutable::Config {
             metadata_partition: format!("{PARTITION}_metadata"),
             journal_partition: format!("{PARTITION}_journal"),
             ordinal_partition: format!("{PARTITION}_ordinal"),
@@ -76,7 +76,7 @@ impl ArchiveFactory for MinimalArchiveFactory {
             replay_buffer: REPLAY_BUFFER,
             cursor_heads: CURSOR_HEADS,
         };
-        commonware_storage::archive::minimal::Archive::init(context, cfg).await
+        commonware_storage::archive::immutable::Archive::init(context, cfg).await
     }
 }
 

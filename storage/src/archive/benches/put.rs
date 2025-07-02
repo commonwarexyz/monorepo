@@ -1,4 +1,6 @@
-use super::utils::{append_random, ArchiveFactory, FastArchiveFactory, MinimalArchiveFactory};
+use super::utils::{
+    append_random, ArchiveFactory, ImmutableArchiveFactory, PrunableArchiveFactory,
+};
 use commonware_runtime::benchmarks::{context, tokio};
 use commonware_storage::archive::Archive;
 use criterion::{criterion_group, Criterion};
@@ -42,14 +44,14 @@ fn bench_put_for_factory<F: ArchiveFactory>(
 fn bench_put(c: &mut Criterion) {
     let runner = tokio::Runner::default();
 
-    // Test fast implementation
+    // Test prunable implementation
     for compression in [None, Some(3)] {
-        bench_put_for_factory::<FastArchiveFactory>(c, &runner, compression, "fast");
+        bench_put_for_factory::<PrunableArchiveFactory>(c, &runner, compression, "prunable");
     }
 
-    // Test minimal implementation
+    // Test immutable implementation
     for compression in [None, Some(3)] {
-        bench_put_for_factory::<MinimalArchiveFactory>(c, &runner, compression, "minimal");
+        bench_put_for_factory::<ImmutableArchiveFactory>(c, &runner, compression, "immutable");
     }
 }
 

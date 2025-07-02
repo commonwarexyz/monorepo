@@ -178,12 +178,18 @@ pub struct Config<T: Translator, C> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
-    use crate::{archive::Archive as _, translator::FourCap};
+    use crate::{
+        archive::Archive as _,
+        translator::{FourCap, TwoCap},
+    };
     use commonware_codec::{varint::UInt, DecodeExt, EncodeSize};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
+    use rand::Rng;
 
     const DEFAULT_ITEMS_PER_SECTION: u64 = 65536;
     const DEFAULT_WRITE_BUFFER: usize = 1024;
@@ -319,5 +325,244 @@ mod tests {
                 .expect("Data not found");
             assert_eq!(retrieved, data2);
         });
+    }
+
+    #[test_traced]
+    fn test_archive_prune_keys() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Initialize the archive
+            let cfg = Config {
+                partition: "test_partition".into(),
+                translator: FourCap,
+                codec_config: (),
+                compression: None,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_section: 1,
+            };
+            let mut archive = Archive::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            // Insert multiple keys across different sections
+            let keys = vec![
+                (1u64, test_key("key1-blah"), 1),
+                (2u64, test_key("key2-blah"), 2),
+                (3u64, test_key("key3-blah"), 3),
+                (4u64, test_key("key3-bleh"), 3),
+                (5u64, test_key("key4-blah"), 4),
+            ];
+
+            for (index, key, data) in &keys {
+                archive
+                    .put(*index, key.clone(), *data)
+                    .await
+                    .expect("Failed to put data");
+            }
+
+            // Check metrics
+            let buffer = context.encode();
+            assert!(buffer.contains("items_tracked 5"));
+
+            // Prune sections less than 3
+            archive.prune(3).await.expect("Failed to prune");
+
+            // Ensure keys 1 and 2 are no longer present
+            for (index, key, data) in keys {
+                let retrieved = archive
+                    .get(Identifier::Key(&key))
+                    .await
+                    .expect("Failed to get data");
+                if index < 3 {
+                    assert!(retrieved.is_none());
+                } else {
+                    assert_eq!(retrieved.expect("Data not found"), data);
+                }
+            }
+
+            // Check metrics
+            let buffer = context.encode();
+            assert!(buffer.contains("items_tracked 3"));
+            assert!(buffer.contains("indices_pruned_total 2"));
+            assert!(buffer.contains("pruned_total 0")); // no lazy cleanup yet
+
+            // Try to prune older section
+            archive.prune(2).await.expect("Failed to prune");
+
+            // Try to prune current section again
+            archive.prune(3).await.expect("Failed to prune");
+
+            // Try to put older index
+            let result = archive.put(1, test_key("key1-blah"), 1).await;
+            assert!(matches!(result, Err(Error::AlreadyPrunedTo(3))));
+
+            // Trigger lazy removal of keys
+            archive
+                .put(6, test_key("key2-blfh"), 5)
+                .await
+                .expect("Failed to put data");
+
+            // Check metrics
+            let buffer = context.encode();
+            assert!(buffer.contains("items_tracked 4")); // lazily remove one, add one
+            assert!(buffer.contains("indices_pruned_total 2"));
+            assert!(buffer.contains("pruned_total 1"));
+        });
+    }
+
+    fn test_archive_keys_and_restart(num_keys: usize) -> String {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Initialize the archive
+            let items_per_section = 256;
+            let cfg = Config {
+                partition: "test_partition".into(),
+                translator: TwoCap,
+                codec_config: (),
+                compression: None,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_section,
+            };
+            let mut archive = Archive::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            // Insert multiple keys across different sections
+            let mut keys = BTreeMap::new();
+            while keys.len() < num_keys {
+                let index = keys.len() as u64;
+                let mut key = [0u8; 64];
+                context.fill(&mut key);
+                let key = FixedBytes::<64>::decode(key.as_ref()).unwrap();
+                let mut data = [0u8; 1024];
+                context.fill(&mut data);
+                let data = FixedBytes::<1024>::decode(data.as_ref()).unwrap();
+
+                archive
+                    .put(index, key.clone(), data.clone())
+                    .await
+                    .expect("Failed to put data");
+                keys.insert(key, (index, data));
+            }
+
+            // Ensure all keys can be retrieved
+            for (key, (index, data)) in &keys {
+                let retrieved = archive
+                    .get(Identifier::Index(*index))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+                let retrieved = archive
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+            }
+
+            // Check metrics
+            let buffer = context.encode();
+            let tracked = format!("items_tracked {num_keys:?}");
+            assert!(buffer.contains(&tracked));
+            assert!(buffer.contains("pruned_total 0"));
+
+            // Close the archive
+            archive.close().await.expect("Failed to close archive");
+
+            // Reinitialize the archive
+            let cfg = Config {
+                partition: "test_partition".into(),
+                translator: TwoCap,
+                codec_config: (),
+                compression: None,
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                items_per_section,
+            };
+            let mut archive =
+                Archive::<_, _, _, FixedBytes<1024>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize archive");
+
+            // Ensure all keys can be retrieved
+            for (key, (index, data)) in &keys {
+                let retrieved = archive
+                    .get(Identifier::Index(*index))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+                let retrieved = archive
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+            }
+
+            // Prune first half
+            let min = (keys.len() / 2) as u64;
+            archive.prune(min).await.expect("Failed to prune");
+
+            // Ensure all keys can be retrieved that haven't been pruned
+            let min = (min / items_per_section) * items_per_section;
+            let mut removed = 0;
+            for (key, (index, data)) in keys {
+                if index >= min {
+                    let retrieved = archive
+                        .get(Identifier::Key(&key))
+                        .await
+                        .expect("Failed to get data")
+                        .expect("Data not found");
+                    assert_eq!(retrieved, data);
+
+                    // Check range
+                    let (current_end, start_next) = archive.next_gap(index);
+                    assert_eq!(current_end.unwrap(), num_keys as u64 - 1);
+                    assert!(start_next.is_none());
+                } else {
+                    let retrieved = archive
+                        .get(Identifier::Key(&key))
+                        .await
+                        .expect("Failed to get data");
+                    assert!(retrieved.is_none());
+                    removed += 1;
+
+                    // Check range
+                    let (current_end, start_next) = archive.next_gap(index);
+                    assert!(current_end.is_none());
+                    assert_eq!(start_next.unwrap(), min);
+                }
+            }
+
+            // Check metrics
+            let buffer = context.encode();
+            let tracked = format!("items_tracked {:?}", num_keys - removed);
+            assert!(buffer.contains(&tracked));
+            let pruned = format!("indices_pruned_total {removed}");
+            assert!(buffer.contains(&pruned));
+            assert!(buffer.contains("pruned_total 0")); // have not lazily removed keys yet
+
+            context.auditor().state()
+        })
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_archive_many_keys_and_restart() {
+        test_archive_keys_and_restart(100_000); // 391 sections
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_determinism() {
+        let state1 = test_archive_keys_and_restart(5_000); // 20 sections
+        let state2 = test_archive_keys_and_restart(5_000);
+        assert_eq!(state1, state2);
     }
 }
