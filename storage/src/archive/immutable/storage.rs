@@ -280,60 +280,22 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     }
 
     async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
-        // Get keys
-        let keys = self.metadata.keys(None).collect::<Vec<_>>();
+        // Get table entry
+        let result = self.table.get(key).await?;
 
-        // For each key, check if in bloom filter
-        for section in keys {
-            let record = self.metadata.get(section).unwrap();
-            let section = section.to_u64();
-            if !record.bloom.contains(key.as_ref()) {
-                continue;
-            }
-
-            // Get cursor
-            let head = crc32fast::hash(key.as_ref()) % self.cursor_heads;
-            let mut cursor = record.cursors[head as usize];
-
-            // Try to find key in journal
-            while let Some(this) = cursor {
-                let entry = self.journal.get(section, this).await?.unwrap();
-                if entry.key == *key {
-                    return Ok(Some(entry.value));
-                }
-                cursor = entry.next;
-            }
-        }
-
-        // No key found
-        Ok(None)
+        // Get value
+        Ok(result)
     }
 
     async fn initialize_section(&mut self, section: u64) {
         // Create active bit vector
-        let active = BitVec::zeroes(self.items_per_section as usize);
-
-        // Create bloom filter
-        let bloom = BloomFilter::with_capacity(
-            NZUsize!(self.items_per_section as usize),
-            NZUsize!(FALSE_POSITIVE_NUMERATOR),
-            NZUsize!(FALSE_POSITIVE_DENOMINATOR),
-        )
-        .unwrap();
-
-        // Create cursors
-        let cursors = vec![None; self.cursor_heads as usize];
+        let indices = BitVec::zeroes(self.items_per_section as usize);
 
         // Store record
-        let record = MetadataRecord {
-            active,
-            bloom,
-            cursors,
-            size: 0,
-        };
-        let record_size = record.encode_size();
-        self.metadata.put(section.into(), record);
-        debug!(section, size = record_size, "initialized section");
+        let key = U64::new(INDICES_PREFIX, section);
+        self.metadata
+            .put(key, MetadataRecord::Indices(Some(indices)));
+        debug!(section, "initialized section");
     }
 }
 
