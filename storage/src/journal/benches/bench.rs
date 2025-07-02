@@ -1,10 +1,9 @@
-use std::sync::Arc;
-
 use commonware_runtime::{buffer::pool::BufferPool, tokio::Context, RwLock};
 use commonware_storage::journal::fixed::{Config as JConfig, Journal};
 use commonware_utils::array::FixedBytes;
 use criterion::criterion_main;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
+use std::sync::Arc;
 
 mod fixed_append;
 mod fixed_read_random;
@@ -18,24 +17,28 @@ criterion_main!(
     fixed_replay::benches,
 );
 
+/// Use a "prod sized" page size to test the performance of the journal.
+const PAGE_SIZE: usize = 16384;
+
 /// Open and return a temp journal with the given config parameters and items of size ITEM_SIZE.
 async fn get_journal<const ITEM_SIZE: usize>(
     context: Context,
     partition_name: &str,
     items_per_blob: u64,
-) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
+) -> Journal<Context, FixedBytes<ITEM_SIZE>, PAGE_SIZE> {
     // Initialize the journal at the given partition.
     let journal_config = JConfig {
         partition: partition_name.to_string(),
         items_per_blob,
-        buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
+        write_buffer: 1024,
+        buffer_pool: Arc::new(RwLock::new(BufferPool::<PAGE_SIZE>::new())),
     };
     Journal::init(context, journal_config).await.unwrap()
 }
 
 /// Append `items_to_write` random items to the given journal, syncing the changes before returning.
 async fn append_random_data<const ITEM_SIZE: usize>(
-    journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>,
+    journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>, PAGE_SIZE>,
     items_to_write: u64,
 ) {
     // Append `items_to_write` random items to the journal.

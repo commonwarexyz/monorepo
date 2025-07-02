@@ -1,4 +1,4 @@
-use super::{append_random_data, get_journal};
+use super::{append_random_data, get_journal, PAGE_SIZE};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context, Runner},
@@ -20,7 +20,7 @@ const ITEMS_PER_BLOB: u64 = 100_000;
 const ITEM_SIZE: usize = 32;
 
 /// Replay all items in the given `journal`.
-async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: usize) {
+async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>, PAGE_SIZE>, buffer: usize) {
     let stream = journal
         .replay(buffer, 0)
         .await

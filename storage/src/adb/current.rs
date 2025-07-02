@@ -31,7 +31,7 @@ use tracing::{debug, warn};
 
 /// Configuration for a [Current] authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator> {
+pub struct Config<T: Translator, const PAGE_SIZE: usize> {
     /// The name of the [RStorage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
@@ -63,7 +63,7 @@ pub struct Config<T: Translator> {
     pub pool: Option<ThreadPool>,
 
     /// The buffer pool to use for caching data.
-    pub buffer_pool: Arc<RwLock<BufferPool>>,
+    pub buffer_pool: Arc<RwLock<BufferPool<PAGE_SIZE>>>,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
@@ -79,10 +79,11 @@ pub struct Current<
     H: CHasher,
     T: Translator,
     const N: usize,
+    const PAGE_SIZE: usize,
 > {
     /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    pub any: Any<E, K, V, H, T>,
+    pub any: Any<E, K, V, H, T, PAGE_SIZE>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
@@ -116,7 +117,8 @@ impl<
         H: CHasher,
         T: Translator,
         const N: usize,
-    > Current<E, K, V, H, T, N>
+        const PAGE_SIZE: usize,
+    > Current<E, K, V, H, T, N, PAGE_SIZE>
 {
     // A compile-time assertion that the chunk size is some multiple of digest size. A multiple of 1 is optimal with
     // respect to proof size, but a higher multiple allows for a smaller (RAM resident) merkle tree over the structure.
@@ -132,7 +134,7 @@ impl<
 
     /// Initializes a [Current] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
-    pub async fn init(context: E, config: Config<T>) -> Result<Self, Error> {
+    pub async fn init(context: E, config: Config<T, PAGE_SIZE>) -> Result<Self, Error> {
         // Initialize the MMR journal and metadata.
         let cfg = AConfig {
             mmr_journal_partition: config.mmr_journal_partition,
@@ -159,7 +161,8 @@ impl<
         // Initialize the db's mmr/log.
         let mut hasher = Standard::<H>::new();
         let (mut mmr, log) =
-            Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), cfg, &mut hasher).await?;
+            Any::<_, _, _, _, T, PAGE_SIZE>::init_mmr_and_log(context.clone(), cfg, &mut hasher)
+                .await?;
 
         // Ensure consistency between the bitmap and the db's MMR.
         let mmr_pruned_pos = mmr.pruned_to_pos();
@@ -500,7 +503,7 @@ impl<
 
         let digests = ops
             .iter()
-            .map(|op| Any::<E, _, _, _, T>::op_digest(hasher, op))
+            .map(|op| Any::<E, _, _, _, T, PAGE_SIZE>::op_digest(hasher, op))
             .collect::<Vec<_>>();
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
@@ -612,7 +615,7 @@ impl<
         let pos = leaf_num_to_pos(info.loc);
         let num = info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let mut verifier = GraftingVerifier::new(Self::grafting_height(), num, vec![&info.chunk]);
-        let digest = Any::<E, _, _, H, T>::op_digest(
+        let digest = Any::<E, _, _, H, T, PAGE_SIZE>::op_digest(
             verifier.standard(),
             &Operation::Update(info.key.clone(), info.value.clone()),
         );
@@ -741,7 +744,9 @@ pub mod test {
     use commonware_runtime::{deterministic, Runner as _};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
 
-    fn current_db_config(partition_prefix: &str) -> Config<TwoCap> {
+    const TESTING_PAGE_SIZE: usize = 88;
+
+    fn current_db_config(partition_prefix: &str) -> Config<TwoCap, TESTING_PAGE_SIZE> {
         Config {
             mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
             mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
@@ -753,7 +758,7 @@ pub mod test {
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: TwoCap,
             pool: None,
-            buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
+            buffer_pool: Arc::new(RwLock::new(BufferPool::<TESTING_PAGE_SIZE>::new())),
         }
     }
 
@@ -761,8 +766,8 @@ pub mod test {
     async fn open_db<E: RStorage + Clock + Metrics>(
         context: E,
         partition_prefix: &str,
-    ) -> Current<E, Digest, Digest, Sha256, TwoCap, 32> {
-        Current::<E, Digest, Digest, Sha256, TwoCap, 32>::init(
+    ) -> Current<E, Digest, Digest, Sha256, TwoCap, 32, TESTING_PAGE_SIZE> {
+        Current::<E, Digest, Digest, Sha256, TwoCap, 32, TESTING_PAGE_SIZE>::init(
             context,
             current_db_config(partition_prefix),
         )
@@ -857,27 +862,36 @@ pub mod test {
             };
             let root = db.root(&mut hasher).await.unwrap();
             // Proof should be verifiable against current root.
-            assert!(
-                Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                    hasher.inner(),
-                    &proof.0,
-                    &info,
-                    &root,
-                ),
-            );
+            assert!(Current::<
+                deterministic::Context,
+                _,
+                _,
+                _,
+                TwoCap,
+                32,
+                TESTING_PAGE_SIZE,
+            >::verify_key_value_proof(
+                hasher.inner(), &proof.0, &info, &root,
+            ),);
 
             let v2 = Sha256::fill(0xA2);
             // Proof should not verify against a different value.
             let mut bad_info = info.clone();
             bad_info.value = v2;
-            assert!(
-                !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                    hasher.inner(),
-                    &proof.0,
-                    &bad_info,
-                    &root,
-                ),
-            );
+            assert!(!Current::<
+                deterministic::Context,
+                _,
+                _,
+                _,
+                TwoCap,
+                32,
+                TESTING_PAGE_SIZE,
+            >::verify_key_value_proof(
+                hasher.inner(),
+                &proof.0,
+                &bad_info,
+                &root,
+            ),);
 
             // update the key to invalidate its previous update
             db.update(k, v2).await.unwrap();
@@ -885,14 +899,17 @@ pub mod test {
 
             // Proof should not be verifiable against the new root.
             let root = db.root(&mut hasher).await.unwrap();
-            assert!(
-                !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                    hasher.inner(),
-                    &proof.0,
-                    &info,
-                    &root,
-                ),
-            );
+            assert!(!Current::<
+                deterministic::Context,
+                _,
+                _,
+                _,
+                TwoCap,
+                32,
+                TESTING_PAGE_SIZE,
+            >::verify_key_value_proof(
+                hasher.inner(), &proof.0, &info, &root,
+            ),);
 
             // Create a proof of the now-inactive operation.
             let proof_inactive = db
@@ -907,14 +924,20 @@ pub mod test {
                 loc: proof_inactive.2,
                 chunk: proof_inactive.3,
             };
-            assert!(
-                !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                    hasher.inner(),
-                    &proof_inactive.0,
-                    &proof_inactive_info,
-                    &root,
-                ),
-            );
+            assert!(!Current::<
+                deterministic::Context,
+                _,
+                _,
+                _,
+                TwoCap,
+                32,
+                TESTING_PAGE_SIZE,
+            >::verify_key_value_proof(
+                hasher.inner(),
+                &proof_inactive.0,
+                &proof_inactive_info,
+                &root,
+            ),);
 
             // Attempt #1 to "fool" the verifier:  change the location to that of an active
             // operation. This should not fool the verifier if we're properly validating the
@@ -928,14 +951,20 @@ pub mod test {
             );
             let mut info_with_modified_loc = info.clone();
             info_with_modified_loc.loc = active_loc;
-            assert!(
-                !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                    hasher.inner(),
-                    &proof_inactive.0,
-                    &proof_inactive_info,
-                    &root,
-                ),
-            );
+            assert!(!Current::<
+                deterministic::Context,
+                _,
+                _,
+                _,
+                TwoCap,
+                32,
+                TESTING_PAGE_SIZE,
+            >::verify_key_value_proof(
+                hasher.inner(),
+                &proof_inactive.0,
+                &proof_inactive_info,
+                &root,
+            ),);
 
             // Attempt #2 to "fool" the verifier: Modify the chunk in the proof info to make it look
             // like the operation is active by flipping its corresponding bit to 1. This should not
@@ -949,14 +978,20 @@ pub mod test {
 
             let mut info_with_modified_chunk = info.clone();
             info_with_modified_chunk.chunk = modified_chunk;
-            assert!(
-                !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                    hasher.inner(),
-                    &proof_inactive.0,
-                    &info_with_modified_chunk,
-                    &root,
-                ),
-            );
+            assert!(!Current::<
+                deterministic::Context,
+                _,
+                _,
+                _,
+                TwoCap,
+                32,
+                TESTING_PAGE_SIZE,
+            >::verify_key_value_proof(
+                hasher.inner(),
+                &proof_inactive.0,
+                &info_with_modified_chunk,
+                &root,
+            ),);
 
             db.destroy().await.unwrap();
         });
@@ -968,7 +1003,7 @@ pub mod test {
         num_elements: u64,
         commit_changes: bool,
         rng_seed: u64,
-        db: &mut Current<E, Digest, Digest, Sha256, TwoCap, 32>,
+        db: &mut Current<E, Digest, Digest, Sha256, TwoCap, 32, TESTING_PAGE_SIZE>,
     ) -> Result<(), Error> {
         // Log the seed with high visibility to make failures reproducible.
         warn!("rng_seed={}", rng_seed);
@@ -1025,7 +1060,7 @@ pub mod test {
                 let (proof, ops, chunks) =
                     db.range_proof(hasher.inner(), i, max_ops).await.unwrap();
                 assert!(
-                    Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_range_proof(
+                    Current::<deterministic::Context, _, _, _, TwoCap, 32, TESTING_PAGE_SIZE>::verify_range_proof(
                         &mut hasher,
                         &proof,
                         i,
@@ -1069,48 +1104,63 @@ pub mod test {
                 let (proof, info) = db.key_value_proof(hasher.inner(), *key).await.unwrap();
                 assert_eq!(info.value, *op.to_value().unwrap());
                 // Proof should validate against the current value and correct root.
-                assert!(
-                    Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                        hasher.inner(),
-                        &proof,
-                        &info,
-                        &root
-                    )
-                );
+                assert!(Current::<
+                    deterministic::Context,
+                    _,
+                    _,
+                    _,
+                    TwoCap,
+                    32,
+                    TESTING_PAGE_SIZE,
+                >::verify_key_value_proof(
+                    hasher.inner(), &proof, &info, &root
+                ));
                 // Proof should fail against the wrong value.
                 let wrong_val = Sha256::fill(0xFF);
                 let mut bad_info = info.clone();
                 bad_info.value = wrong_val;
-                assert!(
-                    !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                        hasher.inner(),
-                        &proof,
-                        &bad_info,
-                        &root
-                    ),
-                );
+                assert!(!Current::<
+                    deterministic::Context,
+                    _,
+                    _,
+                    _,
+                    TwoCap,
+                    32,
+                    TESTING_PAGE_SIZE,
+                >::verify_key_value_proof(
+                    hasher.inner(), &proof, &bad_info, &root
+                ),);
                 // Proof should fail against the wrong key.
                 let wrong_key = Sha256::fill(0xEE);
                 let mut bad_info = info.clone();
                 bad_info.key = wrong_key;
-                assert!(
-                    !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                        hasher.inner(),
-                        &proof,
-                        &bad_info,
-                        &root
-                    ),
-                );
+                assert!(!Current::<
+                    deterministic::Context,
+                    _,
+                    _,
+                    _,
+                    TwoCap,
+                    32,
+                    TESTING_PAGE_SIZE,
+                >::verify_key_value_proof(
+                    hasher.inner(), &proof, &bad_info, &root
+                ),);
                 // Proof should fail against the wrong root.
                 let wrong_root = Sha256::fill(0xDD);
-                assert!(
-                    !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
-                        hasher.inner(),
-                        &proof,
-                        &info,
-                        &wrong_root,
-                    ),
-                );
+                assert!(!Current::<
+                    deterministic::Context,
+                    _,
+                    _,
+                    _,
+                    TwoCap,
+                    32,
+                    TESTING_PAGE_SIZE,
+                >::verify_key_value_proof(
+                    hasher.inner(),
+                    &proof,
+                    &info,
+                    &wrong_root,
+                ),);
             }
 
             db.destroy().await.unwrap();
@@ -1175,7 +1225,7 @@ pub mod test {
                 let (proof, info) = db.key_value_proof(hasher.inner(), k).await.unwrap();
                 assert_eq!(info.value, v);
                 assert!(
-                    Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
+                    Current::<deterministic::Context, _, _, _, TwoCap, 32, TESTING_PAGE_SIZE>::verify_key_value_proof(
                         hasher.inner(),
                         &proof,
                         &info,
@@ -1185,7 +1235,7 @@ pub mod test {
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
-                    !Current::<deterministic::Context, _, _, _, TwoCap, 32>::verify_key_value_proof(
+                    !Current::<deterministic::Context, _, _, _, TwoCap, 32, TESTING_PAGE_SIZE>::verify_key_value_proof(
                         hasher.inner(),
                         &proof,
                         &old_info,

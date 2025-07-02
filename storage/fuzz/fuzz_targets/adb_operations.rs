@@ -37,12 +37,14 @@ struct FuzzInput {
     operations: Vec<AdbOperation>,
 }
 
+const TESTING_PAGE_SIZE: usize = 555;
+
 fn fuzz(data: FuzzInput) {
     let mut hasher = Standard::<Sha256>::new();
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = Config::<EightCap> {
+        let cfg = Config::<EightCap, TESTING_PAGE_SIZE> {
             mmr_journal_partition: "test_adb_mmr_journal".into(),
             mmr_items_per_blob: 500000,
             mmr_write_buffer: 1024,
@@ -55,7 +57,7 @@ fn fuzz(data: FuzzInput) {
             buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
         };
 
-        let mut adb = Any::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
+        let mut adb = Any::<_, Key, Value, Sha256, EightCap, TESTING_PAGE_SIZE>::init(context.clone(), cfg.clone())
             .await
             .expect("init adb");
 
@@ -169,7 +171,7 @@ fn fuzz(data: FuzzInput) {
                             .expect("proof should not fail");
 
                         assert!(
-                            Any::<deterministic::Context, _, _, _, EightCap>::verify_proof(
+                            Any::<deterministic::Context, _, _, _, EightCap, TESTING_PAGE_SIZE>::verify_proof(
                                 &mut hasher,
                                 &proof,
                                 adjusted_start,

@@ -28,7 +28,7 @@ use tracing::{debug, error, warn};
 
 /// Configuration for a journal-backed MMR.
 #[derive(Clone)]
-pub struct Config {
+pub struct Config<const PAGE_SIZE: usize> {
     /// The name of the `commonware-runtime::Storage` storage partition used for the journal storing
     /// the MMR nodes.
     pub journal_partition: String,
@@ -48,16 +48,16 @@ pub struct Config {
     pub pool: Option<ThreadPool>,
 
     /// The buffer pool to use for caching data.
-    pub buffer_pool: Arc<RwLock<BufferPool>>,
+    pub buffer_pool: Arc<RwLock<BufferPool<PAGE_SIZE>>>,
 }
 
 /// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher> {
+pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher, const PAGE_SIZE: usize> {
     /// A memory resident MMR used to build the MMR structure and cache updates.
     mem_mmr: MemMmr<H>,
 
     /// Stores all unpruned MMR nodes.
-    journal: Journal<E, H::Digest>,
+    journal: Journal<E, H::Digest, PAGE_SIZE>,
 
     /// The size of the journal irrespective of any pruned nodes or any un-synced nodes currently
     /// cached in the memory resident MMR.
@@ -73,7 +73,9 @@ pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher> {
     pruned_to_pos: u64,
 }
 
-impl<E: RStorage + Clock + Metrics, H: CHasher> Builder<H> for Mmr<E, H> {
+impl<E: RStorage + Clock + Metrics, H: CHasher, const PAGE_SIZE: usize> Builder<H>
+    for Mmr<E, H, PAGE_SIZE>
+{
     async fn add(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Result<u64, Error> {
         self.add(hasher, element).await
     }
@@ -89,17 +91,24 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the key storing the prune_to_pos position in the metadata.
 const PRUNE_TO_POS_PREFIX: u8 = 1;
 
-impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
+impl<E: RStorage + Clock + Metrics, H: CHasher, const PAGE_SIZE: usize> Mmr<E, H, PAGE_SIZE> {
     /// Initialize a new `Mmr` instance.
-    pub async fn init(context: E, hasher: &mut impl Hasher<H>, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(
+        context: E,
+        hasher: &mut impl Hasher<H>,
+        cfg: Config<PAGE_SIZE>,
+    ) -> Result<Self, Error> {
         let journal_cfg = JConfig {
             partition: cfg.journal_partition,
             items_per_blob: cfg.items_per_blob,
             buffer_pool: cfg.buffer_pool,
             write_buffer: cfg.write_buffer,
         };
-        let mut journal =
-            Journal::<E, H::Digest>::init(context.with_label("mmr_journal"), journal_cfg).await?;
+        let mut journal = Journal::<E, H::Digest, PAGE_SIZE>::init(
+            context.with_label("mmr_journal"),
+            journal_cfg,
+        )
+        .await?;
         let mut journal_size = journal.size().await?;
 
         let metadata_cfg = MConfig {
@@ -175,7 +184,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         let mut pinned_nodes = Vec::new();
         for pos in Proof::<H::Digest>::nodes_to_pin(journal_size) {
             let digest =
-                Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+                Mmr::<E, H, PAGE_SIZE>::get_from_metadata_or_journal(&metadata, &journal, pos)
+                    .await?;
             pinned_nodes.push(digest);
         }
         let mut mem_mmr = MemMmr::init(MemConfig {
@@ -190,7 +200,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         let mut pinned_nodes = HashMap::new();
         for pos in Proof::<H::Digest>::nodes_to_pin(metadata_prune_pos) {
             let digest =
-                Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+                Mmr::<E, H, PAGE_SIZE>::get_from_metadata_or_journal(&metadata, &journal, pos)
+                    .await?;
             pinned_nodes.insert(pos, digest);
         }
         mem_mmr.add_pinned_nodes(pinned_nodes);
@@ -245,7 +256,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     /// error otherwise.
     async fn get_from_metadata_or_journal(
         metadata: &Metadata<E, U64, Vec<u8>>,
-        journal: &Journal<E, H::Digest>,
+        journal: &Journal<E, H::Digest, PAGE_SIZE>,
         pos: u64,
     ) -> Result<H::Digest, Error> {
         if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, pos)) {
@@ -340,9 +351,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Reset the mem_mmr to one of the new_size in the "prune_all" state.
         let mut pinned_nodes = Vec::new();
         for pos in Proof::<H::Digest>::nodes_to_pin(new_size) {
-            let digest =
-                Mmr::<E, H>::get_from_metadata_or_journal(&self.metadata, &self.journal, pos)
-                    .await?;
+            let digest = Mmr::<E, H, PAGE_SIZE>::get_from_metadata_or_journal(
+                &self.metadata,
+                &self.journal,
+                pos,
+            )
+            .await?;
             pinned_nodes.push(digest);
         }
         self.mem_mmr = MemMmr::init(MemConfig {
@@ -442,7 +456,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         end_element_pos: u64,
     ) -> Result<Proof<H::Digest>, Error> {
         assert!(!self.mem_mmr.is_dirty());
-        Proof::<H::Digest>::range_proof::<Mmr<E, H>>(self, start_element_pos, end_element_pos).await
+        Proof::<H::Digest>::range_proof::<Mmr<E, H, PAGE_SIZE>>(
+            self,
+            start_element_pos,
+            end_element_pos,
+        )
+        .await
     }
 
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
@@ -577,14 +596,16 @@ mod tests {
         hash(&v.to_be_bytes())
     }
 
-    fn test_config() -> Config {
+    const TESTING_PAGE_SIZE: usize = 111;
+
+    fn test_config() -> Config<TESTING_PAGE_SIZE> {
         Config {
             journal_partition: "journal_partition".into(),
             metadata_partition: "metadata_partition".into(),
             items_per_blob: 7,
             write_buffer: 1024,
             pool: None,
-            buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
+            buffer_pool: Arc::new(RwLock::new(BufferPool::<TESTING_PAGE_SIZE>::new())),
         }
     }
 

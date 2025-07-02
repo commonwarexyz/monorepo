@@ -1,4 +1,4 @@
-use super::{append_random_data, get_journal};
+use super::{append_random_data, get_journal, PAGE_SIZE};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context, Runner},
@@ -25,7 +25,10 @@ const ITEM_SIZE: usize = 32;
 
 /// Read `items_to_read` random items from the given `journal`, awaiting each
 /// result before continuing.
-async fn bench_run_serial(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: usize) {
+async fn bench_run_serial(
+    journal: &Journal<Context, FixedBytes<ITEM_SIZE>, PAGE_SIZE>,
+    items_to_read: usize,
+) {
     let mut rng = StdRng::seed_from_u64(0);
     for _ in 0..items_to_read {
         let pos = rng.gen_range(0..ITEMS_TO_WRITE);
@@ -35,7 +38,7 @@ async fn bench_run_serial(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, ite
 
 /// Concurrently read (via try_join_all) `items_to_read` random items from the given `journal`.
 async fn bench_run_concurrent(
-    journal: &Journal<Context, FixedBytes<ITEM_SIZE>>,
+    journal: &Journal<Context, FixedBytes<ITEM_SIZE>, PAGE_SIZE>,
     items_to_read: usize,
 ) {
     let mut rng = StdRng::seed_from_u64(0);

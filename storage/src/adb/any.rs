@@ -42,7 +42,7 @@ const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator> {
+pub struct Config<T: Translator, const PAGE_SIZE: usize> {
     /// The name of the [RStorage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
@@ -70,19 +70,26 @@ pub struct Config<T: Translator> {
     /// An optional thread pool to use for parallelizing batch operations.
     pub pool: Option<ThreadPool>,
 
-    pub buffer_pool: Arc<RwLock<BufferPool>>,
+    pub buffer_pool: Arc<RwLock<BufferPool<PAGE_SIZE>>>,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator> {
+pub struct Any<
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Array,
+    H: CHasher,
+    T: Translator,
+    const PAGE_SIZE: usize,
+> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
     ///
     /// The number of leaves in this MMR always equals the number of operations in the unpruned
     /// `log`.
-    pub(super) ops: Mmr<E, H>,
+    pub(super) ops: Mmr<E, H, PAGE_SIZE>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position of
     /// each operation in the log is called its _location_, which is a stable identifier. Pruning is
@@ -93,7 +100,7 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T:
     ///
     /// An operation's location is always equal to the number of the MMR leaf storing the digest of
     /// the operation.
-    pub(super) log: Journal<E, Operation<K, V>>,
+    pub(super) log: Journal<E, Operation<K, V>, PAGE_SIZE>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
@@ -124,12 +131,18 @@ pub enum UpdateResult {
     Updated(u64, u64),
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator>
-    Any<E, K, V, H, T>
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Array,
+        H: CHasher,
+        T: Translator,
+        const PAGE_SIZE: usize,
+    > Any<E, K, V, H, T, PAGE_SIZE>
 {
     /// Returns any `Any` adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config<T, PAGE_SIZE>) -> Result<Self, Error> {
         let mut snapshot: Index<T, u64> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
         let mut hasher = Standard::<H>::new();
@@ -177,9 +190,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// db will be as of the last committed operation.
     pub(super) async fn init_mmr_and_log(
         context: E,
-        cfg: Config<T>,
+        cfg: Config<T, PAGE_SIZE>,
         hasher: &mut Standard<H>,
-    ) -> Result<(Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
+    ) -> Result<(Mmr<E, H, PAGE_SIZE>, Journal<E, Operation<K, V>, PAGE_SIZE>), Error> {
         let mut mmr = Mmr::init(
             context.with_label("mmr"),
             hasher,
@@ -258,7 +271,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// the bitmap.
     pub(super) async fn build_snapshot_from_log<const N: usize>(
         start_leaf_num: u64,
-        log: &Journal<E, Operation<K, V>>,
+        log: &Journal<E, Operation<K, V>, PAGE_SIZE>,
         snapshot: &mut Index<T, u64>,
         mut bitmap: Option<&mut Bitmap<H, N>>,
     ) -> Result<u64, Error> {
@@ -267,6 +280,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             assert_eq!(start_leaf_num, bitmap.bit_count());
         }
 
+        println!("start_leaf_num: {start_leaf_num}");
         let stream = log
             .replay(SNAPSHOT_READ_BUFFER_SIZE, start_leaf_num)
             .await?;
@@ -280,7 +294,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                     match op {
                         Operation::Deleted(key) => {
                             let result =
-                                Any::<E, K, V, H, T>::delete_key(snapshot, log, &key, i).await?;
+                                Any::<E, K, V, H, T, PAGE_SIZE>::delete_key(snapshot, log, &key, i)
+                                    .await?;
                             if let Some(ref mut bitmap) = bitmap {
                                 // Mark previous location (if any) of the deleted key as inactive.
                                 if let Some(old_loc) = result {
@@ -289,9 +304,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                             }
                         }
                         Operation::Update(key, _) => {
-                            let result =
-                                Any::<E, K, V, H, T>::update_loc(snapshot, log, key, None, i)
-                                    .await?;
+                            let result = Any::<E, K, V, H, T, PAGE_SIZE>::update_loc(
+                                snapshot, log, key, None, i,
+                            )
+                            .await?;
                             if let Some(ref mut bitmap) = bitmap {
                                 match result {
                                     UpdateResult::NoOp => unreachable!("unexpected no-op update"),
@@ -325,7 +341,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// UpdateResult::NoOp is returned.
     async fn update_loc(
         snapshot: &mut Index<T, u64>,
-        log: &Journal<E, Operation<K, V>>,
+        log: &Journal<E, Operation<K, V>, PAGE_SIZE>,
         key: K,
         value: Option<&V>,
         new_loc: u64,
@@ -367,7 +383,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// Panics if the location does not reference an update operation. This should never happen
     /// unless the snapshot is buggy, or this method is being used to look up an operation
     /// independent of the snapshot contents.
-    async fn get_update_op(log: &Journal<E, Operation<K, V>>, loc: u64) -> Result<(K, V), Error> {
+    async fn get_update_op(
+        log: &Journal<E, Operation<K, V>, PAGE_SIZE>,
+        loc: u64,
+    ) -> Result<(K, V), Error> {
         let Operation::Update(k, v) = log.read(loc).await? else {
             panic!("location does not reference update operation. loc={loc}");
         };
@@ -416,7 +435,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
         let new_loc = self.op_count();
-        let res = Any::<_, _, _, H, _>::update_loc(
+        let res = Any::<_, _, _, H, _, PAGE_SIZE>::update_loc(
             &mut self.snapshot,
             &self.log,
             key.clone(),
@@ -456,7 +475,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// associated with it.
     async fn delete_key(
         snapshot: &mut Index<T, u64>,
-        log: &Journal<E, Operation<K, V>>,
+        log: &Journal<E, Operation<K, V>, PAGE_SIZE>,
         key: &K,
         delete_loc: u64,
     ) -> Result<Option<u64>, Error> {
@@ -554,7 +573,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
         let digests = ops
             .iter()
-            .map(|op| Any::<E, _, _, _, T>::op_digest(hasher, op))
+            .map(|op| Any::<E, _, _, _, T, PAGE_SIZE>::op_digest(hasher, op))
             .collect::<Vec<_>>();
 
         proof.verify_range_inclusion(hasher, &digests, start_pos, root_digest)
@@ -746,7 +765,9 @@ mod test {
 
     const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
 
-    fn any_db_config<T: Translator>(suffix: &str, translator: T) -> Config<T> {
+    const TESTING_PAGE_SIZE: usize = 77;
+
+    fn any_db_config<T: Translator>(suffix: &str, translator: T) -> Config<T, TESTING_PAGE_SIZE> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -757,15 +778,15 @@ mod test {
             log_write_buffer: 1024,
             translator,
             pool: None,
-            buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
+            buffer_pool: Arc::new(RwLock::new(BufferPool::<TESTING_PAGE_SIZE>::new())),
         }
     }
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db<E: RStorage + Clock + Metrics>(
         context: E,
-    ) -> Any<E, Digest, Digest, Sha256, EightCap> {
-        Any::<E, Digest, Digest, Sha256, EightCap>::init(
+    ) -> Any<E, Digest, Digest, Sha256, EightCap, TESTING_PAGE_SIZE> {
+        Any::<E, Digest, Digest, Sha256, EightCap, TESTING_PAGE_SIZE>::init(
             context,
             any_db_config("partition", EightCap),
         )
@@ -1048,15 +1069,16 @@ mod test {
 
             for i in start_loc..end_loc {
                 let (proof, log) = db.proof(i, max_ops).await.unwrap();
-                assert!(
-                    Any::<deterministic::Context, _, _, _, EightCap>::verify_proof(
-                        &mut hasher,
-                        &proof,
-                        i,
-                        &log,
-                        &root
-                    ),
-                );
+                assert!(Any::<
+                    deterministic::Context,
+                    _,
+                    _,
+                    _,
+                    EightCap,
+                    TESTING_PAGE_SIZE,
+                >::verify_proof(
+                    &mut hasher, &proof, i, &log, &root
+                ),);
             }
 
             db.destroy().await.unwrap();
@@ -1112,7 +1134,7 @@ mod test {
             db.destroy().await.unwrap();
 
             // Recreate the database without any failures and make sure the roots match.
-            let mut new_db = Any::<_, Digest, Digest, Sha256, EightCap>::init(
+            let mut new_db = Any::<_, Digest, Digest, Sha256, EightCap, TESTING_PAGE_SIZE>::init(
                 context,
                 any_db_config("new_partition", EightCap),
             )
@@ -1265,28 +1287,28 @@ mod test {
 
             // Initialize the db's mmr/log.
             let cfg = any_db_config("partition", TwoCap);
-            let (mmr, log) = Any::<_, Digest, Digest, _, TwoCap>::init_mmr_and_log(
-                context.clone(),
-                cfg,
-                &mut hasher,
-            )
-            .await
-            .unwrap();
+            let (mmr, log) =
+                Any::<_, Digest, Digest, _, TwoCap, TESTING_PAGE_SIZE>::init_mmr_and_log(
+                    context.clone(),
+                    cfg,
+                    &mut hasher,
+                )
+                .await
+                .unwrap();
             let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
 
             // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
             let mut snapshot: Index<TwoCap, u64> =
                 Index::init(context.with_label("snapshot"), TwoCap);
-            let inactivity_floor_loc = Any::<_, _, _, Sha256, TwoCap>::build_snapshot_from_log::<
-                SHA256_SIZE,
-            >(
-                start_leaf_num, &log, &mut snapshot, Some(&mut bitmap)
-            )
-            .await
-            .unwrap();
+            let inactivity_floor_loc =
+                Any::<_, _, _, Sha256, TwoCap, TESTING_PAGE_SIZE>::build_snapshot_from_log::<
+                    SHA256_SIZE,
+                >(start_leaf_num, &log, &mut snapshot, Some(&mut bitmap))
+                .await
+                .unwrap();
 
             // Check the recovered state is correct.
-            let db = Any::<_, _, _, _, TwoCap> {
+            let db = Any::<_, _, _, _, TwoCap, TESTING_PAGE_SIZE> {
                 ops: mmr,
                 log,
                 snapshot,
