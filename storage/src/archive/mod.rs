@@ -241,12 +241,18 @@ mod tests {
         }
 
         fn check_metrics(buffer: &str, expected: &MetricsExpectation) {
-            // Minimal archive may have different or no metrics
-            // For now, we'll just check basic assertions if they exist
-            if expected.items_tracked.is_some() && buffer.contains("items_tracked") {
-                // Basic validation that metric exists
-                assert!(buffer.contains("items_tracked"));
+            // Minimal archive has different metrics than fast archive
+            if let Some(_) = expected.gets {
+                // Minimal archive may count gets differently (e.g., has() may not count as a get)
+                assert!(buffer.contains("gets_total"));
             }
+            if let Some(_) = expected.has {
+                assert!(buffer.contains("has_total"));
+            }
+            if let Some(syncs) = expected.syncs {
+                assert!(buffer.contains(&format!("syncs_total {syncs}")));
+            }
+            // Minimal doesn't track items_tracked, unnecessary_reads, indices_pruned, or pruned
         }
     }
 
@@ -760,12 +766,15 @@ mod tests {
 
             // If it succeeds, the data might not be readable
             if let Ok(archive) = result {
-                let retrieved = archive
-                    .get(Identifier::Index(index))
-                    .await
-                    .expect("Failed to get data");
-                // Either the archive fails to initialize or data is not readable
-                assert!(retrieved.is_none());
+                let retrieved = archive.get(Identifier::Index(index)).await;
+                // Either the archive fails to initialize, data is not readable, or we get a codec error
+                match retrieved {
+                    Ok(Some(_)) => {
+                        panic!("Should not be able to read compressed data without compression")
+                    }
+                    Ok(None) => {} // Data not found is acceptable
+                    Err(_) => {}   // Codec error when trying to read compressed data is acceptable
+                }
             }
             // Otherwise it should have failed initialization
         });
@@ -885,10 +894,9 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            let tracked = format!("items_tracked {num_keys:?}");
-            // For minimal archive, this metric might not exist
+            // For minimal archive, items_tracked metric might not exist
             if buffer.contains("items_tracked") {
-                assert!(buffer.contains(&tracked));
+                assert!(buffer.contains(&format!("items_tracked {num_keys:?}")));
             }
 
             // Close the archive
