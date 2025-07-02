@@ -51,7 +51,7 @@ impl A for Application {
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let (sender, receiver) = oneshot::channel();
 
-        let payload = format!("data for index {}", context);
+        let payload = format!("data for index {context}");
         let mut hasher = Sha256::default();
         hasher.update(payload.as_bytes());
 
@@ -74,7 +74,7 @@ impl A for Application {
                     hasher.finalize()
                 }
                 ByzantineStrategy::ConflictingContent => {
-                    let conflicting_payload = format!("conflicting_data for index {}", context);
+                    let conflicting_payload = format!("conflicting_data for index {context}");
                     let mut hasher = Sha256::default();
                     hasher.update(conflicting_payload.as_bytes());
                     hasher.finalize()
@@ -97,7 +97,7 @@ impl A for Application {
         let (sender, receiver) = oneshot::channel();
 
         // Compute the expected valid digest
-        let expected_payload = format!("data for index {}", context);
+        let expected_payload = format!("data for index {context}");
         let mut hasher = Sha256::default();
         hasher.update(expected_payload.as_bytes());
         let expected_digest = hasher.finalize();

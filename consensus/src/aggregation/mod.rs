@@ -222,7 +222,7 @@ mod tests {
                     rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_timeout),
                     epoch_bounds: (1, 1),
                     window: std::num::NonZeroU64::new(10).unwrap(),
-                    partition: format!("aggregation/{}/", validator),
+                    partition: format!("aggregation/{validator}/"),
                     journal_write_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
                     journal_replay_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
                     journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
@@ -431,7 +431,7 @@ mod tests {
                                 epoch_bounds: (1, 1),
                                 window: std::num::NonZeroU64::new(10).unwrap(),
                                 // Use validator-specific partition for journal recovery
-                                partition: format!("unclean_shutdown_test/{}/", validator),
+                                partition: format!("unclean_shutdown_test/{validator}/"),
                                 journal_write_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
                                 journal_replay_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
                                 journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
@@ -540,8 +540,7 @@ mod tests {
         let total_shutdowns = shutdown_counts.lock().unwrap().values().sum::<u32>();
         assert_eq!(
             final_completed, num_validators as usize,
-            "All validators should reach target index {} despite unclean shutdowns. Only {} completed after {} shutdowns",
-            target_index, final_completed, total_shutdowns
+            "All validators should reach target index {target_index} despite unclean shutdowns. Only {final_completed} completed after {total_shutdowns} shutdowns"
         );
 
         // Verify that each validator experienced a minimum number of shutdowns
@@ -550,10 +549,7 @@ mod tests {
             let count = counts.get(pk).copied().unwrap_or(0);
             assert!(
                 count >= min_shutdowns,
-                "Validator {:?} should have at least {} shutdowns, but had {}",
-                pk,
-                min_shutdowns,
-                count
+                "Validator {pk:?} should have at least {min_shutdowns} shutdowns, but had {count}"
             );
         }
 
@@ -889,20 +885,17 @@ mod tests {
                 let tip_result = reporter_mailbox.get_tip().await;
                 assert!(
                     tip_result.is_some(),
-                    "Reporter for validator {:?} should have a tip",
-                    validator_pk
+                    "Reporter for validator {validator_pk:?} should have a tip"
                 );
 
                 let (tip_index, tip_epoch) = tip_result.unwrap();
                 assert!(
                     tip_index >= 1,
-                    "Tip should have progressed beyond initial state for validator {:?}",
-                    validator_pk
+                    "Tip should have progressed beyond initial state for validator {validator_pk:?}"
                 );
                 assert_eq!(
                     tip_epoch, 111,
-                    "Tip epoch should match expected epoch for validator {:?}",
-                    validator_pk
+                    "Tip epoch should match expected epoch for validator {validator_pk:?}"
                 );
 
                 // Validate that we can retrieve the digest for consensus items
@@ -910,8 +903,7 @@ mod tests {
                     let item_result = reporter_mailbox.get(tip_index - 1).await;
                     assert!(
                         item_result.is_some(),
-                        "Should be able to retrieve consensus item for validator {:?}",
-                        validator_pk
+                        "Should be able to retrieve consensus item for validator {validator_pk:?}"
                     );
                 }
             }
@@ -1119,8 +1111,7 @@ mod tests {
                     let item_result = reporter_mailbox.get(index).await;
                     assert!(
                         item_result.is_some(),
-                        "Should have consensus item at index {}",
-                        index
+                        "Should have consensus item at index {index}"
                     );
 
                     let (digest, epoch) = item_result.unwrap();
