@@ -133,7 +133,7 @@ pub enum Error {
 
     // Attributable Faults
     /// The chunk conflicts with an existing chunk at the same height
-    #[error("Chunk mismatch from sender {0} with height {1}")]
+    #[error("Chunk payload mismatch from sequencer {0} at height {1}")]
     ChunkMismatch(String, u64),
 }
 
