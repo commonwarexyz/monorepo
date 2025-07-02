@@ -36,7 +36,4 @@ pub struct Config<C> {
 
     /// The amount of bytes to use when replaying the ordinal.
     pub replay_buffer: usize,
-
-    /// The number of cursor heads to use for key lookups.
-    pub cursor_heads: u32,
 }

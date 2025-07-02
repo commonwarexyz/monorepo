@@ -5,19 +5,12 @@ use crate::{
     table::{self, Table},
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write};
-use commonware_cryptography::BloomFilter;
+use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{
-    array::{prefixed_u64::U64, U32},
-    Array, BitVec, NZUsize,
-};
-use futures::{future::try_join_all, join};
+use commonware_utils::{array::prefixed_u64::U64, Array, BitVec};
+use futures::join;
 use prometheus_client::metrics::counter::Counter;
-use std::{
-    collections::{BTreeSet, HashMap},
-    ops::Deref,
-};
+use std::{collections::HashMap, ops::Deref};
 use tracing::debug;
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
@@ -164,13 +157,10 @@ const INDICES_PREFIX: u8 = 1;
 
 pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     items_per_section: u64,
-    cursor_heads: u32,
 
     metadata: Metadata<E, U64, MetadataRecord>,
     table: Table<E, K, V>,
     ordinal: Ordinal<E, OrdinalRecord>,
-
-    modified: BTreeSet<u64>,
 
     // Metrics
     gets: Counter,
@@ -252,11 +242,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
 
         Ok(Self {
             items_per_section: cfg.items_per_section,
-            cursor_heads: cfg.cursor_heads,
             metadata,
             table,
             ordinal,
-            modified: BTreeSet::new(),
             gets,
             has,
             syncs,
@@ -311,36 +299,32 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
             return Ok(());
         }
 
-        // Check if section exists
-        let section = index / self.items_per_section;
-        self.modified.insert(section);
-
         // Initialize section if it doesn't exist
-        if self.metadata.get(&section.into()).is_none() {
+        let section = index / self.items_per_section;
+        let k = U64::new(INDICES_PREFIX, section);
+        if self.metadata.get(&k).is_none() {
             self.initialize_section(section).await;
         }
-        let record = self.metadata.get_mut(&section.into()).unwrap();
-
-        // Get head for key
-        let head = crc32fast::hash(key.as_ref()) % self.cursor_heads;
-        let cursor = record.cursors[head as usize];
-
-        // Put item in journal
-        let entry = JournalRecord::new(key.clone(), data, cursor);
-        let (offset, _) = self.journal.append(section, entry).await?;
-        record.size = self.journal.size(section).await?;
-
-        // Put cursor in metadata
-        record.cursors[head as usize] = Some(offset);
+        let record = self.metadata.get_mut(&k).unwrap();
 
         // Update active bits
-        record.active.set((index % self.items_per_section) as usize);
-        if record.active.ones() == self.items_per_section as usize {
-            record.active = None;
+        let done = if let MetadataRecord::Indices(Some(record)) = record {
+            record.set((index % self.items_per_section) as usize);
+            record.count_ones() == self.items_per_section as usize
+        } else {
+            false
+        };
+        if done {
+            *record = MetadataRecord::Indices(None);
         }
 
+        // Put in table
+        let (section, offset) = self.table.put(key, data).await?;
+
         // Put section and offset in ordinal
-        self.ordinal.put(index, offset.into()).await?;
+        self.ordinal
+            .put(index, OrdinalRecord::new(section, offset))
+            .await?;
 
         Ok(())
     }
@@ -367,16 +351,16 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         self.syncs.inc();
 
         // Sync journal and ordinal
-        let mut futures = Vec::new();
-        for section in self.modified.iter() {
-            futures.push(self.journal.sync(*section));
-        }
-        let (journal_result, ordinal_result) = join!(try_join_all(futures), self.ordinal.sync());
-        journal_result?;
+        let (table_result, ordinal_result) = join!(self.table.sync(), self.ordinal.sync());
+        let (table_epoch, table_section, table_size) = table_result?;
         ordinal_result?;
 
-        // Clear modified sections
-        self.modified.clear();
+        // Update cursor
+        let cursor_key = U64::new(CURSOR_PREFIX, 0);
+        self.metadata.put(
+            cursor_key.clone(),
+            MetadataRecord::Cursor(table_epoch, table_section, table_size),
+        );
 
         // Sync metadata once underlying are synced
         self.metadata.sync().await?;
@@ -388,12 +372,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         self.ordinal.next_gap(index)
     }
 
-    async fn close(self) -> Result<(), Error> {
-        // Close journal
-        self.journal.close().await?;
-
+    async fn close(mut self) -> Result<(), Error> {
         // Close ordinal
         self.ordinal.close().await?;
+
+        // Close table
+        let (table_epoch, table_section, table_size) = self.table.close().await?;
+
+        // Update cursor
+        let cursor_key = U64::new(CURSOR_PREFIX, 0);
+        self.metadata.put(
+            cursor_key.clone(),
+            MetadataRecord::Cursor(table_epoch, table_section, table_size),
+        );
 
         // Close metadata
         self.metadata.close().await?;
@@ -402,11 +393,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        // Destroy journal
-        self.journal.destroy().await?;
-
         // Destroy ordinal
         self.ordinal.destroy().await?;
+
+        // Destroy table
+        self.table.destroy().await?;
 
         // Destroy metadata
         self.metadata.destroy().await?;

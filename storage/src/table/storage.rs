@@ -359,7 +359,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
     }
 
     /// Put a key-value pair into the store.
-    pub async fn put(&mut self, key: K, value: V) -> Result<(), Error> {
+    pub async fn put(&mut self, key: K, value: V) -> Result<(u64, u32), Error> {
         self.puts.inc();
 
         // Update the section if needed
@@ -380,7 +380,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         self.update_head(self.next_epoch, table_index, self.current_section, offset)
             .await?;
 
-        Ok(())
+        Ok((self.current_section, offset))
     }
 
     /// Get the first value for a given key.
