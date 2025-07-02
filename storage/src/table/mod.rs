@@ -108,7 +108,6 @@
 
 mod storage;
 
-use commonware_utils::array::U64;
 pub use storage::Store;
 use thiserror::Error;
 
@@ -119,8 +118,6 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
-    #[error("metadata error: {0}")]
-    Metadata(#[from] crate::metadata::Error<U64>),
     #[error("codec error: {0}")]
     Codec(#[from] commonware_codec::Error),
     #[error("invalid key length: expected {expected}, got {actual}")]
@@ -143,9 +140,6 @@ pub struct Config<C> {
 
     /// The compression algorithm to use for the journal.
     pub journal_compression: Option<u8>,
-
-    /// The `commonware-runtime::Storage` partition to use for storing the metadata.
-    pub metadata_partition: String,
 
     /// The `commonware-runtime::Storage` partition to use for storing the hash table.
     pub table_partition: String,
@@ -193,16 +187,16 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: compression,
-                metadata_partition: "test_metadata".into(),
                 table_partition: "test_table".into(),
                 table_size: DEFAULT_TABLE_SIZE,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
-            let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize store");
+            let mut store =
+                Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                    .await
+                    .expect("Failed to initialize store");
 
             let key = test_key("testkey");
             let data = 42;
@@ -258,16 +252,16 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                metadata_partition: "test_metadata".into(),
                 table_partition: "test_table".into(),
                 table_size: DEFAULT_TABLE_SIZE,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
-            let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize store");
+            let mut store =
+                Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                    .await
+                    .expect("Failed to initialize store");
 
             // Insert multiple keys
             let keys = vec![
@@ -306,16 +300,16 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                metadata_partition: "test_metadata".into(),
                 table_partition: "test_table".into(),
                 table_size: 4, // Very small to force collisions
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
-            let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize store");
+            let mut store =
+                Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                    .await
+                    .expect("Failed to initialize store");
 
             // Insert multiple keys that will likely collide
             let keys = vec![
@@ -359,7 +353,6 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                metadata_partition: "test_metadata".into(),
                 table_partition: "test_table".into(),
                 table_size: DEFAULT_TABLE_SIZE,
                 codec_config: (),
@@ -368,10 +361,11 @@ mod tests {
             };
 
             // Insert data and close
-            {
-                let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+            let result = {
+                let mut store =
+                    Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                        .await
+                        .expect("Failed to initialize store");
 
                 let keys = vec![
                     (test_key("persist1"), 100),
@@ -386,14 +380,19 @@ mod tests {
                         .expect("Failed to put data");
                 }
 
-                store.close().await.expect("Failed to close store");
-            }
+                store.close().await.expect("Failed to close store")
+            };
 
             // Reopen and verify data persisted
             {
-                let store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+                let store = Store::<_, FixedBytes<64>, i32>::init(
+                    context.clone(),
+                    cfg.clone(),
+                    result.0,
+                    (result.1, result.2),
+                )
+                .await
+                .expect("Failed to initialize store");
 
                 let keys = vec![
                     (test_key("persist1"), 100),
@@ -421,7 +420,6 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                metadata_partition: "test_metadata".into(),
                 table_partition: "test_table".into(),
                 table_size: DEFAULT_TABLE_SIZE,
                 codec_config: (),
@@ -430,10 +428,11 @@ mod tests {
             };
 
             // First, create some committed data
-            {
-                let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+            let result = {
+                let mut store =
+                    Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                        .await
+                        .expect("Failed to initialize store");
 
                 store
                     .put(test_key("committed1"), 1)
@@ -458,14 +457,19 @@ mod tests {
                     .expect("Failed to put data");
 
                 // Close without syncing to simulate crash
-                store.close().await.expect("Failed to close");
-            }
+                store.close().await.expect("Failed to close")
+            };
 
             // Reopen and verify only committed data is present
             {
-                let store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+                let store = Store::<_, FixedBytes<64>, i32>::init(
+                    context.clone(),
+                    cfg.clone(),
+                    result.0,
+                    (result.1, result.2),
+                )
+                .await
+                .expect("Failed to initialize store");
 
                 // Committed data should be present
                 assert_eq!(store.get(&test_key("committed1")).await.unwrap(), Some(1));
@@ -492,16 +496,16 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                metadata_partition: "test_metadata".into(),
                 table_partition: "test_table".into(),
                 table_size: DEFAULT_TABLE_SIZE,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
-            let store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize store");
+            let store =
+                Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                    .await
+                    .expect("Failed to initialize store");
 
             // Attempt to get a key that doesn't exist
             let key = test_key("nonexistent");
@@ -522,7 +526,6 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                metadata_partition: "test_metadata".into(),
                 table_partition: "test_table".into(),
                 table_size: DEFAULT_TABLE_SIZE,
                 codec_config: (),
@@ -532,9 +535,10 @@ mod tests {
 
             // Create store with data
             {
-                let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+                let mut store =
+                    Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                        .await
+                        .expect("Failed to initialize store");
 
                 store
                     .put(test_key("destroy1"), 1)
@@ -551,9 +555,10 @@ mod tests {
 
             // Try to create a new store - it should be empty
             {
-                let store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+                let store =
+                    Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                        .await
+                        .expect("Failed to initialize store");
 
                 // Should not find any data
                 assert!(store.get(&test_key("destroy1")).await.unwrap().is_none());
@@ -570,7 +575,6 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                metadata_partition: "test_metadata".into(),
                 table_partition: "test_table".into(),
                 table_size: 4,
                 codec_config: (),
@@ -579,15 +583,16 @@ mod tests {
             };
 
             // Create store with data and sync
-            {
-                let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+            let result = {
+                let mut store =
+                    Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                        .await
+                        .expect("Failed to initialize store");
 
                 store.put(test_key("key1"), 42).await.unwrap();
                 store.sync().await.unwrap();
-                store.close().await.unwrap();
-            }
+                store.close().await.unwrap()
+            };
 
             // Corrupt the table by writing partial entry
             {
@@ -599,9 +604,14 @@ mod tests {
 
             // Reopen and verify it handles the corruption
             {
-                let store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+                let store = Store::<_, FixedBytes<64>, i32>::init(
+                    context.clone(),
+                    cfg.clone(),
+                    result.0,
+                    (result.1, result.2),
+                )
+                .await
+                .expect("Failed to initialize store");
 
                 // The key should still be retrievable from journal if table is corrupted
                 // but the table entry is zeroed out
@@ -619,7 +629,6 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                metadata_partition: "test_metadata".into(),
                 table_partition: "test_table".into(),
                 table_size: 4,
                 codec_config: (),
@@ -628,15 +637,16 @@ mod tests {
             };
 
             // Create store with data
-            {
-                let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+            let result = {
+                let mut store =
+                    Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                        .await
+                        .expect("Failed to initialize store");
 
                 store.put(test_key("key1"), 42).await.unwrap();
                 store.sync().await.unwrap();
-                store.close().await.unwrap();
-            }
+                store.close().await.unwrap()
+            };
 
             // Corrupt the CRC in the table entry
             {
@@ -652,142 +662,19 @@ mod tests {
 
             // Reopen and verify it handles invalid CRC
             {
-                let store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+                let store = Store::<_, FixedBytes<64>, i32>::init(
+                    context.clone(),
+                    cfg.clone(),
+                    result.0,
+                    (result.1, result.2),
+                )
+                .await
+                .expect("Failed to initialize store");
 
                 // With invalid CRC, the entry should be treated as invalid
                 let result = store.get(&test_key("key1")).await.unwrap();
                 // The store should still work but may not find the key due to invalid table entry
                 assert!(result.is_none() || result == Some(42));
-            }
-        });
-    }
-
-    #[test_traced]
-    fn test_store_invalid_epoch_cleanup() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                metadata_partition: "test_metadata".into(),
-                table_partition: "test_table".into(),
-                table_size: 4,
-                codec_config: (),
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
-            };
-
-            // Create store with data
-            {
-                let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
-
-                store.put(test_key("key1"), 42).await.unwrap();
-                store.sync().await.unwrap(); // This creates epoch 1
-                store.put(test_key("key2"), 43).await.unwrap();
-                store.sync().await.unwrap(); // This creates epoch 2
-                store.close().await.unwrap();
-            }
-
-            // Manually corrupt metadata to simulate crash after table write but before metadata update
-            {
-                use crate::metadata::{Config as MetadataConfig, Metadata};
-                use commonware_utils::array::U64;
-
-                let mut metadata = Metadata::<_, U64>::init(
-                    context.with_label("metadata"),
-                    MetadataConfig {
-                        partition: cfg.metadata_partition.clone(),
-                    },
-                )
-                .await
-                .unwrap();
-
-                // Set committed epoch back to 1 (simulating crash before epoch 2 was committed)
-                metadata.put(0u64.into(), 1u64.to_be_bytes().to_vec());
-                metadata.sync().await.unwrap();
-                metadata.close().await.unwrap();
-            }
-
-            // Reopen and verify epoch cleanup works
-            {
-                let store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
-
-                // key1 should still be there (epoch 1)
-                assert_eq!(store.get(&test_key("key1")).await.unwrap(), Some(42));
-
-                // key2 might not be found as its table entry (epoch 2) should be cleaned up
-                let key2_result = store.get(&test_key("key2")).await.unwrap();
-                assert!(key2_result.is_none() || key2_result == Some(43));
-            }
-        });
-    }
-
-    #[test_traced]
-    fn test_store_corrupted_journal_entry() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                metadata_partition: "test_metadata".into(),
-                table_partition: "test_table".into(),
-                table_size: 4,
-                codec_config: (),
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
-            };
-
-            // Create store with multiple entries
-            {
-                let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
-
-                store.put(test_key("key1"), 42).await.unwrap();
-                store.put(test_key("key2"), 43).await.unwrap();
-                store.sync().await.unwrap();
-                store.close().await.unwrap();
-            }
-
-            // Corrupt a journal entry
-            {
-                let journal_section = 0u64.to_be_bytes();
-                let (blob, size) = context
-                    .open(&cfg.journal_partition, &journal_section)
-                    .await
-                    .unwrap();
-
-                // Corrupt data somewhere in the middle of the journal
-                if size > 20 {
-                    blob.write_at(vec![0xFF; 4], 16).await.unwrap();
-                }
-                blob.close().await.unwrap();
-            }
-
-            // Reopen and verify it handles journal corruption
-            {
-                // Journal corruption is handled during replay
-                // The store should still initialize but may have lost some data
-                let store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
-
-                // Try to get the keys - behavior depends on what was corrupted
-                let _ = store.get(&test_key("key1")).await;
-                let _ = store.get(&test_key("key2")).await;
-
-                // Store should still be functional for new writes
-                let mut store_mut = store;
-                store_mut.put(test_key("key3"), 44).await.unwrap();
-                assert_eq!(store_mut.get(&test_key("key3")).await.unwrap(), Some(44));
             }
         });
     }
@@ -800,7 +687,6 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                metadata_partition: "test_metadata".into(),
                 table_partition: "test_table".into(),
                 table_size: 4,
                 codec_config: (),
@@ -809,15 +695,16 @@ mod tests {
             };
 
             // Create store with data
-            {
-                let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+            let result = {
+                let mut store =
+                    Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), 0, (0, 0))
+                        .await
+                        .expect("Failed to initialize store");
 
                 store.put(test_key("key1"), 42).await.unwrap();
                 store.sync().await.unwrap();
-                store.close().await.unwrap();
-            }
+                store.close().await.unwrap()
+            };
 
             // Add extra bytes to the table blob
             {
@@ -831,9 +718,14 @@ mod tests {
 
             // Reopen and verify it handles extra bytes gracefully
             {
-                let store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+                let store = Store::<_, FixedBytes<64>, i32>::init(
+                    context.clone(),
+                    cfg.clone(),
+                    result.0,
+                    (result.1, result.2),
+                )
+                .await
+                .expect("Failed to initialize store");
 
                 // Should still be able to read the key
                 assert_eq!(store.get(&test_key("key1")).await.unwrap(), Some(42));
@@ -846,52 +738,6 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_store_missing_metadata() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                metadata_partition: "test_metadata".into(),
-                table_partition: "test_table".into(),
-                table_size: 4,
-                codec_config: (),
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
-            };
-
-            // Create store with data
-            {
-                let mut store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
-
-                store.put(test_key("key1"), 42).await.unwrap();
-                store.sync().await.unwrap();
-                store.close().await.unwrap();
-            }
-
-            // Remove metadata
-            {
-                context.remove(&cfg.metadata_partition, None).await.unwrap();
-            }
-
-            // Reopen and verify it handles missing metadata
-            {
-                let store = Store::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
-
-                // With missing metadata, committed epoch is 0, so all table entries
-                // with epoch > 0 will be cleaned up
-                let result = store.get(&test_key("key1")).await.unwrap();
-                assert!(result.is_none() || result == Some(42));
-            }
-        });
-    }
-
     fn test_store_operations_and_restart(num_keys: usize) -> String {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
@@ -899,7 +745,6 @@ mod tests {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
-                metadata_partition: "test_metadata".into(),
                 table_partition: "test_table".into(),
                 table_size: 64, // Small table to force collisions
                 codec_config: (),
@@ -908,10 +753,14 @@ mod tests {
             };
 
             // Initialize the store
-            let mut store =
-                Store::<_, FixedBytes<96>, FixedBytes<256>>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+            let mut store = Store::<_, FixedBytes<96>, FixedBytes<256>>::init(
+                context.clone(),
+                cfg.clone(),
+                0,
+                (0, 0),
+            )
+            .await
+            .expect("Failed to initialize store");
 
             // Generate and insert random key-value pairs
             let mut pairs = Vec::new();
@@ -961,13 +810,17 @@ mod tests {
             }
 
             // Close the store
-            store.close().await.expect("Failed to close store");
+            let result = store.close().await.expect("Failed to close store");
 
             // Reopen the store
-            let mut store =
-                Store::<_, FixedBytes<96>, FixedBytes<256>>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+            let mut store = Store::<_, FixedBytes<96>, FixedBytes<256>>::init(
+                context.clone(),
+                cfg.clone(),
+                result.0,
+                (result.1, result.2),
+            )
+            .await
+            .expect("Failed to initialize store");
 
             // Verify all pairs are still there after restart
             for (key, value) in &pairs {
