@@ -1,3 +1,4 @@
+use crate::journal::fixed::{Config as JConfig, Journal};
 use crate::{
     adb::{
         self,
@@ -69,22 +70,23 @@ where
     T: Translator,
     R: Resolver<H, K, V>,
 {
-    /// Next step is to fetch data from resolver.
+    /// Next step: fetch and verify proofs, holding only the pruned log.
     FetchData {
         config: Config<E, K, V, H, T, R>,
-        db: adb::any::Any<E, K, V, H, T>,
-        applied_ops: u64,
+        log: Journal<E, Operation<K, V>>,
+        /// Extracted pinned nodes from first batch proof
+        pinned_nodes: Option<HashMap<u64, H::Digest>>,
         metrics: Metrics,
     },
-    /// Apply operations of the latest verified batch.
+    /// Apply fetched operations to the log only.
     ApplyData {
         config: Config<E, K, V, H, T, R>,
-        db: adb::any::Any<E, K, V, H, T>,
+        log: Journal<E, Operation<K, V>>,
+        pinned_nodes: Option<HashMap<u64, H::Digest>>,
         batch_ops: Vec<Operation<K, V>>,
-        applied_ops: u64,
         metrics: Metrics,
     },
-    /// Sync completed.
+    /// Sync completed, full database constructed.
     Done {
         db: adb::any::Any<E, K, V, H, T>,
         metrics: Metrics,
@@ -110,21 +112,24 @@ where
             });
         }
 
-        // Create an empty pruned database. Pinned nodes will be installed after the first proof.
-        let db = adb::any::Any::<E, K, V, H, T>::init_pruned(
-            config.context.clone(),
-            crate::adb::any::SyncConfig {
-                config: config.db_config.clone(),
-                pruned_to_loc: config.lower_bound_ops,
+        // Initialize only the pruned operation log. No MMR or snapshot yet.
+        let log = Journal::<E, Operation<K, V>>::init_pruned(
+            config.context.clone().with_label("log"),
+            JConfig {
+                partition: config.db_config.log_journal_partition.clone(),
+                items_per_blob: config.db_config.log_items_per_blob,
+                write_buffer: config.db_config.log_write_buffer,
             },
+            config.lower_bound_ops,
         )
         .await
+        .map_err(adb::Error::JournalError)
         .map_err(Error::DatabaseInitFailed)?;
 
         Ok(Client::FetchData {
             config,
-            db,
-            applied_ops: 0,
+            log,
+            pinned_nodes: None,
             metrics: Metrics {
                 valid_batches_received: 0,
                 invalid_batches_received: 0,
@@ -137,8 +142,8 @@ where
         match self {
             Client::FetchData {
                 mut config,
-                mut db,
-                applied_ops,
+                log,
+                mut pinned_nodes,
                 mut metrics,
             } => {
                 // Calculate total operations needed and current position (inclusive bounds)
@@ -149,6 +154,7 @@ where
                     lower_bound_pos: config.lower_bound_ops,
                     upper_bound_pos: config.upper_bound_ops,
                 })? + 1;
+                let applied_ops = log.size().await.unwrap();
                 let remaining_ops = total_ops_needed
                     .checked_sub(applied_ops)
                     .ok_or(Error::InvalidState)?;
@@ -186,8 +192,8 @@ where
                     }
                     return Ok(Client::FetchData {
                         config,
-                        db,
-                        applied_ops,
+                        log,
+                        pinned_nodes,
                         metrics,
                     });
                 }
@@ -213,8 +219,8 @@ where
 
                     return Ok(Client::FetchData {
                         config,
-                        db,
-                        applied_ops,
+                        log,
+                        pinned_nodes,
                         metrics,
                     });
                 }
@@ -228,9 +234,11 @@ where
                             let nodes_to_pin =
                                 Proof::<H::Digest>::nodes_to_pin(start_pos).collect::<Vec<_>>();
                             assert_eq!(nodes_to_pin.len(), new_pinned_nodes.len());
-                            let pinned_nodes =
-                                HashMap::from_iter(nodes_to_pin.into_iter().zip(new_pinned_nodes));
-                            db.set_pinned_nodes(pinned_nodes);
+                            pinned_nodes = Some(HashMap::from_iter(
+                                nodes_to_pin.into_iter().zip(new_pinned_nodes),
+                            ));
+                            // Persist pinned nodes before any MMR construction
+                            // log.set_pinned_nodes(pinned_nodes.clone())
                         }
                         Err(_) => {
                             warn!("Failed to extract pinned nodes, retrying");
@@ -240,8 +248,8 @@ where
                             }
                             return Ok(Client::FetchData {
                                 config,
-                                db,
-                                applied_ops,
+                                log,
+                                pinned_nodes,
                                 metrics,
                             });
                         }
@@ -251,49 +259,53 @@ where
                 metrics.valid_batches_received += 1;
                 Ok(Client::ApplyData {
                     config,
-                    db: db,
+                    log,
+                    pinned_nodes,
                     batch_ops: new_operations,
-                    applied_ops,
                     metrics,
                 })
             }
 
             Client::ApplyData {
-                mut config,
-                mut db,
+                config,
+                mut log,
+                pinned_nodes,
                 batch_ops,
-                mut applied_ops,
                 metrics,
             } => {
-                // Apply each operation
-                let batch_len = batch_ops.len() as u64;
+                // Append each operation to the log
                 for op in batch_ops.into_iter() {
-                    db.replay_logged_op(op)
+                    log.append(op)
                         .await
+                        .map_err(adb::Error::JournalError)
                         .map_err(Error::DatabaseInitFailed)?;
                 }
-                applied_ops += batch_len;
+                // No need to sync here -- we will occasionally do so on `append`
+                // and then when we're done.
 
-                // Flush dirty nodes so that future root computations won't panic.
-                // TODO danlaine: make sure writes result in consistent state.
-                db.sync().await.map_err(Error::DatabaseInitFailed)?;
+                if log.size().await.unwrap()
+                    >= (config.upper_bound_ops - config.lower_bound_ops + 1)
+                {
+                    // TODO: Initialize the database
+                    todo!();
 
-                if applied_ops >= (config.upper_bound_ops - config.lower_bound_ops + 1) {
-                    let got_hash = db.root(&mut config.hasher);
-                    if got_hash != config.target_hash {
-                        return Err(Error::HashMismatch {
-                            expected: Box::new(config.target_hash),
-                            actual: Box::new(got_hash),
-                        });
-                    }
+                    // let got_hash = log.root(&mut config.hasher);
+                    // todo!();
+                    // if got_hash != config.target_hash {
+                    //     return Err(Error::HashMismatch {
+                    //         expected: Box::new(config.target_hash),
+                    //         actual: Box::new(got_hash),
+                    //     });
+                    // }
+                    let db = todo!();
                     return Ok(Client::Done { db, metrics });
                 }
 
                 // Need to fetch more
                 Ok(Client::FetchData {
                     config,
-                    db,
-                    applied_ops,
+                    log,
+                    pinned_nodes,
                     metrics,
                 })
             }
