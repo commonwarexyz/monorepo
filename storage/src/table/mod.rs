@@ -93,8 +93,10 @@
 //! });
 //! ```
 
+mod extendible;
 mod storage;
 use commonware_utils::Array;
+pub use extendible::ExtendibleTable;
 pub use storage::{Checkpoint, Cursor, Table};
 use thiserror::Error;
 
@@ -188,7 +190,7 @@ mod tests {
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
-            let mut store = Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+            let mut store = Table::<_, FixedBytes<64>, i32>::init(context, cfg.clone())
                 .await
                 .expect("Failed to initialize store");
 

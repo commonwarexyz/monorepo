@@ -120,6 +120,13 @@ impl FixedSize for Checkpoint {
     const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE;
 }
 
+/// Name of the blob that stores the directory metadata (currently just the global depth).
+const DIR_BLOB_NAME: &[u8] = b"dir";
+
+/// Size in bytes of the directory header (currently stores depth as u8 plus padding/future-use).
+/// We reserve 8 bytes so the header is naturally 64-bit aligned.
+const DIR_HEADER_SIZE: usize = 8;
+
 // -------------------------------------------------------------------------------------------------
 // Table layout
 // -------------------------------------------------------------------------------------------------
@@ -250,9 +257,10 @@ pub struct Table<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Context for storage operations
     context: E,
 
-    // Table size
+    // Table size and hashing depth (if extendible hashing is enabled)
     table_partition: String,
     table_size: u32,
+    global_depth: u8,
 
     // Table blob that maps hash values to journal locations (journal_id, offset)
     table: E::Blob,
@@ -437,6 +445,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
             gets,
             modified_sections: BTreeSet::new(),
             _phantom: PhantomData,
+            global_depth: config.global_depth,
         })
     }
 
