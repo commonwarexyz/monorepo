@@ -290,10 +290,15 @@ pub struct Table<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
     /// Initialize a new [Table] instance.
-    pub async fn init(
+    pub async fn init(context: E, config: Config<V::Cfg>) -> Result<Self, Error> {
+        Self::init_with_checkpoint(context, config, None).await
+    }
+
+    /// Initialize a new [Table] instance with a [Checkpoint].
+    pub async fn init_with_checkpoint(
         context: E,
         config: Config<V::Cfg>,
-        checkpoint: Checkpoint,
+        checkpoint: Option<Checkpoint>,
     ) -> Result<Self, Error> {
         // Initialize variable journal with a separate partition
         let journal_config = JournalConfig {
@@ -310,19 +315,22 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
             .await?;
 
         // If the blob is brand new, create header + zeroed buckets.
-        if table_len == 0 {
-            assert_eq!(checkpoint.epoch, 0);
-            assert_eq!(checkpoint.section, 0);
-            assert_eq!(checkpoint.size, 0);
+        let checkpoint = if table_len == 0 {
+            if let Some(checkpoint) = checkpoint {
+                assert_eq!(checkpoint.epoch, 0);
+                assert_eq!(checkpoint.section, 0);
+                assert_eq!(checkpoint.size, 0);
+            }
             let table_data_size = config.table_size as u64 * FULL_TABLE_ENTRY_SIZE as u64;
             table.resize(table_data_size).await?;
             table.sync().await?;
-        } else {
+            Checkpoint::default()
+        } else if let Some(checkpoint) = checkpoint {
             // Rewind the journal to the committed section and offset and drop all values larger
             journal.rewind(checkpoint.section, checkpoint.size).await?;
 
             // Zero out any table entries whose epoch is greater than the committed epoch
-            let mut sync = false;
+            let mut modified = false;
             let zero_buf = vec![0u8; TABLE_ENTRY_SIZE];
             for table_index in 0..config.table_size {
                 let offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
@@ -332,19 +340,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
 
                 let mut buf1 = &result.as_ref()[0..TABLE_ENTRY_SIZE];
                 let entry1 = TableEntry::read(&mut buf1)?;
-                if entry1.epoch > checkpoint.epoch {
+                if !entry1.is_empty() && (!entry1.is_valid() || entry1.epoch > checkpoint.epoch) {
                     debug!(
                         epoch = checkpoint.epoch,
                         epoch = entry1.epoch,
                         "found invalid table entry"
                     );
                     table.write_at(zero_buf.clone(), offset).await?;
-                    sync = true;
+                    modified = true;
                 }
 
                 let mut buf2 = &result.as_ref()[TABLE_ENTRY_SIZE..FULL_TABLE_ENTRY_SIZE];
                 let entry2 = TableEntry::read(&mut buf2)?;
-                if entry2.epoch > checkpoint.epoch {
+                if !entry2.is_empty() && (!entry2.is_valid() || entry2.epoch > checkpoint.epoch) {
                     debug!(
                         epoch = checkpoint.epoch,
                         epoch = entry2.epoch,
@@ -353,14 +361,75 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
                     table
                         .write_at(zero_buf.clone(), offset + TABLE_ENTRY_SIZE as u64)
                         .await?;
-                    sync = true;
+                    modified = true;
                 }
             }
 
             // Sync the table if any changes were made
-            if sync {
+            if modified {
                 table.sync().await?;
             }
+            checkpoint
+        } else {
+            // Open the table blob and construct a checkpoint from what is written
+            let mut modified = false;
+            let mut checkpoint = Checkpoint::default();
+            let zero_buf = vec![0u8; TABLE_ENTRY_SIZE];
+            for table_index in 0..config.table_size {
+                let offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
+                let result = table
+                    .read_at(vec![0u8; FULL_TABLE_ENTRY_SIZE], offset)
+                    .await?;
+
+                let mut buf1 = &result.as_ref()[0..TABLE_ENTRY_SIZE];
+                let entry1 = TableEntry::read(&mut buf1)?;
+                if !entry1.is_empty() {
+                    if !entry1.is_valid() {
+                        debug!(
+                            epoch = checkpoint.epoch,
+                            epoch = entry1.epoch,
+                            "found invalid table entry"
+                        );
+                        table.write_at(zero_buf.clone(), offset).await?;
+                        modified = true;
+                    } else {
+                        if entry1.epoch > checkpoint.epoch {
+                            checkpoint.epoch = entry1.epoch;
+                            checkpoint.section = entry1.section;
+                        }
+                    }
+                }
+
+                let mut buf2 = &result.as_ref()[TABLE_ENTRY_SIZE..FULL_TABLE_ENTRY_SIZE];
+                let entry2 = TableEntry::read(&mut buf2)?;
+                if !entry2.is_empty() {
+                    if !entry2.is_valid() {
+                        debug!(
+                            epoch = checkpoint.epoch,
+                            epoch = entry2.epoch,
+                            "found invalid table entry"
+                        );
+                        table
+                            .write_at(zero_buf.clone(), offset + TABLE_ENTRY_SIZE as u64)
+                            .await?;
+                        modified = true;
+                    } else {
+                        if entry2.epoch > checkpoint.epoch {
+                            checkpoint.epoch = entry2.epoch;
+                            checkpoint.section = entry2.section;
+                        }
+                    }
+                }
+            }
+            if modified {
+                table.sync().await?;
+            }
+
+            // Get the current section size
+            let size = journal.size(checkpoint.section).await?;
+            checkpoint.size = size;
+
+            checkpoint
         };
 
         // Create metrics
