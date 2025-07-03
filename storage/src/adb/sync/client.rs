@@ -6,12 +6,12 @@ use crate::{
     },
     index::Translator,
     journal::fixed::{Config as JConfig, Journal},
-    mmr::{self, iterator::leaf_num_to_pos, verification::Proof},
+    mmr::{self, iterator::leaf_num_to_pos},
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics as MetricsTrait, Storage};
 use commonware_utils::Array;
-use std::{collections::HashMap, marker::PhantomData, num::NonZeroU64};
+use std::{marker::PhantomData, num::NonZeroU64};
 use tracing::{debug, info, warn};
 
 /// Configuration for the sync client
@@ -75,14 +75,14 @@ where
         config: Config<E, K, V, H, T, R>,
         log: Journal<E, Operation<K, V>>,
         /// Extracted pinned nodes from first batch proof
-        pinned_nodes: Option<HashMap<u64, H::Digest>>,
+        pinned_nodes: Option<Vec<H::Digest>>,
         metrics: Metrics,
     },
     /// Apply fetched operations to the log only.
     ApplyData {
         config: Config<E, K, V, H, T, R>,
         log: Journal<E, Operation<K, V>>,
-        pinned_nodes: Option<HashMap<u64, H::Digest>>,
+        pinned_nodes: Option<Vec<H::Digest>>,
         batch_ops: Vec<Operation<K, V>>,
         metrics: Metrics,
     },
@@ -142,7 +142,7 @@ where
     async fn build_database_from_log(
         config: &Config<E, K, V, H, T, R>,
         log: Journal<E, Operation<K, V>>,
-        pinned_nodes: HashMap<u64, H::Digest>,
+        pinned_nodes: Vec<H::Digest>,
     ) -> Result<adb::any::Any<E, K, V, H, T>, Error> {
         // Create the sync config for the Any database
         let sync_config = adb::any::SyncConfig {
@@ -305,29 +305,21 @@ where
                 if applied_ops == 0 {
                     let start_pos = leaf_num_to_pos(next_op_loc);
                     let end_pos = leaf_num_to_pos(next_op_loc + new_operations_len - 1);
-                    match proof.extract_pinned_nodes(start_pos, end_pos) {
-                        Ok(new_pinned_nodes) => {
-                            let nodes_to_pin =
-                                Proof::<H::Digest>::nodes_to_pin(start_pos).collect::<Vec<_>>();
-                            assert_eq!(nodes_to_pin.len(), new_pinned_nodes.len());
-                            pinned_nodes = Some(HashMap::from_iter(
-                                nodes_to_pin.into_iter().zip(new_pinned_nodes),
-                            ));
+                    let Ok(new_pinned_nodes) = proof.extract_pinned_nodes(start_pos, end_pos)
+                    else {
+                        warn!("Failed to extract pinned nodes, retrying");
+                        metrics.invalid_batches_received += 1;
+                        if metrics.invalid_batches_received > config.max_retries {
+                            return Err(Error::MaxRetriesExceeded);
                         }
-                        Err(_) => {
-                            warn!("Failed to extract pinned nodes, retrying");
-                            metrics.invalid_batches_received += 1;
-                            if metrics.invalid_batches_received > config.max_retries {
-                                return Err(Error::MaxRetriesExceeded);
-                            }
-                            return Ok(Client::FetchData {
-                                config,
-                                log,
-                                pinned_nodes,
-                                metrics,
-                            });
-                        }
-                    }
+                        return Ok(Client::FetchData {
+                            config,
+                            log,
+                            pinned_nodes,
+                            metrics,
+                        });
+                    };
+                    pinned_nodes = Some(new_pinned_nodes);
                 }
 
                 metrics.valid_batches_received += 1;
@@ -431,6 +423,7 @@ mod tests {
         Runner as _,
     };
     use commonware_utils::NZU64;
+    use futures::future::join_all;
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
     use std::{
         collections::{HashMap, HashSet},
@@ -737,7 +730,7 @@ mod tests {
             .await
             .unwrap();
 
-            let db = Client::build_database_from_log(&config, log, HashMap::new())
+            let db = Client::build_database_from_log(&config, log, Vec::new())
                 .await
                 .unwrap();
             assert_eq!(db.op_count(), 0);
@@ -761,7 +754,13 @@ mod tests {
             let upper_bound_ops = source_db.op_count() - 1;
 
             // Get pinned nodes and target hash before moving source_db
-            let pinned_nodes = source_db.ops.get_pinned_nodes();
+            let pinned_nodes_map = source_db.ops.get_pinned_nodes();
+            // Convert into Vec in order of expected by Proof::nodes_to_pin
+            let nodes_to_pin = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(lower_bound_ops));
+            let pinned_nodes = nodes_to_pin
+                .map(|pos| pinned_nodes_map.get(&pos).unwrap().clone())
+                .collect();
+
             let target_hash = {
                 let mut hasher = create_test_hasher();
                 source_db.root(&mut hasher)
@@ -891,7 +890,15 @@ mod tests {
                 }
                 log.sync().await.unwrap();
 
-                let db = Client::build_database_from_log(&config, log, HashMap::new())
+                let pinned_nodes = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(lower_bound))
+                    .map(|pos| source_db.ops.get_node(pos));
+                let pinned_nodes = join_all(pinned_nodes).await;
+                let pinned_nodes = pinned_nodes
+                    .iter()
+                    .map(|node| node.as_ref().unwrap().unwrap())
+                    .collect::<Vec<_>>();
+
+                let db = Client::build_database_from_log(&config, log, pinned_nodes)
                     .await
                     .unwrap();
 
@@ -915,11 +922,7 @@ mod tests {
                     }
                 }
                 for (key, value) in expected_kvs {
-                    assert_eq!(
-                        db.get(&key).await.unwrap().unwrap(),
-                        value,
-                        "Mismatch for key {key}, bound [{lower_bound}, {upper_bound}]"
-                    );
+                    assert_eq!(db.get(&key).await.unwrap().unwrap(), value,);
                 }
                 // Verify that deleted keys are absent
                 for key in deleted_keys {
@@ -984,7 +987,7 @@ mod tests {
             }
             log.sync().await.unwrap();
 
-            let db = Client::build_database_from_log(&config, log, HashMap::new())
+            let db = Client::build_database_from_log(&config, log, Vec::new())
                 .await
                 .unwrap();
 
@@ -1043,7 +1046,7 @@ mod tests {
             }
             log.sync().await.unwrap();
 
-            let result = Client::build_database_from_log(&config, log, HashMap::new()).await;
+            let result = Client::build_database_from_log(&config, log, Vec::new()).await;
             assert!(result.is_ok());
 
             let db = result.unwrap();

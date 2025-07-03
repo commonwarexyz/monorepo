@@ -27,7 +27,6 @@ use futures::{
     future::{try_join_all, TryFutureExt},
     pin_mut, try_join, StreamExt,
 };
-use std::collections::HashMap;
 use tracing::{debug, warn};
 
 /// Indicator that the generic parameter N is unused by the call. N is only
@@ -81,7 +80,7 @@ pub struct SyncConfig<T: Translator, D: Digest> {
     pub pruned_to_loc: u64,
 
     /// The pinned nodes to use for the MMR.
-    pub pinned_nodes: HashMap<u64, D>,
+    pub pinned_nodes: Vec<D>,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
@@ -197,11 +196,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 pool: cfg.config.pool.clone(),
             },
             pruned_to_pos: leaf_num_to_pos(cfg.pruned_to_loc),
+            pinned_nodes: cfg.pinned_nodes,
         };
-        let mut mmr = Mmr::init_pruned(context.with_label("mmr"), mmr_config)
+        let mmr = Mmr::init_pruned(context.with_label("mmr"), mmr_config)
             .await
             .map_err(Error::MmrError)?;
-        mmr.set_pinned_nodes(cfg.pinned_nodes);
 
         // Initialize the log in an empty, pruned state.
         let log = Journal::<E, Operation<K, V>>::init_pruned(
@@ -1414,8 +1413,8 @@ mod test {
         executor.start(|context| async move {
             let sync_config: SyncConfig<EightCap, Digest> = SyncConfig {
                 config: any_db_config("sync_basic", EightCap),
-                pruned_to_loc: 0, // No pruning
-                pinned_nodes: HashMap::new(),
+                pruned_to_loc: 0,     // No pruning
+                pinned_nodes: vec![], // TODO test with pinned nodes
             };
             let mut synced_db: Any<_, Digest, Digest, Sha256, EightCap> =
                 Any::init_pruned(context.clone(), sync_config)
@@ -1493,11 +1492,17 @@ mod test {
             );
             assert_eq!(ops.len(), need_ops as usize);
 
+            let pinned_nodes_map = source_db.ops.get_pinned_nodes();
+            // Convert into Vec in order of expected by Proof::nodes_to_pin
+            let pinned_nodes = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(oldest_retained_loc))
+                .map(|pos| pinned_nodes_map.get(&pos).unwrap().clone())
+                .collect();
+
             // Initialize the synced db.
             let sync_config: SyncConfig<EightCap, Digest> = SyncConfig {
                 config: any_db_config("sync_pruning", EightCap),
                 pruned_to_loc: oldest_retained_loc,
-                pinned_nodes: HashMap::new(),
+                pinned_nodes,
             };
             let synced_db: Any<_, Digest, Digest, Sha256, EightCap> =
                 Any::init_pruned(context.clone(), sync_config)

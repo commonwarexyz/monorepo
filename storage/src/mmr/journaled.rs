@@ -18,7 +18,7 @@ use crate::{
     },
 };
 use commonware_codec::DecodeExt;
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::array::prefixed_u64::U64;
 use std::collections::HashMap;
@@ -47,12 +47,15 @@ pub struct Config {
 }
 
 /// Configuration for initializing a journaled MMR in a synced state.
-pub struct SyncConfig {
+pub struct SyncConfig<D: Digest> {
     /// Base configuration for the MMR (journal, metadata, etc.)
     pub config: Config,
 
     /// The position up to which elements have been pruned (first non-pruned element index).
     pub pruned_to_pos: u64,
+
+    /// The pinned nodes to use for the MMR.
+    pub pinned_nodes: Vec<D>,
 }
 
 /// A MMR backed by a fixed-item-length journal.
@@ -220,7 +223,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     }
 
     /// Initialize a new [Mmr] instance in an empty, pruned state.
-    pub async fn init_pruned(context: E, cfg: SyncConfig) -> Result<Self, Error> {
+    pub async fn init_pruned(context: E, cfg: SyncConfig<H::Digest>) -> Result<Self, Error> {
         // Initialize the journal in an empty, pruned state.
         let journal = Journal::<E, H::Digest>::init_pruned(
             context.with_label("mmr_journal"),
@@ -247,17 +250,11 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Sync metadata to ensure it's persisted
         metadata.sync().await.map_err(Error::MetadataError)?;
 
-        // Build a dummy pinned-node vector filled with empty digests; real values will be supplied
-        // later via `set_pinned_nodes` as soon as the sync client obtains them.
-        // TODO danlaine: can we avoid this?
-        let dummy_pin_count = Proof::<H::Digest>::nodes_to_pin(cfg.pruned_to_pos).count();
-        let dummy_pins = vec![H::empty(); dummy_pin_count];
-
         Ok(Self {
             mem_mmr: MemMmr::init(MemConfig {
                 nodes: vec![],
                 pruned_to_pos: cfg.pruned_to_pos,
-                pinned_nodes: dummy_pins,
+                pinned_nodes: cfg.pinned_nodes,
                 pool: cfg.config.pool,
             }),
             journal,
@@ -612,17 +609,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Don't actually prune the journal to simulate failure
         Ok(())
     }
-
-    /// Set this MMR's pinned nodes to the given set.
-    /// Doesn't sync the pinned nodes to disk.
-    pub(crate) fn set_pinned_nodes(&mut self, nodes: HashMap<u64, H::Digest>) {
-        self.mem_mmr.add_pinned_nodes(nodes.clone());
-
-        for (pos, digest) in nodes {
-            self.metadata
-                .put(U64::new(NODE_PREFIX, pos), digest.to_vec());
-        }
-    }
 }
 
 #[cfg(test)]
@@ -651,23 +637,6 @@ mod tests {
             items_per_blob: 7,
             write_buffer: 1024,
             pool: None,
-        }
-    }
-
-    fn test_sync_config(
-        journal_partition: String,
-        metadata_partition: String,
-        pruned_to_pos: u64,
-    ) -> SyncConfig {
-        SyncConfig {
-            config: Config {
-                journal_partition,
-                metadata_partition,
-                items_per_blob: 7,
-                write_buffer: 1024,
-                pool: None,
-            },
-            pruned_to_pos,
         }
     }
 
@@ -1135,14 +1104,26 @@ mod tests {
                 .await
                 .unwrap();
 
+            let pinned_nodes_map = source_mmr.get_pinned_nodes();
+            // Convert into Vec in order of expected by Proof::nodes_to_pin
+            let pinned_nodes = Proof::<Digest>::nodes_to_pin(PRUNED_TO_POS)
+                .map(|pos| pinned_nodes_map.get(&pos).unwrap().clone())
+                .collect();
+
             // Now create a new MMR using init_pruned
             // After pruning to position 7, the remaining leaves are at positions 7, 8, 10, 11, 15, 16
             // These correspond to operations 4, 5, 6, 7, 8, 9 (0-indexed)
-            let sync_config = test_sync_config(
-                "sync_journal_partition".into(),
-                "sync_metadata_partition".into(),
-                PRUNED_TO_POS,
-            );
+            let sync_config = SyncConfig {
+                config: Config {
+                    journal_partition: "pruned_journal_partition".into(),
+                    metadata_partition: "pruned_metadata_partition".into(),
+                    items_per_blob: 7,
+                    write_buffer: 1024,
+                    pool: None,
+                },
+                pruned_to_pos: PRUNED_TO_POS,
+                pinned_nodes,
+            };
             let synced_mmr: Mmr<_, Sha256> = Mmr::init_pruned(context.clone(), sync_config)
                 .await
                 .unwrap();
@@ -1182,12 +1163,24 @@ mod tests {
                 .await
                 .unwrap();
 
+            let pinned_nodes_map = source_mmr.get_pinned_nodes();
+            // Convert into Vec in order of expected by Proof::nodes_to_pin
+            let pinned_nodes = Proof::<Digest>::nodes_to_pin(source_mmr_size)
+                .map(|pos| pinned_nodes_map.get(&pos).unwrap().clone())
+                .collect();
+
             // Initialize synced MMR with empty operations
-            let sync_config = test_sync_config(
-                "sync_empty_journal".into(),
-                "sync_empty_metadata".into(),
-                source_mmr_size, // Everything is pruned
-            );
+            let sync_config = SyncConfig {
+                config: Config {
+                    journal_partition: "pruned_journal_partition".into(),
+                    metadata_partition: "pruned_metadata_partition".into(),
+                    items_per_blob: 7,
+                    write_buffer: 1024,
+                    pool: None,
+                },
+                pruned_to_pos: source_mmr_size,
+                pinned_nodes,
+            };
 
             let synced_mmr: Mmr<_, Sha256> = Mmr::init_pruned(context.clone(), sync_config)
                 .await
