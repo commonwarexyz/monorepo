@@ -231,6 +231,59 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         // Check if index exists
         self.indices.contains_key(&index)
     }
+
+    /// Prune `Archive` to the provided `min` (masked by the configured
+    /// section mask).
+    ///
+    /// If this is called with a min lower than the last pruned, nothing
+    /// will happen.
+    pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
+        // Update `min` to reflect section mask
+        let min = self.section(min);
+
+        // Check if min is less than last pruned
+        if let Some(oldest_allowed) = self.oldest_allowed {
+            if min <= oldest_allowed {
+                // We don't return an error in this case because the caller
+                // shouldn't be burdened with converting `min` to some section.
+                return Ok(());
+            }
+        }
+        debug!(min, "pruning archive");
+
+        // Prune journal
+        self.journal.prune(min).await.map_err(Error::Journal)?;
+
+        // Remove pending writes (no need to call `sync` as we are pruning)
+        loop {
+            let next = match self.pending.iter().next() {
+                Some(section) if *section < min => *section,
+                _ => break,
+            };
+            self.pending.remove(&next);
+        }
+
+        // Remove all indices that are less than min
+        loop {
+            let next = match self.indices.first_key_value() {
+                Some((index, _)) if *index < min => *index,
+                _ => break,
+            };
+            self.indices.remove(&next).unwrap();
+            self.indices_pruned.inc();
+        }
+
+        // Remove all keys from interval tree less than min
+        if min > 0 {
+            self.intervals.remove(0, min - 1);
+        }
+
+        // Update last pruned (to prevent reads from
+        // pruned sections)
+        self.oldest_allowed = Some(min);
+        self.items_tracked.set(self.indices.len() as i64);
+        Ok(())
+    }
 }
 
 impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Archive
@@ -287,54 +340,6 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
             Identifier::Index(index) => Ok(self.has_index(index)),
             Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
         }
-    }
-
-    async fn prune(&mut self, min: u64) -> Result<(), Error> {
-        // Update `min` to reflect section mask
-        let min = self.section(min);
-
-        // Check if min is less than last pruned
-        if let Some(oldest_allowed) = self.oldest_allowed {
-            if min <= oldest_allowed {
-                // We don't return an error in this case because the caller
-                // shouldn't be burdened with converting `min` to some section.
-                return Ok(());
-            }
-        }
-        debug!(min, "pruning archive");
-
-        // Prune journal
-        self.journal.prune(min).await.map_err(Error::Journal)?;
-
-        // Remove pending writes (no need to call `sync` as we are pruning)
-        loop {
-            let next = match self.pending.iter().next() {
-                Some(section) if *section < min => *section,
-                _ => break,
-            };
-            self.pending.remove(&next);
-        }
-
-        // Remove all indices that are less than min
-        loop {
-            let next = match self.indices.first_key_value() {
-                Some((index, _)) if *index < min => *index,
-                _ => break,
-            };
-            self.indices.remove(&next).unwrap();
-            self.indices_pruned.inc();
-        }
-
-        // Remove all keys from interval tree less than min
-        if min > 0 {
-            self.intervals.remove(0, min - 1);
-        }
-
-        // Update last pruned (to prevent reads from
-        // pruned sections)
-        self.oldest_allowed = Some(min);
-        self.items_tracked.set(self.indices.len() as i64);
-        Ok(())
     }
 
     async fn sync(&mut self) -> Result<(), Error> {

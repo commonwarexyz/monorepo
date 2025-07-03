@@ -1,4 +1,6 @@
-use super::utils::{append_random, init};
+use super::utils::{
+    append_random, ArchiveFactory, ImmutableArchiveFactory, PrunableArchiveFactory,
+};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
@@ -8,51 +10,78 @@ use commonware_storage::archive::Archive;
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
+fn bench_restart_for_factory<F: ArchiveFactory>(
+    c: &mut Criterion,
+    cfg: Config,
+    compression: Option<u8>,
+    impl_name: &str,
+) {
+    for items in [10_000, 50_000, 100_000, 500_000] {
+        let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
+        builder.start(|ctx| async move {
+            let mut a = F::init(ctx, compression).await.unwrap();
+            append_random(&mut a, items).await;
+            a.close().await.unwrap();
+        });
+
+        // Run the benchmarks
+        let runner = tokio::Runner::new(cfg.clone());
+        c.bench_function(
+            &format!(
+                "{}/impl={} items={} comp={}",
+                module_path!(),
+                impl_name,
+                items,
+                compression
+                    .map(|l| l.to_string())
+                    .unwrap_or_else(|| "off".into())
+            ),
+            |b| {
+                b.to_async(&runner).iter_custom(|iters| async move {
+                    let ctx = context::get::<commonware_runtime::tokio::Context>();
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let start = Instant::now();
+                        let a = F::init(ctx.clone(), compression).await.unwrap(); // replay happens inside init
+                        total += start.elapsed();
+                        a.close().await.unwrap();
+                    }
+                    total
+                });
+            },
+        );
+
+        // Tear down
+        let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
+        cleaner.start(|ctx| async move {
+            let a = F::init(ctx, compression).await.unwrap();
+            a.destroy().await.unwrap();
+        });
+    }
+}
+
 fn bench_restart(c: &mut Criterion) {
     // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
     let cfg = Config::default();
+
+    // Test prunable implementation
     for compression in [None, Some(3)] {
-        for items in [10_000, 50_000, 100_000, 500_000] {
-            let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
-            builder.start(|ctx| async move {
-                let mut a = init(ctx, compression).await;
-                append_random(&mut a, items).await;
-                a.close().await.unwrap();
-            });
+        bench_restart_for_factory::<PrunableArchiveFactory>(
+            c,
+            cfg.clone(),
+            compression,
+            "prunable",
+        );
+    }
 
-            // Run the benchmarks
-            let runner = tokio::Runner::new(cfg.clone());
-            c.bench_function(
-                &format!(
-                    "{}/items={} comp={}",
-                    module_path!(),
-                    items,
-                    compression
-                        .map(|l| l.to_string())
-                        .unwrap_or_else(|| "off".into())
-                ),
-                |b| {
-                    b.to_async(&runner).iter_custom(|iters| async move {
-                        let ctx = context::get::<commonware_runtime::tokio::Context>();
-                        let mut total = Duration::ZERO;
-                        for _ in 0..iters {
-                            let start = Instant::now();
-                            let a = init(ctx.clone(), compression).await; // replay happens inside init
-                            total += start.elapsed();
-                            a.close().await.unwrap();
-                        }
-                        total
-                    });
-                },
-            );
-
-            // Tear down
-            let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
-            cleaner.start(|ctx| async move {
-                let a = init(ctx, compression).await;
-                a.destroy().await.unwrap();
-            });
-        }
+    // Test immutable implementation
+    for compression in [None, Some(3)] {
+        bench_restart_for_factory::<ImmutableArchiveFactory>(
+            c,
+            cfg.clone(),
+            compression,
+            "immutable",
+        );
     }
 }
 

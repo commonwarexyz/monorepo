@@ -8,8 +8,8 @@ use commonware_utils::Array;
 use std::future::Future;
 use thiserror::Error;
 
-pub mod fast;
-pub mod minimal;
+pub mod immutable;
+pub mod prunable;
 
 /// Subject of a `get` or `has` operation.
 pub enum Identifier<'a, K: Array> {
@@ -26,6 +26,8 @@ pub enum Error {
     Ordinal(#[from] crate::ordinal::Error),
     #[error("metadata error: {0}")]
     Metadata(#[from] crate::metadata::Error),
+    #[error("table error: {0}")]
+    Table(#[from] crate::table::Error),
     #[error("record corrupted")]
     RecordCorrupted,
     #[error("already pruned to: {0}")]
@@ -73,9 +75,6 @@ pub trait Archive {
 
     /// Sync all pending writes.
     fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
-
-    /// Prune the to the minimum index.
-    fn prune(&mut self, min: u64) -> impl Future<Output = Result<(), Error>>;
 
     /// Close [Archive] (and underlying storage).
     ///

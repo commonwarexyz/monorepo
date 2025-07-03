@@ -114,8 +114,11 @@
 //! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_cryptography::hash;
 //! use commonware_storage::{
-//!     index::translator::FourCap,
-//!     archive::{Archive, Config},
+//!     translator::FourCap,
+//!     archive::{
+//!         Archive as _,
+//!         prunable::{Archive, Config},
+//!     },
 //! };
 //!
 //! let executor = deterministic::Runner::default();
@@ -127,7 +130,6 @@
 //!         compression: Some(3),
 //!         codec_config: (),
 //!         items_per_section: 1024,
-//!         pending_writes: 10,
 //!         write_buffer: 1024 * 1024,
 //!         replay_buffer: 4096,
 //!     };

@@ -92,7 +92,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
     pub async fn init_align(
         context: E,
         config: Config,
-        bits: Option<HashMap<u64, &BitVec>>,
+        bits: Option<HashMap<u64, &Option<BitVec>>>,
     ) -> Result<Self, Error> {
         // Scan for all blobs in the partition
         let mut blobs = BTreeMap::new();
@@ -160,10 +160,17 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
                 let mut must_exist = false;
                 if let Some(bits) = &bits {
                     let bits = bits.get(section).unwrap();
-                    if !bits.get(offset as usize).expect("bitvec is too short") {
-                        offset += Record::<V>::SIZE as u64;
-                        continue;
+
+                    // If bits are provided, check if the record exists
+                    if let Some(bits) = bits {
+                        let bit_index = offset as usize / Record::<V>::SIZE;
+                        if !bits.get(bit_index).expect("bitvec is too short") {
+                            offset += Record::<V>::SIZE as u64;
+                            continue;
+                        }
                     }
+
+                    // If bit section exists but it is empty, we must have all records
                     must_exist = true;
                 }
 

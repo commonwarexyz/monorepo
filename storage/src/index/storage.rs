@@ -8,22 +8,22 @@ use std::collections::{
 
 /// The initial capacity of the internal hashmap. This is a guess at the number of unique keys we will
 /// encounter. The hashmap will grow as needed, but this is a good starting point (covering
-/// the entire [super::translator::OneCap] range).
+/// the entire [crate::translator::OneCap] range).
 const INITIAL_CAPACITY: usize = 256;
 
-/// Panic message shown when `next()` is not called after `Cursor` creation or after `insert()` or ``delete()`.
+/// Panic message shown when [Cursor::next] is not called after [Cursor::new] or after [Cursor::insert] or [Cursor::delete].
 const MUST_CALL_NEXT: &str = "must call Cursor::next()";
 
-/// Panic message shown when `update()` is called after `Cursor` has returned `None` or after `insert()`
-/// or `delete()` (but before `next()`).
+/// Panic message shown when [Cursor::update] is called after [Cursor::next] has returned `None` or after [Cursor::insert]
+/// or [Cursor::delete] (but before [Cursor::next]).
 const NO_ACTIVE_ITEM: &str = "no active item in Cursor";
 
-/// Each key is mapped to a `Record` that contains a linked list of potential values for that key.
+/// Each key is mapped to a [Record] that contains a linked list of potential values for that key.
 ///
-/// We avoid using a `Vec` to store values because the common case (where there are no collisions) would
+/// We avoid using a [Vec] to store values because the common case (where there are no collisions) would
 /// require an additional 24 bytes of memory for each value (the `len`, `capacity`, and `ptr` fields).
 ///
-/// Again optimizing for the common case, we store the first value directly in the `Record` to avoid
+/// Again optimizing for the common case, we store the first value directly in the [Record] to avoid
 /// indirection (heap jumping).
 #[derive(PartialEq, Eq)]
 struct Record<V: Eq> {
@@ -31,7 +31,7 @@ struct Record<V: Eq> {
     next: Option<Box<Record<V>>>,
 }
 
-/// Phases of the `Cursor` during iteration.
+/// Phases of the [Cursor] during iteration.
 #[derive(PartialEq, Eq)]
 enum Phase<V: Eq> {
     /// Before iteration starts.
@@ -58,21 +58,21 @@ enum Phase<V: Eq> {
 
 /// A mutable iterator over the values associated with a translated key, allowing in-place modifications.
 ///
-/// The `Cursor` provides a way to traverse and modify the linked list of `Record`s while maintaining its
+/// The [Cursor] provides a way to traverse and modify the linked list of `Record`s while maintaining its
 /// structure. It supports:
 ///
-/// - Iteration via `next()` to access values.
-/// - Modification via `update()` to change the current value.
-/// - Insertion via `insert()` to add new values.
-/// - Deletion via `delete()` to remove values.
+/// - Iteration via [Cursor::next] to access values.
+/// - Modification via [Cursor::update] to change the current value.
+/// - Insertion via [Cursor::insert] to add new values.
+/// - Deletion via [Cursor::delete] to remove values.
 ///
 /// # Safety
 ///
-/// - Must call `next()` before `update()`, `insert()`, or `delete()` to establish a valid position.
-/// - Once `next()` returns `None`, only `insert()` can be called.
-/// - Dropping the `Cursor` automatically restores the list structure by reattaching any detached `next` nodes.
+/// - Must call [Cursor::next] before [Cursor::update], [Cursor::insert], or [Cursor::delete] to establish a valid position.
+/// - Once [Cursor::next] returns `None`, only [Cursor::insert] can be called.
+/// - Dropping the [Cursor] automatically restores the list structure by reattaching any detached `next` nodes.
 ///
-/// _If you don't need advanced functionality, just use `insert()`, `insert_and_prune()`, or `remove()` instead._
+/// _If you don't need advanced functionality, just use [Index::insert], [Index::insert_and_prune], or [Index::remove] instead._
 pub struct Cursor<'a, T: Translator, V: Eq> {
     // The current phase of the cursor.
     phase: Phase<V>,
@@ -94,7 +94,7 @@ pub struct Cursor<'a, T: Translator, V: Eq> {
 }
 
 impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
-    /// Creates a new `Cursor` from a mutable record reference, detaching its `next` chain for iteration.
+    /// Creates a new [Cursor] from a mutable record reference, detaching its `next` chain for iteration.
     fn new(
         entry: OccupiedEntry<'a, T::Key, Record<V>>,
         keys: &'a Gauge,
@@ -116,7 +116,7 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
         }
     }
 
-    /// Pushes a `Record` to the end of `past`.
+    /// Pushes a [Record] to the end of `past`.
     ///
     /// If the record has a `next`, this function cannot be called again.
     fn past_push(&mut self, mut next: Box<Record<V>>) {
@@ -140,7 +140,7 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
 
     /// Updates the value at the current position in the iteration.
     ///
-    /// Panics if called before `next()` or after iteration is complete (`Status::Done` phase).
+    /// Panics if called before [Cursor::next] or after iteration is complete.
     pub fn update(&mut self, v: V) {
         match &mut self.phase {
             Phase::Initial => unreachable!("{MUST_CALL_NEXT}"),
@@ -173,13 +173,13 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
 
     /// Advances the cursor to the next value in the chain, returning a reference to it.
     ///
-    /// This method must be called before any other operations (`insert()`, `delete()`, etc.). If
-    /// either `insert()` or `delete()` is called, `next()` must be called to set a new active
-    /// item. If after `insert()`, the next active item is the item after the inserted item. If after
-    /// `delete()`, the next active item is the item after the deleted item.
+    /// This method must be called before any other operations ([Cursor::insert], [Cursor::delete], etc.). If
+    /// either [Cursor::insert] or [Cursor::delete] is called, [Cursor::next] must be called to set a new active
+    /// item. If after [Cursor::insert], the next active item is the item after the inserted item. If after
+    /// [Cursor::delete], the next active item is the item after the deleted item.
     ///
     /// Handles transitions between phases and adjusts for deletions. Returns `None` when the list is exhausted.
-    /// It is safe to call `next()` even after it returns `None`.
+    /// It is safe to call [Cursor::next] even after it returns `None`.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&V> {
         match std::mem::replace(&mut self.phase, Phase::Done) {
