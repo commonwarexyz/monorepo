@@ -60,17 +60,16 @@
 //!
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic};
-//! use commonware_storage::store::immutable::{Store, Config};
+//! use commonware_storage::table::{Table, Config, Identifier};
 //! use commonware_utils::array::FixedBytes;
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
 //!     // Create a store
 //!     let cfg = Config {
-//!         journal_partition: "store_journal".into(),
+//!         journal_partition: "table_journal".into(),
 //!         journal_compression: Some(3),
-//!         metadata_partition: "store_metadata".into(),
-//!         table_partition: "store_table".into(),
+//!         table_partition: "table_table".into(),
 //!         table_size: 65536, // 64K buckets
 //!         codec_config: (),
 //!         write_buffer: 1024 * 1024,
@@ -86,7 +85,7 @@
 //!     store.sync().await.unwrap();
 //!
 //!     // Get the value
-//!     let value = store.get(&key).await.unwrap().unwrap();
+//!     let value = store.get(Identifier::Key(&key)).await.unwrap().unwrap();
 //!     assert_eq!(value, 42);
 //!
 //!     // Close the store
