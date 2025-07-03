@@ -129,10 +129,8 @@ fn fuzz(input: FuzzInput) {
 
                 JournalOperation::Replay { buffer, start_pos } => {
                     // Test replay functionality - panic on any replay failures
-                    if journal_size < *start_pos {
-                        return;
-                    }
-                    let stream = journal.replay(*buffer, *start_pos).await.unwrap();
+                    let start_pos = start_pos % (journal_size + 1);
+                    let stream = journal.replay(*buffer, start_pos).await.unwrap();
                     pin_mut!(stream);
                     // Consume first few items to test stream - panic on stream errors
                     for _ in 0..3 {
