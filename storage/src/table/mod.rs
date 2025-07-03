@@ -9,7 +9,6 @@
 //! [Store] uses a multi-component architecture:
 //! - **Variable Journal**: Stores key-value entries in an append-only log with optional compression
 //! - **Hash Table**: A persistent hash table stored in a blob that maps keys to journal locations
-//! - **Metadata**: Stores committed epoch/section information for crash consistency
 //!
 //! The hash table uses a dual-entry design where each bucket contains two slots. This provides
 //! redundancy and enables atomic updates without locks or complex coordination.
@@ -36,7 +35,6 @@
 //! [Store] ensures crash consistency through:
 //! 1. **Checksums**: All table entries include CRC32 checksums
 //! 2. **Epochs**: Each write increments an epoch counter, invalid epochs are cleaned on restart
-//! 3. **Atomic Metadata**: Committed state is atomically updated after successful writes
 //!
 //! On restart, any table entries with epochs greater than the last committed epoch are zeroed out,
 //! ensuring the store returns to a consistent state.
@@ -59,14 +57,6 @@
 //! The store minimizes memory usage by keeping all data structures on disk:
 //! - Hash table: Fixed size on disk (table_size * 48 bytes)
 //! - Journal: Append-only logs split into sections
-//! - Only pending writes are buffered in memory until sync
-//!
-//! # Performance Characteristics
-//!
-//! - **Writes**: O(1) amortized - append to journal and update table
-//! - **Reads**: O(k) where k is the chain length for a bucket (typically small with good hash distribution)
-//! - **Memory**: O(p) where p is the number of pending writes
-//! - **Restart**: O(n) where n is the table size (to validate epochs)
 //!
 //! # Example
 //!
