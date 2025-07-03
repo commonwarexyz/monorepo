@@ -745,6 +745,7 @@ pub mod test {
     use rand::{rngs::StdRng, RngCore, SeedableRng};
 
     const TESTING_PAGE_SIZE: usize = 88;
+    const TESTING_PAGE_CACHE_SIZE: usize = 8;
 
     fn current_db_config(partition_prefix: &str) -> Config<TwoCap, TESTING_PAGE_SIZE> {
         Config {
@@ -758,7 +759,9 @@ pub mod test {
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: TwoCap,
             pool: None,
-            buffer_pool: Arc::new(RwLock::new(BufferPool::<TESTING_PAGE_SIZE>::new())),
+            buffer_pool: Arc::new(RwLock::new(BufferPool::<TESTING_PAGE_SIZE>::new(
+                TESTING_PAGE_CACHE_SIZE,
+            ))),
         }
     }
 

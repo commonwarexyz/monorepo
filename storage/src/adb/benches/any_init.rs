@@ -25,6 +25,9 @@ const PARTITION_SUFFIX: &str = "any_bench_partition";
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: usize = 16384;
 
+/// The number of pages to cache in the buffer pool.
+const PAGE_CACHE_SIZE: usize = 10_000;
+
 /// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
 /// configured to provide 8 cores. This speeds up benchmark setup, but doesn't affect the benchmark
 /// timing itself since any::init is single threaded.
@@ -41,7 +44,7 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, PAGE_SIZE> {
         log_write_buffer: 1024,
         translator: EightCap,
         pool: Some(pool),
-        buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
+        buffer_pool: Arc::new(RwLock::new(BufferPool::new(PAGE_CACHE_SIZE))),
     }
 }
 

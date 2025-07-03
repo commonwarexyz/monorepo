@@ -655,22 +655,24 @@ mod tests {
     };
     use futures::{pin_mut, StreamExt};
 
+    const TESTING_PAGE_SIZE: usize = 44;
+    const TESTING_PAGE_CACHE_SIZE: usize = 3;
+
     /// Generate a SHA-256 digest for the given value.
     fn test_digest(value: u64) -> Digest {
         hash(&value.to_be_bytes())
     }
 
-    fn test_cfg<const PAGE_SIZE: usize>(items_per_blob: u64) -> Config<PAGE_SIZE> {
+    fn test_cfg(items_per_blob: u64) -> Config<TESTING_PAGE_SIZE> {
         Config {
             partition: "test_partition".into(),
             items_per_blob,
-            buffer_pool: Arc::new(RwLock::new(BufferPool::<PAGE_SIZE>::new())),
+            buffer_pool: Arc::new(RwLock::new(BufferPool::<TESTING_PAGE_SIZE>::new(
+                TESTING_PAGE_CACHE_SIZE,
+            ))),
             write_buffer: 2048,
         }
     }
-
-    /// Use a small page size for testing to make sure we exercise buffer pool paging boundaries.
-    const TESTING_PAGE_SIZE: usize = 99;
 
     #[test_traced]
     fn test_fixed_journal_append_and_prune() {
@@ -680,7 +682,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
-            let cfg = test_cfg::<TESTING_PAGE_SIZE>(2);
+            let cfg = test_cfg(2);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -699,7 +701,7 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Re-initialize the journal to simulate a restart
-            let cfg = test_cfg::<TESTING_PAGE_SIZE>(2);
+            let cfg = test_cfg(2);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
@@ -830,7 +832,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         const ITEMS_PER_BLOB: u64 = 10000;
         executor.start(|context| async move {
-            let cfg = test_cfg::<TESTING_PAGE_SIZE>(ITEMS_PER_BLOB);
+            let cfg = test_cfg(ITEMS_PER_BLOB);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -863,7 +865,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
-            let cfg = test_cfg::<TESTING_PAGE_SIZE>(ITEMS_PER_BLOB);
+            let cfg = test_cfg(ITEMS_PER_BLOB);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -980,7 +982,7 @@ mod tests {
         const ITEMS_PER_BLOB: u64 = 7;
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
-            let cfg = test_cfg::<TESTING_PAGE_SIZE>(ITEMS_PER_BLOB);
+            let cfg = test_cfg(ITEMS_PER_BLOB);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1035,7 +1037,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
-            let cfg = test_cfg::<TESTING_PAGE_SIZE>(ITEMS_PER_BLOB);
+            let cfg = test_cfg(ITEMS_PER_BLOB);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1099,7 +1101,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
-            let cfg = test_cfg::<TESTING_PAGE_SIZE>(3);
+            let cfg = test_cfg(3);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1157,7 +1159,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
-            let cfg = test_cfg::<TESTING_PAGE_SIZE>(10);
+            let cfg = test_cfg(10);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1204,7 +1206,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
-            let cfg = test_cfg::<TESTING_PAGE_SIZE>(10);
+            let cfg = test_cfg(10);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1263,7 +1265,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
-            let cfg = test_cfg::<TESTING_PAGE_SIZE>(2);
+            let cfg = test_cfg(2);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1326,7 +1328,7 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Repeat with a different blob size (3 items per blob)
-            let mut cfg = test_cfg::<TESTING_PAGE_SIZE>(3);
+            let mut cfg = test_cfg(3);
             cfg.partition = "test_partition_2".into();
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -1381,7 +1383,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Create a journal configuration
-            let cfg = test_cfg::<TESTING_PAGE_SIZE>(60);
+            let cfg = test_cfg(60);
 
             // Initialize the journal
             let mut journal = Journal::init(context.clone(), cfg.clone())

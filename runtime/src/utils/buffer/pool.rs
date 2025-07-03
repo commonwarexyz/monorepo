@@ -1,30 +1,68 @@
 use crate::{buffer::Buffer, Blob, Error, RwLock};
 use commonware_utils::StableBuf;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 /// A [BufferPool] caches pages of [Blob] data in memory.
 ///
 /// A single buffer pool can be used to cache data from multiple blobs by assigning a unique id to
 /// each.
-#[derive(Default)]
 pub struct BufferPool<const PAGE_SIZE: usize> {
-    /// The page cache, indexed by the blob id and the page number.
-    cache: HashMap<(u32, u64), Box<[u8; PAGE_SIZE]>>,
+    /// The page cache index, indexed by the blob id and the page number, mapping to the index of
+    /// the cache entry for the page.
+    index: HashMap<(u32, u64), usize>,
+
+    /// The page cache.
+    cache: Vec<CacheEntry<PAGE_SIZE>>,
+
+    /// The current clock hand index into `cache` for the CLOCK replacement policy.
+    clock: usize,
 
     /// The next id to assign to a blob that will be managed by this pool.
     next_id: u32,
+
+    /// The maximum number of pages that will be cached.
+    capacity: usize,
+}
+
+struct CacheEntry<const PAGE_SIZE: usize> {
+    /// The cache key which is composed of the blob id and page number of the page.
+    key: (u32, u64),
+
+    /// A bit indicating whether this page was recently referenced.
+    referenced: AtomicBool,
+
+    /// The cached page itself.
+    data: Box<[u8; PAGE_SIZE]>,
 }
 
 impl<const PAGE_SIZE: usize> BufferPool<PAGE_SIZE> {
     const PAGE_SIZE_U64: u64 = PAGE_SIZE as u64;
 
-    /// Return a new empty buffer pool with an initial next-blob id of 0.
-    pub fn new() -> Self {
-        Self::default()
+    /// Return a new empty buffer pool with an initial next-blob id of 0, and a max cache capacity
+    /// of `capacity` pages.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is 0.
+    pub fn new(capacity: usize) -> Self {
+        assert!(capacity > 0);
+        Self {
+            index: HashMap::new(),
+            cache: Vec::new(),
+            clock: 0,
+            next_id: 0,
+            capacity,
+        }
     }
 
     /// Assign and return the next unique blob id.
-    async fn next_id(&mut self) -> u32 {
+    fn next_id(&mut self) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
         id
@@ -43,10 +81,14 @@ impl<const PAGE_SIZE: usize> BufferPool<PAGE_SIZE> {
     /// PAGE_SIZE bytes.
     fn read_at(&self, blob_id: u32, buf: &mut [u8], offset: u64) -> usize {
         let (page_num, offset_in_page) = Self::offset_to_page(offset);
-        let page = self.cache.get(&(blob_id, page_num));
-        let Some(page) = page else {
+        let page_index = self.index.get(&(blob_id, page_num));
+        let Some(&page_index) = page_index else {
             return 0;
         };
+        let page = &self.cache[page_index];
+        assert_eq!(page.key, (blob_id, page_num));
+        page.referenced.store(true, Ordering::Relaxed);
+        let page = &page.data;
 
         let bytes_to_copy = std::cmp::min(buf.len(), PAGE_SIZE - offset_in_page);
         buf[..bytes_to_copy].copy_from_slice(&page[offset_in_page..offset_in_page + bytes_to_copy]);
@@ -58,6 +100,10 @@ impl<const PAGE_SIZE: usize> BufferPool<PAGE_SIZE> {
     /// boundaries, it's possible for the provided page to be smaller than the PAGE_SIZE.
     fn cache(&mut self, page: &mut [u8], blob_id: u32, page_num: u64) {
         assert!(page.len() <= PAGE_SIZE);
+        if self.index.contains_key(&(blob_id, page_num)) {
+            // This can happen if different threads fault on the same page.
+            return;
+        }
 
         let page_array = if page.len() < PAGE_SIZE {
             let mut page_array = [0u8; PAGE_SIZE];
@@ -67,7 +113,35 @@ impl<const PAGE_SIZE: usize> BufferPool<PAGE_SIZE> {
             page.try_into().unwrap()
         };
 
-        self.cache.insert((blob_id, page_num), Box::new(page_array));
+        let key = (blob_id, page_num);
+        if self.cache.len() < self.capacity {
+            self.index.insert(key, self.cache.len());
+            self.cache.push(CacheEntry {
+                key,
+                referenced: AtomicBool::new(true),
+                data: Box::new(page_array),
+            });
+            return;
+        }
+
+        // Cache is full, find a page to evict.
+        while self.cache[self.clock].referenced.load(Ordering::Relaxed) {
+            self.cache[self.clock]
+                .referenced
+                .store(false, Ordering::Relaxed);
+            self.clock = (self.clock + 1) % self.cache.len();
+        }
+
+        // Evict the page by replacing it with the new page.
+        let entry = &mut self.cache[self.clock];
+        entry.referenced.store(true, Ordering::Relaxed);
+        assert!(self.index.remove(&entry.key).is_some());
+        self.index.insert(key, self.clock);
+        entry.key = key;
+        entry.data = Box::new(page_array);
+
+        // Move the clock forward.
+        self.clock = (self.clock + 1) % self.cache.len();
     }
 
     /// Read the specified bytes, preferentially from the buffer pool cache. Bytes not found in the
@@ -94,7 +168,16 @@ impl<const PAGE_SIZE: usize> BufferPool<PAGE_SIZE> {
                 }
             }
 
-            // Fetch the page from the blob since it wasn't in the buffer pool.
+            // Page fault: fetch the page from the underlying blob since it wasn't in the buffer
+            // pool.
+            //
+            // Note that we hold no locks at this point, so it's possible multiple threads can fault
+            // on the same page. In this scenario, each such thread might make its own call to
+            // retrieve the same data from the underlying blob. We in fact see this happen in the
+            // fixed_read_random benchmark under concurrent reads.
+            //
+            // TODO: Consider making the buffer pool aware of any in-progress page requests to avoid
+            // this wasteful race condition.
             let (page_num, offset_in_page) = Self::offset_to_page(offset);
             let page_offset = page_num * Self::PAGE_SIZE_U64;
 
@@ -144,7 +227,7 @@ impl<B: Blob, const PAGE_SIZE: usize> Immutable<B, PAGE_SIZE> {
     pub async fn new(blob: B, size: u64, pool: Arc<RwLock<BufferPool<PAGE_SIZE>>>) -> Self {
         let id = {
             let mut pool_guard = pool.write().await;
-            pool_guard.next_id().await
+            pool_guard.next_id()
         };
 
         Self {
@@ -264,7 +347,7 @@ impl<B: Blob, const PAGE_SIZE: usize> Append<B, PAGE_SIZE> {
 
         let id = {
             let mut pool_guard = pool.write().await;
-            pool_guard.next_id().await
+            pool_guard.next_id()
         };
 
         Ok(Self {
