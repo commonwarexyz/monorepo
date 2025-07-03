@@ -189,7 +189,7 @@ mod tests {
             let monitor = mocks::Monitor::new(111);
             monitors.insert(validator.clone(), monitor.clone());
             let supervisor = {
-                let mut s = mocks::Supervisor::<PublicKey, V>::new();
+                let mut s = mocks::Supervisor::<PublicKey, V>::default();
                 s.add_epoch(
                     111,
                     share.clone(),
@@ -398,7 +398,7 @@ mod tests {
                         let monitor = mocks::Monitor::new(111);
                         engine_monitors.insert(validator.clone(), monitor.clone());
                         let supervisor = {
-                            let mut s = mocks::Supervisor::<PublicKey, V>::new();
+                            let mut s = mocks::Supervisor::<PublicKey, V>::default();
                             s.add_epoch(111, share.clone(), polynomial.clone(), pks.to_vec());
                             s
                         };

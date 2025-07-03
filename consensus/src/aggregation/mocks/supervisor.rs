@@ -18,8 +18,8 @@ pub struct Supervisor<P: PublicKey, V: Variant> {
     _phantom: PhantomData<(P, V)>,
 }
 
-impl<P: PublicKey, V: Variant> Supervisor<P, V> {
-    pub fn new() -> Self {
+impl<P: PublicKey, V: Variant> Default for Supervisor<P, V> {
+    fn default() -> Self {
         Self {
             shares: HashMap::new(),
             polynomials: HashMap::new(),
@@ -28,7 +28,9 @@ impl<P: PublicKey, V: Variant> Supervisor<P, V> {
             _phantom: PhantomData,
         }
     }
+}
 
+impl<P: PublicKey, V: Variant> Supervisor<P, V> {
     pub fn add_epoch(
         &mut self,
         epoch: Epoch,
@@ -47,12 +49,6 @@ impl<P: PublicKey, V: Variant> Supervisor<P, V> {
         self.polynomials.insert(epoch, polynomial);
         self.validators.insert(epoch, validators);
         self.validators_maps.insert(epoch, validators_map);
-    }
-}
-
-impl<P: PublicKey, V: Variant> Default for Supervisor<P, V> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
