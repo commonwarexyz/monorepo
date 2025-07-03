@@ -1,6 +1,8 @@
 //! Random key-lookup benchmark for Archive.
 
-use super::utils::{append_random, ArchiveFactory, FastArchiveFactory, Key, MinimalArchiveFactory};
+use super::utils::{
+    append_random, ArchiveFactory, ImmutableArchiveFactory, Key, PrunableArchiveFactory,
+};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
@@ -139,39 +141,49 @@ fn bench_get(c: &mut Criterion) {
     // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
     let cfg = Config::default();
 
-    // Test fast implementation
+    // Test prunable implementation
     for compression in [None, Some(3)] {
         // Create a shared on-disk archive once so later setup is fast.
         let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
         let keys = builder.start(|ctx| async move {
-            let mut a = FastArchiveFactory::init(ctx, compression).await.unwrap();
+            let mut a = PrunableArchiveFactory::init(ctx, compression)
+                .await
+                .unwrap();
             let keys = append_random(&mut a, ITEMS).await;
             a.close().await.unwrap();
             keys
         });
 
         // Run the benchmarks
-        bench_get_for_factory::<FastArchiveFactory>(c, cfg.clone(), compression, &keys, "fast");
-    }
-
-    // Test minimal implementation
-    for compression in [None, Some(3)] {
-        // Create a shared on-disk archive once so later setup is fast.
-        let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
-        let keys = builder.start(|ctx| async move {
-            let mut a = MinimalArchiveFactory::init(ctx, compression).await.unwrap();
-            let keys = append_random(&mut a, ITEMS).await;
-            a.close().await.unwrap();
-            keys
-        });
-
-        // Run the benchmarks
-        bench_get_for_factory::<MinimalArchiveFactory>(
+        bench_get_for_factory::<PrunableArchiveFactory>(
             c,
             cfg.clone(),
             compression,
             &keys,
-            "minimal",
+            "prunable",
+        );
+    }
+
+    // Test immutable implementation
+    for compression in [None, Some(3)] {
+        // Create a shared on-disk archive once so later setup is fast.
+        let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
+        let keys = builder.start(|ctx| async move {
+            let mut a = ImmutableArchiveFactory::init(ctx, compression)
+                .await
+                .unwrap();
+            let keys = append_random(&mut a, ITEMS).await;
+            a.close().await.unwrap();
+            keys
+        });
+
+        // Run the benchmarks
+        bench_get_for_factory::<ImmutableArchiveFactory>(
+            c,
+            cfg.clone(),
+            compression,
+            &keys,
+            "immutable",
         );
     }
 }

@@ -21,9 +21,6 @@ const ITEMS_PER_SECTION: u64 = 65_536;
 /// Number of bytes to buffer when replaying.
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
-/// Number of cursor heads for minimal archive.
-const CURSOR_HEADS: u32 = 16_384;
-
 /// Fixed-length key and value types.
 pub type Key = FixedBytes<64>;
 pub type Val = FixedBytes<32>;
@@ -38,14 +35,14 @@ pub trait ArchiveFactory: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Self::Archive, Error>> + Send;
 }
 
-/// Factory for fast archive implementation.
-pub struct FastArchiveFactory;
+/// Factory for fast prunable implementation.
+pub struct PrunableArchiveFactory;
 
-impl ArchiveFactory for FastArchiveFactory {
-    type Archive = commonware_storage::archive::fast::Archive<TwoCap, Context, Key, Val>;
+impl ArchiveFactory for PrunableArchiveFactory {
+    type Archive = commonware_storage::archive::prunable::Archive<TwoCap, Context, Key, Val>;
 
     async fn init(context: Context, compression: Option<u8>) -> Result<Self::Archive, Error> {
-        let cfg = commonware_storage::archive::fast::Config {
+        let cfg = commonware_storage::archive::prunable::Config {
             partition: PARTITION.into(),
             translator: TwoCap,
             compression,
@@ -54,29 +51,31 @@ impl ArchiveFactory for FastArchiveFactory {
             write_buffer: WRITE_BUFFER,
             replay_buffer: REPLAY_BUFFER,
         };
-        commonware_storage::archive::fast::Archive::init(context, cfg).await
+        commonware_storage::archive::prunable::Archive::init(context, cfg).await
     }
 }
 
-/// Factory for minimal archive implementation.
-pub struct MinimalArchiveFactory;
+/// Factory for immutable archive implementation.
+pub struct ImmutableArchiveFactory;
 
-impl ArchiveFactory for MinimalArchiveFactory {
-    type Archive = commonware_storage::archive::minimal::Archive<Context, Key, Val>;
+impl ArchiveFactory for ImmutableArchiveFactory {
+    type Archive = commonware_storage::archive::immutable::Archive<Context, Key, Val>;
 
     async fn init(context: Context, compression: Option<u8>) -> Result<Self::Archive, Error> {
-        let cfg = commonware_storage::archive::minimal::Config {
+        let cfg = commonware_storage::archive::immutable::Config {
             metadata_partition: format!("{PARTITION}_metadata"),
+            table_partition: format!("{PARTITION}_table"),
+            table_size: 131_072, // 48B per entry * 131_072 = 6MB
             journal_partition: format!("{PARTITION}_journal"),
+            target_journal_size: 1024 * 1024 * 1024, // 1GB
             ordinal_partition: format!("{PARTITION}_ordinal"),
             compression,
             codec_config: (),
             items_per_section: ITEMS_PER_SECTION,
             write_buffer: WRITE_BUFFER,
             replay_buffer: REPLAY_BUFFER,
-            cursor_heads: CURSOR_HEADS,
         };
-        commonware_storage::archive::minimal::Archive::init(context, cfg).await
+        commonware_storage::archive::immutable::Archive::init(context, cfg).await
     }
 }
 

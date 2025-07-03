@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
     archive::{
-        fast::{Archive, Config},
+        prunable::{Archive, Config},
         Archive as _, Identifier,
     },
     translator::EightCap,

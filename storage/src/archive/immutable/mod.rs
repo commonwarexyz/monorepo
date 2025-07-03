@@ -7,8 +7,17 @@ pub struct Config<C> {
     /// The partition to use for the archive's metadata.
     pub metadata_partition: String,
 
+    /// The partition to use for the archive's table.
+    pub table_partition: String,
+
+    /// The size of the archive's table.
+    pub table_size: u32,
+
     /// The partition to use for the archive's journal.
     pub journal_partition: String,
+
+    /// The target size of the archive's journal.
+    pub target_journal_size: u64,
 
     /// The partition to use for the archive's ordinal.
     pub ordinal_partition: String,
@@ -27,7 +36,4 @@ pub struct Config<C> {
 
     /// The amount of bytes to use when replaying the ordinal.
     pub replay_buffer: usize,
-
-    /// The number of cursor heads to use for key lookups.
-    pub cursor_heads: u32,
 }
