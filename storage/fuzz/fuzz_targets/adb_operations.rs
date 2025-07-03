@@ -5,8 +5,8 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
     adb::any::{Any, Config},
-    index::translator::EightCap,
     mmr::hasher::Standard,
+    translator::EightCap,
 };
 use commonware_utils::array::FixedBytes;
 use libfuzzer_sys::fuzz_target;
@@ -118,7 +118,7 @@ fn fuzz(data: FuzzInput) {
                         assert!(oldest_loc.is_some(), "Expected Some oldest location when operations exist");
                         if let Some(loc) = oldest_loc {
                             assert!(loc < actual_op_count,
-                                "Oldest retained location {loc} should be less than op count {actual_op_count}", 
+                                "Oldest retained location {loc} should be less than op count {actual_op_count}",
                             );
                         }
                     }

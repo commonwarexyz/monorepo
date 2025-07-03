@@ -113,6 +113,22 @@ macro_rules! NZUsize {
     };
 }
 
+/// A macro to create a `NonZeroU8` from a value, panicking if the value is zero.
+#[macro_export]
+macro_rules! NZU8 {
+    ($val:expr) => {
+        std::num::NonZeroU8::new($val).expect("value must be non-zero")
+    };
+}
+
+/// A macro to create a `NonZeroU16` from a value, panicking if the value is zero.
+#[macro_export]
+macro_rules! NZU16 {
+    ($val:expr) => {
+        std::num::NonZeroU16::new($val).expect("value must be non-zero")
+    };
+}
+
 /// A macro to create a `NonZeroU32` from a value, panicking if the value is zero.
 #[macro_export]
 macro_rules! NZU32 {

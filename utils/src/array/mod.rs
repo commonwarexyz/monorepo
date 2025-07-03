@@ -12,6 +12,8 @@ pub mod fixed_bytes;
 pub use fixed_bytes::FixedBytes;
 pub mod u64;
 pub use u64::U64;
+pub mod u32;
+pub use u32::U32;
 pub mod prefixed_u64;
 
 /// Errors returned by the `Array` trait's functions.
