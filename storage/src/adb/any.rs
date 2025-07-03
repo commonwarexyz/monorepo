@@ -20,7 +20,7 @@ use crate::{
     },
 };
 use commonware_codec::Encode as _;
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::{
@@ -71,7 +71,7 @@ pub struct Config<T: Translator> {
 
 /// Configuration for syncing an [Any] to a pruned target state.
 #[derive(Clone)]
-pub struct SyncConfig<T: Translator> {
+pub struct SyncConfig<T: Translator, D: Digest> {
     /// Base configuration for the database.
     pub config: Config<T>,
 
@@ -79,6 +79,9 @@ pub struct SyncConfig<T: Translator> {
     /// This serves as both the log pruning boundary and the inactivity floor.
     /// Everything before this location is considered pruned/inactive.
     pub pruned_to_loc: u64,
+
+    /// The pinned nodes to use for the MMR.
+    pub pinned_nodes: HashMap<u64, D>,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
@@ -181,7 +184,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Initialize an [Any] database in a pruned state.
     /// Removes all existing persisted data and applies the state given in `cfg`.
-    pub(super) async fn init_pruned(context: E, cfg: SyncConfig<T>) -> Result<Self, Error> {
+    pub(super) async fn init_pruned(
+        context: E,
+        cfg: SyncConfig<T, H::Digest>,
+    ) -> Result<Self, Error> {
         let mmr_config = crate::mmr::journaled::SyncConfig {
             config: MmrConfig {
                 journal_partition: cfg.config.mmr_journal_partition,
@@ -192,9 +198,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             },
             pruned_to_pos: leaf_num_to_pos(cfg.pruned_to_loc),
         };
-        let mmr = Mmr::init_pruned(context.with_label("mmr"), mmr_config)
+        let mut mmr = Mmr::init_pruned(context.with_label("mmr"), mmr_config)
             .await
             .map_err(Error::MmrError)?;
+        mmr.set_pinned_nodes(cfg.pinned_nodes);
 
         // Initialize the log in an empty, pruned state.
         let log = Journal::<E, Operation<K, V>>::init_pruned(
@@ -794,11 +801,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         }
 
         Ok(())
-    }
-
-    /// Set the pinned nodes for the MMR.
-    pub(super) fn set_pinned_nodes(&mut self, nodes: HashMap<u64, H::Digest>) {
-        self.ops.set_pinned_nodes(nodes);
     }
 }
 
@@ -1410,9 +1412,10 @@ mod test {
     pub fn test_any_db_init_pruned_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let sync_config: SyncConfig<EightCap> = SyncConfig {
+            let sync_config: SyncConfig<EightCap, Digest> = SyncConfig {
                 config: any_db_config("sync_basic", EightCap),
                 pruned_to_loc: 0, // No pruning
+                pinned_nodes: HashMap::new(),
             };
             let mut synced_db: Any<_, Digest, Digest, Sha256, EightCap> =
                 Any::init_pruned(context.clone(), sync_config)
@@ -1491,9 +1494,10 @@ mod test {
             assert_eq!(ops.len(), need_ops as usize);
 
             // Initialize the synced db.
-            let sync_config: SyncConfig<EightCap> = SyncConfig {
+            let sync_config: SyncConfig<EightCap, Digest> = SyncConfig {
                 config: any_db_config("sync_pruning", EightCap),
                 pruned_to_loc: oldest_retained_loc,
+                pinned_nodes: HashMap::new(),
             };
             let synced_db: Any<_, Digest, Digest, Sha256, EightCap> =
                 Any::init_pruned(context.clone(), sync_config)

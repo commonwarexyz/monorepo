@@ -148,15 +148,13 @@ where
         let sync_config = adb::any::SyncConfig {
             config: config.db_config.clone(),
             pruned_to_loc: config.lower_bound_ops,
+            pinned_nodes,
         };
 
         // Initialize the Any database in pruned state
         let mut db = adb::any::Any::init_pruned(config.context.clone(), sync_config)
             .await
             .map_err(Error::DatabaseInitFailed)?;
-
-        // Set pinned nodes
-        db.set_pinned_nodes(pinned_nodes);
 
         // Replay all operations from the log to populate the MMR and snapshot
         let log_size = log
@@ -315,8 +313,6 @@ where
                             pinned_nodes = Some(HashMap::from_iter(
                                 nodes_to_pin.into_iter().zip(new_pinned_nodes),
                             ));
-                            // Persist pinned nodes before any MMR construction
-                            // log.set_pinned_nodes(pinned_nodes.clone())
                         }
                         Err(_) => {
                             warn!("Failed to extract pinned nodes, retrying");
