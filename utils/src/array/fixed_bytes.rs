@@ -1,6 +1,7 @@
 use crate::{hex, Array};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+#[cfg(test)]
+use commonware_codec::{Error as CodecError, ReadExt};
+use commonware_codec::{FixedSize, Read, Write};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
@@ -17,7 +18,7 @@ pub enum Error {
 }
 
 /// An `Array` implementation for fixed-length byte arrays.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Read, Write, FixedSize)]
 #[repr(transparent)]
 pub struct FixedBytes<const N: usize>([u8; N]);
 
@@ -26,24 +27,6 @@ impl<const N: usize> FixedBytes<N> {
     pub fn new(value: [u8; N]) -> Self {
         Self(value)
     }
-}
-
-impl<const N: usize> Write for FixedBytes<N> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-    }
-}
-
-impl<const N: usize> Read for FixedBytes<N> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Ok(Self(<[u8; N]>::read(buf)?))
-    }
-}
-
-impl<const N: usize> FixedSize for FixedBytes<N> {
-    const SIZE: usize = N;
 }
 
 impl<const N: usize> Array for FixedBytes<N> {}
