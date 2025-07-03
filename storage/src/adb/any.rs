@@ -212,17 +212,29 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             mmr.add_batched(&mut hasher, &digest).await?;
         }
 
-        Ok(Any {
+        let mut snapshot = Index::init(
+            context.with_label("snapshot"),
+            cfg.db_config.translator.clone(),
+        );
+
+        Any::<E, K, V, H, T>::build_snapshot_from_log::<0 /* UNUSED_N */>(
+            cfg.pruned_to_loc,
+            &cfg.log,
+            &mut snapshot,
+            None,
+        )
+        .await?;
+
+        let mut db = Any {
             ops: mmr,
             log: cfg.log,
-            snapshot: Index::init(
-                context.with_label("snapshot"),
-                cfg.db_config.translator.clone(),
-            ),
+            snapshot,
             inactivity_floor_loc: cfg.pruned_to_loc,
             uncommitted_ops: 0,
             hasher: Standard::<H>::new(),
-        })
+        };
+        db.sync().await?;
+        Ok(db)
     }
 
     /// Initialize and return the mmr and log from the given config, correcting any inconsistencies

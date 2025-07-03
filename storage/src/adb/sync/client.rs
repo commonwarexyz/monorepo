@@ -1,6 +1,7 @@
 use crate::{
     adb::{
         self,
+        any::SyncConfig,
         operation::Operation,
         sync::{resolver::Resolver, Error},
     },
@@ -137,40 +138,28 @@ where
         })
     }
 
-    /// Create an [adb::any::Any] database from the populated log and pruning boundary.
-    /// This method constructs the MMR, snapshot, and all necessary components.
-    async fn build_database_from_log(
-        config: &Config<E, K, V, H, T, R>,
-        log: Journal<E, Operation<K, V>>,
-        pinned_nodes: Vec<H::Digest>,
-    ) -> Result<adb::any::Any<E, K, V, H, T>, Error> {
-        // Create the sync config for the Any database
-        let sync_config = adb::any::SyncConfig {
-            db_config: config.db_config.clone(),
-            pruned_to_loc: config.lower_bound_ops,
-            pinned_nodes,
-            log,
-        };
+    // /// Create an [adb::any::Any] database from the populated log and pruning boundary.
+    // /// This method constructs the MMR, snapshot, and all necessary components.
+    // async fn build_database_from_log(
+    //     config: &Config<E, K, V, H, T, R>,
+    //     log: Journal<E, Operation<K, V>>,
+    //     pinned_nodes: Vec<H::Digest>,
+    // ) -> Result<adb::any::Any<E, K, V, H, T>, Error> {
+    //     // Create the sync config for the Any database
+    //     let sync_config = adb::any::SyncConfig {
+    //         db_config: config.db_config.clone(),
+    //         pruned_to_loc: config.lower_bound_ops,
+    //         pinned_nodes,
+    //         log,
+    //     };
 
-        // Initialize the Any database in pruned state
-        let mut db = adb::any::Any::init_pruned(config.context.clone(), sync_config)
-            .await
-            .map_err(Error::DatabaseInitFailed)?;
+    //     // Initialize the Any database in pruned state
+    //     let db = adb::any::Any::init_pruned(config.context.clone(), sync_config)
+    //         .await
+    //         .map_err(Error::DatabaseInitFailed)?;
 
-        adb::any::Any::<E, K, V, H, T>::build_snapshot_from_log::<0 /* UNUSED_N */>(
-            config.lower_bound_ops,
-            &db.log,
-            &mut db.snapshot,
-            None,
-        )
-        .await
-        .map_err(Error::DatabaseInitFailed)?;
-
-        // Sync the database to ensure all operations are persisted
-        db.sync().await.map_err(Error::DatabaseInitFailed)?;
-
-        Ok(db)
-    }
+    //     Ok(db)
+    // }
 
     /// Process the next step in the sync process
     async fn step(self) -> Result<Self, Error> {
@@ -344,8 +333,17 @@ where
                         .map_err(Error::DatabaseInitFailed)?;
 
                     // Build the complete database from the log
-                    let db =
-                        Self::build_database_from_log(&config, log, pinned_nodes.unwrap()).await?;
+                    let db = adb::any::Any::init_pruned(
+                        config.context.clone(),
+                        SyncConfig {
+                            db_config: config.db_config.clone(),
+                            log,
+                            pruned_to_loc: config.lower_bound_ops,
+                            pinned_nodes: pinned_nodes.unwrap(),
+                        },
+                    )
+                    .await
+                    .map_err(Error::DatabaseInitFailed)?;
 
                     // Verify the final hash matches the target
                     let mut hasher = mmr::hasher::Standard::<H>::new();
@@ -396,7 +394,7 @@ mod tests {
     use super::*;
     use crate::{
         adb::{any::Any, sync::sync},
-        index,
+        index::{self, translator::TwoCap},
         mmr::verification::Proof,
     };
     use commonware_cryptography::{sha256::Digest, Digest as _, Sha256};
@@ -682,6 +680,7 @@ mod tests {
     }
 
     /// Test build_database_from_log with empty log
+    /// TODO move this test
     #[test]
     fn test_build_database_from_log_empty() {
         let executor = deterministic::Runner::default();
@@ -712,7 +711,16 @@ mod tests {
             .await
             .unwrap();
 
-            let db = Client::build_database_from_log(&config, log, Vec::new())
+            let db: adb::any::Any<Context, Digest, Digest, TestHash, TestTranslator> =
+                adb::any::Any::init_pruned(
+                    config.context.clone(),
+                    SyncConfig {
+                        db_config: config.db_config.clone(),
+                        log,
+                        pruned_to_loc: config.lower_bound_ops,
+                        pinned_nodes: Vec::new(),
+                    },
+                )
                 .await
                 .unwrap();
             assert_eq!(db.op_count(), 0);
@@ -787,9 +795,17 @@ mod tests {
             }
             log.sync().await.unwrap();
 
-            let db = Client::build_database_from_log(&config, log, pinned_nodes)
-                .await
-                .unwrap();
+            let db = adb::any::Any::init_pruned(
+                config.context.clone(),
+                SyncConfig {
+                    db_config: config.db_config.clone(),
+                    log,
+                    pruned_to_loc: config.lower_bound_ops,
+                    pinned_nodes,
+                },
+            )
+            .await
+            .unwrap();
             assert_eq!(db.op_count(), upper_bound_ops + 1);
             assert_eq!(db.inactivity_floor_loc, lower_bound_ops);
 
@@ -880,7 +896,16 @@ mod tests {
                     .map(|node| node.as_ref().unwrap().unwrap())
                     .collect::<Vec<_>>();
 
-                let db = Client::build_database_from_log(&config, log, pinned_nodes)
+                let db: Any<Context, Digest, Digest, TestHash, TwoCap> =
+                    adb::any::Any::init_pruned(
+                        config.context.clone(),
+                        SyncConfig {
+                            db_config: config.db_config.clone(),
+                            log,
+                            pruned_to_loc: lower_bound,
+                            pinned_nodes,
+                        },
+                    )
                     .await
                     .unwrap();
 
@@ -969,9 +994,17 @@ mod tests {
             }
             log.sync().await.unwrap();
 
-            let db = Client::build_database_from_log(&config, log, Vec::new())
-                .await
-                .unwrap();
+            let db = adb::any::Any::init_pruned(
+                config.context.clone(),
+                SyncConfig {
+                    db_config: config.db_config.clone(),
+                    log,
+                    pruned_to_loc: config.lower_bound_ops,
+                    pinned_nodes: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
 
             // Verify the database is functional (op_count may differ from expected due to internal handling)
             assert!(db.op_count() > 0);
@@ -984,59 +1017,6 @@ mod tests {
 
             // Verify that the database snapshot has been built
             assert!(db.snapshot.keys() > 0);
-        });
-    }
-
-    /// Test build_database_from_log with valid configuration
-    #[test]
-    fn test_build_database_from_log_integration() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Create a simple valid configuration
-            let config = Config {
-                db_config: create_test_config(context.next_u64()),
-                max_ops_per_batch: NZU64!(5),
-                max_retries: 0,
-                target_hash: Digest::from([0u8; 32]),
-                lower_bound_ops: 0,
-                upper_bound_ops: 4,
-                context: context.clone(),
-                resolver: create_test_db(context.clone()).await,
-                hasher: create_test_hasher(),
-                _phantom: PhantomData,
-            };
-
-            // Create log with a few operations
-            let mut log = Journal::<_, Operation<TestKey, TestValue>>::init_pruned(
-                context.clone().with_label("integration_log"),
-                JConfig {
-                    partition: format!("integration_log_{}", context.next_u64()),
-                    items_per_blob: 1024,
-                    write_buffer: 64,
-                },
-                0,
-            )
-            .await
-            .unwrap();
-
-            // Add a few simple operations
-            let mut rng = StdRng::seed_from_u64(123);
-            for _ in 0..5 {
-                let key = TestKey::random(&mut rng);
-                let value = TestValue::random(&mut rng);
-                log.append(Operation::Update(key, value)).await.unwrap();
-            }
-            log.sync().await.unwrap();
-
-            let result = Client::build_database_from_log(&config, log, Vec::new()).await;
-            assert!(result.is_ok());
-
-            let db = result.unwrap();
-            assert!(db.op_count() >= 5);
-
-            // Verify the database is functional
-            let mut hasher = create_test_hasher();
-            let _root_hash = db.root(&mut hasher);
         });
     }
 }
