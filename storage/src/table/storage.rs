@@ -1,4 +1,4 @@
-use super::{Config, Error};
+use super::{Config, Error, Identifier};
 use crate::journal::variable::{Config as JournalConfig, Journal};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
@@ -562,8 +562,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         Ok(Cursor::new(self.current_section, offset))
     }
 
+    /// Get the value for a given cursor.
+    async fn get_cursor(&self, cursor: Cursor) -> Result<Option<V>, Error> {
+        let entry = self.journal.get(cursor.section(), cursor.offset()).await?;
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
+
+        Ok(Some(entry.value))
+    }
+
     /// Get the first value for a given key.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+    async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
         self.gets.inc();
 
         // Get head of the chain from table
@@ -596,19 +606,16 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         Ok(None)
     }
 
-    /// Check if a key exists in the store.
-    pub async fn has(&self, key: &K) -> Result<bool, Error> {
-        Ok(self.get(key).await?.is_some())
+    pub async fn get<'a>(&'a self, identifier: Identifier<'a, K>) -> Result<Option<V>, Error> {
+        match identifier {
+            Identifier::Cursor(cursor) => self.get_cursor(cursor).await,
+            Identifier::Key(key) => self.get_key(key).await,
+        }
     }
 
-    /// Get the value for a given cursor.
-    pub async fn get_cursor(&self, cursor: Cursor) -> Result<Option<V>, Error> {
-        let entry = self.journal.get(cursor.section(), cursor.offset()).await?;
-        let Some(entry) = entry else {
-            return Ok(None);
-        };
-
-        Ok(Some(entry.value))
+    /// Check if a key exists in the store.
+    pub async fn has(&self, key: &K) -> Result<bool, Error> {
+        Ok(self.get(Identifier::Key(key)).await?.is_some())
     }
 
     /// Sync all data to the underlying store.

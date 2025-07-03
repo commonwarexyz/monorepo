@@ -107,9 +107,16 @@
 //! ```
 
 mod storage;
+use commonware_utils::Array;
 pub use storage::{Checkpoint, Cursor, Table};
 
 use thiserror::Error;
+
+/// Subject of a `get` operation.
+pub enum Identifier<'a, K: Array> {
+    Cursor(Cursor),
+    Key(&'a K),
+}
 
 /// Errors that can occur when interacting with the [Store].
 #[derive(Debug, Error)]
@@ -218,7 +225,7 @@ mod tests {
 
             // Get the data back
             let retrieved = store
-                .get(&key)
+                .get(Identifier::Key(&key))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
@@ -282,7 +289,7 @@ mod tests {
             // Retrieve all keys and verify
             for (key, data) in &keys {
                 let retrieved = store
-                    .get(key)
+                    .get(Identifier::Key(key))
                     .await
                     .expect("Failed to get data")
                     .expect("Data not found");
@@ -335,7 +342,7 @@ mod tests {
             // Retrieve all keys and verify they can still be found
             for (key, data) in &keys {
                 let retrieved = store
-                    .get(key)
+                    .get(Identifier::Key(key))
                     .await
                     .expect("Failed to get data")
                     .expect("Data not found");
@@ -399,7 +406,7 @@ mod tests {
 
                 for (key, data) in &keys {
                     let retrieved = store
-                        .get(key)
+                        .get(Identifier::Key(key))
                         .await
                         .expect("Failed to get data")
                         .expect("Data not found");
@@ -467,15 +474,35 @@ mod tests {
                 .expect("Failed to initialize store");
 
                 // Committed data should be present
-                assert_eq!(store.get(&test_key("committed1")).await.unwrap(), Some(1));
-                assert_eq!(store.get(&test_key("committed2")).await.unwrap(), Some(2));
+                assert_eq!(
+                    store
+                        .get(Identifier::Key(&test_key("committed1")))
+                        .await
+                        .unwrap(),
+                    Some(1)
+                );
+                assert_eq!(
+                    store
+                        .get(Identifier::Key(&test_key("committed2")))
+                        .await
+                        .unwrap(),
+                    Some(2)
+                );
 
                 // Uncommitted data might or might not be present depending on implementation
                 // But if present, it should be correct
-                if let Some(val) = store.get(&test_key("uncommitted1")).await.unwrap() {
+                if let Some(val) = store
+                    .get(Identifier::Key(&test_key("uncommitted1")))
+                    .await
+                    .unwrap()
+                {
                     assert_eq!(val, 3);
                 }
-                if let Some(val) = store.get(&test_key("uncommitted2")).await.unwrap() {
+                if let Some(val) = store
+                    .get(Identifier::Key(&test_key("uncommitted2")))
+                    .await
+                    .unwrap()
+                {
                     assert_eq!(val, 4);
                 }
             }
@@ -503,7 +530,10 @@ mod tests {
 
             // Attempt to get a key that doesn't exist
             let key = test_key("nonexistent");
-            let retrieved = store.get(&key).await.expect("Failed to get data");
+            let retrieved = store
+                .get(Identifier::Key(&key))
+                .await
+                .expect("Failed to get data");
             assert!(retrieved.is_none());
 
             // Check has returns false
@@ -553,8 +583,16 @@ mod tests {
                     .expect("Failed to initialize store");
 
                 // Should not find any data
-                assert!(store.get(&test_key("destroy1")).await.unwrap().is_none());
-                assert!(store.get(&test_key("destroy2")).await.unwrap().is_none());
+                assert!(store
+                    .get(Identifier::Key(&test_key("destroy1")))
+                    .await
+                    .unwrap()
+                    .is_none());
+                assert!(store
+                    .get(Identifier::Key(&test_key("destroy2")))
+                    .await
+                    .unwrap()
+                    .is_none());
             }
         });
     }
@@ -605,7 +643,7 @@ mod tests {
 
                 // The key should still be retrievable from journal if table is corrupted
                 // but the table entry is zeroed out
-                let result = store.get(&test_key("key1")).await.unwrap();
+                let result = store.get(Identifier::Key(&test_key("key1"))).await.unwrap();
                 assert!(result.is_none() || result == Some(42));
             }
         });
@@ -660,7 +698,7 @@ mod tests {
                 .expect("Failed to initialize store");
 
                 // With invalid CRC, the entry should be treated as invalid
-                let result = store.get(&test_key("key1")).await.unwrap();
+                let result = store.get(Identifier::Key(&test_key("key1"))).await.unwrap();
                 // The store should still work but may not find the key due to invalid table entry
                 assert!(result.is_none() || result == Some(42));
             }
@@ -714,12 +752,21 @@ mod tests {
                 .expect("Failed to initialize store");
 
                 // Should still be able to read the key
-                assert_eq!(store.get(&test_key("key1")).await.unwrap(), Some(42));
+                assert_eq!(
+                    store.get(Identifier::Key(&test_key("key1"))).await.unwrap(),
+                    Some(42)
+                );
 
                 // And write new data
                 let mut store_mut = store;
                 store_mut.put(test_key("key2"), 43).await.unwrap();
-                assert_eq!(store_mut.get(&test_key("key2")).await.unwrap(), Some(43));
+                assert_eq!(
+                    store_mut
+                        .get(Identifier::Key(&test_key("key2")))
+                        .await
+                        .unwrap(),
+                    Some(43)
+                );
             }
         });
     }
@@ -771,7 +818,7 @@ mod tests {
             // Verify all pairs can be retrieved
             for (key, value) in &pairs {
                 let retrieved = store
-                    .get(key)
+                    .get(Identifier::Key(key))
                     .await
                     .expect("Failed to get data")
                     .expect("Data not found");
@@ -806,7 +853,7 @@ mod tests {
             // Verify all pairs are still there after restart
             for (key, value) in &pairs {
                 let retrieved = store
-                    .get(key)
+                    .get(Identifier::Key(key))
                     .await
                     .expect("Failed to get data")
                     .expect("Data not found");

@@ -182,7 +182,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         };
 
         // Get journal entry
-        let result = self.table.get_cursor(cursor).await?;
+        let result = self.table.get(table::Identifier::Cursor(cursor)).await?;
 
         // Get value
         Ok(result)
@@ -190,7 +190,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
 
     async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
         // Get table entry
-        let result = self.table.get(key).await?;
+        let result = self.table.get(table::Identifier::Key(key)).await?;
 
         // Get value
         Ok(result)
