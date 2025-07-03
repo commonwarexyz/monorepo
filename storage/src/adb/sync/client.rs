@@ -156,7 +156,6 @@ where
             .map_err(Error::DatabaseInitFailed)?;
 
         // Set pinned nodes
-        // TODO pass pinned_node
         db.set_pinned_nodes(pinned_nodes);
 
         // Replay all operations from the log to populate the MMR and snapshot
@@ -174,7 +173,18 @@ where
             db.replay_logged_op(op)
                 .await
                 .map_err(Error::DatabaseInitFailed)?;
+            let op_count = db.op_count();
+            info!("op_count: {}", op_count);
         }
+
+        adb::any::Any::<E, K, V, H, T>::build_snapshot_from_log::<0 /* UNUSED_N */>(
+            config.lower_bound_ops,
+            &log,
+            &mut db.snapshot,
+            None,
+        )
+        .await
+        .map_err(Error::DatabaseInitFailed)?;
 
         // Sync the database to ensure all operations are persisted
         db.sync().await.map_err(Error::DatabaseInitFailed)?;
@@ -820,7 +830,7 @@ mod tests {
             for op in &ops {
                 if let Operation::Update(key, value) = op {
                     expected_kvs.insert(*key, *value);
-                    deleted_keys.insert(*key);
+                    deleted_keys.remove(key);
                 } else if let Operation::Deleted(key) = op {
                     expected_kvs.remove(key);
                     deleted_keys.insert(*key);
@@ -953,12 +963,7 @@ mod tests {
 
             // Test different pruning boundaries
             for lower_bound in [0, 50, 100, 150] {
-                if lower_bound >= total_ops {
-                    continue;
-                }
-
-                let upper_bound = std::cmp::min(lower_bound + 50, total_ops - 1);
-
+                let upper_bound = std::cmp::min(lower_bound + 49, total_ops - 1);
                 let config = Config {
                     db_config: create_test_config(context.next_u64()),
                     max_ops_per_batch: NZU64!(10),
@@ -987,39 +992,41 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                log.sync().await.unwrap();
 
-                // Create a temporary source db to get the actual operations
-                let mut temp_source_db = create_test_db(context.clone()).await;
-                temp_source_db = apply_ops(temp_source_db, ops.clone()).await;
-                temp_source_db.commit().await.unwrap();
-
-                // Get the actual operations from the temporary source database
-                let mut actual_ops = Vec::new();
-                for i in lower_bound..=upper_bound {
-                    if i < temp_source_db.op_count() {
-                        let op = temp_source_db.log.read(i).await.unwrap();
-                        actual_ops.push(op);
-                    }
-                }
-
-                // Add actual operations to log
-                for op in actual_ops {
-                    log.append(op).await.unwrap();
+                let ops_slice = &ops[lower_bound as usize..=upper_bound as usize];
+                for op in ops_slice {
+                    log.append(op.clone()).await.unwrap();
                 }
                 log.sync().await.unwrap();
 
                 let db = Client::build_database_from_log(&config, log, HashMap::new())
                     .await
                     .unwrap();
-                // The database op_count may vary based on internal handling and pruning state
-                assert!(db.op_count() >= lower_bound);
+
+                // Verify database state
+                let expected_op_count = upper_bound + 1; // +1 because op_count is total number of ops
+                assert_eq!(
+                    db.log.size().await.unwrap(),
+                    expected_op_count,
+                    "log size mismatch for bounds [{}, {}]",
+                    lower_bound,
+                    upper_bound
+                );
+                assert_eq!(
+                    db.op_count(),
+                    expected_op_count,
+                    "op_count mismatch for bounds [{}, {}]",
+                    lower_bound,
+                    upper_bound
+                );
                 assert_eq!(db.inactivity_floor_loc, lower_bound);
                 assert_eq!(db.oldest_retained_loc(), Some(lower_bound));
 
                 // Verify state matches the source operations
                 let mut expected_kvs = HashMap::new();
                 let mut deleted_keys = HashSet::new();
-                for op in &ops {
+                for op in ops_slice {
                     if let Operation::Update(key, value) = op {
                         expected_kvs.insert(*key, *value);
                         deleted_keys.remove(key);
@@ -1029,8 +1036,11 @@ mod tests {
                     }
                 }
                 for (key, value) in expected_kvs {
-                    let synced_value = db.get(&key).await.unwrap().unwrap();
-                    assert_eq!(synced_value, value, "Mismatch for key {:?}", key);
+                    assert_eq!(
+                        db.get(&key).await.unwrap().unwrap(),
+                        value,
+                        "Mismatch for key {key}, bound [{lower_bound}, {upper_bound}]"
+                    );
                 }
                 // Verify that deleted keys are absent
                 for key in deleted_keys {
@@ -1040,6 +1050,7 @@ mod tests {
                         key
                     );
                 }
+                db.destroy().await.unwrap();
             }
         });
     }

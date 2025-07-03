@@ -32,7 +32,7 @@ use tracing::{debug, warn};
 
 /// Indicator that the generic parameter N is unused by the call. N is only
 /// needed if the caller is providing the optional bitmap.
-const UNUSED_N: usize = 0;
+pub const UNUSED_N: usize = 0;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.
@@ -782,19 +782,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     pub(crate) async fn replay_logged_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
         match op {
             Operation::Update(key, value) => {
-                // Use the public helper so the snapshot is updated consistently.
-                let _ = self.update(key, value).await?;
+                self.apply_op(Operation::Update(key, value)).await?;
             }
             Operation::Deleted(key) => {
-                let _ = self.delete(key).await?;
+                self.apply_op(Operation::Deleted(key)).await?;
             }
             Operation::Commit(loc) => {
-                // Append the commit op directly to the log/MMR without raising the inactivity
-                // floor again (it has already been raised in the target db). We must, however,
-                // mirror the side-effect of advancing the `inactivity_floor_loc` so that future
-                // operations observe the correct pruning boundary.
                 self.apply_op(Operation::Commit(loc)).await?;
-                self.inactivity_floor_loc = loc;
+                // self.inactivity_floor_loc = loc; TODO do we need this?
             }
         }
 
