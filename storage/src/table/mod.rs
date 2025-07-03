@@ -109,7 +109,6 @@
 mod storage;
 use commonware_utils::Array;
 pub use storage::{Checkpoint, Cursor, Table};
-
 use thiserror::Error;
 
 /// Subject of a `get` operation.

@@ -178,8 +178,6 @@ pub struct Config<T: Translator, C> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
     use crate::{
         archive::Archive as _,
@@ -190,6 +188,7 @@ mod tests {
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
     use rand::Rng;
+    use std::collections::BTreeMap;
 
     const DEFAULT_ITEMS_PER_SECTION: u64 = 65536;
     const DEFAULT_WRITE_BUFFER: usize = 1024;
