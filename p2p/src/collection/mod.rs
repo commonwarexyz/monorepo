@@ -10,17 +10,22 @@ use std::{collections::HashMap, fmt::Debug, future::Future};
 
 pub mod actor;
 
-pub trait Idable: Debug + Send + 'static {
+/// Trait for an item that has an associated, unique ID.
+pub trait Idable: Clone + Send + 'static {
     type ID: Debug + Send + 'static;
+
+    /// Returns the unique ID of the item.
     fn id(&self) -> Self::ID;
 }
 
 /// Interface for actor that will disperse messages and collect responses.
-pub trait Collector: Debug + Send + 'static {
+pub trait Collector: Clone + Send + 'static {
     type Message: Idable + Debug + Send + 'static;
     type PublicKey: PublicKey;
 
     /// Sends a message to recipients.
+    ///
+    /// Once a quorum of responses have been collected, the [Originator] will be notified.
     fn send(
         &mut self,
         message: Self::Message,
@@ -30,18 +35,19 @@ pub trait Collector: Debug + Send + 'static {
     /// Peek at the collected responses for a given ID.
     fn peek(
         &mut self,
-        id: Self::Message::ID,
+        id: <Self::Message as Idable>::ID,
     ) -> impl Future<Output = oneshot::Receiver<HashMap<Self::PublicKey, Bytes>>> + Send;
 
     /// Cancels a message, dropping all existing and future responses.
-    fn cancel(&mut self, id: Self::Message::ID) -> impl Future<Output = ()> + Send;
+    fn cancel(&mut self, id: <Self::Message as Idable>::ID) -> impl Future<Output = ()> + Send;
 }
 
 /// Interface for the application that originates messages.
-pub trait Originator: Debug + Send + 'static {
+pub trait Originator: Clone + Send + 'static {
     type PublicKey: PublicKey;
     type ID: Debug + Send + 'static;
 
+    /// Called once a sufficient amount of responses have been collected for a message.
     fn collected(
         &mut self,
         id: Self::ID,
@@ -50,7 +56,7 @@ pub trait Originator: Debug + Send + 'static {
 }
 
 /// Interface for the application that receives messages from an origin.
-pub trait Endpoint: Debug + Send + 'static {
+pub trait Endpoint: Clone + Send + 'static {
     type Message: Idable + Debug + Send + 'static;
 
     /// Processes a message and (optionally) sends a response.
