@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::hash;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::journal::fixed::{
@@ -10,20 +10,41 @@ use commonware_storage::journal::fixed::{
 use futures::{pin_mut, StreamExt};
 use libfuzzer_sys::fuzz_target;
 
+const MAX_REPLAY_BUF: usize = 2048;
+
+fn bounded_non_zero(u: &mut Unstructured<'_>) -> Result<usize> {
+    let v = u.int_in_range(1..=MAX_REPLAY_BUF)?;
+    Ok(v)
+}
+
 #[derive(Arbitrary, Debug, Clone)]
 enum JournalOperation {
-    Append { value: u64 },
-    Read { pos: u64 },
+    Append {
+        value: u64,
+    },
+    Read {
+        pos: u64,
+    },
     Size,
     Sync,
-    Rewind { size: u64 },
+    Rewind {
+        size: u64,
+    },
     OldestRetainedPos,
-    Prune { min_pos: u64 },
-    Replay,
+    Prune {
+        min_pos: u64,
+    },
+    Replay {
+        #[arbitrary(with = bounded_non_zero)]
+        buffer: usize,
+        start_pos: u64,
+    },
     Close,
     Destroy,
     // Edge case operations
-    AppendMany { count: u8 },
+    AppendMany {
+        count: u8,
+    },
     MultipleSync,
 }
 
@@ -106,15 +127,16 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                JournalOperation::Replay => {
+                JournalOperation::Replay { buffer, start_pos } => {
                     // Test replay functionality - panic on any replay failures
-                    let stream = journal.replay(100, 1024).await.unwrap();
+                    let start_pos = start_pos % (journal_size + 1);
+                    let stream = journal.replay(*buffer, start_pos).await.unwrap();
                     pin_mut!(stream);
                     // Consume first few items to test stream - panic on stream errors
                     for _ in 0..3 {
                         match stream.next().await {
                             Some(result) => {
-                                result.unwrap(); // Panic on item errors
+                                result.unwrap();
                             }
                             None => break,
                         }
