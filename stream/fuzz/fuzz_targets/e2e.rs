@@ -180,13 +180,14 @@ impl StateMachine {
             (ProtocolState::Initial, StateAction::AttemptUpgrade, true) => true,
             (ProtocolState::Initial, StateAction::SendValidHello, true) => true,
             (ProtocolState::Initial, StateAction::SendInvalidHello, true) => true,
+            // We only model sending valid confirmations during StateAction::AttemptUpgrade.
             (ProtocolState::WaitingForResponse, StateAction::SendInvalidConfirmation, true) => true,
-            // We can model sending invalid confirmations only.
 
             // Listener states and actions
             (ProtocolState::Initial, StateAction::AttemptUpgrade, false) => true,
             (ProtocolState::WaitingForHello, StateAction::SendValidHello, false) => true,
             (ProtocolState::WaitingForHello, StateAction::SendInvalidHello, false) => true,
+            // We only model sending valid confirmations during StateAction::AttemptUpgrade.
             (ProtocolState::WaitingForHello, StateAction::SendInvalidConfirmation, false) => true,
 
             // Universal actions valid from any state
