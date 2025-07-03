@@ -51,13 +51,14 @@ use bytes::BufMut;
 use commonware_codec::{Codec, DecodeExt, FixedSize};
 use commonware_runtime::{
     buffer::{
-        pool::{Append, BufferPool, Immutable},
+        pool::{Append, BufferPool},
         Read,
     },
     Blob, Error as RError, Metrics, RwLock, Storage,
 };
 use commonware_utils::hex;
 use futures::{
+    future::try_join_all,
     stream::{self, Stream},
     StreamExt,
 };
@@ -93,14 +94,14 @@ pub struct Journal<E: Storage + Metrics, A, const PAGE_SIZE: usize> {
     context: E,
     cfg: Config<PAGE_SIZE>,
 
-    /// Blobs are stored in a BTreeMap to ensure they are always iterated in order of their indices.
+    /// Stores the historical blobs. A BTreeMap allows iterating over them from oldest to newest.
     ///
     /// # Invariants
     ///
     /// - Indices are consecutive and without gaps.
     /// - Contains only full blobs.
     /// - Never contains the most recent blob.
-    blobs: BTreeMap<u64, Immutable<E::Blob, PAGE_SIZE>>,
+    blobs: BTreeMap<u64, Append<E::Blob, PAGE_SIZE>>,
 
     /// The most recent blob.
     ///
@@ -200,20 +201,13 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize, const PAGE_SIZE: usiz
         tracked.set(blobs.len() as i64);
 
         // Initialize the tail blob.
-        let (mut tail_index, unbuffered_tail) = blobs.pop_last().unwrap();
+        let (mut tail_index, mut tail) = blobs.pop_last().unwrap();
         let mut tail_size = *sizes.get(&tail_index).unwrap();
-        let mut tail = Append::new(
-            unbuffered_tail,
-            tail_size,
-            cfg.write_buffer,
-            cfg.buffer_pool.clone(),
-        )
-        .await?;
 
         // Truncate the tail if it's not the expected length, which might happen from unclean
         // shutdown.
         let mut truncated = false;
-        if tail_size % Self::CHUNK_SIZE_U64 != 0 {
+        if !tail_size.is_multiple_of(Self::CHUNK_SIZE_U64) {
             warn!(
                 blob = tail_index,
                 invalid_size = tail_size,
@@ -258,30 +252,27 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize, const PAGE_SIZE: usiz
                 .open(&cfg.partition, &next_blob_index.to_be_bytes())
                 .await?;
             assert_eq!(size, 0);
-            let next_blob =
-                Append::new(next_blob, 0, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
-            blobs.insert(tail_index, tail.take_blob());
+            blobs.insert(tail_index, tail);
             (tail_index, tail) = (next_blob_index, next_blob);
+            tail_size = 0;
             tracked.inc();
         }
 
-        let blobs = futures::future::join_all(blobs.into_iter().map(|(index, blob)| {
+        let blobs = try_join_all(blobs.into_iter().map(|(index, blob)| {
             let pool = cfg.buffer_pool.clone();
             async move {
-                (
-                    index,
-                    Immutable::new(blob, cfg.items_per_blob * Self::CHUNK_SIZE_U64, pool).await,
-                )
+                let blob =
+                    Append::new(blob, cfg.items_per_blob * Self::CHUNK_SIZE_U64, 0, pool).await?;
+                Ok::<_, Error>((index, blob))
             }
         }))
-        .await
-        .into_iter()
-        .collect();
+        .await?;
+        let tail = Append::new(tail, tail_size, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
 
         Ok(Self {
             context,
             cfg,
-            blobs,
+            blobs: blobs.into_iter().collect(),
             tail,
             tail_index,
             tracked,
@@ -346,19 +337,13 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize, const PAGE_SIZE: usiz
             )
             .await?;
 
-            // Sync the previous blob before taking it and inserting it into the blobs map.
+            // Sync the previous blob and set its write buffer to 0 (since we won't be writing to
+            // it) before moving it to the old blobs map.
             self.tail.sync().await?;
-            let old_blob = std::mem::replace(&mut self.tail, next_blob).take_blob();
-            let immutable_blob = Immutable::new(
-                old_blob,
-                self.cfg.items_per_blob * Self::CHUNK_SIZE_U64,
-                self.cfg.buffer_pool.clone(),
-            )
-            .await;
-            assert!(self
-                .blobs
-                .insert(self.tail_index, immutable_blob,)
-                .is_none());
+            self.tail.reset_buffer(0).await?;
+            let old_tail = std::mem::replace(&mut self.tail, next_blob);
+            assert!(self.blobs.insert(self.tail_index, old_tail).is_none());
+
             self.tail_index = next_blob_index;
             self.tracked.inc();
         }
@@ -377,45 +362,43 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize, const PAGE_SIZE: usiz
             std::cmp::Ordering::Equal => return Ok(()),
             std::cmp::Ordering::Less => {}
         }
-        self.tail.sync().await?;
-        let size = self.tail.size().await;
-        let immutable_tail =
-            Immutable::new(self.tail.clone_blob(), size, self.cfg.buffer_pool.clone()).await;
-        self.blobs.insert(self.tail_index, immutable_tail);
 
         let rewind_to_blob_index = journal_size / self.cfg.items_per_blob;
         if rewind_to_blob_index < self.oldest_blob_index() {
             return Err(Error::InvalidRewind(journal_size));
         }
         let rewind_to_offset = (journal_size % self.cfg.items_per_blob) * Self::CHUNK_SIZE_U64;
-        let mut current_blob_index = self.tail_index;
 
         // Remove blobs until we reach the rewind point.
-        while current_blob_index > rewind_to_blob_index {
-            let Some(blob) = self.blobs.remove(&current_blob_index) else {
-                return Err(Error::MissingBlob(current_blob_index));
-            };
-            blob.close().await?;
-            self.context
-                .remove(&self.cfg.partition, Some(&current_blob_index.to_be_bytes()))
-                .await?;
-            debug!(blob = current_blob_index, "unwound over blob");
-            self.tracked.dec();
-            current_blob_index -= 1;
+        if rewind_to_blob_index < self.tail_index {
+            let mut current_blob_index = self.tail_index - 1;
+            while current_blob_index > rewind_to_blob_index {
+                let Some(blob) = self.blobs.remove(&current_blob_index) else {
+                    return Err(Error::MissingBlob(current_blob_index));
+                };
+                blob.close().await?;
+                self.context
+                    .remove(&self.cfg.partition, Some(&current_blob_index.to_be_bytes()))
+                    .await?;
+                debug!(blob = current_blob_index, "unwound over blob");
+                self.tracked.dec();
+                current_blob_index -= 1;
+            }
         }
 
         // Set up the new tail blob and truncate it to the correct offset.
-        let (tail_index, unbuffered_tail) = self.blobs.pop_last().unwrap();
-        let raw_blob = unbuffered_tail.take_blob();
-        raw_blob.resize(rewind_to_offset).await?;
-        self.tail_index = tail_index;
-        self.tail = Append::new(
-            raw_blob,
-            rewind_to_offset,
-            self.cfg.write_buffer,
-            self.cfg.buffer_pool.clone(),
-        )
-        .await?;
+        if rewind_to_blob_index != self.tail_index {
+            self.context
+                .remove(&self.cfg.partition, Some(&self.tail_index.to_be_bytes()))
+                .await?;
+            self.tracked.dec();
+            debug!(blob = self.tail_index, "unwound over tail blob");
+            self.tail = self.blobs.remove(&rewind_to_blob_index).unwrap();
+            // Make sure the new tail blob has a healthy write buffer.
+            self.tail.reset_buffer(self.cfg.write_buffer).await?;
+            self.tail_index = rewind_to_blob_index;
+        }
+        self.tail.resize(rewind_to_offset).await?;
 
         Ok(())
     }
@@ -497,17 +480,13 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize, const PAGE_SIZE: usiz
         let blobs = self.blobs.range(start_blob..).collect::<Vec<_>>();
         let mut blob_plus = blobs
             .into_iter()
-            .map(|(blob_index, blob)| (*blob_index, (*blob).clone()))
+            .map(|(blob_index, blob)| (*blob_index, (*blob).clone_blob()))
             .collect::<Vec<_>>();
 
         // Include the tail blob.
-        self.tail.sync().await?;
+        self.tail.sync().await?; // make sure no data is buffered
         let tail_size = self.tail.size().await;
-        let tail_blob = self.tail.clone_blob();
-        blob_plus.push((
-            self.tail_index,
-            Immutable::new(tail_blob, tail_size, self.cfg.buffer_pool.clone()).await,
-        ));
+        blob_plus.push((self.tail_index, self.tail.clone_blob()));
         let items_per_blob = self.cfg.items_per_blob;
         let start_offset = (start_pos % items_per_blob) * Self::CHUNK_SIZE_U64;
 

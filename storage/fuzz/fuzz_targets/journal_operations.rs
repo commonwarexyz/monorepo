@@ -2,13 +2,14 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::hash;
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{buffer::pool::BufferPool, deterministic, Runner, RwLock};
 use commonware_storage::journal::fixed::{
     Config as FixedConfig, Config as VariableConfig, Journal as FixedJournal,
     Journal as VariableJournal,
 };
 use futures::{pin_mut, StreamExt};
 use libfuzzer_sys::fuzz_target;
+use std::sync::Arc;
 
 const MAX_REPLAY_BUF: usize = 2048;
 
@@ -60,6 +61,9 @@ struct FuzzInput {
     journal_type: JournalType,
 }
 
+const PAGE_SIZE: usize = 128;
+const PAGE_CACHE_SIZE: usize = 1;
+
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
@@ -69,11 +73,13 @@ fn fuzz(input: FuzzInput) {
                 partition: "fixed_journal_operations_fuzz_test".to_string(),
                 items_per_blob: 3,
                 write_buffer: 512,
+                buffer_pool: Arc::new(RwLock::new(BufferPool::<PAGE_SIZE>::new(PAGE_CACHE_SIZE))),
             },
             JournalType::Variable => VariableConfig {
                 partition: "variable_journal_operations_fuzz_test".to_string(),
                 items_per_blob: 3,
                 write_buffer: 512,
+                buffer_pool: Arc::new(RwLock::new(BufferPool::<PAGE_SIZE>::new(PAGE_CACHE_SIZE))),
             },
         };
 
