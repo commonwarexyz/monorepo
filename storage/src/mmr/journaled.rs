@@ -597,6 +597,7 @@ mod tests {
     }
 
     const TESTING_PAGE_SIZE: usize = 111;
+    const TESTING_PAGE_CACHE_SIZE: usize = 5;
 
     fn test_config() -> Config<TESTING_PAGE_SIZE> {
         Config {
@@ -605,7 +606,9 @@ mod tests {
             items_per_blob: 7,
             write_buffer: 1024,
             pool: None,
-            buffer_pool: Arc::new(RwLock::new(BufferPool::<TESTING_PAGE_SIZE>::new())),
+            buffer_pool: Arc::new(RwLock::new(BufferPool::<TESTING_PAGE_SIZE>::new(
+                TESTING_PAGE_CACHE_SIZE,
+            ))),
         }
     }
 

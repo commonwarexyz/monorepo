@@ -20,6 +20,10 @@ criterion_main!(
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: usize = 16384;
 
+/// The number of pages to cache in the buffer pool. Make it big enough to be
+/// fast, but not so big we avoid any page faults for the larger benchmarks.
+const PAGE_CACHE_SIZE: usize = 10_000;
+
 /// Open and return a temp journal with the given config parameters and items of size ITEM_SIZE.
 async fn get_journal<const ITEM_SIZE: usize>(
     context: Context,
@@ -31,7 +35,7 @@ async fn get_journal<const ITEM_SIZE: usize>(
         partition: partition_name.to_string(),
         items_per_blob,
         write_buffer: 1024,
-        buffer_pool: Arc::new(RwLock::new(BufferPool::<PAGE_SIZE>::new())),
+        buffer_pool: Arc::new(RwLock::new(BufferPool::<PAGE_SIZE>::new(PAGE_CACHE_SIZE))),
     };
     Journal::init(context, journal_config).await.unwrap()
 }

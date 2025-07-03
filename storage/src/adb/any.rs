@@ -280,7 +280,6 @@ impl<
             assert_eq!(start_leaf_num, bitmap.bit_count());
         }
 
-        println!("start_leaf_num: {start_leaf_num}");
         let stream = log
             .replay(SNAPSHOT_READ_BUFFER_SIZE, start_leaf_num)
             .await?;
@@ -766,6 +765,7 @@ mod test {
     const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
 
     const TESTING_PAGE_SIZE: usize = 77;
+    const TESTING_PAGE_CACHE_SIZE: usize = 9;
 
     fn any_db_config<T: Translator>(suffix: &str, translator: T) -> Config<T, TESTING_PAGE_SIZE> {
         Config {
@@ -778,7 +778,9 @@ mod test {
             log_write_buffer: 1024,
             translator,
             pool: None,
-            buffer_pool: Arc::new(RwLock::new(BufferPool::<TESTING_PAGE_SIZE>::new())),
+            buffer_pool: Arc::new(RwLock::new(BufferPool::<TESTING_PAGE_SIZE>::new(
+                TESTING_PAGE_CACHE_SIZE,
+            ))),
         }
     }
 

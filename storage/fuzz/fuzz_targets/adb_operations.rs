@@ -38,6 +38,7 @@ struct FuzzInput {
 }
 
 const TESTING_PAGE_SIZE: usize = 555;
+const TESTING_PAGE_CACHE_SIZE: usize = 100;
 
 fn fuzz(data: FuzzInput) {
     let mut hasher = Standard::<Sha256>::new();
@@ -54,7 +55,7 @@ fn fuzz(data: FuzzInput) {
             log_write_buffer: 1024,
             translator: EightCap,
             pool: None,
-            buffer_pool: Arc::new(RwLock::new(BufferPool::new())),
+            buffer_pool: Arc::new(RwLock::new(BufferPool::new(TESTING_PAGE_CACHE_SIZE))),
         };
 
         let mut adb = Any::<_, Key, Value, Sha256, EightCap, TESTING_PAGE_SIZE>::init(context.clone(), cfg.clone())
