@@ -427,7 +427,7 @@ mod tests {
     use commonware_utils::NZU64;
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
     use std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         sync::{atomic::AtomicU64, Arc},
     };
     use test_case::test_case;
@@ -523,7 +523,10 @@ mod tests {
             let target_db_ops = create_test_ops(target_db_ops);
             let mut target_db = apply_ops(target_db, target_db_ops.clone()).await;
             target_db.commit().await.unwrap();
-            let target_ops = target_db.op_count();
+            let target_op_count = target_db.op_count();
+            let target_inactivity_floor = target_db.inactivity_floor_loc;
+            let target_pruned_pos = target_db.ops.pruned_to_pos();
+            let target_log_size = target_db.log.size().await.unwrap();
             let mut hasher = create_test_hasher();
             let target_hash = target_db.root(&mut hasher);
 
@@ -531,12 +534,22 @@ mod tests {
             // Start syncing from the oldest retained location, not 0
             let lower_bound_ops = target_db.oldest_retained_loc().unwrap();
 
-            // Get target database state before moving it into the config
-            let mut target_key_values = HashMap::new();
+            // Capture target database state and deleted keys before moving into config
+            let mut expected_kvs = HashMap::new();
+            let mut deleted_keys = HashSet::new();
             for op in &target_db_ops {
-                if let Operation::Update(key, _) = op {
-                    let value = target_db.get(key).await.unwrap();
-                    target_key_values.insert(*key, value);
+                match op {
+                    Operation::Update(key, _) => {
+                        if let Some((value, loc)) = target_db.get_with_loc(key).await.unwrap() {
+                            expected_kvs.insert(*key, (value, loc));
+                            deleted_keys.remove(key);
+                        }
+                    }
+                    Operation::Deleted(key) => {
+                        expected_kvs.remove(key);
+                        deleted_keys.insert(*key);
+                    }
+                    _ => {}
                 }
             }
 
@@ -544,9 +557,9 @@ mod tests {
                 db_config: create_test_config(context.next_u64()),
                 max_ops_per_batch,
                 max_retries: 0,
-                target_hash,
+                target_hash: target_hash,
                 lower_bound_ops,
-                upper_bound_ops: target_ops - 1, // target_ops is the count, operations are 0-indexed
+                upper_bound_ops: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
                 context,
                 resolver: target_db,
                 hasher,
@@ -555,13 +568,23 @@ mod tests {
             let got_db = sync(config).await.unwrap();
             let mut hasher = create_test_hasher();
             assert_eq!(got_db.root(&mut hasher), target_hash);
-            assert_eq!(got_db.op_count(), target_ops);
+            assert_eq!(got_db.op_count(), target_op_count);
+            assert_eq!(got_db.inactivity_floor_loc, target_inactivity_floor);
+            assert_eq!(got_db.ops.pruned_to_pos(), target_pruned_pos);
+            assert_eq!(got_db.log.size().await.unwrap(), target_log_size);
 
-            // Verify that the synced database produces the same final state
-            // by checking that all keys match the target database state
-            for (key, target_value) in target_key_values {
-                let synced_value = got_db.get(&key).await.unwrap();
-                assert_eq!(target_value, synced_value, "Mismatch for key {key}");
+            // Verify that the synced database matches the target state
+            for (key, &(value, loc)) in &expected_kvs {
+                let synced_opt = got_db.get_with_loc(key).await.unwrap();
+                assert_eq!(synced_opt, Some((value, loc)), "Mismatch for key {:?}", key);
+            }
+            // Verify that deleted keys are absent
+            for key in &deleted_keys {
+                assert!(
+                    got_db.get_with_loc(key).await.unwrap().is_none(),
+                    "Deleted key {:?} still present",
+                    key
+                );
             }
         });
     }
@@ -790,6 +813,31 @@ mod tests {
             // Verify the root hash matches the target
             let mut hasher = create_test_hasher();
             assert_eq!(db.root(&mut hasher), config.target_hash);
+
+            // Verify state matches the source operations
+            let mut expected_kvs = HashMap::new();
+            let mut deleted_keys = HashSet::new();
+            for op in &ops {
+                if let Operation::Update(key, value) = op {
+                    expected_kvs.insert(*key, *value);
+                    deleted_keys.insert(*key);
+                } else if let Operation::Deleted(key) = op {
+                    expected_kvs.remove(key);
+                    deleted_keys.insert(*key);
+                }
+            }
+            for (key, value) in expected_kvs {
+                let synced_value = db.get(&key).await.unwrap().unwrap();
+                assert_eq!(synced_value, value, "Mismatch for key {:?}", key);
+            }
+            // Verify that deleted keys are absent
+            for key in deleted_keys {
+                assert!(
+                    db.get(&key).await.unwrap().is_none(),
+                    "Deleted key {:?} still present",
+                    key
+                );
+            }
         });
     }
 
@@ -862,6 +910,31 @@ mod tests {
             // Verify the root hash matches the target
             let mut hasher = create_test_hasher();
             assert_eq!(db.root(&mut hasher), config.target_hash);
+
+            // Verify state matches the source operations
+            let mut expected_kvs = HashMap::new();
+            let mut deleted_keys = HashSet::new();
+            for op in &ops {
+                if let Operation::Update(key, value) = op {
+                    expected_kvs.insert(*key, *value);
+                    deleted_keys.insert(*key);
+                } else if let Operation::Deleted(key) = op {
+                    expected_kvs.remove(key);
+                    deleted_keys.insert(*key);
+                }
+            }
+            for (key, value) in expected_kvs {
+                let synced_value = db.get(&key).await.unwrap().unwrap();
+                assert_eq!(synced_value, value, "Mismatch for key {:?}", key);
+            }
+            // Verify that deleted keys are absent
+            for key in deleted_keys {
+                assert!(
+                    db.get(&key).await.unwrap().is_none(),
+                    "Deleted key {:?} still present",
+                    key
+                );
+            }
         });
     }
 
@@ -942,6 +1015,31 @@ mod tests {
                 assert!(db.op_count() >= lower_bound);
                 assert_eq!(db.inactivity_floor_loc, lower_bound);
                 assert_eq!(db.oldest_retained_loc(), Some(lower_bound));
+
+                // Verify state matches the source operations
+                let mut expected_kvs = HashMap::new();
+                let mut deleted_keys = HashSet::new();
+                for op in &ops {
+                    if let Operation::Update(key, value) = op {
+                        expected_kvs.insert(*key, *value);
+                        deleted_keys.remove(key);
+                    } else if let Operation::Deleted(key) = op {
+                        expected_kvs.remove(key);
+                        deleted_keys.insert(*key);
+                    }
+                }
+                for (key, value) in expected_kvs {
+                    let synced_value = db.get(&key).await.unwrap().unwrap();
+                    assert_eq!(synced_value, value, "Mismatch for key {:?}", key);
+                }
+                // Verify that deleted keys are absent
+                for key in deleted_keys {
+                    assert!(
+                        db.get(&key).await.unwrap().is_none(),
+                        "Deleted key {:?} still present",
+                        key
+                    );
+                }
             }
         });
     }
