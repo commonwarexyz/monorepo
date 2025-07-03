@@ -1,4 +1,3 @@
-use crate::journal::fixed::{Config as JConfig, Journal};
 use crate::{
     adb::{
         self,
@@ -6,6 +5,7 @@ use crate::{
         sync::{resolver::Resolver, Error},
     },
     index::Translator,
+    journal::fixed::{Config as JConfig, Journal},
     mmr::{self, iterator::leaf_num_to_pos, verification::Proof},
 };
 use commonware_cryptography::Hasher;
