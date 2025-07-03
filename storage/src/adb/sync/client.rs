@@ -326,12 +326,6 @@ where
                 let total_ops_needed = config.upper_bound_ops - config.lower_bound_ops + 1;
 
                 if applied_ops >= total_ops_needed {
-                    // Persist the log
-                    log.sync()
-                        .await
-                        .map_err(adb::Error::JournalError)
-                        .map_err(Error::DatabaseInitFailed)?;
-
                     // Build the complete database from the log
                     let db = adb::any::Any::init_pruned(
                         config.context.clone(),
