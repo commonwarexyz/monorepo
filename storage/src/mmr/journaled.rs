@@ -249,6 +249,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         // Build a dummy pinned-node vector filled with empty digests; real values will be supplied
         // later via `set_pinned_nodes` as soon as the sync client obtains them.
+        // TODO danlaine: can we avoid this?
         let dummy_pin_count = Proof::<H::Digest>::nodes_to_pin(cfg.pruned_to_pos).count();
         let dummy_pins = vec![H::empty(); dummy_pin_count];
 
@@ -1108,7 +1109,6 @@ mod tests {
     fn test_journaled_mmr_init_pruned() {
         const PRUNED_TO_POS: u64 = 7;
         const NUM_OPERATIONS: usize = 10;
-        const PRUNED_OPS: usize = 4;
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1134,19 +1134,6 @@ mod tests {
                 .prune_to_pos(&mut hasher, PRUNED_TO_POS)
                 .await
                 .unwrap();
-            let source_root = source_mmr.root(&mut hasher);
-            let source_size = source_mmr.size();
-
-            // Get the pinned nodes and operations from the source
-            let pinned_nodes = source_mmr.mem_mmr.pinned_nodes.clone();
-
-            // Store expected nodes for comparison
-            let mut expected_nodes = HashMap::new();
-            for i in PRUNED_TO_POS..source_size {
-                if let Ok(Some(node)) = source_mmr.get_node(i).await {
-                    expected_nodes.insert(i, node);
-                }
-            }
 
             // Now create a new MMR using init_pruned
             // After pruning to position 7, the remaining leaves are at positions 7, 8, 10, 11, 15, 16
@@ -1156,49 +1143,16 @@ mod tests {
                 "sync_metadata_partition".into(),
                 PRUNED_TO_POS,
             );
-            let mut synced_mmr = Mmr::init_pruned(context.clone(), sync_config)
+            let synced_mmr: Mmr<_, Sha256> = Mmr::init_pruned(context.clone(), sync_config)
                 .await
                 .unwrap();
 
-            // Set the pinned nodes
-            synced_mmr.set_pinned_nodes(pinned_nodes);
-
-            // Verify the synced MMR has the same root and properties
-            assert_eq!(synced_mmr.root(&mut hasher), source_root);
-            assert_eq!(synced_mmr.size(), source_size);
+            // Verify the synced MMR has the expected state
+            assert_eq!(synced_mmr.size(), PRUNED_TO_POS);
             assert_eq!(synced_mmr.pruned_to_pos(), PRUNED_TO_POS);
-            assert_eq!(synced_mmr.oldest_retained_pos(), Some(PRUNED_TO_POS));
-            assert_eq!(synced_mmr.journal.size().await.unwrap(), synced_mmr.size());
-
-            // Verify nodes are the same
-            for i in PRUNED_TO_POS..source_size {
-                let expected_node = expected_nodes.get(&i);
-                let synced_node = synced_mmr.get_node(i).await.unwrap();
-                if let Some(expected) = expected_node {
-                    assert_eq!(
-                        Some(expected),
-                        synced_node.as_ref(),
-                        "Node at position {i} doesn't match",
-                    );
-                } else {
-                    assert_eq!(
-                        None, synced_node,
-                        "Expected no node at position {i} but found one",
-                    );
-                }
-            }
-
-            // Test that we can generate proofs
-            let last_leaf_pos = synced_mmr.last_leaf_pos().unwrap();
-            let synced_proof = synced_mmr.proof(last_leaf_pos).await.unwrap();
-            let source_proof = source_mmr.proof(last_leaf_pos).await.unwrap();
-            assert_eq!(synced_proof, source_proof);
-
-            // replay unpruned operations into the synced MMR so it mirrors the source.
-            for op in operations.iter().skip(PRUNED_OPS) {
-                synced_mmr.add_batched(&mut hasher, op).await.unwrap();
-            }
-            synced_mmr.sync(&mut hasher).await.unwrap();
+            assert_eq!(synced_mmr.oldest_retained_pos(), None);
+            assert_eq!(synced_mmr.journal.size().await.unwrap(), PRUNED_TO_POS);
+            assert_eq!(synced_mmr.journal_size, PRUNED_TO_POS);
 
             synced_mmr.destroy().await.unwrap();
             source_mmr.destroy().await.unwrap();

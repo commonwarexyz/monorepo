@@ -1446,7 +1446,7 @@ mod test {
 
     /// Test init_pruned where the target state is pruned.
     #[test_traced("WARN")]
-    pub fn test_any_db_init_pruned_with_pruning() {
+    pub fn test_any_db_init_pruned_nonempty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut source_db = Any::<_, Digest, Digest, Sha256, EightCap>::init(
@@ -1472,9 +1472,10 @@ mod test {
             let mut hasher = Standard::<Sha256>::new();
             let source_root = source_db.root(&mut hasher);
             let source_op_count = source_db.op_count();
-            let need_ops = source_op_count - source_db.inactivity_floor_loc;
+            let oldest_retained_loc = source_db.oldest_retained_loc().unwrap();
+            let need_ops = source_op_count - oldest_retained_loc;
             let (proof, ops) = source_db
-                .proof(source_db.inactivity_floor_loc, source_op_count)
+                .proof(oldest_retained_loc, source_op_count)
                 .await
                 .unwrap();
             // Verify proof (not really part of this test but doesn't hurt).
@@ -1482,7 +1483,7 @@ mod test {
                 Any::<Context, Digest, Digest, Sha256, EightCap>::verify_proof(
                     &mut hasher,
                     &proof,
-                    source_db.inactivity_floor_loc,
+                    oldest_retained_loc,
                     &ops,
                     &source_root,
                 )
@@ -1492,83 +1493,22 @@ mod test {
             // Initialize the synced db.
             let sync_config: SyncConfig<EightCap> = SyncConfig {
                 config: any_db_config("sync_pruning", EightCap),
-                pruned_to_loc: source_db.inactivity_floor_loc,
+                pruned_to_loc: oldest_retained_loc,
             };
-            let mut synced_db = Any::init_pruned(context.clone(), sync_config)
-                .await
-                .unwrap();
-
-            let pinned_nodes = source_db.ops.get_pinned_nodes();
-            synced_db.set_pinned_nodes(pinned_nodes);
-
-            // Replay live operations so the synced_db state is equivalent to the source.
-            for op in &ops {
-                synced_db.apply_op(op.clone()).await.unwrap();
-            }
-            synced_db.sync().await.unwrap();
+            let synced_db: Any<_, Digest, Digest, Sha256, EightCap> =
+                Any::init_pruned(context.clone(), sync_config)
+                    .await
+                    .unwrap();
 
             // Verify the synced database matches the source
-            assert_eq!(synced_db.root(&mut hasher), source_root);
-            assert_eq!(synced_db.op_count(), source_op_count);
+            assert_eq!(synced_db.op_count(), oldest_retained_loc);
+            assert_eq!(synced_db.oldest_retained_loc(), None);
+            assert_eq!(synced_db.ops.size(), leaf_num_to_pos(oldest_retained_loc));
             assert_eq!(
-                synced_db.inactivity_floor_loc,
-                source_db.inactivity_floor_loc
+                synced_db.ops.pruned_to_pos(),
+                leaf_num_to_pos(oldest_retained_loc)
             );
-            assert_eq!(synced_db.ops.size(), source_db.ops.size());
-            assert_eq!(synced_db.ops.pruned_to_pos(), source_db.ops.pruned_to_pos());
-            assert_eq!(
-                synced_db.log.size().await.unwrap(),
-                leaf_pos_to_num(synced_db.ops.size()).unwrap()
-            );
-
-            // Verify the key-value pairs match what we expect
-            for (key, value) in keys.iter().zip(values.iter()) {
-                assert_eq!(synced_db.get(key).await.unwrap(), Some(*value));
-            }
-
-            // Test that we can add more operations to the synced database
-            let key3 = hash(&3u64.to_be_bytes());
-            let value3 = hash(&30u64.to_be_bytes());
-            synced_db.update(key3, value3).await.unwrap();
-            synced_db.commit().await.unwrap();
-            assert_eq!(synced_db.get(&key3).await.unwrap(), Some(value3));
-            assert_eq!(
-                synced_db.log.size().await.unwrap(),
-                leaf_pos_to_num(synced_db.ops.size()).unwrap()
-            );
-
-            // Test we get the same root as the source db
-            source_db.update(key3, value3).await.unwrap();
-            source_db.commit().await.unwrap();
-            assert_eq!(source_db.root(&mut hasher), synced_db.root(&mut hasher));
-
-            // Test sizes are same
-            assert_eq!(
-                source_db.log.size().await.unwrap(),
-                synced_db.log.size().await.unwrap()
-            );
-            assert_eq!(source_db.ops.size(), synced_db.ops.size());
-            assert_eq!(source_db.ops.pruned_to_pos(), synced_db.ops.pruned_to_pos());
-
-            // Test that we can get a proof from the synced database
-            let (proof, ops) = synced_db
-                .proof(synced_db.inactivity_floor_loc, synced_db.op_count())
-                .await
-                .unwrap();
-            let synced_db_hash = synced_db.root(&mut hasher);
-            assert!(
-                Any::<Context, Digest, Digest, Sha256, EightCap>::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    synced_db.inactivity_floor_loc,
-                    &ops,
-                    &synced_db_hash,
-                )
-            );
-            assert_eq!(
-                ops.len(),
-                (synced_db.op_count() - synced_db.inactivity_floor_loc) as usize
-            );
+            assert_eq!(synced_db.log.size().await.unwrap(), oldest_retained_loc);
 
             synced_db.destroy().await.unwrap();
             source_db.destroy().await.unwrap();

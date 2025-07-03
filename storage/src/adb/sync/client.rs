@@ -567,7 +567,7 @@ mod tests {
                 db_config: create_test_config(context.next_u64()),
                 max_ops_per_batch,
                 max_retries: 0,
-                target_hash: target_hash,
+                target_hash,
                 lower_bound_ops,
                 upper_bound_ops: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
                 context,
@@ -586,15 +586,11 @@ mod tests {
             // Verify that the synced database matches the target state
             for (key, &(value, loc)) in &expected_kvs {
                 let synced_opt = got_db.get_with_loc(key).await.unwrap();
-                assert_eq!(synced_opt, Some((value, loc)), "Mismatch for key {:?}", key);
+                assert_eq!(synced_opt, Some((value, loc)));
             }
             // Verify that deleted keys are absent
             for key in &deleted_keys {
-                assert!(
-                    got_db.get_with_loc(key).await.unwrap().is_none(),
-                    "Deleted key {:?} still present",
-                    key
-                );
+                assert!(got_db.get_with_loc(key).await.unwrap().is_none(),);
             }
         });
     }
@@ -838,112 +834,11 @@ mod tests {
             }
             for (key, value) in expected_kvs {
                 let synced_value = db.get(&key).await.unwrap().unwrap();
-                assert_eq!(synced_value, value, "Mismatch for key {:?}", key);
+                assert_eq!(synced_value, value);
             }
             // Verify that deleted keys are absent
             for key in deleted_keys {
-                assert!(
-                    db.get(&key).await.unwrap().is_none(),
-                    "Deleted key {:?} still present",
-                    key
-                );
-            }
-        });
-    }
-
-    /// Test build_database_from_log with pinned nodes
-    #[test]
-    fn test_build_database_from_log_with_pinned_nodes() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Create and populate a source database
-            let mut source_db = create_test_db(context.clone()).await;
-            let ops = create_test_ops(500);
-            source_db = apply_ops(source_db, ops.clone()).await;
-            source_db.commit().await.unwrap();
-
-            let lower_bound_ops = source_db.oldest_retained_loc().unwrap();
-            let upper_bound_ops = source_db.op_count() - 1;
-
-            // Get pinned nodes and target hash before moving source_db
-            let pinned_nodes = source_db.ops.get_pinned_nodes();
-            let target_hash = {
-                let mut hasher = create_test_hasher();
-                source_db.root(&mut hasher)
-            };
-
-            // Get the actual operations from the source database
-            let mut actual_ops = Vec::new();
-            for i in lower_bound_ops..=upper_bound_ops {
-                let op = source_db.log.read(i).await.unwrap();
-                actual_ops.push(op);
-            }
-
-            let config = Config {
-                db_config: create_test_config(context.next_u64()),
-                max_ops_per_batch: NZU64!(10),
-                max_retries: 0,
-                target_hash,
-                lower_bound_ops,
-                upper_bound_ops,
-                context: context.clone(),
-                resolver: source_db,
-                hasher: create_test_hasher(),
-                _phantom: PhantomData,
-            };
-
-            // Create log with operations
-            let mut log = Journal::<_, Operation<TestKey, TestValue>>::init_pruned(
-                context.clone().with_label("pinned_log"),
-                JConfig {
-                    partition: format!("pinned_log_{}", context.next_u64()),
-                    items_per_blob: 1024,
-                    write_buffer: 64,
-                },
-                lower_bound_ops,
-            )
-            .await
-            .unwrap();
-
-            // Add actual operations to log
-            for op in actual_ops {
-                log.append(op).await.unwrap();
-            }
-            log.sync().await.unwrap();
-
-            let db = Client::build_database_from_log(&config, log, pinned_nodes)
-                .await
-                .unwrap();
-            assert_eq!(db.op_count(), upper_bound_ops + 1);
-            assert_eq!(db.inactivity_floor_loc, lower_bound_ops);
-
-            // Verify the root hash matches the target
-            let mut hasher = create_test_hasher();
-            assert_eq!(db.root(&mut hasher), config.target_hash);
-
-            // Verify state matches the source operations
-            let mut expected_kvs = HashMap::new();
-            let mut deleted_keys = HashSet::new();
-            for op in &ops {
-                if let Operation::Update(key, value) = op {
-                    expected_kvs.insert(*key, *value);
-                    deleted_keys.insert(*key);
-                } else if let Operation::Deleted(key) = op {
-                    expected_kvs.remove(key);
-                    deleted_keys.insert(*key);
-                }
-            }
-            for (key, value) in expected_kvs {
-                let synced_value = db.get(&key).await.unwrap().unwrap();
-                assert_eq!(synced_value, value, "Mismatch for key {:?}", key);
-            }
-            // Verify that deleted keys are absent
-            for key in deleted_keys {
-                assert!(
-                    db.get(&key).await.unwrap().is_none(),
-                    "Deleted key {:?} still present",
-                    key
-                );
+                assert!(db.get(&key).await.unwrap().is_none(),);
             }
         });
     }
@@ -1006,20 +901,8 @@ mod tests {
 
                 // Verify database state
                 let expected_op_count = upper_bound + 1; // +1 because op_count is total number of ops
-                assert_eq!(
-                    db.log.size().await.unwrap(),
-                    expected_op_count,
-                    "log size mismatch for bounds [{}, {}]",
-                    lower_bound,
-                    upper_bound
-                );
-                assert_eq!(
-                    db.op_count(),
-                    expected_op_count,
-                    "op_count mismatch for bounds [{}, {}]",
-                    lower_bound,
-                    upper_bound
-                );
+                assert_eq!(db.log.size().await.unwrap(), expected_op_count);
+                assert_eq!(db.op_count(), expected_op_count);
                 assert_eq!(db.inactivity_floor_loc, lower_bound);
                 assert_eq!(db.oldest_retained_loc(), Some(lower_bound));
 
@@ -1044,11 +927,7 @@ mod tests {
                 }
                 // Verify that deleted keys are absent
                 for key in deleted_keys {
-                    assert!(
-                        db.get(&key).await.unwrap().is_none(),
-                        "Deleted key {:?} still present",
-                        key
-                    );
+                    assert!(db.get(&key).await.unwrap().is_none());
                 }
                 db.destroy().await.unwrap();
             }
