@@ -241,7 +241,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     /// 1. Removes all existing blobs in the partition
     /// 2. Creates a single blob at the index that would contain the operation at `num_pruned`
     /// 3. Sets the blob size to represent the "leftover" operations within that blob.
-    /// The [Journal] is not `sync`ed before being returned.
+    ///    The [Journal] is not `sync`ed before being returned.
     ///
     /// For example, if `items_per_blob = 10` and `num_pruned = 25`:
     /// - Blob index would be 25 / 10 = 2 (third blob, 0-indexed)
