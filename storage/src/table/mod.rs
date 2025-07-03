@@ -126,16 +126,16 @@ pub enum Error {
     ChecksumMismatch { expected: u32, actual: u32 },
 }
 
-/// Configuration for [Store] storage.
+/// Configuration for [Table].
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The `commonware-runtime::Storage` partition to use for storing the journal.
+    /// The [commonware_runtime::Storage] partition to use for storing the journal.
     pub journal_partition: String,
 
     /// The compression algorithm to use for the journal.
     pub journal_compression: Option<u8>,
 
-    /// The `commonware-runtime::Storage` partition to use for storing the hash table.
+    /// The [commonware_runtime::Storage] partition to use for storing the hash table.
     pub table_partition: String,
 
     /// The number of items in the table.
