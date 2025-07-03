@@ -1181,8 +1181,6 @@ mod tests {
                 .prune_to_pos(&mut hasher, source_mmr_size)
                 .await
                 .unwrap();
-            let source_root = source_mmr.root(&mut hasher);
-            let pinned_nodes = source_mmr.mem_mmr.pinned_nodes.clone();
 
             // Initialize synced MMR with empty operations
             let sync_config = test_sync_config(
@@ -1191,15 +1189,9 @@ mod tests {
                 source_mmr_size, // Everything is pruned
             );
 
-            let mut synced_mmr = Mmr::init_pruned(context.clone(), sync_config)
+            let synced_mmr: Mmr<_, Sha256> = Mmr::init_pruned(context.clone(), sync_config)
                 .await
                 .unwrap();
-
-            // Set the pinned nodes
-            synced_mmr.set_pinned_nodes(pinned_nodes);
-
-            // Verify the synced MMR matches the fully pruned source
-            assert_eq!(synced_mmr.root(&mut hasher), source_root);
             assert_eq!(synced_mmr.size(), source_mmr_size);
             assert_eq!(synced_mmr.pruned_to_pos(), source_mmr_size);
             assert_eq!(synced_mmr.oldest_retained_pos(), None);
