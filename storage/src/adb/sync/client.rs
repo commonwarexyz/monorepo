@@ -157,23 +157,6 @@ where
             .await
             .map_err(Error::DatabaseInitFailed)?;
 
-        // // Replay all operations from the log to populate the MMR and snapshot
-        // let log_size = log
-        //     .size()
-        //     .await
-        //     .map_err(|e| Error::DatabaseInitFailed(adb::Error::JournalError(e)))?;
-
-        // // Only read from the valid range (lower_bound_ops to current size)
-        // for i in config.lower_bound_ops..log_size {
-        //     let op = log
-        //         .read(i)
-        //         .await
-        //         .map_err(|e| Error::DatabaseInitFailed(adb::Error::JournalError(e)))?;
-        //     db.replay_logged_op(op)
-        //         .await
-        //         .map_err(Error::DatabaseInitFailed)?;
-        // }
-
         adb::any::Any::<E, K, V, H, T>::build_snapshot_from_log::<0 /* UNUSED_N */>(
             config.lower_bound_ops,
             &db.log,
