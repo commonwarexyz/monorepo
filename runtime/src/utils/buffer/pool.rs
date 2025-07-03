@@ -96,22 +96,19 @@ impl<const PAGE_SIZE: usize> BufferPool<PAGE_SIZE> {
         bytes_to_copy
     }
 
-    /// Put the given `page` into the buffer pool. Note that because blobs don't always end on page
-    /// boundaries, it's possible for the provided page to be smaller than the PAGE_SIZE.
+    /// Put the given `page` into the buffer pool.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the provided page is not exactly PAGE_SIZE bytes long.
     fn cache(&mut self, page: &mut [u8], blob_id: u32, page_num: u64) {
-        assert!(page.len() <= PAGE_SIZE);
+        assert_eq!(page.len(), PAGE_SIZE);
         if self.index.contains_key(&(blob_id, page_num)) {
             // This can happen if different threads fault on the same page.
             return;
         }
 
-        let page_array = if page.len() < PAGE_SIZE {
-            let mut page_array = [0u8; PAGE_SIZE];
-            page_array[..page.len()].copy_from_slice(page);
-            page_array
-        } else {
-            page.try_into().unwrap()
-        };
+        let page_array = page.try_into().unwrap();
 
         let key = (blob_id, page_num);
         if self.cache.len() < self.capacity {
@@ -138,7 +135,7 @@ impl<const PAGE_SIZE: usize> BufferPool<PAGE_SIZE> {
         assert!(self.index.remove(&entry.key).is_some());
         self.index.insert(key, self.clock);
         entry.key = key;
-        entry.data = Box::new(page_array);
+        *entry.data = page_array;
 
         // Move the clock forward.
         self.clock = (self.clock + 1) % self.cache.len();
@@ -207,95 +204,6 @@ impl<const PAGE_SIZE: usize> BufferPool<PAGE_SIZE> {
     }
 }
 
-/// A blob wrapper providing buffer-pool managed caching of data for immutable blobs.
-#[derive(Clone)]
-pub struct Immutable<B: Blob, const PAGE_SIZE: usize> {
-    blob: B,
-
-    /// Unique id assigned by the buffer pool.
-    id: u32,
-
-    /// size of the blob.
-    size: u64,
-
-    /// Buffer pool to consult for caching.
-    pool: Arc<RwLock<BufferPool<PAGE_SIZE>>>,
-}
-
-impl<B: Blob, const PAGE_SIZE: usize> Immutable<B, PAGE_SIZE> {
-    /// Return a new [Immutable] wrapper that uses `pool` to provide read caching for `blob`.
-    pub async fn new(blob: B, size: u64, pool: Arc<RwLock<BufferPool<PAGE_SIZE>>>) -> Self {
-        let id = {
-            let mut pool_guard = pool.write().await;
-            pool_guard.next_id()
-        };
-
-        Self {
-            blob,
-            id,
-            pool,
-            size,
-        }
-    }
-
-    pub fn take_blob(self) -> B {
-        self.blob
-    }
-
-    pub fn size(&self) -> u64 {
-        self.size
-    }
-}
-
-impl<B: Blob, const PAGE_SIZE: usize> Blob for Immutable<B, PAGE_SIZE> {
-    async fn read_at(
-        &self,
-        buf: impl Into<StableBuf> + Send,
-        offset: u64,
-    ) -> Result<StableBuf, Error> {
-        let mut buf = buf.into();
-        let buf_slice = buf.as_mut();
-
-        // Make sure we aren't trying to read past the end of the blob, since the buffer pool
-        // doesn't keep track of the blob length and could return invalid results.
-        if offset
-            .checked_add(buf_slice.len() as u64)
-            .ok_or(Error::OffsetOverflow)?
-            > self.size
-        {
-            return Err(Error::BlobInsufficientLength);
-        }
-
-        BufferPool::read(
-            self.pool.clone(),
-            &self.blob,
-            self.id,
-            self.size,
-            buf_slice,
-            offset,
-        )
-        .await?;
-
-        Ok(buf)
-    }
-
-    async fn write_at(&self, _buf: impl Into<StableBuf> + Send, _offset: u64) -> Result<(), Error> {
-        panic!("Immutable blobs do not support writes");
-    }
-
-    async fn sync(&self) -> Result<(), Error> {
-        Ok(()) // No-op for immutable blobs.
-    }
-
-    async fn resize(&self, _len: u64) -> Result<(), Error> {
-        panic!("Immutable blobs do not support resize");
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        self.blob.close().await
-    }
-}
-
 /// A [Blob] wrapper that supports appending new data that is both read and write cached, and
 /// provides buffer-pool managed read caching of older data.
 #[derive(Clone)]
@@ -322,6 +230,8 @@ pub struct Append<B: Blob, const PAGE_SIZE: usize> {
 impl<B: Blob, const PAGE_SIZE: usize> Append<B, PAGE_SIZE> {
     const PAGE_SIZE_U64: u64 = PAGE_SIZE as u64;
 
+    /// Create a new [Append] of provided `size` using the provided `pool` for read caching, and a
+    /// write buffer with capacity `buffer_size`.
     pub async fn new(
         blob: B,
         size: u64,
@@ -356,6 +266,17 @@ impl<B: Blob, const PAGE_SIZE: usize> Append<B, PAGE_SIZE> {
             pool,
             buffer: Arc::new(RwLock::new(buffer)),
         })
+    }
+
+    /// Change the capacity of the write buffer.
+    ///
+    /// The buffer will be flushed, leaving an empty buffer upon return.
+    pub async fn reset_buffer(&mut self, buffer_size: usize) -> Result<(), Error> {
+        let mut buffer = self.buffer.write().await;
+        self.flush(&mut buffer).await?;
+        buffer.capacity = buffer_size.max(PAGE_SIZE * 2);
+
+        Ok(())
     }
 
     /// Append all bytes in `buf` to the tip of the blob.
@@ -433,11 +354,6 @@ impl<B: Blob, const PAGE_SIZE: usize> Append<B, PAGE_SIZE> {
     /// Clones and returns the underlying blob.
     pub fn clone_blob(&self) -> B {
         self.blob.clone()
-    }
-
-    /// Consumes the [Append] and returns the underlying blob.
-    pub fn take_blob(self) -> B {
-        self.blob
     }
 }
 
