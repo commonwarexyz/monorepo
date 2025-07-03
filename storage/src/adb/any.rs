@@ -74,6 +74,8 @@ pub struct SyncConfig<E: RStorage + Metrics, K: Array, V: Array, T: Translator, 
     pub db_config: Config<T>,
 
     /// The [Any]'s log of operations.
+    /// This log is expected to be pruned to the `pruned_to_loc` boundary
+    /// and contain all subsequent operations.
     pub log: Journal<E, Operation<K, V>>,
 
     /// The location in the [Any] up to which operations have been pruned.
@@ -81,8 +83,8 @@ pub struct SyncConfig<E: RStorage + Metrics, K: Array, V: Array, T: Translator, 
     /// Everything before this location is considered pruned/inactive.
     pub pruned_to_loc: u64,
 
-    /// The pinned nodes the MMR needs at the pruning boundary
-    /// given by `pruned_to_loc`.
+    /// The pinned nodes the MMR needs at the pruning boundary given by
+    /// `pruned_to_loc`, in the order specified by [Proof::nodes_to_pin].
     pub pinned_nodes: Vec<D>,
 }
 
