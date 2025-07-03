@@ -1,27 +1,53 @@
-enum Message {}
+use crate::collection::Collector;
+use bytes::Bytes;
+use commonware_cryptography::{Committable, PublicKey};
+use futures::channel::{mpsc, oneshot};
+use std::collections::HashMap;
 
-pub struct Mailbox<M: Idable> {}
+type Response<PK> = oneshot::Receiver<HashMap<PK, Bytes>>;
 
-impl Collector for Mailbox {
-    type Message = E::Message;
-    type PublicKey = E::Message::PublicKey;
+pub enum Message<M: Committable, P: PublicKey> {
+    Send {
+        message: M,
+    },
+    Peek {
+        id: M::Digest,
+        sender: oneshot::Sender<Response<P>>,
+    },
+    Cancel {
+        id: M::Digest,
+    },
+}
 
-    fn send(
-        &mut self,
-        message: Self::Message,
-        transformer: fn(Self::Message, Self::PublicKey) -> Bytes,
-    ) -> impl Future<Output = ()> + Send {
-        todo!()
+#[derive(Clone)]
+pub struct Mailbox<M: Committable, P: PublicKey> {
+    sender: mpsc::Sender<Message<M, P>>,
+}
+
+impl<M: Committable, P: PublicKey> Mailbox<M, P> {
+    pub fn new(sender: mpsc::Sender<Message<M, P>>) -> Self {
+        Self { sender }
+    }
+}
+
+impl<M: Committable + std::fmt::Debug, P: PublicKey> Collector for Mailbox<M, P> {
+    type Message = M;
+    type PublicKey = P;
+
+    async fn send(&mut self, message: M) {
+        let command = Message::Send { message };
+        let _ = self.sender.try_send(command);
     }
 
-    fn peek(
-        &mut self,
-        id: <Self::Message as Idable>::ID,
-    ) -> impl Future<Output = oneshot::Receiver<HashMap<Self::PublicKey, Bytes>>> + Send {
-        todo!()
+    async fn peek(&mut self, id: M::Digest) -> Response<P> {
+        let (sender, receiver) = oneshot::channel();
+        let command = Message::Peek { id, sender };
+        let _ = self.sender.try_send(command);
+        receiver.await.unwrap()
     }
 
-    fn cancel(&mut self, id: <Self::Message as Idable>::ID) -> impl Future<Output = ()> + Send {
-        todo!()
+    async fn cancel(&mut self, id: M::Digest) {
+        let command = Message::Cancel { id };
+        let _ = self.sender.try_send(command);
     }
 }

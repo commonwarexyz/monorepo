@@ -1,5 +1,9 @@
+use crate::collection::{Endpoint, Originator};
+
+#[derive(Clone)]
 pub struct Config<O: Originator, E: Endpoint> {
-    originator: O,
-    endpoint: E,
-    mailbox_size: usize,
+    pub originator: O,
+    pub endpoint: E,
+    pub mailbox_size: usize,
+    pub quorum: usize,
 }
