@@ -2,7 +2,7 @@ use crate::{
     archive::{immutable::Config, Error, Identifier},
     metadata::{self, Metadata},
     ordinal::{self, Ordinal},
-    table::{self, Table},
+    table::{self, Cursor, Table},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write};
@@ -90,14 +90,14 @@ impl std::fmt::Display for OrdinalRecord {
 }
 
 enum MetadataRecord {
-    Cursor(u64, u64, u64),
+    Cursor(Cursor),
     Indices(Option<BitVec>),
 }
 
 impl MetadataRecord {
-    fn cursor(&self) -> (u64, u64, u64) {
+    fn cursor(&self) -> &Cursor {
         match self {
-            Self::Cursor(index, size, offset) => (*index, *size, *offset),
+            Self::Cursor(cursor) => cursor,
             _ => panic!("incorrect record"),
         }
     }
@@ -113,11 +113,9 @@ impl MetadataRecord {
 impl Write for MetadataRecord {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Self::Cursor(index, size, offset) => {
+            Self::Cursor(cursor) => {
                 buf.put_u8(0);
-                buf.put_u64(*index);
-                buf.put_u64(*size);
-                buf.put_u64(*offset);
+                cursor.write(buf);
             }
             Self::Indices(indices) => {
                 buf.put_u8(1);
@@ -133,7 +131,7 @@ impl Read for MetadataRecord {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let tag = buf.get_u8();
         match tag {
-            0 => Ok(Self::Cursor(buf.get_u64(), buf.get_u64(), buf.get_u64())),
+            0 => Ok(Self::Cursor(Cursor::read(buf)?)),
             1 => Ok(Self::Indices(Option::<BitVec>::read_cfg(
                 buf,
                 &(0..=usize::MAX).into(),
@@ -146,7 +144,7 @@ impl Read for MetadataRecord {
 impl EncodeSize for MetadataRecord {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::Cursor(_, _, _) => u64::SIZE * 3,
+            Self::Cursor(_) => Cursor::SIZE,
             Self::Indices(indices) => indices.encode_size(),
         }
     }
@@ -185,7 +183,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         let cursor = match metadata.get(&cursor_key) {
             Some(cursor) => cursor.cursor(),
             None => {
-                metadata.put(cursor_key.clone(), MetadataRecord::Cursor(0, 0, 0));
+                metadata.put(
+                    cursor_key.clone(),
+                    MetadataRecord::Cursor(Cursor::default()),
+                );
                 metadata.get(&cursor_key).unwrap().cursor()
             }
         };
@@ -202,8 +203,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
                 write_buffer: cfg.write_buffer,
                 target_journal_size: cfg.target_journal_size,
             },
-            cursor.0,
-            (cursor.1, cursor.2),
+            *cursor,
         )
         .await?;
 
