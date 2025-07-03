@@ -107,7 +107,7 @@
 //! ```
 
 mod storage;
-pub use storage::{Cursor, Table};
+pub use storage::{Checkpoint, Cursor, Table};
 
 use thiserror::Error;
 
@@ -200,7 +200,7 @@ mod tests {
             let mut store = Table::<_, FixedBytes<64>, i32>::init(
                 context.clone(),
                 cfg.clone(),
-                Cursor::default(),
+                Checkpoint::default(),
             )
             .await
             .expect("Failed to initialize store");
@@ -268,7 +268,7 @@ mod tests {
             let mut store = Table::<_, FixedBytes<64>, i32>::init(
                 context.clone(),
                 cfg.clone(),
-                Cursor::default(),
+                Checkpoint::default(),
             )
             .await
             .expect("Failed to initialize store");
@@ -319,7 +319,7 @@ mod tests {
             let mut store = Table::<_, FixedBytes<64>, i32>::init(
                 context.clone(),
                 cfg.clone(),
-                Cursor::default(),
+                Checkpoint::default(),
             )
             .await
             .expect("Failed to initialize store");
@@ -374,11 +374,11 @@ mod tests {
             };
 
             // Insert data and close
-            let cursor = {
+            let checkpoint = {
                 let mut store = Table::<_, FixedBytes<64>, i32>::init(
                     context.clone(),
                     cfg.clone(),
-                    Cursor::default(),
+                    Checkpoint::default(),
                 )
                 .await
                 .expect("Failed to initialize store");
@@ -389,22 +389,20 @@ mod tests {
                     (test_key("persist3"), 300),
                 ];
 
-                let mut cursor = Cursor::default();
                 for (key, data) in &keys {
-                    cursor = store
+                    store
                         .put(key.clone(), *data)
                         .await
                         .expect("Failed to put data");
                 }
 
-                store.close().await.expect("Failed to close store");
-                cursor
+                store.close().await.expect("Failed to close store")
             };
 
             // Reopen and verify data persisted
             {
                 let store =
-                    Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), cursor)
+                    Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), checkpoint)
                         .await
                         .expect("Failed to initialize store");
 
@@ -442,11 +440,11 @@ mod tests {
             };
 
             // First, create some committed data
-            let cursor = {
+            let checkpoint = {
                 let mut store = Table::<_, FixedBytes<64>, i32>::init(
                     context.clone(),
                     cfg.clone(),
-                    Cursor::default(),
+                    Checkpoint::default(),
                 )
                 .await
                 .expect("Failed to initialize store");
@@ -468,20 +466,19 @@ mod tests {
                     .put(test_key("uncommitted1"), 3)
                     .await
                     .expect("Failed to put data");
-                let cursor = store
+                store
                     .put(test_key("uncommitted2"), 4)
                     .await
                     .expect("Failed to put data");
 
                 // Close without syncing to simulate crash
-                store.close().await.expect("Failed to close");
-                cursor
+                store.close().await.expect("Failed to close")
             };
 
             // Reopen and verify only committed data is present
             {
                 let store =
-                    Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), cursor)
+                    Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), checkpoint)
                         .await
                         .expect("Failed to initialize store");
 
@@ -519,7 +516,7 @@ mod tests {
             let store = Table::<_, FixedBytes<64>, i32>::init(
                 context.clone(),
                 cfg.clone(),
-                Cursor::default(),
+                Checkpoint::default(),
             )
             .await
             .expect("Failed to initialize store");
@@ -555,7 +552,7 @@ mod tests {
                 let mut store = Table::<_, FixedBytes<64>, i32>::init(
                     context.clone(),
                     cfg.clone(),
-                    Cursor::default(),
+                    Checkpoint::default(),
                 )
                 .await
                 .expect("Failed to initialize store");
@@ -578,7 +575,7 @@ mod tests {
                 let store = Table::<_, FixedBytes<64>, i32>::init(
                     context.clone(),
                     cfg.clone(),
-                    Cursor::default(),
+                    Checkpoint::default(),
                 )
                 .await
                 .expect("Failed to initialize store");
@@ -606,19 +603,18 @@ mod tests {
             };
 
             // Create store with data and sync
-            let cursor = {
+            let checkpoint = {
                 let mut store = Table::<_, FixedBytes<64>, i32>::init(
                     context.clone(),
                     cfg.clone(),
-                    Cursor::default(),
+                    Checkpoint::default(),
                 )
                 .await
                 .expect("Failed to initialize store");
 
-                let cursor = store.put(test_key("key1"), 42).await.unwrap();
+                store.put(test_key("key1"), 42).await.unwrap();
                 store.sync().await.unwrap();
-                store.close().await.unwrap();
-                cursor
+                store.close().await.unwrap()
             };
 
             // Corrupt the table by writing partial entry
@@ -632,7 +628,7 @@ mod tests {
             // Reopen and verify it handles the corruption
             {
                 let store =
-                    Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), cursor)
+                    Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone(), checkpoint)
                         .await
                         .expect("Failed to initialize store");
 
