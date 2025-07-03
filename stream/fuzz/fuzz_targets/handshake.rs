@@ -71,7 +71,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     }
 }
 
-fuzz_target!(|input: FuzzInput| {
+fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let mut dialer_crypto = PrivateKey::from_seed(input.dialer_seed);
@@ -93,10 +93,9 @@ fuzz_target!(|input: FuzzInput| {
         let (sink, _) = mocks::Channel::init();
         let (mut stream_sender, stream) = mocks::Channel::init();
 
-        context
+        let sender = context
             .with_label("stream_sender")
             .spawn(move |_| async move {
-                // Our target is panic.
                 let _ =
                     send_frame(&mut stream_sender, &hello.encode(), input.max_message_size).await;
             });
@@ -110,7 +109,12 @@ fuzz_target!(|input: FuzzInput| {
             handshake_timeout,
         };
 
-        // Our target is panic.
         let _ = IncomingConnection::verify(&context, config, sink, stream).await;
+        sender.abort();
+        let _ = sender.await;
     });
+}
+
+fuzz_target!(|input: FuzzInput| {
+    fuzz(input);
 });

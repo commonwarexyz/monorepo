@@ -80,7 +80,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     }
 }
 
-fuzz_target!(|input: FuzzInput| {
+fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let max_message_size = input.max_message_size;
@@ -162,4 +162,8 @@ fuzz_target!(|input: FuzzInput| {
             assert_eq!(&received[..], &msg[..], "Message {i} mismatch");
         }
     });
+}
+
+fuzz_target!(|input: FuzzInput| {
+    fuzz(input);
 });

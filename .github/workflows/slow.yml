@@ -101,9 +101,7 @@ jobs:
       if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
       run: cargo +nightly install cargo-fuzz --version ${{ env.FUZZ_VERSION }}
     - name: Test all targets
-      env:
-        ASAN_OPTIONS: "detect_leaks=0"
       run: |
         for target in $(cargo +nightly fuzz list --fuzz-dir ${{ matrix.fuzz_dir }}); do
-          cargo +nightly fuzz run $target --fuzz-dir ${{ matrix.fuzz_dir }} -- -max_total_time=60 -detect_leaks=0
+          cargo +nightly fuzz run $target --fuzz-dir ${{ matrix.fuzz_dir }} -- -max_total_time=60
         done

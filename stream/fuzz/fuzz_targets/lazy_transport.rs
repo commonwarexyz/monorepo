@@ -82,7 +82,7 @@ thread_local! {
     });
 }
 
-fuzz_target!(|data: &[u8]| {
+fn fuzz(data: &[u8]) {
     if data.is_empty() || data.len() > MAX_MESSAGE_SIZE {
         return;
     }
@@ -101,4 +101,8 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(&received[..], chunk, "Data corruption detected");
         }
     });
+}
+
+fuzz_target!(|input: &[u8]| {
+    fuzz(input);
 });
