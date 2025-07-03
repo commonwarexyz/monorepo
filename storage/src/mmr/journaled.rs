@@ -1107,7 +1107,7 @@ mod tests {
             let pinned_nodes_map = source_mmr.get_pinned_nodes();
             // Convert into Vec in order of expected by Proof::nodes_to_pin
             let pinned_nodes = Proof::<Digest>::nodes_to_pin(PRUNED_TO_POS)
-                .map(|pos| pinned_nodes_map.get(&pos).unwrap().clone())
+                .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
                 .collect();
 
             // Now create a new MMR using init_pruned
@@ -1166,7 +1166,7 @@ mod tests {
             let pinned_nodes_map = source_mmr.get_pinned_nodes();
             // Convert into Vec in order of expected by Proof::nodes_to_pin
             let pinned_nodes = Proof::<Digest>::nodes_to_pin(source_mmr_size)
-                .map(|pos| pinned_nodes_map.get(&pos).unwrap().clone())
+                .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
                 .collect();
 
             // Initialize synced MMR with empty operations

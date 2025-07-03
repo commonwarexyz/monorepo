@@ -69,10 +69,12 @@ pub struct Config<T: Translator> {
 }
 
 /// Configuration for syncing an [Any] to a pruned target state.
-#[derive(Clone)]
-pub struct SyncConfig<T: Translator, D: Digest> {
+pub struct SyncConfig<E: RStorage + Metrics, K: Array, V: Array, T: Translator, D: Digest> {
     /// Database configuration.
     pub db_config: Config<T>,
+
+    /// The [Any]'s log of operations.
+    pub log: Journal<E, Operation<K, V>>,
 
     /// The location in the [Any] up to which operations have been pruned.
     /// This serves as both the log pruning boundary and the inactivity floor.
@@ -186,7 +188,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// Removes all existing persisted data and applies the state given in `cfg`.
     pub(super) async fn init_pruned(
         context: E,
-        cfg: SyncConfig<T, H::Digest>,
+        cfg: SyncConfig<E, K, V, T, H::Digest>,
     ) -> Result<Self, Error> {
         let mmr_config = crate::mmr::journaled::SyncConfig {
             config: MmrConfig {
@@ -199,25 +201,20 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             pruned_to_pos: leaf_num_to_pos(cfg.pruned_to_loc),
             pinned_nodes: cfg.pinned_nodes,
         };
-        let mmr = Mmr::init_pruned(context.with_label("mmr"), mmr_config)
+        let mut mmr = Mmr::init_pruned(context.with_label("mmr"), mmr_config)
             .await
             .map_err(Error::MmrError)?;
 
-        // Initialize the log in an empty, pruned state.
-        let log = Journal::<E, Operation<K, V>>::init_pruned(
-            context.with_label("log"),
-            JConfig {
-                partition: cfg.db_config.log_journal_partition,
-                items_per_blob: cfg.db_config.log_items_per_blob,
-                write_buffer: cfg.db_config.log_write_buffer,
-            },
-            cfg.pruned_to_loc,
-        )
-        .await?;
+        let mut hasher = Standard::<H>::new();
+        for i in cfg.pruned_to_loc..cfg.log.size().await? {
+            let op = cfg.log.read(i).await?;
+            let digest = Self::op_digest(&mut hasher, &op);
+            mmr.add_batched(&mut hasher, &digest).await?;
+        }
 
         Ok(Any {
             ops: mmr,
-            log,
+            log: cfg.log,
             snapshot: Index::init(
                 context.with_label("snapshot"),
                 cfg.db_config.translator.clone(),
@@ -776,28 +773,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         // Rewind the operation log over the commit op to force rollback to the previous commit.
         self.log.rewind(self.log.size().await? - 1).await?;
         self.log.close().await?;
-
-        Ok(())
-    }
-
-    /// Replay a historical operation that already occurred in the target database.
-    ///
-    /// This helper is intended _exclusively_ for the sync client. It replays the operation
-    /// verbatim, ensuring that the local database transitions through the exact same sequence of
-    /// log/MMR updates as the target _without_ re-executing higher-level behaviours that would
-    /// otherwise modify the state (e.g. raising the inactivity floor during a commit).
-    pub(crate) async fn replay_logged_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
-        match op {
-            Operation::Update(key, value) => {
-                self.apply_op(Operation::Update(key, value)).await?;
-            }
-            Operation::Deleted(key) => {
-                self.apply_op(Operation::Deleted(key)).await?;
-            }
-            Operation::Commit(loc) => {
-                self.apply_op(Operation::Commit(loc)).await?;
-            }
-        }
 
         Ok(())
     }
@@ -1411,10 +1386,21 @@ mod test {
     pub fn test_any_db_init_pruned_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let sync_config: SyncConfig<EightCap, Digest> = SyncConfig {
+            let log = Journal::<Context, Operation<Digest, Digest>>::init(
+                context.clone(),
+                JConfig {
+                    partition: "sync_basic_log".into(),
+                    items_per_blob: 1000,
+                    write_buffer: 1024,
+                },
+            )
+            .await
+            .unwrap();
+            let sync_config: SyncConfig<Context, Digest, Digest, EightCap, Digest> = SyncConfig {
                 db_config: any_db_config("sync_basic", EightCap),
-                pruned_to_loc: 0,     // No pruning
-                pinned_nodes: vec![], // TODO test with pinned nodes
+                pruned_to_loc: 0, // No pruning
+                pinned_nodes: vec![],
+                log,
             };
             let mut synced_db: Any<_, Digest, Digest, Sha256, EightCap> =
                 Any::init_pruned(context.clone(), sync_config)
@@ -1495,14 +1481,32 @@ mod test {
             let pinned_nodes_map = source_db.ops.get_pinned_nodes();
             // Convert into Vec in order of expected by Proof::nodes_to_pin
             let pinned_nodes = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(oldest_retained_loc))
-                .map(|pos| pinned_nodes_map.get(&pos).unwrap().clone())
+                .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
                 .collect();
 
+            let log_config = any_db_config("sync_pruning_log", EightCap);
+            let mut copied_log = Journal::<Context, Operation<Digest, Digest>>::init_pruned(
+                context.clone(),
+                JConfig {
+                    partition: log_config.log_journal_partition,
+                    items_per_blob: log_config.log_items_per_blob,
+                    write_buffer: log_config.log_write_buffer,
+                },
+                oldest_retained_loc,
+            )
+            .await
+            .unwrap();
+            for i in 0..oldest_retained_loc {
+                let op = source_db.log.read(i).await.unwrap();
+                copied_log.append(op).await.unwrap();
+            }
+
             // Initialize the synced db.
-            let sync_config: SyncConfig<EightCap, Digest> = SyncConfig {
+            let sync_config: SyncConfig<Context, Digest, Digest, EightCap, Digest> = SyncConfig {
                 db_config: any_db_config("sync_pruning", EightCap),
                 pruned_to_loc: oldest_retained_loc,
                 pinned_nodes,
+                log: copied_log,
             };
             let synced_db: Any<_, Digest, Digest, Sha256, EightCap> =
                 Any::init_pruned(context.clone(), sync_config)
@@ -1510,14 +1514,14 @@ mod test {
                     .unwrap();
 
             // Verify the synced database matches the source
-            assert_eq!(synced_db.op_count(), oldest_retained_loc);
-            assert_eq!(synced_db.oldest_retained_loc(), None);
-            assert_eq!(synced_db.ops.size(), leaf_num_to_pos(oldest_retained_loc));
+            assert_eq!(synced_db.op_count(), source_op_count);
+            assert_eq!(synced_db.oldest_retained_loc(), Some(oldest_retained_loc));
+            assert_eq!(synced_db.ops.size(), source_db.ops.size());
+            assert_eq!(synced_db.ops.pruned_to_pos(), source_db.ops.pruned_to_pos());
             assert_eq!(
-                synced_db.ops.pruned_to_pos(),
-                leaf_num_to_pos(oldest_retained_loc)
+                synced_db.log.size().await.unwrap(),
+                source_db.log.size().await.unwrap()
             );
-            assert_eq!(synced_db.log.size().await.unwrap(), oldest_retained_loc);
 
             synced_db.destroy().await.unwrap();
             source_db.destroy().await.unwrap();

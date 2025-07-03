@@ -149,6 +149,7 @@ where
             db_config: config.db_config.clone(),
             pruned_to_loc: config.lower_bound_ops,
             pinned_nodes,
+            log,
         };
 
         // Initialize the Any database in pruned state
@@ -156,26 +157,26 @@ where
             .await
             .map_err(Error::DatabaseInitFailed)?;
 
-        // Replay all operations from the log to populate the MMR and snapshot
-        let log_size = log
-            .size()
-            .await
-            .map_err(|e| Error::DatabaseInitFailed(adb::Error::JournalError(e)))?;
+        // // Replay all operations from the log to populate the MMR and snapshot
+        // let log_size = log
+        //     .size()
+        //     .await
+        //     .map_err(|e| Error::DatabaseInitFailed(adb::Error::JournalError(e)))?;
 
-        // Only read from the valid range (lower_bound_ops to current size)
-        for i in config.lower_bound_ops..log_size {
-            let op = log
-                .read(i)
-                .await
-                .map_err(|e| Error::DatabaseInitFailed(adb::Error::JournalError(e)))?;
-            db.replay_logged_op(op)
-                .await
-                .map_err(Error::DatabaseInitFailed)?;
-        }
+        // // Only read from the valid range (lower_bound_ops to current size)
+        // for i in config.lower_bound_ops..log_size {
+        //     let op = log
+        //         .read(i)
+        //         .await
+        //         .map_err(|e| Error::DatabaseInitFailed(adb::Error::JournalError(e)))?;
+        //     db.replay_logged_op(op)
+        //         .await
+        //         .map_err(Error::DatabaseInitFailed)?;
+        // }
 
         adb::any::Any::<E, K, V, H, T>::build_snapshot_from_log::<0 /* UNUSED_N */>(
             config.lower_bound_ops,
-            &log,
+            &db.log,
             &mut db.snapshot,
             None,
         )
@@ -756,7 +757,7 @@ mod tests {
             // Convert into Vec in order of expected by Proof::nodes_to_pin
             let nodes_to_pin = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(lower_bound_ops));
             let pinned_nodes = nodes_to_pin
-                .map(|pos| pinned_nodes_map.get(&pos).unwrap().clone())
+                .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
                 .collect();
 
             let target_hash = {
