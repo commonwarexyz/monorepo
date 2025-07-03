@@ -146,7 +146,7 @@ where
     ) -> Result<adb::any::Any<E, K, V, H, T>, Error> {
         // Create the sync config for the Any database
         let sync_config = adb::any::SyncConfig {
-            config: config.db_config.clone(),
+            db_config: config.db_config.clone(),
             pruned_to_loc: config.lower_bound_ops,
             pinned_nodes,
         };
@@ -171,8 +171,6 @@ where
             db.replay_logged_op(op)
                 .await
                 .map_err(Error::DatabaseInitFailed)?;
-            let op_count = db.op_count();
-            info!("op_count: {}", op_count);
         }
 
         adb::any::Any::<E, K, V, H, T>::build_snapshot_from_log::<0 /* UNUSED_N */>(

@@ -31,7 +31,7 @@ use tracing::{debug, warn};
 
 /// Indicator that the generic parameter N is unused by the call. N is only
 /// needed if the caller is providing the optional bitmap.
-pub const UNUSED_N: usize = 0;
+const UNUSED_N: usize = 0;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.
@@ -71,15 +71,16 @@ pub struct Config<T: Translator> {
 /// Configuration for syncing an [Any] to a pruned target state.
 #[derive(Clone)]
 pub struct SyncConfig<T: Translator, D: Digest> {
-    /// Base configuration for the database.
-    pub config: Config<T>,
+    /// Database configuration.
+    pub db_config: Config<T>,
 
     /// The location in the [Any] up to which operations have been pruned.
     /// This serves as both the log pruning boundary and the inactivity floor.
     /// Everything before this location is considered pruned/inactive.
     pub pruned_to_loc: u64,
 
-    /// The pinned nodes to use for the MMR.
+    /// The pinned nodes the MMR needs at the pruning boundary
+    /// given by `pruned_to_loc`.
     pub pinned_nodes: Vec<D>,
 }
 
@@ -189,11 +190,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     ) -> Result<Self, Error> {
         let mmr_config = crate::mmr::journaled::SyncConfig {
             config: MmrConfig {
-                journal_partition: cfg.config.mmr_journal_partition,
-                metadata_partition: cfg.config.mmr_metadata_partition,
-                items_per_blob: cfg.config.mmr_items_per_blob,
-                write_buffer: cfg.config.mmr_write_buffer,
-                pool: cfg.config.pool.clone(),
+                journal_partition: cfg.db_config.mmr_journal_partition,
+                metadata_partition: cfg.db_config.mmr_metadata_partition,
+                items_per_blob: cfg.db_config.mmr_items_per_blob,
+                write_buffer: cfg.db_config.mmr_write_buffer,
+                pool: cfg.db_config.pool.clone(),
             },
             pruned_to_pos: leaf_num_to_pos(cfg.pruned_to_loc),
             pinned_nodes: cfg.pinned_nodes,
@@ -206,9 +207,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let log = Journal::<E, Operation<K, V>>::init_pruned(
             context.with_label("log"),
             JConfig {
-                partition: cfg.config.log_journal_partition,
-                items_per_blob: cfg.config.log_items_per_blob,
-                write_buffer: cfg.config.log_write_buffer,
+                partition: cfg.db_config.log_journal_partition,
+                items_per_blob: cfg.db_config.log_items_per_blob,
+                write_buffer: cfg.db_config.log_write_buffer,
             },
             cfg.pruned_to_loc,
         )
@@ -219,7 +220,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             log,
             snapshot: Index::init(
                 context.with_label("snapshot"),
-                cfg.config.translator.clone(),
+                cfg.db_config.translator.clone(),
             ),
             inactivity_floor_loc: cfg.pruned_to_loc,
             uncommitted_ops: 0,
@@ -795,7 +796,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             }
             Operation::Commit(loc) => {
                 self.apply_op(Operation::Commit(loc)).await?;
-                // self.inactivity_floor_loc = loc; TODO do we need this?
             }
         }
 
@@ -1412,7 +1412,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let sync_config: SyncConfig<EightCap, Digest> = SyncConfig {
-                config: any_db_config("sync_basic", EightCap),
+                db_config: any_db_config("sync_basic", EightCap),
                 pruned_to_loc: 0,     // No pruning
                 pinned_nodes: vec![], // TODO test with pinned nodes
             };
@@ -1500,7 +1500,7 @@ mod test {
 
             // Initialize the synced db.
             let sync_config: SyncConfig<EightCap, Digest> = SyncConfig {
-                config: any_db_config("sync_pruning", EightCap),
+                db_config: any_db_config("sync_pruning", EightCap),
                 pruned_to_loc: oldest_retained_loc,
                 pinned_nodes,
             };
