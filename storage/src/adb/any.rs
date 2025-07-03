@@ -21,15 +21,12 @@ use crate::{
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{
-    buffer::pool::BufferPool, Clock, Metrics, RwLock, Storage as RStorage, ThreadPool,
-};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::{
     future::{try_join_all, TryFutureExt},
     pin_mut, try_join, StreamExt,
 };
-use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// Indicator that the generic parameter N is unused by the call. N is only
@@ -70,7 +67,7 @@ pub struct Config<T: Translator, const PAGE_SIZE: usize> {
     /// An optional thread pool to use for parallelizing batch operations.
     pub pool: Option<ThreadPool>,
 
-    pub buffer_pool: Arc<RwLock<BufferPool<PAGE_SIZE>>>,
+    pub buffer_pool: PoolRef<PAGE_SIZE>,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
@@ -755,12 +752,15 @@ mod test {
     use commonware_codec::{DecodeExt, FixedSize};
     use commonware_cryptography::{hash, sha256::Digest, Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{buffer::Pool, deterministic, Runner as _, RwLock};
     use rand::{
         rngs::{OsRng, StdRng},
         RngCore, SeedableRng,
     };
-    use std::collections::{HashMap, HashSet};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
 
     const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
 
@@ -778,7 +778,7 @@ mod test {
             log_write_buffer: 1024,
             translator,
             pool: None,
-            buffer_pool: Arc::new(RwLock::new(BufferPool::<TESTING_PAGE_SIZE>::new(
+            buffer_pool: Arc::new(RwLock::new(Pool::<TESTING_PAGE_SIZE>::new(
                 TESTING_PAGE_CACHE_SIZE,
             ))),
         }

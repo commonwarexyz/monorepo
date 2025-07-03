@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::pool::BufferPool, deterministic, Runner, RwLock};
+use commonware_runtime::{buffer::Pool, deterministic, Runner, RwLock};
 use commonware_storage::{
     adb::any::{Any, Config},
     index::translator::EightCap,
@@ -55,7 +55,7 @@ fn fuzz(data: FuzzInput) {
             log_write_buffer: 1024,
             translator: EightCap,
             pool: None,
-            buffer_pool: Arc::new(RwLock::new(BufferPool::new(TESTING_PAGE_CACHE_SIZE))),
+            buffer_pool: Arc::new(RwLock::new(Pool::new(TESTING_PAGE_CACHE_SIZE))),
         };
 
         let mut adb = Any::<_, Key, Value, Sha256, EightCap, TESTING_PAGE_SIZE>::init(context.clone(), cfg.clone())

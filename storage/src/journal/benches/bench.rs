@@ -1,4 +1,4 @@
-use commonware_runtime::{buffer::pool::BufferPool, tokio::Context, RwLock};
+use commonware_runtime::{buffer::Pool, tokio::Context, RwLock};
 use commonware_storage::journal::fixed::{Config as JConfig, Journal};
 use commonware_utils::array::FixedBytes;
 use criterion::criterion_main;
@@ -35,7 +35,7 @@ async fn get_journal<const ITEM_SIZE: usize>(
         partition: partition_name.to_string(),
         items_per_blob,
         write_buffer: 1024,
-        buffer_pool: Arc::new(RwLock::new(BufferPool::<PAGE_SIZE>::new(PAGE_CACHE_SIZE))),
+        buffer_pool: Arc::new(RwLock::new(Pool::<PAGE_SIZE>::new(PAGE_CACHE_SIZE))),
     };
     Journal::init(context, journal_config).await.unwrap()
 }
