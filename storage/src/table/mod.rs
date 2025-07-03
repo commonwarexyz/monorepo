@@ -1,12 +1,12 @@
 //! A persistent, immutable key-value store with efficient lookups.
 //!
-//! [Store] is a key-value store designed for permanent storage where data is written once and never
+//! [Table] is a key-value store designed for permanent storage where data is written once and never
 //! modified. Unlike in-memory stores, this implementation uses persistent on-disk structures to
 //! minimize memory usage while maintaining fast lookups through a hash table approach.
 //!
 //! # Architecture
 //!
-//! [Store] uses a multi-component architecture:
+//! [Table] uses a multi-component architecture:
 //! - **Variable Journal**: Stores key-value entries in an append-only log with optional compression
 //! - **Hash Table**: A persistent hash table stored in a blob that maps keys to journal locations
 //!
@@ -14,8 +14,6 @@
 //! redundancy and enables atomic updates without locks or complex coordination.
 //!
 //! # Hash Table Design
-//!
-//! The table uses a cuckoo-like approach with two slots per bucket:
 //!
 //! ```text
 //! Bucket Layout (48 bytes total, 2 slots of 24 bytes each):
@@ -32,7 +30,7 @@
 //!
 //! # Crash Consistency
 //!
-//! [Store] ensures crash consistency through:
+//! [Table] ensures crash consistency through:
 //! 1. **Checksums**: All table entries include CRC32 checksums
 //! 2. **Epochs**: Each write increments an epoch counter, invalid epochs are cleaned on restart
 //!
@@ -101,13 +99,13 @@ use commonware_utils::Array;
 pub use storage::{Checkpoint, Cursor, Table};
 use thiserror::Error;
 
-/// Subject of a `get` operation.
+/// Subject of a [Table::get] operation.
 pub enum Identifier<'a, K: Array> {
     Cursor(Cursor),
     Key(&'a K),
 }
 
-/// Errors that can occur when interacting with the [Store].
+/// Errors that can occur when interacting with the [Table].
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("runtime error: {0}")]
