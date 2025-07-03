@@ -2,7 +2,7 @@ use crate::{
     archive::{immutable::Config, Error, Identifier},
     metadata::{self, Metadata},
     ordinal::{self, Ordinal},
-    table::{self, Cursor, Table},
+    table::{self, Checkpoint, Cursor, Table},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write};
@@ -10,94 +10,21 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{array::prefixed_u64::U64, Array, BitVec};
 use futures::join;
 use prometheus_client::metrics::counter::Counter;
-use std::{collections::HashMap, ops::Deref};
+use std::collections::HashMap;
 use tracing::debug;
 
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
-#[repr(transparent)]
-pub struct OrdinalRecord([u8; u64::SIZE + u32::SIZE]);
+const CHECKPOINT_PREFIX: u8 = 0;
+const INDICES_PREFIX: u8 = 1;
 
-impl OrdinalRecord {
-    fn new(index: u64, offset: u32) -> Self {
-        let mut buf = [0u8; u64::SIZE + u32::SIZE];
-        buf[..u64::SIZE].copy_from_slice(&index.to_be_bytes());
-        buf[u64::SIZE..].copy_from_slice(&offset.to_be_bytes());
-        Self(buf)
-    }
-
-    fn index(&self) -> u64 {
-        u64::from_be_bytes(self.0[..u64::SIZE].try_into().unwrap())
-    }
-
-    fn offset(&self) -> u32 {
-        u32::from_be_bytes(self.0[u64::SIZE..].try_into().unwrap())
-    }
-}
-
-impl Write for OrdinalRecord {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-    }
-}
-
-impl Read for OrdinalRecord {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        <[u8; u64::SIZE + u32::SIZE]>::read(buf).map(Self)
-    }
-}
-
-impl FixedSize for OrdinalRecord {
-    const SIZE: usize = u64::SIZE + u32::SIZE;
-}
-
-impl Array for OrdinalRecord {}
-
-impl Deref for OrdinalRecord {
-    type Target = [u8];
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl AsRef<[u8]> for OrdinalRecord {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for OrdinalRecord {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "OrdinalRecord(section={}, offset={})",
-            u64::from_be_bytes(self.0[..u64::SIZE].try_into().unwrap()),
-            u32::from_be_bytes(self.0[u64::SIZE..].try_into().unwrap())
-        )
-    }
-}
-
-impl std::fmt::Display for OrdinalRecord {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "OrdinalRecord(section={}, offset={})",
-            u64::from_be_bytes(self.0[..u64::SIZE].try_into().unwrap()),
-            u32::from_be_bytes(self.0[u64::SIZE..].try_into().unwrap())
-        )
-    }
-}
-
-enum MetadataRecord {
-    Cursor(Cursor),
+enum Record {
+    Checkpoint(Checkpoint),
     Indices(Option<BitVec>),
 }
 
-impl MetadataRecord {
-    fn cursor(&self) -> &Cursor {
+impl Record {
+    fn checkpoint(&self) -> &Checkpoint {
         match self {
-            Self::Cursor(cursor) => cursor,
+            Self::Checkpoint(checkpoint) => checkpoint,
             _ => panic!("incorrect record"),
         }
     }
@@ -110,12 +37,12 @@ impl MetadataRecord {
     }
 }
 
-impl Write for MetadataRecord {
+impl Write for Record {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Self::Cursor(cursor) => {
+            Self::Checkpoint(checkpoint) => {
                 buf.put_u8(0);
-                cursor.write(buf);
+                checkpoint.write(buf);
             }
             Self::Indices(indices) => {
                 buf.put_u8(1);
@@ -125,13 +52,13 @@ impl Write for MetadataRecord {
     }
 }
 
-impl Read for MetadataRecord {
+impl Read for Record {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let tag = buf.get_u8();
         match tag {
-            0 => Ok(Self::Cursor(Cursor::read(buf)?)),
+            0 => Ok(Self::Checkpoint(Checkpoint::read(buf)?)),
             1 => Ok(Self::Indices(Option::<BitVec>::read_cfg(
                 buf,
                 &(0..=usize::MAX).into(),
@@ -141,24 +68,21 @@ impl Read for MetadataRecord {
     }
 }
 
-impl EncodeSize for MetadataRecord {
+impl EncodeSize for Record {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::Cursor(_) => Cursor::SIZE,
+            Self::Checkpoint(_) => Checkpoint::SIZE,
             Self::Indices(indices) => indices.encode_size(),
         }
     }
 }
 
-const CURSOR_PREFIX: u8 = 0;
-const INDICES_PREFIX: u8 = 1;
-
 pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     items_per_section: u64,
 
-    metadata: Metadata<E, U64, MetadataRecord>,
+    metadata: Metadata<E, U64, Record>,
     table: Table<E, K, V>,
-    ordinal: Ordinal<E, OrdinalRecord>,
+    ordinal: Ordinal<E, Cursor>,
 
     // Metrics
     gets: Counter,
@@ -169,7 +93,7 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metadata
-        let mut metadata = Metadata::<E, U64, MetadataRecord>::init(
+        let mut metadata = Metadata::<E, U64, Record>::init(
             context.with_label("metadata"),
             metadata::Config {
                 partition: cfg.metadata_partition,
@@ -178,21 +102,21 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         )
         .await?;
 
-        // Get cursor
-        let cursor_key = U64::new(CURSOR_PREFIX, 0);
-        let cursor = match metadata.get(&cursor_key) {
-            Some(cursor) => cursor.cursor(),
+        // Get checkpoint
+        let checkpoint_key = U64::new(CHECKPOINT_PREFIX, 0);
+        let checkpoint = match metadata.get(&checkpoint_key) {
+            Some(checkpoint) => *checkpoint.checkpoint(),
             None => {
                 metadata.put(
-                    cursor_key.clone(),
-                    MetadataRecord::Cursor(Cursor::default()),
+                    checkpoint_key.clone(),
+                    Record::Checkpoint(Checkpoint::default()),
                 );
-                metadata.get(&cursor_key).unwrap().cursor()
+                *metadata.get(&checkpoint_key).unwrap().checkpoint()
             }
         };
 
         // Initialize table
-        let table = Table::init(
+        let table = Table::init_with_checkpoint(
             context.with_label("table"),
             table::Config {
                 journal_partition: cfg.journal_partition,
@@ -203,7 +127,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
                 write_buffer: cfg.write_buffer,
                 target_journal_size: cfg.target_journal_size,
             },
-            *cursor,
+            Some(checkpoint),
         )
         .await?;
 
@@ -253,15 +177,12 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
 
     async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
         // Get ordinal
-        let Some(record) = self.ordinal.get(index).await? else {
+        let Some(cursor) = self.ordinal.get(index).await? else {
             return Ok(None);
         };
 
         // Get journal entry
-        let result = self
-            .table
-            .get_location(record.index(), record.offset())
-            .await?;
+        let result = self.table.get_cursor(cursor).await?;
 
         // Get value
         Ok(result)
@@ -281,8 +202,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
 
         // Store record
         let key = U64::new(INDICES_PREFIX, section);
-        self.metadata
-            .put(key, MetadataRecord::Indices(Some(indices)));
+        self.metadata.put(key, Record::Indices(Some(indices)));
         debug!(section, "initialized section");
     }
 }
@@ -308,23 +228,21 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         let record = self.metadata.get_mut(&k).unwrap();
 
         // Update active bits
-        let done = if let MetadataRecord::Indices(Some(record)) = record {
+        let done = if let Record::Indices(Some(record)) = record {
             record.set((index % self.items_per_section) as usize);
             record.count_ones() == self.items_per_section as usize
         } else {
             false
         };
         if done {
-            *record = MetadataRecord::Indices(None);
+            *record = Record::Indices(None);
         }
 
         // Put in table
-        let (section, offset) = self.table.put(key, data).await?;
+        let cursor = self.table.put(key, data).await?;
 
         // Put section and offset in ordinal
-        self.ordinal
-            .put(index, OrdinalRecord::new(section, offset))
-            .await?;
+        self.ordinal.put(index, cursor).await?;
 
         Ok(())
     }
@@ -352,15 +270,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
 
         // Sync journal and ordinal
         let (table_result, ordinal_result) = join!(self.table.sync(), self.ordinal.sync());
-        let (table_epoch, table_section, table_size) = table_result?;
+        let checkpoint = table_result?;
         ordinal_result?;
 
-        // Update cursor
-        let cursor_key = U64::new(CURSOR_PREFIX, 0);
-        self.metadata.put(
-            cursor_key.clone(),
-            MetadataRecord::Cursor(table_epoch, table_section, table_size),
-        );
+        // Update checkpoint
+        let checkpoint_key = U64::new(CHECKPOINT_PREFIX, 0);
+        self.metadata
+            .put(checkpoint_key.clone(), Record::Checkpoint(checkpoint));
 
         // Sync metadata once underlying are synced
         self.metadata.sync().await?;
@@ -377,14 +293,12 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         self.ordinal.close().await?;
 
         // Close table
-        let (table_epoch, table_section, table_size) = self.table.close().await?;
+        let checkpoint = self.table.close().await?;
 
-        // Update cursor
-        let cursor_key = U64::new(CURSOR_PREFIX, 0);
-        self.metadata.put(
-            cursor_key.clone(),
-            MetadataRecord::Cursor(table_epoch, table_section, table_size),
-        );
+        // Update checkpoint
+        let checkpoint_key = U64::new(CHECKPOINT_PREFIX, 0);
+        self.metadata
+            .put(checkpoint_key.clone(), Record::Checkpoint(checkpoint));
 
         // Close metadata
         self.metadata.close().await?;

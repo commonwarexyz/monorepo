@@ -87,21 +87,11 @@ impl std::fmt::Display for Cursor {
 }
 
 /// Checkpoint for table progress.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Copy, Default)]
 pub struct Checkpoint {
     epoch: u64,
     section: u64,
     size: u64,
-}
-
-impl Default for Checkpoint {
-    fn default() -> Self {
-        Self {
-            epoch: 0,
-            section: 0,
-            size: 0,
-        }
-    }
 }
 
 impl Read for Checkpoint {
@@ -392,11 +382,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
                         );
                         table.write_at(zero_buf.clone(), offset).await?;
                         modified = true;
-                    } else {
-                        if entry1.epoch > checkpoint.epoch {
-                            checkpoint.epoch = entry1.epoch;
-                            checkpoint.section = entry1.section;
-                        }
+                    } else if entry1.epoch > checkpoint.epoch {
+                        checkpoint.epoch = entry1.epoch;
+                        checkpoint.section = entry1.section;
                     }
                 }
 
@@ -413,11 +401,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
                             .write_at(zero_buf.clone(), offset + TABLE_ENTRY_SIZE as u64)
                             .await?;
                         modified = true;
-                    } else {
-                        if entry2.epoch > checkpoint.epoch {
-                            checkpoint.epoch = entry2.epoch;
-                            checkpoint.section = entry2.section;
-                        }
+                    } else if entry2.epoch > checkpoint.epoch {
+                        checkpoint.epoch = entry2.epoch;
+                        checkpoint.section = entry2.section;
                     }
                 }
             }
