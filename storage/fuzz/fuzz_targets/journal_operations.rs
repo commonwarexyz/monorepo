@@ -2,7 +2,7 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::hash;
-use commonware_runtime::{buffer::pool::BufferPool, deterministic, Runner, RwLock};
+use commonware_runtime::{buffer::Pool, deterministic, Runner, RwLock};
 use commonware_storage::journal::fixed::{
     Config as FixedConfig, Config as VariableConfig, Journal as FixedJournal,
     Journal as VariableJournal,
@@ -73,13 +73,13 @@ fn fuzz(input: FuzzInput) {
                 partition: "fixed_journal_operations_fuzz_test".to_string(),
                 items_per_blob: 3,
                 write_buffer: 512,
-                buffer_pool: Arc::new(RwLock::new(BufferPool::<PAGE_SIZE>::new(PAGE_CACHE_SIZE))),
+                buffer_pool: Arc::new(RwLock::new(Pool::<PAGE_SIZE>::new(PAGE_CACHE_SIZE))),
             },
             JournalType::Variable => VariableConfig {
                 partition: "variable_journal_operations_fuzz_test".to_string(),
                 items_per_blob: 3,
                 write_buffer: 512,
-                buffer_pool: Arc::new(RwLock::new(BufferPool::<PAGE_SIZE>::new(PAGE_CACHE_SIZE))),
+                buffer_pool: Arc::new(RwLock::new(Pool::<PAGE_SIZE>::new(PAGE_CACHE_SIZE))),
             },
         };
 

@@ -19,11 +19,9 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{
-    buffer::pool::BufferPool, Clock, Metrics, RwLock, Storage as RStorage, ThreadPool,
-};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::array::prefixed_u64::U64;
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 use tracing::{debug, error, warn};
 
 /// Configuration for a journal-backed MMR.
@@ -48,7 +46,7 @@ pub struct Config<const PAGE_SIZE: usize> {
     pub pool: Option<ThreadPool>,
 
     /// The buffer pool to use for caching data.
-    pub buffer_pool: Arc<RwLock<BufferPool<PAGE_SIZE>>>,
+    pub buffer_pool: PoolRef<PAGE_SIZE>,
 }
 
 /// A MMR backed by a fixed-item-length journal.
@@ -589,8 +587,9 @@ mod tests {
     };
     use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob as _, Runner};
+    use commonware_runtime::{buffer::Pool, deterministic, Blob as _, Runner, RwLock};
     use commonware_utils::hex;
+    use std::sync::Arc;
 
     fn test_digest(v: usize) -> Digest {
         hash(&v.to_be_bytes())
@@ -606,7 +605,7 @@ mod tests {
             items_per_blob: 7,
             write_buffer: 1024,
             pool: None,
-            buffer_pool: Arc::new(RwLock::new(BufferPool::<TESTING_PAGE_SIZE>::new(
+            buffer_pool: Arc::new(RwLock::new(Pool::<TESTING_PAGE_SIZE>::new(
                 TESTING_PAGE_CACHE_SIZE,
             ))),
         }

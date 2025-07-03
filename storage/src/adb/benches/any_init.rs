@@ -1,7 +1,7 @@
 use commonware_cryptography::{hash, Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
-    buffer::pool::BufferPool,
+    buffer::Pool,
     create_pool,
     tokio::{Config, Context, Runner},
     Runner as _, RwLock, ThreadPool,
@@ -44,7 +44,7 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, PAGE_SIZE> {
         log_write_buffer: 1024,
         translator: EightCap,
         pool: Some(pool),
-        buffer_pool: Arc::new(RwLock::new(BufferPool::new(PAGE_CACHE_SIZE))),
+        buffer_pool: Arc::new(RwLock::new(Pool::new(PAGE_CACHE_SIZE))),
     }
 }
 

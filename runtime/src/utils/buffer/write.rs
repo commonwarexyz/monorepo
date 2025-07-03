@@ -1,4 +1,4 @@
-use crate::{buffer::Buffer, Blob, Error, RwLock};
+use crate::{buffer::tip::Buffer, Blob, Error, RwLock};
 use commonware_utils::StableBuf;
 use std::sync::Arc;
 

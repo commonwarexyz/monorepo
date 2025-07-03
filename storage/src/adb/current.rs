@@ -21,12 +21,9 @@ use crate::{
 };
 use commonware_codec::FixedSize;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{
-    buffer::pool::BufferPool, Clock, Metrics, RwLock, Storage as RStorage, ThreadPool,
-};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::future::try_join_all;
-use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// Configuration for a [Current] authenticated db.
@@ -63,7 +60,7 @@ pub struct Config<T: Translator, const PAGE_SIZE: usize> {
     pub pool: Option<ThreadPool>,
 
     /// The buffer pool to use for caching data.
-    pub buffer_pool: Arc<RwLock<BufferPool<PAGE_SIZE>>>,
+    pub buffer_pool: PoolRef<PAGE_SIZE>,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
@@ -741,8 +738,9 @@ pub mod test {
     use crate::index::translator::TwoCap;
     use commonware_cryptography::{hash, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{buffer::Pool, deterministic, Runner as _, RwLock};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
+    use std::sync::Arc;
 
     const TESTING_PAGE_SIZE: usize = 88;
     const TESTING_PAGE_CACHE_SIZE: usize = 8;
@@ -759,9 +757,7 @@ pub mod test {
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: TwoCap,
             pool: None,
-            buffer_pool: Arc::new(RwLock::new(BufferPool::<TESTING_PAGE_SIZE>::new(
-                TESTING_PAGE_CACHE_SIZE,
-            ))),
+            buffer_pool: Arc::new(RwLock::new(Pool::new(TESTING_PAGE_CACHE_SIZE))),
         }
     }
 

@@ -50,11 +50,8 @@ use super::Error;
 use bytes::BufMut;
 use commonware_codec::{Codec, DecodeExt, FixedSize};
 use commonware_runtime::{
-    buffer::{
-        pool::{Append, BufferPool},
-        Read,
-    },
-    Blob, Error as RError, Metrics, RwLock, Storage,
+    buffer::{Append, PoolRef, Read},
+    Blob, Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;
 use futures::{
@@ -66,7 +63,6 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     collections::{BTreeMap, HashMap},
     marker::PhantomData,
-    sync::Arc,
 };
 use tracing::{debug, trace, warn};
 
@@ -83,7 +79,7 @@ pub struct Config<const PAGE_SIZE: usize> {
     pub items_per_blob: u64,
 
     /// The buffer pool to use for caching data.
-    pub buffer_pool: Arc<RwLock<BufferPool<PAGE_SIZE>>>,
+    pub buffer_pool: PoolRef<PAGE_SIZE>,
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: usize,
@@ -338,7 +334,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize, const PAGE_SIZE: usiz
             .await?;
 
             // Sync the previous blob and set its write buffer to 0 (since we won't be writing to
-            // it) before moving it to the old blobs map.
+            // it) before moving it to the historical blobs map.
             self.tail.sync().await?;
             self.tail.reset_buffer(0).await?;
             let old_tail = std::mem::replace(&mut self.tail, next_blob);
@@ -629,10 +625,12 @@ mod tests {
     use commonware_cryptography::{hash, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
+        buffer::Pool,
         deterministic::{self, Context},
-        Blob, Runner, Storage,
+        Blob, Runner, RwLock, Storage,
     };
     use futures::{pin_mut, StreamExt};
+    use std::sync::Arc;
 
     const TESTING_PAGE_SIZE: usize = 44;
     const TESTING_PAGE_CACHE_SIZE: usize = 3;
@@ -646,7 +644,7 @@ mod tests {
         Config {
             partition: "test_partition".into(),
             items_per_blob,
-            buffer_pool: Arc::new(RwLock::new(BufferPool::<TESTING_PAGE_SIZE>::new(
+            buffer_pool: Arc::new(RwLock::new(Pool::<TESTING_PAGE_SIZE>::new(
                 TESTING_PAGE_CACHE_SIZE,
             ))),
             write_buffer: 2048,
