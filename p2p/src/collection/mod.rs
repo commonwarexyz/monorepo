@@ -3,6 +3,7 @@
 //! The originator's [Collector] is used to distribute and collect responses.
 //! The endpoint's [Collector] is used to receive and respond to requests.
 
+use crate::Recipients;
 use commonware_cryptography::{Committable, Digest, Digestible, PublicKey};
 use futures::channel::oneshot;
 use std::{collections::HashMap, fmt::Debug, future::Future};
@@ -15,16 +16,23 @@ pub trait Collector<D: Digest>: Clone + Send + 'static {
     type Response: Digestible<Digest = D> + Debug + Send + 'static;
     type PublicKey: PublicKey;
 
-    /// Sends a `request` to recipients.
+    /// Sends a `request` to a set of `recipients`, returning the list of recipients that were
+    /// successfully sent to.
     ///
     /// Once a quorum of responses have been collected, the [Originator] will be notified.
-    fn send(&mut self, request: Self::Request) -> impl Future<Output = ()> + Send;
+    fn send(
+        &mut self,
+        request: Self::Request,
+        recipients: Recipients<Self::PublicKey>,
+    ) -> impl Future<Output = Vec<Self::PublicKey>> + Send;
 
     /// Peek at the collected responses for a given `digest`.
+    ///
+    /// Returns [None] if the request is not being collected.
     fn peek(
         &mut self,
         digest: D,
-    ) -> impl Future<Output = oneshot::Receiver<HashMap<Self::PublicKey, Self::Response>>> + Send;
+    ) -> impl Future<Output = Option<HashMap<Self::PublicKey, Self::Response>>> + Send;
 
     /// Cancels a request by `digest`, dropping all existing and future responses.
     fn cancel(&mut self, digest: D) -> impl Future<Output = ()> + Send;
@@ -35,7 +43,7 @@ pub trait Originator<D: Digest>: Clone + Send + 'static {
     type PublicKey: PublicKey;
     type Response: Digestible<Digest = D> + Debug + Send + 'static;
 
-    /// Called once a sufficient amount of `responses` have been collected for a request.
+    /// Called once a quorum of `responses` have been collected for a request.
     fn collected(
         &mut self,
         id: D,

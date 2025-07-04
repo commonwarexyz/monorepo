@@ -1,4 +1,4 @@
-use crate::collection::Collector;
+use crate::{collection::Collector, Recipients};
 use commonware_cryptography::{Committable, Digest, Digestible, PublicKey};
 use futures::{
     channel::{mpsc, oneshot},
@@ -14,13 +14,15 @@ pub enum Message<
 > {
     Send {
         request: Req,
+        recipients: Recipients<P>,
+        responder: oneshot::Sender<Vec<P>>,
     },
     Peek {
-        id: D,
+        digest: D,
         sender: oneshot::Sender<HashMap<P, Res>>,
     },
     Cancel {
-        id: D,
+        digest: D,
     },
 }
 
@@ -57,19 +59,26 @@ impl<
     type Response = Res;
     type PublicKey = P;
 
-    async fn send(&mut self, request: Req) {
-        let command = Message::Send { request };
-        let _ = self.sender.try_send(command);
-    }
-
-    async fn peek(&mut self, id: D) -> oneshot::Receiver<HashMap<P, Res>> {
+    async fn send(&mut self, request: Req, recipients: Recipients<P>) -> Vec<P> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.sender.send(Message::Peek { id, sender: tx }).await;
-        rx
+        let _ = self
+            .sender
+            .send(Message::Send {
+                request,
+                recipients,
+                responder: tx,
+            })
+            .await;
+        rx.await.unwrap()
     }
 
-    async fn cancel(&mut self, id: D) {
-        let command = Message::Cancel { id };
-        let _ = self.sender.try_send(command);
+    async fn peek(&mut self, digest: D) -> Option<HashMap<P, Res>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.sender.send(Message::Peek { digest, sender: tx }).await;
+        rx.await.ok()
+    }
+
+    async fn cancel(&mut self, digest: D) {
+        let _ = self.sender.send(Message::Cancel { digest }).await;
     }
 }

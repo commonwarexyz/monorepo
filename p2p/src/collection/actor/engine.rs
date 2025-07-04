@@ -104,18 +104,27 @@ impl<
                 command = mailbox.next() => {
                     if let Some(command) = command {
                         match command {
-                            Message::Send { request } => {
-                                let msg = request.encode();
-                                let _result = req_tx.send(Recipients::All, msg.into(), self.priority_request).await;
+                            Message::Send { request, recipients, responder } => {
+                                let msg = request.commitment().encode();
+                                match req_tx.send(recipients, msg.into(), self.priority_request).await {
+                                    Ok(recipients) => {
+                                        let _ = responder.send(recipients);
+                                        self.responses.insert(request.digest(), HashMap::new());
+                                    }
+                                    Err(err) => {
+                                        error!(?err, "failed to send request");
+                                    }
+                                }
                             },
-                            Message::Peek { id, sender } => {
-                                let responses = self.responses.get(&id)
-                                    .cloned()
-                                    .unwrap_or_default();
-                                let _ = sender.send(responses);
+                            Message::Peek { digest, sender } => {
+                                // Either send back the responses, or drop the sender to indicate
+                                // that responses for the digest are not being awaited
+                                if let Some(responses) = self.responses.get(&digest).cloned() {
+                                    let _ = sender.send(responses);
+                                }
                             },
-                            Message::Cancel { id } => {
-                                self.responses.remove(&id);
+                            Message::Cancel { digest } => {
+                                self.responses.remove(&digest);
                             }
                         }
                     }
