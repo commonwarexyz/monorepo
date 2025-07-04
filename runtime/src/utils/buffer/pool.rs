@@ -1,11 +1,21 @@
 use crate::{Blob, Error, RwLock};
+use commonware_utils::StableBuf;
+use futures::{future::Shared, FutureExt};
 use std::{
-    collections::HashMap,
+    collections::{hash_map::Entry, HashMap},
+    future::Future,
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
 };
+
+// Type alias for the future we'll be storing for each in-flight page fetch.
+//
+// We wrap [Error] in an Arc so it will be cloneable, which is required for the future to be
+// [Shared].
+type PageFetchFuture = Shared<Pin<Box<dyn Future<Output = Result<StableBuf, Arc<Error>>> + Send>>>;
 
 /// A [Pool] caches pages of [Blob] data in memory.
 ///
@@ -34,6 +44,10 @@ pub struct Pool<const PAGE_SIZE: usize> {
 
     /// The maximum number of pages that will be cached.
     capacity: usize,
+
+    /// A map of currently executing page fetches to ensure only one task at a time is trying to
+    /// fetch a specific page.
+    page_fetches: HashMap<(u64, u64), PageFetchFuture>,
 }
 
 struct CacheEntry<const PAGE_SIZE: usize> {
@@ -67,6 +81,7 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
             clock: 0,
             next_id: 0,
             capacity,
+            page_fetches: HashMap::new(),
         }
     }
 
@@ -113,8 +128,18 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
     pub(super) fn cache(&mut self, page: &[u8], blob_id: u64, page_num: u64) {
         assert_eq!(page.len(), PAGE_SIZE);
         if self.index.contains_key(&(blob_id, page_num)) {
-            // This can happen if different threads fault on the same page.
-            return;
+            // This case should never arise because the `page_fetches` logic prevents more than one
+            // task at a time from caching the same page.
+            #[cfg(debug_assertions)]
+            unreachable!("unexpected duplicate page fault");
+
+            #[cfg(not(debug_assertions))]
+            {
+                // Log error instead of panic in prod since any bug allowing this to happen wouldn't
+                // necessarily impact correctness, only performance.
+                tracing::error!(blob_id, page_num, "unexpected duplicate page fault");
+                return;
+            }
         }
 
         let key = (blob_id, page_num);
@@ -153,10 +178,10 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
     ///
     /// # Warning
     ///
-    /// Attempts to read the last (blob_size % PAGE_SIZE) "trailing bytes" of the blob will result
-    /// in a ReadFailed error since the buffer pool only deals with page sized chunks. Trailing
-    /// bytes need to be dealt with outside of the buffer pool. For example, [crate::buffer::Append]
-    /// uses a [crate::buffer::tip::Buffer] to buffer them.
+    /// Attempts to read any of the last (blob_size % PAGE_SIZE) "trailing bytes" of the blob will
+    /// result in a ReadFailed error since the buffer pool only deals with page sized chunks.
+    /// Trailing bytes need to be dealt with outside of the buffer pool. For example,
+    /// [crate::buffer::Append] uses a [crate::buffer::tip::Buffer] to buffer them.
     pub(super) async fn read<B: Blob>(
         pool: PoolRef<PAGE_SIZE>,
         blob: &B,
@@ -164,10 +189,10 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
         mut buf: &mut [u8],
         mut offset: u64,
     ) -> Result<(), Error> {
-        // Read up to a page worth of data at a time from either the buffer pool or the underlying
-        // blob, until the requested data is fully read.
+        // Read up to a page worth of data at a time from either the buffer pool or the `blob`,
+        // until the requested data is fully read.
         while !buf.is_empty() {
-            // Get a read lock on the buffer pool and see if we can get (some of) the data from it.
+            // Read lock the buffer pool and see if we can get (some of) the data from it.
             {
                 let buffer_pool = pool.read().await;
                 let count = buffer_pool.read_at(blob_id, buf, offset);
@@ -178,8 +203,7 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
                 }
             }
 
-            // Page fault: fetch the page from the underlying blob since it wasn't in the buffer
-            // pool.
+            // Page fault: fetch the page from `blob1 since it wasn't in the buffer pool.
             let (page_num, offset_in_page) = Self::offset_to_page(offset);
             let page_buf =
                 Self::fetch_and_cache_page(pool.clone(), blob, blob_id, page_num).await?;
@@ -195,30 +219,68 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
         Ok(())
     }
 
-    /// Fetch a page from the underlying blob, cache it in the buffer pool, and return it.
+    /// Fetch the specified page from `blob`, cache it in `pool`, and return it.
     async fn fetch_and_cache_page<B: Blob>(
         pool: PoolRef<PAGE_SIZE>,
         blob: &B,
         blob_id: u64,
         page_num: u64,
     ) -> Result<Vec<u8>, Error> {
-        // Note that we hold no locks at this point, so it's possible multiple threads can fault on
-        // the same page and each initiate its own read of the same data from the underlying blob.
-        //
-        // TODO: Consider making the buffer pool aware of any in-progress page requests to avoid
-        // this wasteful race condition.
-        let mut page_buf = vec![0; PAGE_SIZE];
-        page_buf = blob
-            .read_at(page_buf, page_num * Self::PAGE_SIZE_U64)
-            .await?
-            .into();
+        let key = (blob_id, page_num);
 
-        // Get a write lock on the buffer pool and put the page in its cache.
+        // Create or clone a future that retrieves the desired page from the underlying blob. This
+        // requires a write lock on the buffer pool since we may need to modify `page_fetches` if
+        // this is the first fetcher.
+        let fetch_future: PageFetchFuture;
+        let is_first_fetcher: bool;
         {
             let mut buffer_pool = pool.write().await;
-            buffer_pool.cache(&page_buf, blob_id, page_num);
+
+            let entry = buffer_pool.page_fetches.entry(key);
+
+            (fetch_future, is_first_fetcher) = match entry {
+                Entry::Occupied(o) => {
+                    // Another thread is already fetching this page, so clone its existing future.
+                    (o.get().clone(), false)
+                }
+                Entry::Vacant(v) => {
+                    // Nobody is currently fetching this page, so create a future that will do the work.
+                    let blob = blob.clone();
+                    let future = async move {
+                        blob.read_at(vec![0; PAGE_SIZE], page_num * Self::PAGE_SIZE_U64)
+                            .await
+                            .map_err(Arc::new)
+                    };
+
+                    // Make the future shareable and insert it into the map.
+                    let shareable = future.boxed().shared();
+                    v.insert(shareable.clone());
+
+                    (shareable, true)
+                }
+            };
         }
 
-        Ok(page_buf)
+        // Await the future and get the page buffer. If this isn't the task that initiated the
+        // fetch, we can return immediately with the result. Note that we cannot return immediately
+        // on error, since we'd bypass the cleanup required of the first fetcher.
+        let fetch_result = fetch_future.await;
+        if !is_first_fetcher {
+            return Ok(fetch_result.map_err(|_| Error::ReadFailed)?.into());
+        }
+
+        // This is the task that initiated the fetch, so it is responsible for cleaning up the
+        // inserted entry, and caching the page in the buffer pool if the fetch didn't error out.
+        // This requires a write lock on the buffer pool to modify `page_fetches` and cache the
+        // page.
+        let mut buffer_pool = pool.write().await;
+        let _ = buffer_pool.page_fetches.remove(&key);
+
+        let Ok(page_buf) = fetch_result else {
+            return Err(Error::ReadFailed);
+        };
+        buffer_pool.cache(page_buf.as_ref(), blob_id, page_num);
+
+        Ok(page_buf.into())
     }
 }
