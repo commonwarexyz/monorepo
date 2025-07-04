@@ -1,52 +1,74 @@
 use crate::collection::Collector;
-use bytes::Bytes;
-use commonware_cryptography::{Committable, PublicKey};
-use futures::channel::{mpsc, oneshot};
-use std::collections::HashMap;
+use commonware_cryptography::{Committable, Digest, Digestible, PublicKey};
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt,
+};
+use std::{collections::HashMap, fmt::Debug};
 
-type Response<PK> = oneshot::Receiver<HashMap<PK, Bytes>>;
-
-pub enum Message<M: Committable, P: PublicKey> {
+pub enum Message<
+    D: Digest,
+    P: PublicKey,
+    Req: Committable + Digestible<Digest = D>,
+    Res: Digestible<Digest = D>,
+> {
     Send {
-        message: M,
+        request: Req,
     },
     Peek {
-        id: M::Digest,
-        sender: oneshot::Sender<Response<P>>,
+        id: D,
+        sender: oneshot::Sender<HashMap<P, Res>>,
     },
     Cancel {
-        id: M::Digest,
+        id: D,
     },
 }
 
 #[derive(Clone)]
-pub struct Mailbox<M: Committable, P: PublicKey> {
-    sender: mpsc::Sender<Message<M, P>>,
+pub struct Mailbox<
+    D: Digest,
+    P: PublicKey,
+    Req: Committable + Digestible<Digest = D>,
+    Res: Digestible<Digest = D>,
+> {
+    sender: mpsc::Sender<Message<D, P, Req, Res>>,
 }
 
-impl<M: Committable, P: PublicKey> Mailbox<M, P> {
-    pub fn new(sender: mpsc::Sender<Message<M, P>>) -> Self {
+impl<
+        D: Digest,
+        P: PublicKey,
+        Req: Committable + Digestible<Digest = D>,
+        Res: Digestible<Digest = D>,
+    > Mailbox<D, P, Req, Res>
+{
+    pub fn new(sender: mpsc::Sender<Message<D, P, Req, Res>>) -> Self {
         Self { sender }
     }
 }
 
-impl<M: Committable + std::fmt::Debug, P: PublicKey> Collector for Mailbox<M, P> {
-    type Message = M;
+impl<
+        D: Digest,
+        P: PublicKey,
+        Req: Committable + Digestible<Digest = D> + Debug,
+        Res: Digestible<Digest = D> + Debug,
+    > Collector<D> for Mailbox<D, P, Req, Res>
+{
+    type Request = Req;
+    type Response = Res;
     type PublicKey = P;
 
-    async fn send(&mut self, message: M) {
-        let command = Message::Send { message };
+    async fn send(&mut self, request: Req) {
+        let command = Message::Send { request };
         let _ = self.sender.try_send(command);
     }
 
-    async fn peek(&mut self, id: M::Digest) -> Response<P> {
-        let (sender, receiver) = oneshot::channel();
-        let command = Message::Peek { id, sender };
-        let _ = self.sender.try_send(command);
-        receiver.await.unwrap()
+    async fn peek(&mut self, id: D) -> oneshot::Receiver<HashMap<P, Res>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.sender.send(Message::Peek { id, sender: tx }).await;
+        rx
     }
 
-    async fn cancel(&mut self, id: M::Digest) {
+    async fn cancel(&mut self, id: D) {
         let command = Message::Cancel { id };
         let _ = self.sender.try_send(command);
     }

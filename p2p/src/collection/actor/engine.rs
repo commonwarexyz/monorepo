@@ -7,7 +7,7 @@ use crate::{
     Receiver, Recipients, Sender,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
-use commonware_cryptography::{Committable, Digestible, PublicKey};
+use commonware_cryptography::{Committable, Digest, Digestible, PublicKey};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Spawner};
 use futures::{
@@ -20,11 +20,12 @@ use tracing::{error, warn};
 /// Engine that will disperse messages and collect responses.
 pub struct Engine<
     E: Clock + Spawner,
-    M: Committable + Decode,
-    D: Digestible + Decode,
+    D: Digest,
+    Req: Committable + Digestible<Digest = D> + Decode,
+    Res: Digestible<Digest = D> + Encode + Decode,
     P: PublicKey,
-    O: Originator<PublicKey = P>,
-    Z: Endpoint<PublicKey = P, Message = M>,
+    O: Originator<D, PublicKey = P, Response = Res>,
+    Z: Endpoint<D, PublicKey = P, Request = Req, Response = Res>,
 > {
     // Configuration
     context: E,
@@ -35,24 +36,25 @@ pub struct Engine<
     // Message passing
     originator: O,
     endpoint: Z,
-    mailbox: mpsc::Receiver<Message<Z::Message, O::PublicKey>>,
+    mailbox: mpsc::Receiver<Message<D, P, Req, Res>>,
 
     // State
-    responses: HashMap<D::Digest, HashMap<O::PublicKey, Z::Message>>,
+    responses: HashMap<D, HashMap<O::PublicKey, Res>>,
 }
 
 impl<
         E: Clock + Spawner,
-        M: Committable + Decode,
-        D: Digestible + Decode,
+        D: Digest,
+        Req: Committable + Digestible<Digest = D> + Encode + DecodeExt<()>,
+        Res: Digestible<Digest = D> + Encode + DecodeExt<()>,
         P: PublicKey,
-        O: Originator<PublicKey = P>,
-        Z: Endpoint<PublicKey = P, Message = M>,
-    > Engine<E, M, D, P, O, Z>
+        O: Originator<D, PublicKey = P, Response = Res>,
+        Z: Endpoint<D, PublicKey = P, Request = Req, Response = Res>,
+    > Engine<E, D, Req, Res, P, O, Z>
 {
-    pub fn new(context: E, cfg: Config<O, Z>) -> (Self, Mailbox<Z::Message, O::PublicKey>) {
+    pub fn new(context: E, cfg: Config<D, O, Z>) -> (Self, Mailbox<D, P, Req, Res>) {
         let (tx, rx) = mpsc::channel(cfg.mailbox_size);
-        let mailbox = Mailbox::new(tx);
+        let mailbox: Mailbox<D, P, Req, Res> = Mailbox::new(tx);
         (
             Self {
                 context,
@@ -93,23 +95,28 @@ impl<
             impl Receiver<PublicKey = O::PublicKey>,
         ),
     ) {
-        let (req_tx, req_rx) = request_network;
-        let (res_tx, res_rx) = response_network;
+        let (mut req_tx, mut req_rx) = request_network;
+        let (mut res_tx, mut res_rx) = response_network;
+        let mut mailbox = self.mailbox.fuse();
         loop {
             select! {
                 // Command from the mailbox
-                command = self.mailbox.next().await => {
-                    match command {
-                        Message::Send { message } => {
-                            let msg = message.encode();
-                            let result = req_tx.send(Recipients::All, message, self.priority_request).await;
-                        },
-                        Message::Peek { id, sender } => {
-                            let responses = self.responses.get(&id).cloned().unwrap_or_default();
-                            let _ = sender.send(responses);
-                        },
-                        Message::Cancel { id } => {
-                            self.responses.remove(&id);
+                command = mailbox.next() => {
+                    if let Some(command) = command {
+                        match command {
+                            Message::Send { request } => {
+                                let msg = request.encode();
+                                let _result = req_tx.send(Recipients::All, msg.into(), self.priority_request).await;
+                            },
+                            Message::Peek { id, sender } => {
+                                let responses = self.responses.get(&id)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let _ = sender.send(responses);
+                            },
+                            Message::Cancel { id } => {
+                                self.responses.remove(&id);
+                            }
                         }
                     }
                 },
@@ -126,7 +133,7 @@ impl<
                     };
 
                     // Decode the message
-                    let msg = match D::decode(&msg) {
+                    let response = match Res::decode(msg.clone()) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
@@ -135,9 +142,9 @@ impl<
                     };
 
                     // Handle the response
-                    let digest = msg.digest();
-                    let mut entry = self.responses.entry(digest.clone()).or_default();
-                    entry.insert(peer, msg);
+                    let digest = response.digest();
+                    let entry = self.responses.entry(digest).or_default();
+                    entry.insert(peer, response);
 
                     // Check if we have enough responses
                     if entry.len() >= self.quorum {
@@ -163,7 +170,7 @@ impl<
                     };
 
                     // Decode the message
-                    let msg = match M::decode(&msg) {
+                    let msg = match Req::decode(msg) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
@@ -173,12 +180,13 @@ impl<
 
                     // Handle the request
                     let (tx, rx) = oneshot::channel();
-                    self.endpoint.process(peer, msg, tx).await;
+                    self.endpoint.process(peer.clone(), msg, tx).await;
 
                     // Send the response
                     match rx.await {
                         Ok(result) => {
-                            let _ = res_tx.send(Recipients::One(peer), result, self.priority_response).await;
+                            let result = result.encode();
+                            let _ = res_tx.send(Recipients::One(peer), result.into(), self.priority_response).await;
                         }
                         Err(err) => {
                             error!(?err, ?peer, "failed to send response");
