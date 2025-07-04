@@ -49,6 +49,7 @@ pub trait Originator: Clone + Send + 'static {
 /// Interface for the application that receives messages from an origin.
 pub trait Endpoint: Clone + Send + 'static {
     type Message: Committable + Debug + Send + 'static;
+    type PublicKey: PublicKey;
 
     /// Processes a message and (optionally) sends a response.
     ///

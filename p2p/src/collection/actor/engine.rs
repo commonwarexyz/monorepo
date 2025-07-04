@@ -6,19 +6,31 @@ use crate::{
     collection::{Endpoint, Originator},
     Receiver, Recipients, Sender,
 };
-use bytes::Bytes;
-use commonware_cryptography::{Committable, Digestible};
+use commonware_codec::{Decode, DecodeExt, Encode};
+use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Spawner};
-use futures::channel::mpsc;
+use futures::{
+    channel::{mpsc, oneshot},
+    StreamExt,
+};
 use std::collections::HashMap;
 use tracing::{error, warn};
 
 /// Engine that will disperse messages and collect responses.
-pub struct Engine<E: Clock + Spawner, O: Originator, Z: Endpoint> {
+pub struct Engine<
+    E: Clock + Spawner,
+    M: Committable + Decode,
+    D: Digestible + Decode,
+    P: PublicKey,
+    O: Originator<PublicKey = P>,
+    Z: Endpoint<PublicKey = P, Message = M>,
+> {
     // Configuration
     context: E,
     quorum: usize,
+    priority_request: bool,
+    priority_response: bool,
 
     // Message passing
     originator: O,
@@ -26,10 +38,18 @@ pub struct Engine<E: Clock + Spawner, O: Originator, Z: Endpoint> {
     mailbox: mpsc::Receiver<Message<Z::Message, O::PublicKey>>,
 
     // State
-    responses: HashMap<<Z::Message as Digestible>::Digest, HashMap<O::PublicKey, Bytes>>,
+    responses: HashMap<D::Digest, HashMap<O::PublicKey, Z::Message>>,
 }
 
-impl<E: Clock + Spawner, O: Originator, Z: Endpoint> Engine<E, O, Z> {
+impl<
+        E: Clock + Spawner,
+        M: Committable + Decode,
+        D: Digestible + Decode,
+        P: PublicKey,
+        O: Originator<PublicKey = P>,
+        Z: Endpoint<PublicKey = P, Message = M>,
+    > Engine<E, M, D, P, O, Z>
+{
     pub fn new(context: E, cfg: Config<O, Z>) -> (Self, Mailbox<Z::Message, O::PublicKey>) {
         let (tx, rx) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(tx);
@@ -37,6 +57,8 @@ impl<E: Clock + Spawner, O: Originator, Z: Endpoint> Engine<E, O, Z> {
             Self {
                 context,
                 quorum: cfg.quorum,
+                priority_request: cfg.priority_request,
+                priority_response: cfg.priority_response,
                 originator: cfg.originator,
                 endpoint: cfg.endpoint,
                 mailbox: rx,
@@ -48,16 +70,28 @@ impl<E: Clock + Spawner, O: Originator, Z: Endpoint> Engine<E, O, Z> {
 
     pub fn start(
         mut self,
-        request_network: (impl Sender, impl Receiver),
-        response_network: (impl Sender, impl Receiver),
+        request_network: (
+            impl Sender<PublicKey = O::PublicKey>,
+            impl Receiver<PublicKey = O::PublicKey>,
+        ),
+        response_network: (
+            impl Sender<PublicKey = O::PublicKey>,
+            impl Receiver<PublicKey = O::PublicKey>,
+        ),
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(request_network, response_network))
     }
 
     async fn run(
         mut self,
-        request_network: (impl Sender, impl Receiver),
-        response_network: (impl Sender, impl Receiver),
+        request_network: (
+            impl Sender<PublicKey = O::PublicKey>,
+            impl Receiver<PublicKey = O::PublicKey>,
+        ),
+        response_network: (
+            impl Sender<PublicKey = O::PublicKey>,
+            impl Receiver<PublicKey = O::PublicKey>,
+        ),
     ) {
         let (req_tx, req_rx) = request_network;
         let (res_tx, res_rx) = response_network;
@@ -67,8 +101,8 @@ impl<E: Clock + Spawner, O: Originator, Z: Endpoint> Engine<E, O, Z> {
                 command = self.mailbox.next().await => {
                     match command {
                         Message::Send { message } => {
-                            // TODO
-                            let result = req_tx.send(message, Recipients::All, false).await;
+                            let msg = message.encode();
+                            let result = req_tx.send(Recipients::All, message, self.priority_request).await;
                         },
                         Message::Peek { id, sender } => {
                             let responses = self.responses.get(&id).cloned().unwrap_or_default();
@@ -92,7 +126,7 @@ impl<E: Clock + Spawner, O: Originator, Z: Endpoint> Engine<E, O, Z> {
                     };
 
                     // Decode the message
-                    let msg = match msg {
+                    let msg = match D::decode(&msg) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
@@ -129,7 +163,7 @@ impl<E: Clock + Spawner, O: Originator, Z: Endpoint> Engine<E, O, Z> {
                     };
 
                     // Decode the message
-                    let msg = match msg {
+                    let msg = match M::decode(&msg) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
@@ -144,7 +178,7 @@ impl<E: Clock + Spawner, O: Originator, Z: Endpoint> Engine<E, O, Z> {
                     // Send the response
                     match rx.await {
                         Ok(result) => {
-                            let _ = res_tx.send(result, Recipients::One(peer), false).await;
+                            let _ = res_tx.send(Recipients::One(peer), result, self.priority_response).await;
                         }
                         Err(err) => {
                             error!(?err, ?peer, "failed to send response");

@@ -6,4 +6,6 @@ pub struct Config<O: Originator, E: Endpoint> {
     pub endpoint: E,
     pub mailbox_size: usize,
     pub quorum: usize,
+    pub priority_request: bool,
+    pub priority_response: bool,
 }
