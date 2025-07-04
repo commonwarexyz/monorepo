@@ -138,29 +138,6 @@ where
         })
     }
 
-    // /// Create an [adb::any::Any] database from the populated log and pruning boundary.
-    // /// This method constructs the MMR, snapshot, and all necessary components.
-    // async fn build_database_from_log(
-    //     config: &Config<E, K, V, H, T, R>,
-    //     log: Journal<E, Operation<K, V>>,
-    //     pinned_nodes: Vec<H::Digest>,
-    // ) -> Result<adb::any::Any<E, K, V, H, T>, Error> {
-    //     // Create the sync config for the Any database
-    //     let sync_config = adb::any::SyncConfig {
-    //         db_config: config.db_config.clone(),
-    //         pruned_to_loc: config.lower_bound_ops,
-    //         pinned_nodes,
-    //         log,
-    //     };
-
-    //     // Initialize the Any database in pruned state
-    //     let db = adb::any::Any::init_pruned(config.context.clone(), sync_config)
-    //         .await
-    //         .map_err(Error::DatabaseInitFailed)?;
-
-    //     Ok(db)
-    // }
-
     /// Process the next step in the sync process
     async fn step(self) -> Result<Self, Error> {
         match self {
