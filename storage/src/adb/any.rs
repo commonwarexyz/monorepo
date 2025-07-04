@@ -1824,7 +1824,7 @@ pub(super) mod test {
             log_journal_partition: format!("log_journal_{seed}"),
             log_items_per_blob: 1024,
             log_write_buffer: 64,
-            translator: EightCap::default(),
+            translator: EightCap,
             pool: None,
         }
     }
