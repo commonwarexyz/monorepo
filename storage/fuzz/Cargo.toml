@@ -71,3 +71,10 @@ path = "fuzz_targets/bmt_operations.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ordinal_operations"
+path = "fuzz_targets/ordinal_operations.rs"
+test = false
+doc = false
+bench = false
