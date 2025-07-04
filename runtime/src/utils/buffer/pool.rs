@@ -10,6 +10,7 @@ use std::{
         Arc,
     },
 };
+use tracing::warn;
 
 // Type alias for the future we'll be storing for each in-flight page fetch.
 //
@@ -31,9 +32,16 @@ type PageFetchFuture = Shared<Pin<Box<dyn Future<Output = Result<StableBuf, Arc<
 pub struct Pool<const PAGE_SIZE: usize> {
     /// The page cache index, indexed by the blob id and the page number, mapping to the index of
     /// the cache entry for the page.
+    ///
+    /// # Invariants
+    ///
+    /// Each `index` entry maps to exactly one `cache` entry, and that cache entry always has a
+    /// matching key.
     index: HashMap<(u64, u64), usize>,
 
     /// The page cache.
+    ///
+    /// Each `cache` entry has exactly one corresponding `index` entry.
     cache: Vec<CacheEntry<PAGE_SIZE>>,
 
     /// The Clock replacement policy's clock hand index into `cache`.
@@ -127,22 +135,33 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
     /// Panics if the provided page is not exactly PAGE_SIZE bytes long.
     pub(super) fn cache(&mut self, page: &[u8], blob_id: u64, page_num: u64) {
         assert_eq!(page.len(), PAGE_SIZE);
-        if self.index.contains_key(&(blob_id, page_num)) {
-            // This case should never arise because the `page_fetches` logic prevents more than one
-            // task at a time from caching the same page.
-            #[cfg(debug_assertions)]
-            unreachable!("unexpected duplicate page fault");
-
-            #[cfg(not(debug_assertions))]
-            {
-                // Log error instead of panic in prod since any bug allowing this to happen wouldn't
-                // necessarily impact correctness, only performance.
-                tracing::error!(blob_id, page_num, "unexpected duplicate page fault");
-                return;
-            }
-        }
 
         let key = (blob_id, page_num);
+        let index_entry = self.index.entry(key);
+        if let Entry::Occupied(index_entry) = index_entry {
+            // This case should never arise during "ordinary" operation because the `page_fetches`
+            // logic prevents more than one task at a time from caching the same page. The only
+            // exception is if a journal is rewound beyond a page boundary, which would allow the
+            // same page number to be modified. In this case the cache may contain its old page
+            // contents, which we'd want to update with the new one. We log a warning since this
+            // case should be exceptional.
+            //
+            // There is no risk of this old page data being used since it always falls beyond the
+            // tip of the rewound blob, and could never be fetched.
+            warn!(
+                blob_id,
+                page_num,
+                "updating duplicate page -- if this blob wasn't rewound, we have a problem"
+            );
+
+            // Update the stale data with the new page.
+            let entry = &mut self.cache[*index_entry.get()];
+            assert_eq!(entry.key, key);
+            entry.referenced.store(true, Ordering::Relaxed);
+            entry.data.copy_from_slice(page);
+            return;
+        }
+
         if self.cache.len() < self.capacity {
             self.index.insert(key, self.cache.len());
             self.cache.push(CacheEntry {
