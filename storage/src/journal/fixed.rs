@@ -372,27 +372,20 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize, const PAGE_SIZE: usiz
                 let Some(blob) = self.blobs.remove(&current_blob_index) else {
                     return Err(Error::MissingBlob(current_blob_index));
                 };
-                blob.close().await?;
-                self.context
-                    .remove(&self.cfg.partition, Some(&current_blob_index.to_be_bytes()))
-                    .await?;
-                debug!(blob = current_blob_index, "unwound over blob");
-                self.tracked.dec();
+                self.remove_blob(current_blob_index, blob).await?;
                 current_blob_index -= 1;
             }
         }
 
         // Set up the new tail blob and truncate it to the correct offset.
         if rewind_to_blob_index != self.tail_index {
-            self.context
-                .remove(&self.cfg.partition, Some(&self.tail_index.to_be_bytes()))
-                .await?;
-            self.tracked.dec();
-            debug!(blob = self.tail_index, "unwound over tail blob");
-            self.tail = self.blobs.remove(&rewind_to_blob_index).unwrap();
-            // Make sure the new tail blob has a healthy write buffer.
-            self.tail.reset_buffer(self.cfg.write_buffer).await?;
+            let mut blob = self.blobs.remove(&rewind_to_blob_index).unwrap();
+            std::mem::swap(&mut self.tail, &mut blob);
+            self.remove_blob(self.tail_index, blob).await?;
             self.tail_index = rewind_to_blob_index;
+
+            // Make sure the new tail blob has the configured write buffer size.
+            self.tail.reset_buffer(self.cfg.write_buffer).await?;
         }
         self.tail.resize(rewind_to_offset).await?;
 
@@ -565,18 +558,28 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize, const PAGE_SIZE: usiz
         new_oldest_blob = std::cmp::min(new_oldest_blob, self.tail_index);
 
         for index in oldest_blob_index..new_oldest_blob {
-            // Close the blob and remove it from storage
             let blob = self.blobs.remove(&index).unwrap();
-            blob.close().await?;
-            self.context
-                .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
-                .await?;
-            debug!(blob = index, "pruned blob");
+            self.remove_blob(index, blob).await?;
             self.pruned.inc();
-            self.tracked.dec();
         }
 
         Ok(new_oldest_blob * self.cfg.items_per_blob)
+    }
+
+    /// Safely removes any previously tracked blob from underlying storage.
+    async fn remove_blob(
+        &mut self,
+        index: u64,
+        blob: Append<E::Blob, PAGE_SIZE>,
+    ) -> Result<(), Error> {
+        blob.close().await?;
+        self.context
+            .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
+            .await?;
+        debug!(blob = index, "removed blob");
+        self.tracked.dec();
+
+        Ok(())
     }
 
     /// Closes all open sections.

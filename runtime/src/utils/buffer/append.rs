@@ -9,6 +9,7 @@ use std::sync::Arc;
 /// provides buffer-pool managed read caching of older data.
 #[derive(Clone)]
 pub struct Append<B: Blob, const PAGE_SIZE: usize> {
+    /// The underlying blob being wrapped.
     blob: B,
 
     /// Unique id assigned by the buffer pool.
@@ -18,13 +19,14 @@ pub struct Append<B: Blob, const PAGE_SIZE: usize> {
     pool: PoolRef<PAGE_SIZE>,
 
     /// The buffer containing the data yet to be appended to the tip of the underlying blob, as well
-    /// up to the final PAGE_SIZE-1 bytes from the underlying blob (to ensure the buffer's offset is
-    /// always at a page boundary).
+    /// as up to the final PAGE_SIZE-1 bytes from the underlying blob (to ensure the buffer's offset
+    /// is always at a page boundary).
     ///
     /// # Invariants
     ///
     /// - The buffer's `offset` into the blob is always page aligned.
-    /// - The bytes in this buffer are always exclusive to those in `pool`.
+    /// - The range of bytes in this buffer never overlaps with any page buffered by `pool`. (See
+    ///   the warning in [Self::resize] for one uncommon exception.)
     buffer: Arc<RwLock<Buffer>>,
 }
 
@@ -115,17 +117,20 @@ impl<B: Blob, const PAGE_SIZE: usize> Append<B, PAGE_SIZE> {
     ///
     /// # Warning
     ///
-    /// A repeated flush may still result in a write if there are trailing bytes that don't end on a
-    /// page boundary, since we don't (currently) keep track which of the trailing bytes have
-    /// already been written.
+    /// The implementation will rewrite the last (blob_size % PAGE_SIZE) "trailing bytes" of the
+    /// underlying blob since the write's starting offset is page aligned. We don't expect this
+    /// inefficiency to be a significant performance concern, but would be easy enough to avoid by
+    /// maintaining the underlying blob's size.
     async fn flush(&self, buffer: &mut Buffer) -> Result<(), Error> {
         // Take the buffered data, if any.
         let Some((mut buf, offset)) = buffer.take() else {
             return Ok(());
         };
 
-        // Insert the flushed data into the buffer pool. This step isn't absolutely necessary, but
-        // in general it's a good policy to keep recently written data cached for reads.
+        // Insert the flushed data into the buffer pool. This step isn't just to ensure recently
+        // written data remains cached for future reads, but is in fact required to purge
+        // potentially stale cache data which might result from the edge the case of rewinding a
+        // blob across a page boundary.
         let mut buf_slice: &mut [u8] = buf.as_mut();
         let (mut page_num, offset_in_page) = Pool::<PAGE_SIZE>::offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
@@ -215,6 +220,15 @@ impl<B: Blob, const PAGE_SIZE: usize> Blob for Append<B, PAGE_SIZE> {
         self.blob.sync().await
     }
 
+    /// Resize the blob to the provided `size`.
+    ///
+    /// # Warning
+    ///
+    /// Rewinding the blob across a page boundary potentially results in stale data remaining in the
+    /// buffer pool's cache. We don't proactively purge the data within this function since it would
+    /// be inaccessible anyway. Instead we ensure it is always updated should the blob grow back to
+    /// the point where we have new data for the same page, if any old data hasn't expired naturally
+    /// by then.
     async fn resize(&self, size: u64) -> Result<(), Error> {
         // Acquire a write lock on the buffer.
         let mut buffer = self.buffer.write().await;
