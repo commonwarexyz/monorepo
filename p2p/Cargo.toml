@@ -26,7 +26,6 @@ tracing = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true }
 either = { workspace = true }
-tokio = { workspace = true, features = ["macros"] }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

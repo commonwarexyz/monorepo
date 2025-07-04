@@ -15,19 +15,19 @@ pub trait Collector<D: Digest>: Clone + Send + 'static {
     type Response: Digestible<Digest = D> + Debug + Send + 'static;
     type PublicKey: PublicKey;
 
-    /// Sends a request to recipients.
+    /// Sends a `request` to recipients.
     ///
     /// Once a quorum of responses have been collected, the [Originator] will be notified.
     fn send(&mut self, request: Self::Request) -> impl Future<Output = ()> + Send;
 
-    /// Peek at the collected responses for a given ID.
+    /// Peek at the collected responses for a given `digest`.
     fn peek(
         &mut self,
-        id: D,
+        digest: D,
     ) -> impl Future<Output = oneshot::Receiver<HashMap<Self::PublicKey, Self::Response>>> + Send;
 
-    /// Cancels a request, dropping all existing and future responses.
-    fn cancel(&mut self, id: D) -> impl Future<Output = ()> + Send;
+    /// Cancels a request by `digest`, dropping all existing and future responses.
+    fn cancel(&mut self, digest: D) -> impl Future<Output = ()> + Send;
 }
 
 /// Interface for the application that originates requests.
@@ -35,7 +35,7 @@ pub trait Originator<D: Digest>: Clone + Send + 'static {
     type PublicKey: PublicKey;
     type Response: Digestible<Digest = D> + Debug + Send + 'static;
 
-    /// Called once a sufficient amount of responses have been collected for a request.
+    /// Called once a sufficient amount of `responses` have been collected for a request.
     fn collected(
         &mut self,
         id: D,
@@ -49,13 +49,13 @@ pub trait Endpoint<D: Digest>: Clone + Send + 'static {
     type Response: Digestible<Digest = D> + Debug + Send + 'static;
     type PublicKey: PublicKey;
 
-    /// Processes a request and (optionally) sends a response.
+    /// Processes a `request` from `origin` and (optionally) sends a response.
     ///
-    /// If no response is needed, the response sender should be dropped.
+    /// If no response is needed, the `responder` should be dropped.
     fn process(
         &mut self,
         origin: Self::PublicKey,
         request: Self::Request,
-        response: oneshot::Sender<Self::Response>,
+        responder: oneshot::Sender<Self::Response>,
     ) -> impl Future<Output = ()> + Send;
 }
