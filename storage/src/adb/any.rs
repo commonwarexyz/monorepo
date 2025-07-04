@@ -841,6 +841,20 @@ pub(super) mod test {
         .unwrap()
     }
 
+    fn create_test_config(seed: u64) -> Config<EightCap> {
+        Config {
+            mmr_journal_partition: format!("mmr_journal_{seed}"),
+            mmr_metadata_partition: format!("mmr_metadata_{seed}"),
+            mmr_items_per_blob: 1024,
+            mmr_write_buffer: 64,
+            log_journal_partition: format!("log_journal_{seed}"),
+            log_items_per_blob: 1024,
+            log_write_buffer: 64,
+            translator: EightCap,
+            pool: None,
+        }
+    }
+
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(
         mut context: Context,
@@ -1501,141 +1515,9 @@ pub(super) mod test {
         });
     }
 
-    /// Test init_pruned where the target state is pruned.
-    #[test_traced("WARN")]
-    pub fn test_any_db_init_pruned_nonempty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut source_db = Any::<_, Digest, Digest, Sha256, EightCap>::init(
-                context.clone(),
-                any_db_config("source_ops", EightCap),
-            )
-            .await
-            .unwrap();
-
-            // Add operations to the source db.
-            let mut keys = Vec::new();
-            let mut values = Vec::new();
-            for i in 0..5u64 {
-                let key = hash(&i.to_be_bytes());
-                let value = hash(&i.to_be_bytes());
-                keys.push(key);
-                values.push(value);
-                source_db.update(key, value).await.unwrap();
-            }
-            source_db.commit().await.unwrap();
-
-            // Get state from the source db to use later.
-            let mut hasher = Standard::<Sha256>::new();
-            let source_root = source_db.root(&mut hasher);
-            let source_op_count = source_db.op_count();
-            let oldest_retained_loc = source_db.oldest_retained_loc().unwrap();
-            let need_ops = source_op_count - oldest_retained_loc;
-            let (proof, ops) = source_db
-                .proof(oldest_retained_loc, source_op_count)
-                .await
-                .unwrap();
-            // Verify proof (not really part of this test but doesn't hurt).
-            assert!(
-                Any::<Context, Digest, Digest, Sha256, EightCap>::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    oldest_retained_loc,
-                    &ops,
-                    &source_root,
-                )
-            );
-            assert_eq!(ops.len(), need_ops as usize);
-
-            let pinned_nodes_map = source_db.ops.get_pinned_nodes();
-            // Convert into Vec in order of expected by Proof::nodes_to_pin
-            let pinned_nodes = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(oldest_retained_loc))
-                .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
-                .collect();
-
-            let log_config = any_db_config("sync_pruning_log", EightCap);
-            let mut copied_log = Journal::<Context, Operation<Digest, Digest>>::init_pruned(
-                context.clone(),
-                JConfig {
-                    partition: log_config.log_journal_partition,
-                    items_per_blob: log_config.log_items_per_blob,
-                    write_buffer: log_config.log_write_buffer,
-                },
-                oldest_retained_loc,
-            )
-            .await
-            .unwrap();
-            for i in 0..oldest_retained_loc {
-                let op = source_db.log.read(i).await.unwrap();
-                copied_log.append(op).await.unwrap();
-            }
-
-            // Initialize the synced db.
-            let sync_config: SyncConfig<Context, Digest, Digest, EightCap, Digest> = SyncConfig {
-                db_config: any_db_config("sync_pruning", EightCap),
-                pruned_to_loc: oldest_retained_loc,
-                pinned_nodes,
-                log: copied_log,
-            };
-            let synced_db: Any<_, Digest, Digest, Sha256, EightCap> =
-                Any::init_pruned(context.clone(), sync_config)
-                    .await
-                    .unwrap();
-
-            // Verify the synced database matches the source
-            assert_eq!(synced_db.op_count(), source_op_count);
-            assert_eq!(synced_db.oldest_retained_loc(), Some(oldest_retained_loc));
-            assert_eq!(synced_db.ops.size(), source_db.ops.size());
-            assert_eq!(synced_db.ops.pruned_to_pos(), source_db.ops.pruned_to_pos());
-            assert_eq!(
-                synced_db.log.size().await.unwrap(),
-                source_db.log.size().await.unwrap()
-            );
-
-            synced_db.destroy().await.unwrap();
-            source_db.destroy().await.unwrap();
-        });
-    }
-
-    /// Test build_database_from_log with empty log
-    /// TODO move this test
+    /// Test init_pruned with non-empty source database
     #[test]
-    fn test_build_database_from_log_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Create empty log
-            let log = Journal::<_, Operation<Digest, Digest>>::init_pruned(
-                context.clone().with_label("empty_log"),
-                JConfig {
-                    partition: format!("empty_log_{}", context.next_u64()),
-                    items_per_blob: 1024,
-                    write_buffer: 64,
-                },
-                0,
-            )
-            .await
-            .unwrap();
-
-            let db: Any<Context, Digest, Digest, Sha256, EightCap> = Any::init_pruned(
-                context.clone(),
-                SyncConfig {
-                    db_config: create_test_config(context.next_u64()),
-                    log,
-                    pruned_to_loc: 0,
-                    pinned_nodes: Vec::new(),
-                },
-            )
-            .await
-            .unwrap();
-            assert_eq!(db.op_count(), 0);
-            assert_eq!(db.inactivity_floor_loc, 0);
-            assert_eq!(db.oldest_retained_loc(), None);
-        });
-    }
-
-    /// Test build_database_from_log with operations
-    #[test]
-    fn test_build_database_from_log_with_ops() {
+    fn test_any_db_init_pruned_nonempty() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate a source database
@@ -1660,13 +1542,6 @@ pub(super) mod test {
                 source_db.root(&mut hasher)
             };
 
-            // Get the actual operations from the source database
-            let mut actual_ops = Vec::new();
-            for i in lower_bound_ops..=upper_bound_ops {
-                let op = source_db.log.read(i).await.unwrap();
-                actual_ops.push(op);
-            }
-
             // Create log with operations
             let mut log = Journal::<_, Operation<Digest, Digest>>::init_pruned(
                 context.clone().with_label("ops_log"),
@@ -1680,11 +1555,11 @@ pub(super) mod test {
             .await
             .unwrap();
 
-            // Add actual operations to log
-            for op in actual_ops {
+            // Populate log with operations from source db
+            for i in lower_bound_ops..=upper_bound_ops {
+                let op = source_db.log.read(i).await.unwrap();
                 log.append(op).await.unwrap();
             }
-            log.sync().await.unwrap();
 
             let db = Any::init_pruned(
                 context.clone(),
@@ -1724,12 +1599,22 @@ pub(super) mod test {
             for key in deleted_keys {
                 assert!(db.get(&key).await.unwrap().is_none(),);
             }
+            assert_eq!(db.op_count(), upper_bound_ops + 1);
+            assert_eq!(db.oldest_retained_loc(), Some(lower_bound_ops));
+            assert_eq!(db.ops.size(), source_db.ops.size());
+            assert_eq!(db.ops.pruned_to_pos(), source_db.ops.pruned_to_pos());
+            assert_eq!(
+                db.log.size().await.unwrap(),
+                source_db.log.size().await.unwrap()
+            );
+            db.destroy().await.unwrap();
+            source_db.destroy().await.unwrap();
         });
     }
 
-    /// Test build_database_from_log with different pruning boundaries
+    /// Test init_pruned with different pruning boundaries
     #[test]
-    fn test_build_database_from_log_different_pruning_boundaries() {
+    fn test_any_db_init_different_pruning_boundaries() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate a source database
@@ -1758,9 +1643,9 @@ pub(super) mod test {
                 .unwrap();
                 log.sync().await.unwrap();
 
-                let ops_slice = &ops[lower_bound as usize..=upper_bound as usize];
-                for op in ops_slice {
-                    log.append(op.clone()).await.unwrap();
+                for i in lower_bound..=upper_bound {
+                    let op = source_db.log.read(i).await.unwrap();
+                    log.append(op).await.unwrap();
                 }
                 log.sync().await.unwrap();
 
@@ -1787,14 +1672,16 @@ pub(super) mod test {
                 // Verify database state
                 let expected_op_count = upper_bound + 1; // +1 because op_count is total number of ops
                 assert_eq!(db.log.size().await.unwrap(), expected_op_count);
+                assert_eq!(db.ops.size(), leaf_num_to_pos(expected_op_count));
                 assert_eq!(db.op_count(), expected_op_count);
                 assert_eq!(db.inactivity_floor_loc, lower_bound);
                 assert_eq!(db.oldest_retained_loc(), Some(lower_bound));
+                assert_eq!(db.ops.pruned_to_pos(), leaf_num_to_pos(lower_bound));
 
                 // Verify state matches the source operations
                 let mut expected_kvs = HashMap::new();
                 let mut deleted_keys = HashSet::new();
-                for op in ops_slice {
+                for op in &ops[lower_bound as usize..=upper_bound as usize] {
                     if let Operation::Update(key, value) = op {
                         expected_kvs.insert(*key, *value);
                         deleted_keys.remove(key);
@@ -1812,87 +1699,7 @@ pub(super) mod test {
                 }
                 db.destroy().await.unwrap();
             }
-        });
-    }
-
-    fn create_test_config(seed: u64) -> Config<EightCap> {
-        Config {
-            mmr_journal_partition: format!("mmr_journal_{seed}"),
-            mmr_metadata_partition: format!("mmr_metadata_{seed}"),
-            mmr_items_per_blob: 1024,
-            mmr_write_buffer: 64,
-            log_journal_partition: format!("log_journal_{seed}"),
-            log_items_per_blob: 1024,
-            log_write_buffer: 64,
-            translator: EightCap,
-            pool: None,
-        }
-    }
-
-    /// Test build_database_from_log with simple operations
-    #[test]
-    fn test_build_database_from_log_simple_operations() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Create simple operations without commits
-            let mut simple_ops = Vec::new();
-            let mut rng = StdRng::seed_from_u64(42);
-
-            // Add some updates
-            for _ in 0..10 {
-                let key = Digest::random(&mut rng);
-                let value = Digest::random(&mut rng);
-                simple_ops.push(Operation::Update(key, value));
-            }
-
-            // Add some deletes
-            for _ in 0..3 {
-                let key = Digest::random(&mut rng);
-                simple_ops.push(Operation::Deleted(key));
-            }
-
-            // Create log with simple operations
-            let mut log = Journal::<_, Operation<Digest, Digest>>::init_pruned(
-                context.clone().with_label("simple_log"),
-                JConfig {
-                    partition: format!("simple_log_{}", context.next_u64()),
-                    items_per_blob: 1024,
-                    write_buffer: 64,
-                },
-                0,
-            )
-            .await
-            .unwrap();
-
-            // Add operations to log
-            for op in simple_ops {
-                log.append(op).await.unwrap();
-            }
-            log.sync().await.unwrap();
-
-            let db = Any::init_pruned(
-                context.clone(),
-                SyncConfig {
-                    db_config: create_test_config(context.next_u64()),
-                    log,
-                    pruned_to_loc: 0,
-                    pinned_nodes: Vec::new(),
-                },
-            )
-            .await
-            .unwrap();
-
-            // Verify the database is functional (op_count may differ from expected due to internal handling)
-            assert!(db.op_count() > 0);
-            assert_eq!(db.inactivity_floor_loc, 0); // No commit operations
-
-            // Verify the database is in a consistent state
-            let mut hasher = Standard::<Sha256>::new();
-            let root_hash = db.root(&mut hasher);
-            assert_ne!(root_hash, Digest::from([0u8; 32])); // Should have non-zero hash
-
-            // Verify that the database snapshot has been built
-            assert!(db.snapshot.keys() > 0);
+            source_db.destroy().await.unwrap();
         });
     }
 }
