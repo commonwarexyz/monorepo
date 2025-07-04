@@ -15,6 +15,7 @@ use thiserror::Error;
 pub mod any;
 pub mod current;
 pub mod operation;
+pub mod sync;
 
 /// Errors that can occur when interacting with an authenticated database.
 #[derive(Error, Debug)]

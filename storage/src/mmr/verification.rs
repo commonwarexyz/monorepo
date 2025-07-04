@@ -10,6 +10,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use futures::future::try_join_all;
+use std::collections::HashMap;
 use tracing::debug;
 
 /// Errors that can occur when reconstructing a digest from a proof due to invalid input.
@@ -341,6 +342,63 @@ impl<D: Digest> Proof<D> {
             size: mmr.size(),
             digests,
         })
+    }
+
+    /// Extract the hashes of all nodes that should be pinned at the given pruning boundary
+    /// from a proof that proves a range starting at that boundary.
+    ///
+    /// # Arguments
+    /// * `start_element_pos` - Start of the proven range (must equal pruning_boundary)
+    /// * `end_element_pos` - End of the proven range
+    ///
+    /// # Returns
+    /// A Vec of digest values for all nodes in `nodes_to_pin(pruning_boundary)`,
+    /// in the same order as returned by `nodes_to_pin` (decreasing height order)
+    pub fn extract_pinned_nodes(
+        &self,
+        start_element_pos: u64,
+        end_element_pos: u64,
+    ) -> Result<Vec<D>, Error> {
+        // Get the positions of all nodes that should be pinned.
+        let pinned_positions: Vec<u64> = Self::nodes_to_pin(start_element_pos).collect();
+
+        // Get all positions required for the proof.
+        let required_positions =
+            Self::nodes_required_for_range_proof(self.size, start_element_pos, end_element_pos);
+        if required_positions.len() != self.digests.len() {
+            debug!(
+                digests_len = self.digests.len(),
+                required_positions_len = required_positions.len(),
+                "Proof digest count doesn't match required positions",
+            );
+            return Err(Error::InvalidProofLength);
+        }
+
+        // Happy path: we can extract the pinned nodes directly from the proof.
+        // This happens when the `end_element_pos` is the last element in the MMR.
+        if pinned_positions
+            == required_positions[required_positions.len() - pinned_positions.len()..]
+        {
+            return Ok(self.digests[required_positions.len() - pinned_positions.len()..].to_vec());
+        }
+
+        // Create a mapping from position to digest.
+        let position_to_digest: HashMap<u64, D> = required_positions
+            .iter()
+            .zip(self.digests.iter())
+            .map(|(&pos, &digest)| (pos, digest))
+            .collect();
+
+        // Extract the pinned nodes in the same order as nodes_to_pin.
+        let mut result = Vec::with_capacity(pinned_positions.len());
+        for pinned_pos in pinned_positions {
+            let Some(&digest) = position_to_digest.get(&pinned_pos) else {
+                debug!(pinned_pos, "Pinned node not found in proof");
+                return Err(Error::MissingDigest(pinned_pos));
+            };
+            result.push(digest);
+        }
+        Ok(result)
     }
 }
 
@@ -872,6 +930,85 @@ mod tests {
                                 .is_err(),
                             "proof should not deserialize with max length exceeded"
                         );
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_extract_pinned_nodes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Test for every number of elements from 1 to 255
+            for num_elements in 1u8..255 {
+                // Build MMR with the specified number of elements
+                let mut mmr = Mmr::new();
+                let mut hasher: Standard<Sha256> = Standard::new();
+                let mut element_positions = Vec::new();
+                for i in 0..num_elements {
+                    let digest = test_digest(i);
+                    element_positions.push(mmr.add(&mut hasher, &digest));
+                }
+
+                // Test every valid pruning boundary (each element position)
+                for &start_pos in &element_positions {
+                    // Test with a few different end positions to get good coverage
+                    let test_end_positions = if element_positions.len() == 1 {
+                        // Single element case
+                        vec![start_pos]
+                    } else {
+                        // Multi-element case: test with various end positions
+                        let mut ends = vec![start_pos]; // Single element proof
+
+                        // Add a few more end positions if available
+                        let start_idx = element_positions.iter().position(|&pos| pos == start_pos).unwrap();
+                        if start_idx + 1 < element_positions.len() {
+                            ends.push(element_positions[start_idx + 1]);
+                        }
+                        if start_idx + 2 < element_positions.len() {
+                            ends.push(element_positions[start_idx + 2]);
+                        }
+                        // Always test with the last element if different
+                        if *element_positions.last().unwrap() != start_pos {
+                            ends.push(*element_positions.last().unwrap());
+                        }
+
+                        ends.into_iter().collect::<std::collections::HashSet<_>>().into_iter().collect()
+                    };
+
+                    for end_pos in test_end_positions {
+                        // Generate proof for the range
+                        let proof_result = mmr.range_proof(start_pos, end_pos).await;
+                        let proof = proof_result.unwrap();
+
+                        // Extract pinned nodes
+                        let extract_result = proof.extract_pinned_nodes(start_pos, end_pos);
+                        assert!(
+                            extract_result.is_ok(),
+                            "Failed to extract pinned nodes for {num_elements} elements, boundary={start_pos}, range=[{start_pos}, {end_pos}]"
+                        );
+
+                        let pinned_nodes = extract_result.unwrap();
+                        let expected_pinned: Vec<u64> = Proof::<Digest>::nodes_to_pin(start_pos).collect();
+
+                        // Verify count matches expected
+                        assert_eq!(
+                            pinned_nodes.len(),
+                            expected_pinned.len(),
+                            "Pinned node count mismatch for {num_elements} elements, boundary={start_pos}, range=[{start_pos}, {end_pos}]"
+                        );
+
+                        // Verify extracted hashes match actual node values
+                        // The pinned_nodes Vec is in the same order as expected_pinned
+                        for (i, &expected_pos) in expected_pinned.iter().enumerate() {
+                            let extracted_hash = pinned_nodes[i];
+                            let actual_hash = mmr.get_node(expected_pos).unwrap();
+                            assert_eq!(
+                                extracted_hash, actual_hash,
+                                "Hash mismatch at position {expected_pos} (index {i}) for {num_elements} elements, boundary={start_pos}, range=[{start_pos}, {end_pos}]"
+                            );
+                        }
                     }
                 }
             }
