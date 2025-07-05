@@ -1,15 +1,14 @@
-use commonware_runtime::tokio::Context;
+use commonware_runtime::{buffer::Pool, tokio::Context, RwLock};
 use commonware_storage::journal::fixed::{Config as JConfig, Journal};
 use commonware_utils::array::FixedBytes;
 use criterion::criterion_main;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
+use std::sync::Arc;
 
 mod fixed_append;
 mod fixed_read_random;
 mod fixed_read_sequential;
 mod fixed_replay;
-
-const WRITE_BUFFER: usize = 1_024 * 1024; // 1MB
 
 criterion_main!(
     fixed_append::benches,
@@ -18,24 +17,32 @@ criterion_main!(
     fixed_replay::benches,
 );
 
+/// Use a "prod sized" page size to test the performance of the journal.
+const PAGE_SIZE: usize = 16384;
+
+/// The number of pages to cache in the buffer pool. Make it big enough to be
+/// fast, but not so big we avoid any page faults for the larger benchmarks.
+const PAGE_CACHE_SIZE: usize = 10_000;
+
 /// Open and return a temp journal with the given config parameters and items of size ITEM_SIZE.
 async fn get_journal<const ITEM_SIZE: usize>(
     context: Context,
     partition_name: &str,
     items_per_blob: u64,
-) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
+) -> Journal<Context, FixedBytes<ITEM_SIZE>, PAGE_SIZE> {
     // Initialize the journal at the given partition.
     let journal_config = JConfig {
         partition: partition_name.to_string(),
         items_per_blob,
-        write_buffer: WRITE_BUFFER,
+        write_buffer: 1024,
+        buffer_pool: Arc::new(RwLock::new(Pool::<PAGE_SIZE>::new(PAGE_CACHE_SIZE))),
     };
     Journal::init(context, journal_config).await.unwrap()
 }
 
 /// Append `items_to_write` random items to the given journal, syncing the changes before returning.
 async fn append_random_data<const ITEM_SIZE: usize>(
-    journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>,
+    journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>, PAGE_SIZE>,
     items_to_write: u64,
 ) {
     // Append `items_to_write` random items to the journal.

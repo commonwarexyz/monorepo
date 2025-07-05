@@ -1,9 +1,10 @@
 use commonware_cryptography::{hash, Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
+    buffer::Pool,
     create_pool,
     tokio::{Config, Context, Runner},
-    Runner as _, ThreadPool,
+    Runner as _, RwLock, ThreadPool,
 };
 use commonware_storage::{
     adb::any::{Any, Config as AConfig},
@@ -11,7 +12,7 @@ use commonware_storage::{
 };
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 use tracing::info;
 
 const NUM_ELEMENTS: u64 = 100_000;
@@ -21,13 +22,19 @@ const DELETE_FREQUENCY: u32 = 10; // 1/10th of the updates will be deletes.
 const ITEMS_PER_BLOB: u64 = 500_000;
 const PARTITION_SUFFIX: &str = "any_bench_partition";
 
+/// Use a "prod sized" page size to test the performance of the journal.
+const PAGE_SIZE: usize = 16384;
+
+/// The number of pages to cache in the buffer pool.
+const PAGE_CACHE_SIZE: usize = 10_000;
+
 /// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
 /// configured to provide 8 cores. This speeds up benchmark setup, but doesn't affect the benchmark
 /// timing itself since any::init is single threaded.
 const THREADS: usize = 8;
 
-fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
-    AConfig::<EightCap> {
+fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, PAGE_SIZE> {
+    AConfig::<EightCap, PAGE_SIZE> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
@@ -37,6 +44,7 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
         log_write_buffer: 1024,
         translator: EightCap,
         pool: Some(pool),
+        buffer_pool: Arc::new(RwLock::new(Pool::new(PAGE_CACHE_SIZE))),
     }
 }
 
@@ -51,7 +59,7 @@ fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
         info!("Starting DB generation...");
         let pool = create_pool(ctx.clone(), THREADS).unwrap();
         let any_cfg = any_cfg(pool);
-        let mut db = Any::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
+        let mut db = Any::<_, _, _, Sha256, EightCap, PAGE_SIZE>::init(ctx, any_cfg)
             .await
             .unwrap();
 
@@ -116,6 +124,7 @@ fn bench_any_init(c: &mut Criterion) {
                                 <Sha256 as Hasher>::Digest,
                                 Sha256,
                                 EightCap,
+                                PAGE_SIZE,
                             >::init(
                                 ctx.clone(), any_cfg.clone()
                             )
@@ -142,6 +151,7 @@ fn bench_any_init(c: &mut Criterion) {
                     <Sha256 as Hasher>::Digest,
                     Sha256,
                     EightCap,
+                    PAGE_SIZE,
                 >::init(ctx.clone(), any_cfg.clone())
                 .await
                 .unwrap();

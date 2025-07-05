@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{buffer::Pool, deterministic, Runner, RwLock};
 use commonware_storage::{
     adb::any::{Any, Config},
     index::translator::EightCap,
@@ -10,7 +10,10 @@ use commonware_storage::{
 };
 use commonware_utils::array::FixedBytes;
 use libfuzzer_sys::fuzz_target;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
@@ -34,12 +37,15 @@ struct FuzzInput {
     operations: Vec<AdbOperation>,
 }
 
+const TESTING_PAGE_SIZE: usize = 555;
+const TESTING_PAGE_CACHE_SIZE: usize = 100;
+
 fn fuzz(data: FuzzInput) {
     let mut hasher = Standard::<Sha256>::new();
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = Config::<EightCap> {
+        let cfg = Config::<EightCap, TESTING_PAGE_SIZE> {
             mmr_journal_partition: "test_adb_mmr_journal".into(),
             mmr_items_per_blob: 500000,
             mmr_write_buffer: 1024,
@@ -49,9 +55,10 @@ fn fuzz(data: FuzzInput) {
             log_write_buffer: 1024,
             translator: EightCap,
             pool: None,
+            buffer_pool: Arc::new(RwLock::new(Pool::new(TESTING_PAGE_CACHE_SIZE))),
         };
 
-        let mut adb = Any::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
+        let mut adb = Any::<_, Key, Value, Sha256, EightCap, TESTING_PAGE_SIZE>::init(context.clone(), cfg.clone())
             .await
             .expect("init adb");
 
@@ -118,7 +125,7 @@ fn fuzz(data: FuzzInput) {
                         assert!(oldest_loc.is_some(), "Expected Some oldest location when operations exist");
                         if let Some(loc) = oldest_loc {
                             assert!(loc < actual_op_count,
-                                "Oldest retained location {loc} should be less than op count {actual_op_count}", 
+                                "Oldest retained location {loc} should be less than op count {actual_op_count}",
                             );
                         }
                     }
@@ -165,7 +172,7 @@ fn fuzz(data: FuzzInput) {
                             .expect("proof should not fail");
 
                         assert!(
-                            Any::<deterministic::Context, _, _, _, EightCap>::verify_proof(
+                            Any::<deterministic::Context, _, _, _, EightCap, TESTING_PAGE_SIZE>::verify_proof(
                                 &mut hasher,
                                 &proof,
                                 adjusted_start,
