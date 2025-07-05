@@ -10,7 +10,7 @@ use std::{
         Arc,
     },
 };
-use tracing::warn;
+use tracing::{trace, warn};
 
 // Type alias for the future we'll be storing for each in-flight page fetch.
 //
@@ -133,7 +133,7 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
     /// # Panics
     ///
     /// Panics if the provided page is not exactly PAGE_SIZE bytes long.
-    pub(super) fn cache(&mut self, page: &[u8], blob_id: u64, page_num: u64) {
+    pub(super) fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
         assert_eq!(page.len(), PAGE_SIZE);
 
         let key = (blob_id, page_num);
@@ -224,6 +224,8 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
 
             // Page fault: fetch the page from `blob` since it wasn't in the buffer pool.
             let (page_num, offset_in_page) = Self::offset_to_page(offset);
+            trace!(page_num, blob_id, "page fault");
+
             let page_buf =
                 Self::fetch_and_cache_page(pool.clone(), blob, blob_id, page_num).await?;
 
@@ -298,8 +300,116 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
         let Ok(page_buf) = fetch_result else {
             return Err(Error::ReadFailed);
         };
-        buffer_pool.cache(page_buf.as_ref(), blob_id, page_num);
+        buffer_pool.cache(blob_id, page_buf.as_ref(), page_num);
 
         Ok(page_buf.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use commonware_macros::test_traced;
+
+    use super::*;
+    use crate::{deterministic, Runner as _, Storage as _};
+
+    const TEST_PAGE_SIZE: usize = 1024;
+
+    #[test_traced]
+    fn test_pool_basic() {
+        let mut pool: Pool<TEST_PAGE_SIZE> = Pool::new(10);
+        assert_eq!(pool.next_id(), 0);
+        assert_eq!(pool.next_id(), 1);
+
+        let mut buf = vec![0; TEST_PAGE_SIZE];
+        let bytes_read = pool.read_at(0, &mut buf, 0);
+        assert_eq!(bytes_read, 0);
+
+        pool.cache(0, &[1; TEST_PAGE_SIZE], 0);
+        let bytes_read = pool.read_at(0, &mut buf, 0);
+        assert_eq!(bytes_read, TEST_PAGE_SIZE);
+        assert_eq!(buf, [1; TEST_PAGE_SIZE]);
+
+        // Test replacement -- should log a duplicate page warning but still work.
+        pool.cache(0, &[2; TEST_PAGE_SIZE], 0);
+        let bytes_read = pool.read_at(0, &mut buf, 0);
+        assert_eq!(bytes_read, TEST_PAGE_SIZE);
+        assert_eq!(buf, [2; TEST_PAGE_SIZE]);
+
+        // Test exceeding the cache capacity.
+        for i in 0u64..11 {
+            pool.cache(0, &[i as u8; TEST_PAGE_SIZE], i);
+        }
+        // Page 0 should have been evicted.
+        let bytes_read = pool.read_at(0, &mut buf, 0);
+        assert_eq!(bytes_read, 0);
+        // Page 1-10 should be in the cache.
+        for i in 1u64..11 {
+            let bytes_read = pool.read_at(0, &mut buf, i * TEST_PAGE_SIZE as u64);
+            assert_eq!(bytes_read, TEST_PAGE_SIZE);
+            assert_eq!(buf, [i as u8; TEST_PAGE_SIZE]);
+        }
+
+        // Test reading from an unaligned offset by adding 2 to an aligned offset. The read
+        // should be 2 bytes short of a full page.
+        let mut buf = vec![0; TEST_PAGE_SIZE];
+        let bytes_read = pool.read_at(0, &mut buf, TEST_PAGE_SIZE as u64 + 2);
+        assert_eq!(bytes_read, TEST_PAGE_SIZE - 2);
+        assert_eq!(&buf[..TEST_PAGE_SIZE - 2], [1; TEST_PAGE_SIZE - 2]);
+    }
+
+    #[test_traced]
+    fn test_pool_read_with_blob() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        // Start the test within the executor
+        executor.start(|context| async move {
+            // Populate a blob with 11 consecutive pages of data.
+            let (blob, size) = context
+                .open("test", "blob".as_bytes())
+                .await
+                .expect("Failed to open blob");
+            assert_eq!(size, 0);
+            for i in 0..11 {
+                let buf = vec![i as u8; TEST_PAGE_SIZE];
+                blob.write_at(buf, i * TEST_PAGE_SIZE as u64).await.unwrap();
+            }
+
+            // Fill the buffer pool with the blob's data.
+            let pool: Pool<TEST_PAGE_SIZE> = Pool::new(10);
+            let pool_ref = Arc::new(RwLock::new(pool));
+            for i in 0..11 {
+                let mut buf = vec![0; TEST_PAGE_SIZE];
+                Pool::read(
+                    pool_ref.clone(),
+                    &blob,
+                    0,
+                    &mut buf,
+                    i * TEST_PAGE_SIZE as u64,
+                )
+                .await
+                .unwrap();
+                assert_eq!(buf, [i as u8; TEST_PAGE_SIZE]);
+            }
+
+            // Repeat the read to exercise reading from the buffer pool. Must start at 1 because
+            // page 0 should be evicted.
+            for i in 1..11 {
+                let mut buf = vec![0; TEST_PAGE_SIZE];
+                Pool::read(
+                    pool_ref.clone(),
+                    &blob,
+                    0,
+                    &mut buf,
+                    i * TEST_PAGE_SIZE as u64,
+                )
+                .await
+                .unwrap();
+                assert_eq!(buf, [i as u8; TEST_PAGE_SIZE]);
+            }
+
+            // Cleanup.
+            blob.close().await.expect("Failed to destroy blob");
+        });
     }
 }

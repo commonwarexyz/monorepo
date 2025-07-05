@@ -138,7 +138,7 @@ impl<B: Blob, const PAGE_SIZE: usize> Append<B, PAGE_SIZE> {
             // Write lock the buffer pool.
             let mut buffer_pool = self.pool.write().await;
             while buf_slice.len() >= PAGE_SIZE {
-                buffer_pool.cache(&buf_slice[..PAGE_SIZE], self.id, page_num);
+                buffer_pool.cache(self.id, &buf_slice[..PAGE_SIZE], page_num);
                 buf_slice = &mut buf_slice[PAGE_SIZE..];
                 page_num += 1;
             }
