@@ -200,41 +200,8 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize, const PAGE_SIZE: usiz
         let (mut tail_index, mut tail) = blobs.pop_last().unwrap();
         let mut tail_size = *sizes.get(&tail_index).unwrap();
 
-        // Truncate the tail if it's not the expected length, which might happen from unclean
-        // shutdown.
-        let mut truncated = false;
-        if !tail_size.is_multiple_of(Self::CHUNK_SIZE_U64) {
-            warn!(
-                blob = tail_index,
-                invalid_size = tail_size,
-                "last blob size is not a multiple of item size, truncating"
-            );
-            tail_size -= tail_size % Self::CHUNK_SIZE_U64;
-            tail.resize(tail_size).await?;
-            truncated = true;
-        }
-
-        // Truncate any records with failing checksums. This can happen if the file system allocated
-        // extra space for a blob but there was a crash before any data was written to that space.
-        while tail_size > 0 {
-            let offset = tail_size - Self::CHUNK_SIZE_U64;
-            let read = tail.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-            match Self::verify_integrity(read.as_ref()) {
-                Ok(_) => break, // Valid item found, we can stop truncating.
-                Err(Error::ChecksumMismatch(_, _)) => {
-                    warn!(blob = tail_index, offset, "checksum mismatch: truncating",);
-                    tail_size -= Self::CHUNK_SIZE_U64;
-                    tail.resize(tail_size).await?;
-                    truncated = true;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-
-        // If we truncated the blob, make sure to sync it.
-        if truncated {
-            tail.sync().await?;
-        }
+        // Trim invalid items from the tail blob.
+        tail_size = Self::trim_tail(&tail, tail_size, tail_index).await?;
 
         // If the tail blob is full we need to start a new one to maintain its invariant that there
         // is always room for another item.
@@ -277,6 +244,51 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize, const PAGE_SIZE: usiz
 
             _array: PhantomData,
         })
+    }
+
+    /// Trim any invalid data found at the end of the tail blob and return the new size. The new
+    /// size will be less than or equal to the originally provided size, and a multiple of the item
+    /// size.
+    async fn trim_tail(
+        tail: &<E as Storage>::Blob,
+        mut tail_size: u64,
+        tail_index: u64,
+    ) -> Result<u64, Error> {
+        let mut truncated = false;
+        if !tail_size.is_multiple_of(Self::CHUNK_SIZE_U64) {
+            warn!(
+                blob = tail_index,
+                invalid_size = tail_size,
+                "last blob size is not a multiple of item size, truncating"
+            );
+            tail_size -= tail_size % Self::CHUNK_SIZE_U64;
+            tail.resize(tail_size).await?;
+            truncated = true;
+        }
+
+        // Truncate any records with failing checksums. This can happen if the file system allocated
+        // extra space for a blob but there was a crash before any data was written to that space.
+        while tail_size > 0 {
+            let offset = tail_size - Self::CHUNK_SIZE_U64;
+            let read = tail.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
+            match Self::verify_integrity(read.as_ref()) {
+                Ok(_) => break, // Valid item found, we can stop truncating.
+                Err(Error::ChecksumMismatch(_, _)) => {
+                    warn!(blob = tail_index, offset, "checksum mismatch: truncating",);
+                    tail_size -= Self::CHUNK_SIZE_U64;
+                    tail.resize(tail_size).await?;
+                    truncated = true;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        // If we truncated the blob, make sure to sync it.
+        if truncated {
+            tail.sync().await?;
+        }
+
+        Ok(tail_size)
     }
 
     /// Sync any pending updates to disk.
@@ -358,7 +370,6 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize, const PAGE_SIZE: usiz
             std::cmp::Ordering::Equal => return Ok(()),
             std::cmp::Ordering::Less => {}
         }
-
         let rewind_to_blob_index = journal_size / self.cfg.items_per_blob;
         if rewind_to_blob_index < self.oldest_blob_index() {
             return Err(Error::InvalidRewind(journal_size));
@@ -955,7 +966,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_init_with_corruption() {
+    fn test_fixed_journal_init_with_corrupted_historical_blobs() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         // Start the test within the executor
@@ -1002,6 +1013,77 @@ mod tests {
             let result =
                 Journal::<_, Digest, TESTING_PAGE_SIZE>::init(context.clone(), cfg.clone()).await;
             assert!(matches!(result.err().unwrap(), Error::MissingBlob(n) if n == 40));
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_test_trim_blob() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        // Start the test within the executor
+        const ITEMS_PER_BLOB: u64 = 7;
+        executor.start(|context| async move {
+            // Initialize the journal, allowing a max of 7 items per blob.
+            let cfg = test_cfg(ITEMS_PER_BLOB);
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            // Fill one blob and put 3 items in the second.
+            let item_count = ITEMS_PER_BLOB + 3;
+            for i in 0u64..item_count {
+                journal
+                    .append(test_digest(i))
+                    .await
+                    .expect("failed to append data");
+            }
+            assert_eq!(journal.size().await.unwrap(), item_count);
+            journal.close().await.expect("Failed to close journal");
+
+            // Truncate the tail blob by one byte, which should result in the 3rd item being
+            // trimmed.
+            let (blob, size) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            blob.resize(size - 1).await.expect("Failed to corrupt blob");
+
+            // Write incorrect checksum into the second item in the blob, which should result in the
+            // second item being trimmed.
+            let checksum_offset = Digest::SIZE + u32::SIZE + Digest::SIZE;
+
+            let bad_checksum = 123456789u32;
+            blob.write_at(bad_checksum.to_be_bytes().to_vec(), checksum_offset as u64)
+                .await
+                .expect("Failed to write incorrect checksum");
+            blob.close().await.expect("Failed to close blob");
+
+            let journal =
+                Journal::<_, Digest, TESTING_PAGE_SIZE>::init(context.clone(), cfg.clone())
+                    .await
+                    .unwrap();
+
+            // Confirm 2 items were trimmed.
+            assert_eq!(journal.size().await.unwrap(), item_count - 2);
+
+            // Corrupt the last item, ensuring last blob is trimmed to empty state.
+            let (blob, size) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            blob.resize(size - 1).await.expect("Failed to corrupt blob");
+            blob.close().await.expect("Failed to close blob");
+
+            let journal =
+                Journal::<_, Digest, TESTING_PAGE_SIZE>::init(context.clone(), cfg.clone())
+                    .await
+                    .unwrap();
+
+            // Confirm last item in blob was trimmed.
+            assert_eq!(journal.size().await.unwrap(), item_count - 3);
+
+            // Cleanup.
+            journal.destroy().await.expect("Failed to destroy journal");
         });
     }
 
@@ -1080,7 +1162,7 @@ mod tests {
 
         // Start the test within the executor
         executor.start(|context| async move {
-            // Initialize the journal, allowing a max of 2 items per blob.
+            // Initialize the journal, allowing a max of 3 items per blob.
             let cfg = test_cfg(3);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -1116,7 +1198,7 @@ mod tests {
             assert!(buffer.contains("tracked 2"));
             journal.close().await.expect("Failed to close journal");
 
-            // Delete the last blob to simulate a sync() that wrote the last blob at the point it
+            // Delete the tail blob to simulate a sync() that wrote the last blob at the point it
             // was entirely full, but a crash happened before the next empty blob could be created.
             context
                 .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
@@ -1128,7 +1210,11 @@ mod tests {
                     .expect("Failed to re-initialize journal");
             assert_eq!(journal.size().await.unwrap(), 3);
             let buffer = context.encode();
+            // Even though it was deleted, tail blob should be re-created and left empty by the
+            // recovery code. This means we have 2 blobs total, with 3 items in the first, and none
+            // in the tail.
             assert!(buffer.contains("tracked 2"));
+            assert_eq!(journal.size().await.unwrap(), 3);
 
             journal.destroy().await.unwrap();
         });

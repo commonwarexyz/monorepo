@@ -222,7 +222,7 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
                 }
             }
 
-            // Page fault: fetch the page from `blob1 since it wasn't in the buffer pool.
+            // Page fault: fetch the page from `blob` since it wasn't in the buffer pool.
             let (page_num, offset_in_page) = Self::offset_to_page(offset);
             let page_buf =
                 Self::fetch_and_cache_page(pool.clone(), blob, blob_id, page_num).await?;
