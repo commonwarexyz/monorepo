@@ -7,7 +7,7 @@ use commonware_cryptography::bls12381::primitives::{
         Element, Point, Private, Scalar, Share, G1, G1_MESSAGE, G2, G2_MESSAGE, PRIVATE_KEY_LENGTH,
     },
     ops::*,
-    poly::{self, Eval, Poly},
+    poly::{Eval, Poly},
     variant::{MinPk, MinSig, Variant},
 };
 use libfuzzer_sys::fuzz_target;
@@ -98,7 +98,6 @@ enum FuzzOperation {
     },
     SignMinPkLowLevel {
         private: Scalar,
-        dst: Vec<u8>,
         message: Vec<u8>,
     },
     VerifyMinPk {
@@ -114,7 +113,6 @@ enum FuzzOperation {
     },
     VerifyMinPkLowLevel {
         public: G1,
-        dst: Vec<u8>,
         message: Vec<u8>,
         signature: G2,
     },
@@ -129,7 +127,6 @@ enum FuzzOperation {
     },
     SignMinSigLowLevel {
         private: Scalar,
-        dst: Vec<u8>,
         message: Vec<u8>,
     },
     VerifyMinSig {
@@ -145,7 +142,6 @@ enum FuzzOperation {
     },
     VerifyMinSigLowLevel {
         public: G2,
-        dst: Vec<u8>,
         message: Vec<u8>,
         signature: G1,
     },
@@ -306,7 +302,6 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             19 => Ok(FuzzOperation::SignMinPkLowLevel {
                 private: arbitrary_scalar(u)?,
-                dst: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
             }),
             20 => Ok(FuzzOperation::VerifyMinPk {
@@ -322,7 +317,6 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             22 => Ok(FuzzOperation::VerifyMinPkLowLevel {
                 public: arbitrary_g1(u)?,
-                dst: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g2(u)?,
             }),
@@ -337,7 +331,6 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             25 => Ok(FuzzOperation::SignMinSigLowLevel {
                 private: arbitrary_scalar(u)?,
-                dst: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
             }),
             26 => Ok(FuzzOperation::VerifyMinSig {
@@ -353,7 +346,6 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             28 => Ok(FuzzOperation::VerifyMinSigLowLevel {
                 public: arbitrary_g2(u)?,
-                dst: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g1(u)?,
             }),
@@ -657,11 +649,7 @@ fn execute_operation(op: FuzzOperation) {
             let _ = verify_message::<MinPk>(&pub_key, Some(&namespace), &message, &sig);
         }
 
-        FuzzOperation::SignMinPkLowLevel {
-            private,
-            dst: _,
-            message,
-        } => {
+        FuzzOperation::SignMinPkLowLevel { private, message } => {
             // Use built-in DST instead of arbitrary bytes
             let sig = sign::<MinPk>(&private, MinPk::MESSAGE, &message);
             let pub_key = compute_public::<MinPk>(&private);
@@ -687,7 +675,6 @@ fn execute_operation(op: FuzzOperation) {
 
         FuzzOperation::VerifyMinPkLowLevel {
             public,
-            dst: _,
             message,
             signature,
         } => {
@@ -711,11 +698,7 @@ fn execute_operation(op: FuzzOperation) {
             let _ = verify_message::<MinSig>(&pub_key, Some(&namespace), &message, &sig);
         }
 
-        FuzzOperation::SignMinSigLowLevel {
-            private,
-            dst: _,
-            message,
-        } => {
+        FuzzOperation::SignMinSigLowLevel { private, message } => {
             // Use built-in DST instead of arbitrary bytes
             let sig = sign::<MinSig>(&private, MinSig::MESSAGE, &message);
             let pub_key = compute_public::<MinSig>(&private);
@@ -741,7 +724,6 @@ fn execute_operation(op: FuzzOperation) {
 
         FuzzOperation::VerifyMinSigLowLevel {
             public,
-            dst: _,
             message,
             signature,
         } => {
