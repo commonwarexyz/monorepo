@@ -30,8 +30,8 @@ type PageFetchFuture = Shared<Pin<Box<dyn Future<Output = Result<StableBuf, Arc<
 /// searching for the first page with a false reference bit, and setting any skipped page's
 /// reference bit to false along the way.
 pub struct Pool<const PAGE_SIZE: usize> {
-    /// The page cache index, indexed by the blob id and the page number, mapping to the index of
-    /// the cache entry for the page.
+    /// The page cache index, with a key composed of (blob id, page number), that maps each cached
+    /// page to the index of its `cache` entry.
     ///
     /// # Invariants
     ///
@@ -108,9 +108,11 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
         )
     }
 
-    /// Attempt to read blob data from the buffer pool. Returns the number of bytes read, which
-    /// could be 0 if the first page in the requested range isn't buffered, and is never more than
-    /// PAGE_SIZE bytes.
+    /// Attempt to fetch blob data starting at `offset` from the buffer pool. Returns the number of
+    /// bytes read, which could be 0 if the first page in the requested range isn't buffered, and is
+    /// never more than PAGE_SIZE or the length of `buf`. The returned bytes won't cross a page
+    /// boundary, so multiple reads may be required even if all data in the desired range is
+    /// buffered.
     fn read_at(&self, blob_id: u64, buf: &mut [u8], offset: u64) -> usize {
         let (page_num, offset_in_page) = Self::offset_to_page(offset);
         let page_index = self.index.get(&(blob_id, page_num));

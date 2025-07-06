@@ -97,6 +97,7 @@ impl<B: Blob, const PAGE_SIZE: usize> Append<B, PAGE_SIZE> {
             .ok_or(Error::OffsetOverflow)?;
 
         if buffer.append(buf.as_ref()) {
+            // Buffer is over capacity, flush it to the underlying blob.
             return self.flush(&mut buffer).await;
         }
 
@@ -269,6 +270,26 @@ mod tests {
     const TEST_BUFFER_SIZE: usize = TEST_PAGE_SIZE * 2;
 
     #[test_traced]
+    #[should_panic(expected = "not implemented")]
+    fn test_append_blob_write_panics() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        // Start the test within the executor
+        executor.start(|context| async move {
+            let (blob, size) = context
+                .open("test", "blob".as_bytes())
+                .await
+                .expect("Failed to open blob");
+            let pool_ref = Arc::new(RwLock::new(Pool::<TEST_PAGE_SIZE>::new(10)));
+            let blob = Append::new(blob, size, TEST_BUFFER_SIZE, pool_ref.clone())
+                .await
+                .unwrap();
+            assert_eq!(blob.size().await, 0);
+            blob.write_at(vec![0], 0).await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_append_blob_append() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
@@ -322,6 +343,7 @@ mod tests {
 
             // Append one byte & sync to ensure we have "trailing bytes".
             blob.append(vec![42]).await.unwrap();
+            blob.sync().await.unwrap();
 
             // Append 11 consecutive pages of data.
             for i in 0..11 {
@@ -367,11 +389,24 @@ mod tests {
             expected.extend_from_slice(&[10; TEST_PAGE_SIZE]);
             assert_eq!(buf, expected);
 
-            blob.sync().await.unwrap();
+            // Exercise more boundary conditions by reading every possible 2-byte slice.
+            for i in 0..blob.size().await - 1 {
+                let mut buf = vec![0; 2];
+                buf = blob.read_at(buf, i).await.unwrap().into();
+                let page_num = (i / TEST_PAGE_SIZE as u64) as u8;
+                if i == 0 {
+                    assert_eq!(buf, &[42, 0]);
+                } else if i % TEST_PAGE_SIZE as u64 == 0 {
+                    assert_eq!(buf, &[page_num - 1, page_num], "i = {i}");
+                } else {
+                    assert_eq!(buf, &[page_num; 2], "i = {i}");
+                }
+            }
 
-            // Confirm all bytes are as expected after sync.
+            // Confirm all bytes are as expected after syncing the blob.
+            blob.sync().await.unwrap();
             buf = blob.read_at(vec![0], 0).await.unwrap().into();
-            assert_eq!(buf, vec![42]);
+            assert_eq!(buf, &[42]);
 
             for i in 0..11 {
                 let mut buf = vec![0; TEST_PAGE_SIZE];
@@ -380,7 +415,7 @@ mod tests {
                     .await
                     .unwrap()
                     .into();
-                assert_eq!(buf, vec![i as u8; TEST_PAGE_SIZE]);
+                assert_eq!(buf, &[i as u8; TEST_PAGE_SIZE]);
             }
 
             blob.close().await.expect("Failed to close blob");

@@ -746,7 +746,7 @@ impl<
 mod test {
     use super::*;
     use crate::{
-        index::translator::{EightCap, TwoCap},
+        index::translator::TwoCap,
         mmr::{hasher::Standard, mem::Mmr as MemMmr},
     };
     use commonware_codec::{DecodeExt, FixedSize};
@@ -767,7 +767,7 @@ mod test {
     const TESTING_PAGE_SIZE: usize = 77;
     const TESTING_PAGE_CACHE_SIZE: usize = 9;
 
-    fn any_db_config<T: Translator>(suffix: &str, translator: T) -> Config<T, TESTING_PAGE_SIZE> {
+    fn any_db_config(suffix: &str) -> Config<TwoCap, TESTING_PAGE_SIZE> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -776,7 +776,7 @@ mod test {
             log_journal_partition: format!("log_journal_{suffix}"),
             log_items_per_blob: 7,
             log_write_buffer: 1024,
-            translator,
+            translator: TwoCap,
             pool: None,
             buffer_pool: Arc::new(RwLock::new(Pool::<TESTING_PAGE_SIZE>::new(
                 TESTING_PAGE_CACHE_SIZE,
@@ -784,16 +784,14 @@ mod test {
         }
     }
 
+    /// A type alias for the concrete [Any] type used in these unit tests.
+    type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap, TESTING_PAGE_SIZE>;
+
     /// Return an `Any` database initialized with a fixed config.
-    async fn open_db<E: RStorage + Clock + Metrics>(
-        context: E,
-    ) -> Any<E, Digest, Digest, Sha256, EightCap, TESTING_PAGE_SIZE> {
-        Any::<E, Digest, Digest, Sha256, EightCap, TESTING_PAGE_SIZE>::init(
-            context,
-            any_db_config("partition", EightCap),
-        )
-        .await
-        .unwrap()
+    async fn open_db(context: deterministic::Context) -> AnyTest {
+        AnyTest::init(context, any_db_config("partition"))
+            .await
+            .unwrap()
     }
 
     #[test_traced("WARN")]
@@ -1018,13 +1016,13 @@ mod test {
             assert_eq!(db.inactivity_floor_loc, 0);
             assert_eq!(db.log.size().await.unwrap(), 1477);
             assert_eq!(db.oldest_retained_loc().unwrap(), 0); // no pruning yet
-            assert_eq!(db.snapshot.keys(), 857);
+            assert_eq!(db.snapshot.items(), 857);
 
             // Test that commit will raise the activity floor.
             db.commit().await.unwrap();
             assert_eq!(db.op_count(), 2336);
             assert_eq!(db.oldest_retained_loc().unwrap(), 1478);
-            assert_eq!(db.snapshot.keys(), 857);
+            assert_eq!(db.snapshot.items(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
             let root_digest = db.root(&mut hasher);
@@ -1033,7 +1031,7 @@ mod test {
             assert_eq!(root_digest, db.root(&mut hasher));
             assert_eq!(db.op_count(), 2336);
             assert_eq!(db.inactivity_floor_loc, 1478);
-            assert_eq!(db.snapshot.keys(), 857);
+            assert_eq!(db.snapshot.items(), 857);
 
             // Raise the inactivity floor to the point where all inactive operations can be pruned.
             db.raise_inactivity_floor(3000).await.unwrap();
@@ -1042,7 +1040,7 @@ mod test {
             // Inactivity floor should be 858 operations from tip since 858 operations are active
             // (counting the floor op itself).
             assert_eq!(db.op_count(), 4478 + 858);
-            assert_eq!(db.snapshot.keys(), 857);
+            assert_eq!(db.snapshot.items(), 857);
 
             // Confirm the db's state matches that of the separate map we computed independently.
             for i in 0u64..1000 {
@@ -1071,16 +1069,7 @@ mod test {
 
             for i in start_loc..end_loc {
                 let (proof, log) = db.proof(i, max_ops).await.unwrap();
-                assert!(Any::<
-                    deterministic::Context,
-                    _,
-                    _,
-                    _,
-                    EightCap,
-                    TESTING_PAGE_SIZE,
-                >::verify_proof(
-                    &mut hasher, &proof, i, &log, &root
-                ),);
+                assert!(AnyTest::verify_proof(&mut hasher, &proof, i, &log, &root));
             }
 
             db.destroy().await.unwrap();
@@ -1136,12 +1125,7 @@ mod test {
             db.destroy().await.unwrap();
 
             // Recreate the database without any failures and make sure the roots match.
-            let mut new_db = Any::<_, Digest, Digest, Sha256, EightCap, TESTING_PAGE_SIZE>::init(
-                context,
-                any_db_config("new_partition", EightCap),
-            )
-            .await
-            .unwrap();
+            let mut new_db = open_db(context.clone()).await;
             assert_eq!(new_db.op_count(), 0);
             // Insert 1000 keys then sync.
             for i in 0u64..ELEMENTS {
@@ -1288,13 +1272,8 @@ mod test {
             db.close().await.unwrap();
 
             // Initialize the db's mmr/log.
-            let cfg = any_db_config("partition", TwoCap);
-            let (mmr, log) =
-                Any::<_, Digest, Digest, _, TwoCap, TESTING_PAGE_SIZE>::init_mmr_and_log(
-                    context.clone(),
-                    cfg,
-                    &mut hasher,
-                )
+            let cfg = any_db_config("partition");
+            let (mmr, log) = AnyTest::init_mmr_and_log(context.clone(), cfg, &mut hasher)
                 .await
                 .unwrap();
             let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
@@ -1302,15 +1281,17 @@ mod test {
             // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
             let mut snapshot: Index<TwoCap, u64> =
                 Index::init(context.with_label("snapshot"), TwoCap);
-            let inactivity_floor_loc =
-                Any::<_, _, _, Sha256, TwoCap, TESTING_PAGE_SIZE>::build_snapshot_from_log::<
-                    SHA256_SIZE,
-                >(start_leaf_num, &log, &mut snapshot, Some(&mut bitmap))
-                .await
-                .unwrap();
+            let inactivity_floor_loc = AnyTest::build_snapshot_from_log::<SHA256_SIZE>(
+                start_leaf_num,
+                &log,
+                &mut snapshot,
+                Some(&mut bitmap),
+            )
+            .await
+            .unwrap();
 
             // Check the recovered state is correct.
-            let db = Any::<_, _, _, _, TwoCap, TESTING_PAGE_SIZE> {
+            let db = AnyTest {
                 ops: mmr,
                 log,
                 snapshot,

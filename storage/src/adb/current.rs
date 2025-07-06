@@ -761,17 +761,15 @@ pub mod test {
         }
     }
 
+    /// A type alias for the concrete [Current] type used in these unit tests.
+    type CurrentTest =
+        Current<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32, TESTING_PAGE_SIZE>;
+
     /// Return an [Current] database initialized with a fixed config.
-    async fn open_db<E: RStorage + Clock + Metrics>(
-        context: E,
-        partition_prefix: &str,
-    ) -> Current<E, Digest, Digest, Sha256, TwoCap, 32, TESTING_PAGE_SIZE> {
-        Current::<E, Digest, Digest, Sha256, TwoCap, 32, TESTING_PAGE_SIZE>::init(
-            context,
-            current_db_config(partition_prefix),
-        )
-        .await
-        .unwrap()
+    async fn open_db(context: deterministic::Context, partition_prefix: &str) -> CurrentTest {
+        CurrentTest::init(context, current_db_config(partition_prefix))
+            .await
+            .unwrap()
     }
 
     /// Build a small database, then close and reopen it and ensure state is preserved.
@@ -861,31 +859,18 @@ pub mod test {
             };
             let root = db.root(&mut hasher).await.unwrap();
             // Proof should be verifiable against current root.
-            assert!(Current::<
-                deterministic::Context,
-                _,
-                _,
-                _,
-                TwoCap,
-                32,
-                TESTING_PAGE_SIZE,
-            >::verify_key_value_proof(
-                hasher.inner(), &proof.0, &info, &root,
+            assert!(CurrentTest::verify_key_value_proof(
+                hasher.inner(),
+                &proof.0,
+                &info,
+                &root,
             ),);
 
             let v2 = Sha256::fill(0xA2);
             // Proof should not verify against a different value.
             let mut bad_info = info.clone();
             bad_info.value = v2;
-            assert!(!Current::<
-                deterministic::Context,
-                _,
-                _,
-                _,
-                TwoCap,
-                32,
-                TESTING_PAGE_SIZE,
-            >::verify_key_value_proof(
+            assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
                 &bad_info,
@@ -898,16 +883,11 @@ pub mod test {
 
             // Proof should not be verifiable against the new root.
             let root = db.root(&mut hasher).await.unwrap();
-            assert!(!Current::<
-                deterministic::Context,
-                _,
-                _,
-                _,
-                TwoCap,
-                32,
-                TESTING_PAGE_SIZE,
-            >::verify_key_value_proof(
-                hasher.inner(), &proof.0, &info, &root,
+            assert!(!CurrentTest::verify_key_value_proof(
+                hasher.inner(),
+                &proof.0,
+                &info,
+                &root,
             ),);
 
             // Create a proof of the now-inactive operation.
@@ -923,15 +903,7 @@ pub mod test {
                 loc: proof_inactive.2,
                 chunk: proof_inactive.3,
             };
-            assert!(!Current::<
-                deterministic::Context,
-                _,
-                _,
-                _,
-                TwoCap,
-                32,
-                TESTING_PAGE_SIZE,
-            >::verify_key_value_proof(
+            assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
                 &proof_inactive_info,
@@ -950,15 +922,7 @@ pub mod test {
             );
             let mut info_with_modified_loc = info.clone();
             info_with_modified_loc.loc = active_loc;
-            assert!(!Current::<
-                deterministic::Context,
-                _,
-                _,
-                _,
-                TwoCap,
-                32,
-                TESTING_PAGE_SIZE,
-            >::verify_key_value_proof(
+            assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
                 &proof_inactive_info,
@@ -977,15 +941,7 @@ pub mod test {
 
             let mut info_with_modified_chunk = info.clone();
             info_with_modified_chunk.chunk = modified_chunk;
-            assert!(!Current::<
-                deterministic::Context,
-                _,
-                _,
-                _,
-                TwoCap,
-                32,
-                TESTING_PAGE_SIZE,
-            >::verify_key_value_proof(
+            assert!(!CurrentTest::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
                 &info_with_modified_chunk,
@@ -998,11 +954,11 @@ pub mod test {
 
     /// Apply random operations to the given db, committing them (randomly & at the end) only if
     /// `commit_changes` is true.
-    async fn apply_random_ops<E: RStorage + Clock + Metrics>(
+    async fn apply_random_ops(
         num_elements: u64,
         commit_changes: bool,
         rng_seed: u64,
-        db: &mut Current<E, Digest, Digest, Sha256, TwoCap, 32, TESTING_PAGE_SIZE>,
+        db: &mut CurrentTest,
     ) -> Result<(), Error> {
         // Log the seed with high visibility to make failures reproducible.
         warn!("rng_seed={}", rng_seed);
@@ -1059,14 +1015,7 @@ pub mod test {
                 let (proof, ops, chunks) =
                     db.range_proof(hasher.inner(), i, max_ops).await.unwrap();
                 assert!(
-                    Current::<deterministic::Context, _, _, _, TwoCap, 32, TESTING_PAGE_SIZE>::verify_range_proof(
-                        &mut hasher,
-                        &proof,
-                        i,
-                        &ops,
-                        &chunks,
-                        &root
-                    ),
+                    CurrentTest::verify_range_proof(&mut hasher, &proof, i, &ops, &chunks, &root),
                     "failed to verify range at start_loc {start_loc}",
                 );
             }
@@ -1103,58 +1052,35 @@ pub mod test {
                 let (proof, info) = db.key_value_proof(hasher.inner(), *key).await.unwrap();
                 assert_eq!(info.value, *op.to_value().unwrap());
                 // Proof should validate against the current value and correct root.
-                assert!(Current::<
-                    deterministic::Context,
-                    _,
-                    _,
-                    _,
-                    TwoCap,
-                    32,
-                    TESTING_PAGE_SIZE,
-                >::verify_key_value_proof(
-                    hasher.inner(), &proof, &info, &root
+                assert!(CurrentTest::verify_key_value_proof(
+                    hasher.inner(),
+                    &proof,
+                    &info,
+                    &root
                 ));
                 // Proof should fail against the wrong value.
                 let wrong_val = Sha256::fill(0xFF);
                 let mut bad_info = info.clone();
                 bad_info.value = wrong_val;
-                assert!(!Current::<
-                    deterministic::Context,
-                    _,
-                    _,
-                    _,
-                    TwoCap,
-                    32,
-                    TESTING_PAGE_SIZE,
-                >::verify_key_value_proof(
-                    hasher.inner(), &proof, &bad_info, &root
-                ),);
+                assert!(!CurrentTest::verify_key_value_proof(
+                    hasher.inner(),
+                    &proof,
+                    &bad_info,
+                    &root
+                ));
                 // Proof should fail against the wrong key.
                 let wrong_key = Sha256::fill(0xEE);
                 let mut bad_info = info.clone();
                 bad_info.key = wrong_key;
-                assert!(!Current::<
-                    deterministic::Context,
-                    _,
-                    _,
-                    _,
-                    TwoCap,
-                    32,
-                    TESTING_PAGE_SIZE,
-                >::verify_key_value_proof(
-                    hasher.inner(), &proof, &bad_info, &root
-                ),);
+                assert!(!CurrentTest::verify_key_value_proof(
+                    hasher.inner(),
+                    &proof,
+                    &bad_info,
+                    &root
+                ));
                 // Proof should fail against the wrong root.
                 let wrong_root = Sha256::fill(0xDD);
-                assert!(!Current::<
-                    deterministic::Context,
-                    _,
-                    _,
-                    _,
-                    TwoCap,
-                    32,
-                    TESTING_PAGE_SIZE,
-                >::verify_key_value_proof(
+                assert!(!CurrentTest::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
                     &info,
@@ -1224,22 +1150,12 @@ pub mod test {
                 let (proof, info) = db.key_value_proof(hasher.inner(), k).await.unwrap();
                 assert_eq!(info.value, v);
                 assert!(
-                    Current::<deterministic::Context, _, _, _, TwoCap, 32, TESTING_PAGE_SIZE>::verify_key_value_proof(
-                        hasher.inner(),
-                        &proof,
-                        &info,
-                        &root
-                    ),
+                    CurrentTest::verify_key_value_proof(hasher.inner(), &proof, &info, &root),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
-                    !Current::<deterministic::Context, _, _, _, TwoCap, 32, TESTING_PAGE_SIZE>::verify_key_value_proof(
-                        hasher.inner(),
-                        &proof,
-                        &old_info,
-                        &root
-                    ),
+                    !CurrentTest::verify_key_value_proof(hasher.inner(), &proof, &old_info, &root),
                     "proof of update {i} failed to verify"
                 );
                 old_info = info.clone();
