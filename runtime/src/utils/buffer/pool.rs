@@ -308,10 +308,9 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
 
 #[cfg(test)]
 mod tests {
-    use commonware_macros::test_traced;
-
     use super::*;
     use crate::{deterministic, Runner as _, Storage as _};
+    use commonware_macros::test_traced;
 
     const TEST_PAGE_SIZE: usize = 1024;
 
