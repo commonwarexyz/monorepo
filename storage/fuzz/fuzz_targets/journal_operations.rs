@@ -84,6 +84,7 @@ fn fuzz(input: FuzzInput) {
 
         let mut next_value = 0u64;
         let mut journal_size = 0u64;
+        let mut oldest_retained_pos = 0u64;
 
         for op in input.operations.iter() {
             match op {
@@ -109,8 +110,8 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Rewind { size } => {
-                    // Only rewind to valid positions within current journal size
-                    if *size <= journal_size {
+                    // Only rewind to valid positions within current journal size and after oldest retained position
+                    if *size <= journal_size && *size >= oldest_retained_pos {
                         journal.rewind(*size).await.unwrap();
                         journal_size = *size;
                     }
@@ -123,7 +124,9 @@ fn fuzz(input: FuzzInput) {
                 JournalOperation::Prune { min_pos } => {
                     // Only prune positions within current journal size
                     if *min_pos <= journal_size {
-                        journal.prune(*min_pos).await.unwrap();
+                        let actual_pruned_pos = journal.prune(*min_pos).await.unwrap();
+                        // Update oldest retained position based on actual pruning
+                        oldest_retained_pos = actual_pruned_pos;
                     }
                 }
 
