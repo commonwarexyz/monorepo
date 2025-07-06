@@ -36,18 +36,18 @@ impl Buffer {
         self.data.is_empty()
     }
 
-    /// Resizes the buffer to the provided `len`.
+    /// Adjust the buffer to correspond to resizing the logical blob to size `len`.
     ///
-    /// If the new size is greater than the current size, the existing buffer is
-    /// returned (to be flushed to the underlying blob) and the buffer is reset to
-    /// the empty state with an updated offset positioned at the end of the logical
-    /// blob.
+    /// If the new size is greater than the current size, the existing buffer is returned (to be
+    /// flushed to the underlying blob) and the buffer is reset to the empty state with an updated
+    /// offset positioned at the end of the logical blob. (The "existing buffer" is what would have
+    /// been returned by a call to [Self::take].)
     ///
-    /// If the new size is less than the current size (but still greater than current
-    /// offset), the buffer is truncated to the new size.
+    /// If the new size is less than the current size (but still greater than current offset), the
+    /// buffer is truncated to the new size.
     ///
-    /// If the new size is less than the current offset, the buffer is reset to the empty
-    /// state with an updated offset positioned at the end of the logical blob.
+    /// If the new size is less than the current offset, the buffer is reset to the empty state with
+    /// an updated offset positioned at the end of the logical blob.
     pub(super) fn resize(&mut self, len: u64) -> Option<(Vec<u8>, u64)> {
         // Handle case where the buffer is empty.
         if self.is_empty() {
@@ -152,5 +152,71 @@ impl Buffer {
     pub(super) fn append(&mut self, data: &[u8]) -> bool {
         self.data.extend_from_slice(data);
         self.data.len() > self.capacity
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tip_append() {
+        let mut buffer = Buffer::new(50, 100);
+        assert_eq!(buffer.size(), 50);
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.take(), None);
+
+        // Add some data to the buffer.
+        assert!(!buffer.append(&[1, 2, 3]));
+        assert_eq!(buffer.size(), 53);
+        assert!(!buffer.is_empty());
+
+        // Confirm `take()` works as intended.
+        assert_eq!(buffer.take(), Some((vec![1, 2, 3], 50)));
+        assert_eq!(buffer.size(), 53);
+        assert_eq!(buffer.take(), None);
+
+        // Fill the buffer to capacity.
+        let mut buf = vec![42; 100];
+        assert!(!buffer.append(&buf));
+        assert_eq!(buffer.size(), 153);
+
+        // Add one more byte, which should push it over capacity. The byte should still be appended.
+        assert!(buffer.append(&[43]));
+        assert_eq!(buffer.size(), 154);
+        buf.push(43);
+        assert_eq!(buffer.take(), Some((buf, 53)));
+    }
+
+    #[test]
+    fn test_tip_resize() {
+        let mut buffer = Buffer::new(50, 100);
+        buffer.append(&[1, 2, 3]);
+        assert_eq!(buffer.size(), 53);
+
+        // Resize the buffer to correspond to a blob resized to size 60. The returned buffer should
+        // match exactly what we'd expect to be returned by `take` since 60 is greater than the
+        // current size of 53.
+        assert_eq!(buffer.resize(60), Some((vec![1, 2, 3], 50)));
+        assert_eq!(buffer.size(), 60);
+        assert_eq!(buffer.take(), None);
+
+        buffer.append(&[4, 5, 6]);
+        assert_eq!(buffer.size(), 63);
+
+        // Resize the buffer down to size 61.
+        assert_eq!(buffer.resize(61), None);
+        assert_eq!(buffer.size(), 61);
+        assert_eq!(buffer.take(), Some((vec![4], 60)));
+        assert_eq!(buffer.size(), 61);
+
+        buffer.append(&[7, 8, 9]);
+
+        // Resize the buffer prior to the current offset of 61. This should simply reset the buffer
+        // at the new size.
+        assert_eq!(buffer.resize(59), None);
+        assert_eq!(buffer.size(), 59);
+        assert_eq!(buffer.take(), None);
+        assert_eq!(buffer.size(), 59);
     }
 }
