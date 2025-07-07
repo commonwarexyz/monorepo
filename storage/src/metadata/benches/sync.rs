@@ -6,23 +6,18 @@ use std::time::{Duration, Instant};
 fn bench_sync(c: &mut Criterion) {
     let runner = tokio::Runner::default();
     for &num_keys in &[100, 1_000, 10_000] {
-        for &modified_pct in &[0, 5, 25, 50, 75, 100] {
-            let label = format!(
-                "{}/keys={} modified_pct={}",
-                module_path!(),
-                num_keys,
-                modified_pct
-            );
+        for &modified in &[0, 1, 5, 25, 50, 75, 100] {
+            let label = format!("{}/keys={} modified={}", module_path!(), num_keys, modified);
 
             // Generate key-value pairs for the benchmark
             let initial_kvs = get_random_kvs(num_keys);
-            let second_kvs = get_modified_kvs(&initial_kvs, modified_pct);
+            let modified_kvs = get_modified_kvs(&initial_kvs, modified);
 
             // Run the benchmark
             c.bench_function(&label, |b| {
                 b.to_async(&runner).iter_custom(|iters| {
                     let initial_kvs = initial_kvs.clone();
-                    let second_kvs = second_kvs.clone();
+                    let modified_kvs = modified_kvs.clone();
                     async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
                         let mut total = Duration::ZERO;
@@ -38,7 +33,7 @@ fn bench_sync(c: &mut Criterion) {
                             metadata.sync().await.unwrap();
 
                             // Update some keys
-                            for (k, v) in &second_kvs {
+                            for (k, v) in &modified_kvs {
                                 metadata.put(k.clone(), v.clone());
                             }
 

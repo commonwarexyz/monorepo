@@ -20,7 +20,8 @@ members = [
     # Fuzz builds
     "codec/fuzz",
     "cryptography/fuzz",
-    "stream/fuzz"
+    "stream/fuzz",
+    "storage/fuzz"
 ]
 resolver = "2"
 
@@ -79,6 +80,7 @@ zeroize = "1.5.7"
 blst = "0.3.13"
 p256 = "0.13.2"
 test-case = "3.3.1"
+chacha20poly1305 = "0.10.1"
 
 # Fuzz deps
 libfuzzer-sys = "0.4.9"

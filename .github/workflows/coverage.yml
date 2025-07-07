@@ -33,6 +33,7 @@ jobs:
       run: |
         rm -rf codec/fuzz
         rm -rf cryptography/fuzz
+        rm -rf storage/fuzz
         rm -rf stream/fuzz
     - name: Remove fuzz targets from Cargo.toml
       run: |
