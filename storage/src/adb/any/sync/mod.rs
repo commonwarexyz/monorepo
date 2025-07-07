@@ -1,10 +1,10 @@
 use crate::{
-    adb::{
-        any::Any,
+    adb::any::{
         sync::{
             client::{Client, Config},
             resolver::Resolver,
         },
+        Any,
     },
     index::Translator,
 };

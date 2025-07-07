@@ -29,6 +29,8 @@ use futures::{
 };
 use tracing::{debug, warn};
 
+pub mod sync;
+
 /// Indicator that the generic parameter N is unused by the call. N is only
 /// needed if the caller is providing the optional bitmap.
 const UNUSED_N: usize = 0;

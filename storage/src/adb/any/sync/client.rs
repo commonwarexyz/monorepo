@@ -1,9 +1,11 @@
 use crate::{
     adb::{
         self,
-        any::SyncConfig,
+        any::{
+            sync::{resolver::Resolver, Error},
+            SyncConfig,
+        },
         operation::Operation,
-        sync::{resolver::Resolver, Error},
     },
     index::Translator,
     journal::fixed::{Config as JConfig, Journal},
@@ -364,9 +366,9 @@ where
 pub(crate) mod tests {
     use super::*;
     use crate::{
-        adb::{
-            any::test::{apply_ops, create_test_db, create_test_ops},
+        adb::any::{
             sync::sync,
+            test::{apply_ops, create_test_db, create_test_ops},
         },
         index,
         mmr::verification::Proof,
