@@ -16,7 +16,7 @@ use tracing::{trace, warn};
 //
 // We wrap [Error] in an Arc so it will be cloneable, which is required for the future to be
 // [Shared].
-type PageFetchFuture = Shared<Pin<Box<dyn Future<Output = Result<StableBuf, Arc<Error>>> + Send>>>;
+type PageFetchFut = Shared<Pin<Box<dyn Future<Output = Result<StableBuf, Arc<Error>>> + Send>>>;
 
 /// A [Pool] caches pages of [Blob] data in memory.
 ///
@@ -55,7 +55,7 @@ pub struct Pool<const PAGE_SIZE: usize> {
 
     /// A map of currently executing page fetches to ensure only one task at a time is trying to
     /// fetch a specific page.
-    page_fetches: HashMap<(u64, u64), PageFetchFuture>,
+    page_fetches: HashMap<(u64, u64), PageFetchFut>,
 }
 
 struct CacheEntry<const PAGE_SIZE: usize> {
@@ -254,7 +254,7 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
         // Create or clone a future that retrieves the desired page from the underlying blob. This
         // requires a write lock on the buffer pool since we may need to modify `page_fetches` if
         // this is the first fetcher.
-        let fetch_future: PageFetchFuture;
+        let fetch_future: PageFetchFut;
         let is_first_fetcher: bool;
         {
             let mut buffer_pool = pool.write().await;
