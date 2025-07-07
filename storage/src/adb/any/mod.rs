@@ -615,19 +615,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             return Err(Error::HistoricalSizeTooSmall(size, start_loc));
         }
 
-        let mmr = &self.ops;
         let start_pos = leaf_num_to_pos(start_loc);
-
-        // The end position is capped by what was requested and what is available IN THE PAST state `pos`.
         let end_loc = std::cmp::min(
             size.saturating_sub(1),
             start_loc.saturating_add(max_ops).saturating_sub(1),
         );
         let end_pos = leaf_num_to_pos(end_loc);
-
         let mmr_size_at_pos = leaf_num_to_pos(size);
 
-        let proof = mmr
+        let proof = self
+            .ops
             .historical_range_proof(mmr_size_at_pos, start_pos, end_pos)
             .await?;
         let mut ops =
