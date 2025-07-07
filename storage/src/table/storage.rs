@@ -308,6 +308,12 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         config: Config<V::Cfg>,
         checkpoint: Option<Checkpoint>,
     ) -> Result<Self, Error> {
+        // Validate that initial_table_size is a power of 2
+        assert!(
+            config.initial_table_size.is_power_of_two(),
+            "initial_table_size must be a power of 2"
+        );
+
         // Initialize variable journal with a separate partition
         let journal_config = JournalConfig {
             partition: config.journal_partition,
@@ -738,69 +744,21 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         let resize_epoch = self.next_epoch;
         self.next_epoch += 1;
 
-        // For each bucket in the old table, we need to split its chain.
+        // For each bucket in the old table, copy its head to the new position
+        // When we double the table size, bucket i maps to buckets i and i + old_size
         for i in 0..old_size {
-            let Some((mut section, mut offset)) = self.get_head(i).await? else {
-                continue;
-            };
+            let head = self.get_head(i).await?;
 
-            // These lists will store the key/value pairs for the two new buckets.
-            let mut items_for_i = Vec::new();
-            let mut items_for_i_plus_old_size = Vec::new();
-
-            // Traverse the old chain and collect all items.
-            loop {
-                let entry = self.journal.get(section, offset).await?.unwrap();
-                let hash = crc32fast::hash(entry.key.as_ref());
-
-                // check which new bucket the item belongs to
-                if (hash / old_size) % 2 == 0 {
-                    items_for_i.push((entry.key, entry.value));
-                } else {
-                    items_for_i_plus_old_size.push((entry.key, entry.value));
-                }
-
-                if let Some((next_section, next_offset)) = entry.next {
-                    section = next_section;
-                    offset = next_offset;
-                } else {
-                    break;
-                }
-            }
-
-            // Re-insert items for the bucket `i`, building the new chain.
-            let mut head_i = None;
-            let mut depth_i = 0;
-            for (k, v) in items_for_i.into_iter().rev() {
-                self.update_section().await?;
-                depth_i += 1;
-                let entry = JournalEntry::new(k, v, depth_i, head_i);
-                let (off, _) = self.journal.append(self.current_section, entry).await?;
-                head_i = Some((self.current_section, off));
-            }
-
-            // Update the head of the table for bucket `i`.
-            if let Some((s, o)) = head_i {
-                self.update_head(resize_epoch, i, s, o).await?;
+            if let Some((section, offset)) = head {
+                // Write the same head to both i and i + old_size
+                // This works because items will naturally partition based on their hash
+                self.update_head(resize_epoch, i, section, offset).await?;
+                self.update_head(resize_epoch, i + old_size, section, offset)
+                    .await?;
             } else {
-                // All items moved, so clear the old head.
+                // No chain at this position, write empty entries
                 self.update_head(resize_epoch, i, 0, 0).await?;
-            }
-
-            // Re-insert items for the bucket `i + old_size`, building the new chain.
-            let mut head_i_plus_old_size = None;
-            let mut depth_i_plus_old_size = 0;
-            for (k, v) in items_for_i_plus_old_size.into_iter().rev() {
-                self.update_section().await?;
-                depth_i_plus_old_size += 1;
-                let entry = JournalEntry::new(k, v, depth_i_plus_old_size, head_i_plus_old_size);
-                let (off, _) = self.journal.append(self.current_section, entry).await?;
-                head_i_plus_old_size = Some((self.current_section, off));
-            }
-
-            // Update the head of the table for bucket `i + old_size`.
-            if let Some((s, o)) = head_i_plus_old_size {
-                self.update_head(resize_epoch, i + old_size, s, o).await?;
+                self.update_head(resize_epoch, i + old_size, 0, 0).await?;
             }
         }
 
