@@ -324,9 +324,20 @@ impl<D: Digest> Proof<D> {
         start_element_pos: u64,
         end_element_pos: u64,
     ) -> Result<Proof<D>, Error> {
+        Self::range_proof_at_pos(mmr, mmr.size(), start_element_pos, end_element_pos).await
+    }
+
+    /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints.
+    /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
+    pub async fn range_proof_at_pos<S: Storage<D>>(
+        mmr: &S,
+        pos: u64,
+        start_element_pos: u64,
+        end_element_pos: u64,
+    ) -> Result<Proof<D>, Error> {
         let mut digests: Vec<D> = Vec::new();
         let positions =
-            Self::nodes_required_for_range_proof(mmr.size(), start_element_pos, end_element_pos);
+            Self::nodes_required_for_range_proof(pos, start_element_pos, end_element_pos);
 
         let node_futures = positions.iter().map(|pos| mmr.get_node(*pos));
         let hash_results = try_join_all(node_futures).await?;
@@ -338,10 +349,7 @@ impl<D: Digest> Proof<D> {
             };
         }
 
-        Ok(Proof {
-            size: mmr.size(),
-            digests,
-        })
+        Ok(Proof { size: pos, digests })
     }
 
     /// Extract the hashes of all nodes that should be pinned at the given pruning boundary

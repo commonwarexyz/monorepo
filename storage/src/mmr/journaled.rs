@@ -493,6 +493,22 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Proof::<H::Digest>::range_proof::<Mmr<E, H>>(self, start_element_pos, end_element_pos).await
     }
 
+    pub async fn range_proof_at_pos(
+        &self,
+        pos: u64,
+        start_element_pos: u64,
+        end_element_pos: u64,
+    ) -> Result<Proof<H::Digest>, Error> {
+        assert!(!self.mem_mmr.is_dirty());
+        Proof::<H::Digest>::range_proof_at_pos::<Mmr<E, H>>(
+            self,
+            pos,
+            start_element_pos,
+            end_element_pos,
+        )
+        .await
+    }
+
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
     /// blob.
     pub async fn prune_all(&mut self, h: &mut impl Hasher<H>) -> Result<(), Error> {

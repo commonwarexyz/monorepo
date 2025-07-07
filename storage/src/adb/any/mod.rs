@@ -619,6 +619,35 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok((proof, ops))
     }
 
+    pub async fn proof_at_pos(
+        &self,
+        pos: u64,
+        start_loc: u64,
+        max_ops: u64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+        let mmr = &self.ops;
+        let start_pos = leaf_num_to_pos(start_loc);
+        let end_pos_last = mmr.last_leaf_pos().unwrap();
+        let end_pos_max = leaf_num_to_pos(start_loc + max_ops - 1);
+        let (end_pos, end_loc) = if end_pos_last < end_pos_max {
+            (end_pos_last, leaf_pos_to_num(end_pos_last).unwrap())
+        } else {
+            (end_pos_max, start_loc + max_ops - 1)
+        };
+
+        let proof = mmr.range_proof_at_pos(pos, start_pos, end_pos).await?;
+        let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
+        let futures = (start_loc..=end_loc)
+            .map(|i| self.log.read(i))
+            .collect::<Vec<_>>();
+        try_join_all(futures)
+            .await?
+            .into_iter()
+            .for_each(|op| ops.push(op));
+
+        Ok((proof, ops))
+    }
+
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
     /// the log with the provided root.
     pub fn verify_proof(

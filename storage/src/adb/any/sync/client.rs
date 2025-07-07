@@ -269,8 +269,10 @@ where
 
                 // Get proof and operations from resolver with timing
                 let fetch_start = config.context.current();
-                let (proof, new_operations) =
-                    config.resolver.get_proof(next_op_loc, batch_size).await?;
+                let (proof, new_operations) = config
+                    .resolver
+                    .get_proof(next_op_loc + batch_size.get(), next_op_loc, batch_size)
+                    .await?;
                 let fetch_end = config.context.current();
                 let fetch_secs = fetch_end
                     .duration_since(fetch_start)
@@ -619,6 +621,7 @@ pub(crate) mod tests {
     impl Resolver<TestHash, TestKey, TestValue> for FailingResolver {
         async fn get_proof(
             &mut self,
+            _pos: u64,
             _start_index: u64,
             max_ops: NonZeroU64,
         ) -> Result<
@@ -718,6 +721,87 @@ pub(crate) mod tests {
                 }
                 _ => panic!("Expected InvalidTarget error for invalid bounds"),
             }
+        });
+    }
+
+    /// Test that sync works when target database has operations beyond the requested range
+    #[test]
+    fn test_sync_subset_of_target_database() {
+        const TARGET_DB_OPS: usize = 1000;
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(TARGET_DB_OPS);
+            let mut target_db =
+                apply_ops(target_db, target_ops[0..TARGET_DB_OPS - 1].to_vec()).await;
+            target_db.commit().await.unwrap();
+            let mut hasher = create_test_hasher();
+            let target_hash = target_db.root(&mut hasher);
+            let sync_end_loc = target_db.op_count() - 1;
+
+            let final_op = target_ops[TARGET_DB_OPS - 1].clone();
+            let mut target_db = apply_ops(target_db, vec![final_op]).await; // TODO: this is wrong
+            target_db.commit().await.unwrap();
+
+            // Capture expected state from the partial operations [100, 499]
+            // let sync_ops = &target_ops[SYNC_START_OP..SYNC_END_OP];
+            // let mut expected_kvs = HashMap::new();
+            // let mut deleted_keys = HashSet::new();
+            // for op in sync_ops {
+            //     match op {
+            //         Operation::Update(key, value) => {
+            //             expected_kvs.insert(*key, *value);
+            //             deleted_keys.remove(key);
+            //         }
+            //         Operation::Deleted(key) => {
+            //             expected_kvs.remove(key);
+            //             deleted_keys.insert(*key);
+            //         }
+            //         _ => {}
+            //     }
+            // }
+
+            let sync_start_loc = target_db.oldest_retained_loc().unwrap() + 1;
+            let config = Config {
+                db_config: create_test_config(context.next_u64()),
+                fetch_batch_size: NZU64!(10),
+                max_retries: 0,
+                target_hash,
+                lower_bound_ops: sync_start_loc,
+                upper_bound_ops: sync_end_loc,
+                context,
+                resolver: &mut target_db,
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+                _phantom: PhantomData,
+            };
+
+            let synced_db = sync(config).await.unwrap();
+
+            // Verify the synced database has the correct range of operations
+            // assert_eq!(synced_db.op_count(), SYNC_END_OP + 1);
+            assert_eq!(synced_db.oldest_retained_loc(), Some(sync_start_loc));
+
+            // Verify the final hash matches our target (partial database at op 500)
+            assert_eq!(synced_db.root(&mut hasher), target_hash);
+
+            // // Verify that the synced database contains the expected key-value pairs
+            // // from the subset of operations we synced
+            // for (key, value) in expected_kvs {
+            //     let synced_value = synced_db.get(&key).await.unwrap();
+            //     if let Some(synced_value) = synced_value {
+            //         assert_eq!(synced_value, value, "Mismatch for key {:?}", key);
+            //     }
+            // }
+
+            // // Verify that deleted keys are absent
+            // for key in deleted_keys {
+            //     assert!(
+            //         synced_db.get(&key).await.unwrap().is_none(),
+            //         "Deleted key {:?} still present",
+            //         key
+            //     );
+            // }
         });
     }
 }
