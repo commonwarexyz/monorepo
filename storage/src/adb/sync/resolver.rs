@@ -38,7 +38,7 @@ where
     }
 }
 
-impl<'a, E, K, V, H, T> Resolver<H, K, V> for &'a mut Any<E, K, V, H, T>
+impl<E, K, V, H, T> Resolver<H, K, V> for &mut Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
