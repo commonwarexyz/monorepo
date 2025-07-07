@@ -1,17 +1,11 @@
-//! Provides an append-only database (ADB) with efficient key-value operations, cryptographic
-//! authentication, and pruning capabilities.
+//! An authenticated database (ADB) that provides succinct proofs of _any_ value ever associated
+//! with a key. Its implementation is based on an [Mmr] over a log of state-change operations backed
+//! by a [Journal].
 //!
-//! The ADB maintains an MMR of operation digests for authentication and a compressed index
-//! for fast key lookups. It supports both current and historical state access.
-//!
-//! ## Historical State Access
-//!
-//! The database provides [`historical_proof`] for generating proofs against historical database
-//! states. This enables:
-//! - Syncing subsets of data from larger databases
-//! - Verifying operations against past database states
-//! - Supporting rollback and audit scenarios
-//!
+//! In the [Any] db, it is not possible to prove whether the value of a key is the currently active
+//! one, only that it was associated with the key at some point in the past. This type of
+//! authenticated database is most useful for applications involving keys that are given values once
+//! and cannot be updated after.
 
 use crate::{
     adb::{operation::Operation, Error},
