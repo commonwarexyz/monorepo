@@ -337,9 +337,8 @@ impl<D: Digest> Proof<D> {
         Self::historical_range_proof(mmr, mmr.size(), start_element_pos, end_element_pos).await
     }
 
-    /// Return an inclusion proof for the specified range of elements, inclusive of both endpoints,
-    /// for the past state of the MMR with the given size.
-    /// Returns ElementPruned error if some element needed to generate the proof has been pruned.
+    /// Analagous to [range_proof] but for a previous database state.
+    /// Specifically, the state when the MMR had `size` elements.
     pub async fn historical_range_proof<S: Storage<D>>(
         mmr: &S,
         size: u64,
@@ -347,7 +346,10 @@ impl<D: Digest> Proof<D> {
         end_element_pos: u64,
     ) -> Result<Proof<D>, Error> {
         if size > mmr.size() {
-            return Err(Error::InvalidMmrSize(size, mmr.size()));
+            return Err(Error::HistoricalSizeTooLarge(size, mmr.size()));
+        }
+        if size < start_element_pos {
+            return Err(Error::HistoricalSizeTooSmall(size, start_element_pos));
         }
         let mut digests: Vec<D> = Vec::new();
         let positions =

@@ -493,25 +493,21 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Proof::<H::Digest>::range_proof::<Mmr<E, H>>(self, start_element_pos, end_element_pos).await
     }
 
-    /// Generate a range proof for elements as the MMR existed at a previous database state.
+    /// Analagous to [range_proof] but for a previous database state.
     /// Specifically, the state when the MMR had `size` elements.
-    ///
-    /// This method delegates to the verification layer's `historical_range_proof` but ensures the
-    /// journaled MMR is in a clean state (no pending writes) before generating the proof.
-    ///
-    /// # Parameters
-    ///
-    /// * `size`: The historical MMR size to generate the proof against
-    /// * `start_element_pos`: The first leaf position to include in the proof
-    /// * `end_element_pos`: The last leaf position to include in the proof
-    ///
-    /// See [`Proof::historical_range_proof`] for details.
     pub async fn historical_range_proof(
         &self,
         size: u64,
         start_element_pos: u64,
         end_element_pos: u64,
     ) -> Result<Proof<H::Digest>, Error> {
+        if size > self.size() {
+            return Err(Error::HistoricalSizeTooLarge(size, self.size()));
+        }
+        if size < start_element_pos {
+            return Err(Error::HistoricalSizeTooSmall(size, start_element_pos));
+        }
+
         assert!(!self.mem_mmr.is_dirty());
         Proof::<H::Digest>::historical_range_proof::<Mmr<E, H>>(
             self,
