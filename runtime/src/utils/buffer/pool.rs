@@ -10,7 +10,7 @@ use std::{
         Arc,
     },
 };
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 
 // Type alias for the future we'll be storing for each in-flight page fetch.
 //
@@ -141,20 +141,13 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
         let key = (blob_id, page_num);
         let index_entry = self.index.entry(key);
         if let Entry::Occupied(index_entry) = index_entry {
-            // This case should never arise during "ordinary" operation because the `page_fetches`
-            // logic prevents more than one task at a time from caching the same page. The only
-            // exception is if a journal is rewound beyond a page boundary, which would allow the
-            // same page number to be modified. In this case the cache may contain its old page
-            // contents, which we'd want to update with the new one. We log a warning since this
-            // case should be exceptional.
-            //
-            // There is no risk of this old page data being used since it always falls beyond the
-            // tip of the rewound blob, and could never be fetched.
-            warn!(
-                blob_id,
-                page_num,
-                "updating duplicate page -- if this blob wasn't rewound, we have a problem"
-            );
+            // This case should be rare, but not impossible. It can result due to either of:
+            //   1. a race condition in page fetching where the "first fetcher" releases the buffer
+            //   pool write lock after caching the page, and there's another thread that has just
+            //   faulted on the same page.
+            //   2. a blob is truncated across a page boundary, and later grows back to (beyond) its
+            //   original size, caching new data for the same page.
+            debug!(blob_id, page_num, "updating duplicate page");
 
             // Update the stale data with the new page.
             let entry = &mut self.cache[*index_entry.get()];
