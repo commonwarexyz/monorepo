@@ -420,21 +420,16 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         if blob_index > self.tail_index {
             return Err(Error::InvalidItem(item_pos));
         }
-        let item_index = item_pos % self.cfg.items_per_blob;
-        let offset = item_index * Self::CHUNK_SIZE_U64;
 
-        if blob_index == self.tail_index {
-            let read = self
-                .tail
-                .read_at(vec![0u8; Self::CHUNK_SIZE], offset)
-                .await?;
-            return Self::verify_integrity(read.as_ref());
-        }
-
-        let Some(blob) = self.blobs.get(&blob_index) else {
-            return Err(Error::ItemPruned(item_pos));
+        let blob = if blob_index == self.tail_index {
+            &self.tail
+        } else {
+            self.blobs
+                .get(&blob_index)
+                .ok_or(Error::ItemPruned(item_pos))?
         };
 
+        let offset = (item_pos % self.cfg.items_per_blob) * Self::CHUNK_SIZE_U64;
         let read = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
         Self::verify_integrity(read.as_ref())
     }
