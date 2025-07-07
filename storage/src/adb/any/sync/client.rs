@@ -27,6 +27,9 @@ where
     T: Translator,
     R: Resolver<H, K, V>,
 {
+    /// Context for the database.
+    pub context: E,
+
     /// Database configuration.
     pub db_config: adb::any::Config<T>,
 
@@ -44,9 +47,6 @@ where
 
     /// Upper bound of operations to sync (inclusive).
     pub upper_bound_ops: u64,
-
-    /// Context for the database.
-    pub context: E,
 
     /// Resolves requests for proofs and operations.
     pub resolver: R,
