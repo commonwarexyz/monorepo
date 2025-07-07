@@ -16,6 +16,8 @@ criterion_main!(
     fixed_replay::benches,
 );
 
+const WRITE_BUFFER: usize = 1_024 * 1024; // 1MB
+
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: usize = 16384;
 
@@ -33,7 +35,7 @@ async fn get_journal<const ITEM_SIZE: usize>(
     let journal_config = JConfig {
         partition: partition_name.to_string(),
         items_per_blob,
-        write_buffer: 1024,
+        write_buffer: WRITE_BUFFER,
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     };
     Journal::init(context, journal_config).await.unwrap()

@@ -208,17 +208,16 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 blob = tail_index,
                 "tail blob is full, creating a new empty one"
             );
-            let next_blob_index = tail_index + 1;
-            let (next_blob, size) = context
-                .open(&cfg.partition, &next_blob_index.to_be_bytes())
-                .await?;
-            assert_eq!(size, 0);
             blobs.insert(tail_index, tail);
-            (tail_index, tail) = (next_blob_index, next_blob);
-            tail_size = 0;
+            tail_index += 1;
+            (tail, tail_size) = context
+                .open(&cfg.partition, &tail_index.to_be_bytes())
+                .await?;
+            assert_eq!(tail_size, 0);
             tracked.inc();
         }
 
+        // Wrap all blobs with Append wrappers. Only the tail blob needs a non-0 write buffer.
         let blobs = try_join_all(blobs.into_iter().map(|(index, blob)| {
             let pool = cfg.buffer_pool.clone();
             async move {
