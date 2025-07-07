@@ -70,7 +70,8 @@
 //!         journal_partition: "table_journal".into(),
 //!         journal_compression: Some(3),
 //!         table_partition: "table_table".into(),
-//!         table_size: 65536, // 64K buckets
+//!         initial_table_size: 65536, // 64K buckets
+//!         max_chain_depth: 32,
 //!         codec_config: (),
 //!         write_buffer: 1024 * 1024,
 //!         target_journal_size: 100 * 1024 * 1024, // 100MB journals
@@ -141,7 +142,10 @@ pub struct Config<C> {
     ///
     /// To tune this value, consider how many hops you'd like each lookup to take for a key.
     /// If the keyspace is uniformly distributed, this is simply total keys divided by table_size.
-    pub table_size: u32,
+    pub initial_table_size: u32,
+
+    /// The maximum depth of a collision chain before the table is resized.
+    pub max_chain_depth: u32,
 
     /// The codec configuration to use for the value stored in the store.
     pub codec_config: C,
@@ -183,7 +187,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: compression,
                 table_partition: "test_table".into(),
-                table_size: DEFAULT_TABLE_SIZE,
+                initial_table_size: DEFAULT_TABLE_SIZE,
+                max_chain_depth: 32,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -247,7 +252,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: DEFAULT_TABLE_SIZE,
+                initial_table_size: DEFAULT_TABLE_SIZE,
+                max_chain_depth: 32,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -294,7 +300,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: 4, // Very small to force collisions
+                initial_table_size: 4, // Very small to force collisions
+                max_chain_depth: 4,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -346,7 +353,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: DEFAULT_TABLE_SIZE,
+                initial_table_size: DEFAULT_TABLE_SIZE,
+                max_chain_depth: 32,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -411,7 +419,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: DEFAULT_TABLE_SIZE,
+                initial_table_size: DEFAULT_TABLE_SIZE,
+                max_chain_depth: 32,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -505,7 +514,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: DEFAULT_TABLE_SIZE,
+                initial_table_size: DEFAULT_TABLE_SIZE,
+                max_chain_depth: 32,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -537,7 +547,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: DEFAULT_TABLE_SIZE,
+                initial_table_size: DEFAULT_TABLE_SIZE,
+                max_chain_depth: 32,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -592,7 +603,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: 4,
+                initial_table_size: 4,
+                max_chain_depth: 32,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -644,7 +656,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: 4,
+                initial_table_size: 4,
+                max_chain_depth: 32,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -700,7 +713,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: 4,
+                initial_table_size: 4,
+                max_chain_depth: 32,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -765,7 +779,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: 64, // Small table to force collisions
+                initial_table_size: 64, // Small table to force collisions
+                max_chain_depth: 8,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
