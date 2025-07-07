@@ -155,8 +155,8 @@ enum FuzzInput<'a> {
     F64(f64),
 }
 
-fuzz_target!(|input_data: FuzzInput| {
-    match input_data {
+fn fuzz(input: FuzzInput) {
+    match input {
         FuzzInput::Socket(it) => roundtrip_socket(it.0),
         FuzzInput::Bytes(it) => roundtrip_bytes(Bytes::from(it.to_vec())),
         FuzzInput::Map(it) => roundtrip_map(&it, (..).into(), (), ()), // TODO this needs proper length specifiers for the type if doing dynamic lengths!
@@ -178,4 +178,8 @@ fuzz_target!(|input_data: FuzzInput| {
         FuzzInput::F32(v) => roundtrip_primitive_f32(v),
         FuzzInput::F64(v) => roundtrip_primitive_f64(v),
     };
+}
+
+fuzz_target!(|input: FuzzInput| {
+    fuzz(input);
 });
