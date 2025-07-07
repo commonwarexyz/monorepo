@@ -132,7 +132,7 @@ where
         )
         .await
         .map_err(adb::Error::JournalError)
-        .map_err(Error::DatabaseInitFailed)?;
+        .map_err(Error::Adb)?;
 
         Ok(Client::FetchData {
             config,
@@ -299,7 +299,7 @@ where
                     log.append(op)
                         .await
                         .map_err(adb::Error::JournalError)
-                        .map_err(Error::DatabaseInitFailed)?;
+                        .map_err(Error::Adb)?;
                 }
                 // No need to sync here -- we will occasionally do so on `append`
                 // and then when we're done.
@@ -322,7 +322,7 @@ where
                         },
                     )
                     .await
-                    .map_err(Error::DatabaseInitFailed)?;
+                    .map_err(Error::Adb)?;
 
                     // Verify the final hash matches the target
                     let mut hasher = mmr::hasher::Standard::<H>::new();

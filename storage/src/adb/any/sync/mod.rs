@@ -40,9 +40,9 @@ pub enum Error {
     /// Sync already completed
     #[error("Sync already completed")]
     AlreadyComplete,
-    /// Database initialization failed during sync
-    #[error("Database initialization failed: {0}")]
-    DatabaseInitFailed(crate::adb::Error),
+    /// Error from the database
+    #[error("Database error: {0}")]
+    Adb(crate::adb::Error),
     /// Maximum retries exceeded
     #[error("Maximum retries exceeded")]
     MaxRetriesExceeded,
