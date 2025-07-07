@@ -3,13 +3,6 @@
 //! A [crate::journal] is used to store all unpruned MMR nodes, and a [crate::metadata] store is
 //! used to preserve digests required for root and proof generation that would have otherwise been
 //! pruned.
-//!
-//! ## Historical Proof Support
-//!
-//! This implementation supports historical proof generation through [Proof::historical_range_proof],
-//! enabling verification of elements against past MMR states. This is particularly useful
-//! for sync operations and rollback scenarios.
-//!
 
 use crate::{
     journal::{
@@ -500,28 +493,29 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Proof::<H::Digest>::range_proof::<Mmr<E, H>>(self, start_element_pos, end_element_pos).await
     }
 
-    /// Generate a range proof for elements as the MMR existed at a specific historical position.
+    /// Generate a range proof for elements as the MMR existed at a previous database state.
+    /// Specifically, the state when the MMR had `size` elements.
     ///
     /// This method delegates to the verification layer's `historical_range_proof` but ensures the
     /// journaled MMR is in a clean state (no pending writes) before generating the proof.
     ///
     /// # Parameters
     ///
-    /// * `pos`: The historical MMR size to generate the proof against
+    /// * `size`: The historical MMR size to generate the proof against
     /// * `start_element_pos`: The first leaf position to include in the proof
     /// * `end_element_pos`: The last leaf position to include in the proof
     ///
     /// See [`Proof::historical_range_proof`] for details.
     pub async fn historical_range_proof(
         &self,
-        pos: u64,
+        size: u64,
         start_element_pos: u64,
         end_element_pos: u64,
     ) -> Result<Proof<H::Digest>, Error> {
         assert!(!self.mem_mmr.is_dirty());
         Proof::<H::Digest>::historical_range_proof::<Mmr<E, H>>(
             self,
-            pos,
+            size,
             start_element_pos,
             end_element_pos,
         )
