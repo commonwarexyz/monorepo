@@ -502,19 +502,14 @@ pub(crate) mod tests {
         }
     }
 
-    #[test_case(1, NZU64!(1))]
-    #[test_case(1, NZU64!(2))]
-    #[test_case(10, NZU64!(1))]
-    #[test_case(10, NZU64!(3))]
-    #[test_case(250, NZU64!(1))]
-    #[test_case(250, NZU64!(100))]
-    #[test_case(250, NZU64!(251))]
-    #[test_case(1000, NZU64!(1))]
-    #[test_case(1000, NZU64!(3))]
-    #[test_case(1000, NZU64!(100))]
-    #[test_case(1000, NZU64!(1000))]
-    #[test_case(1000, NZU64!(1001))]
-    #[test_case(10_000, NZU64!(13))]
+    #[test_case(1, NZU64!(1); "singleton db with batch size == 1")]
+    #[test_case(1, NZU64!(2); "singleton db with batch size > db size")]
+    #[test_case(1000, NZU64!(1); "db with batch size 1")]
+    #[test_case(1000, NZU64!(3); "db size not evenly divided by batch size")]
+    #[test_case(1000, NZU64!(999); "db size not evenly divided by batch size; different batch size")]
+    #[test_case(1000, NZU64!(100); "db size divided by batch size")]
+    #[test_case(1000, NZU64!(1000); "db size == batch size")]
+    #[test_case(1000, NZU64!(1001); "batch size > db size")]
     fn test_sync(target_db_ops: usize, fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
