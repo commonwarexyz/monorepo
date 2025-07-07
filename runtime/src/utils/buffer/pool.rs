@@ -10,7 +10,7 @@ use std::{
         Arc,
     },
 };
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 // Type alias for the future we'll be storing for each in-flight page fetch.
 //
@@ -141,12 +141,9 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
         let key = (blob_id, page_num);
         let index_entry = self.index.entry(key);
         if let Entry::Occupied(index_entry) = index_entry {
-            // This case should be rare, but not impossible. It can result due to either of:
-            //   1. a race condition in page fetching where the "first fetcher" releases the buffer
-            //   pool write lock after caching the page, and there's another thread that has just
-            //   faulted on the same page.
-            //   2. a blob is truncated across a page boundary, and later grows back to (beyond) its
-            //   original size, caching new data for the same page.
+            // This case can result when a blob is truncated across a page boundary, and later grows
+            // back to (beyond) its original size. It will also become expected behavior once we
+            // allow cached pages to be writable.
             debug!(blob_id, page_num, "updating duplicate page");
 
             // Update the stale data with the new page.
@@ -217,44 +214,47 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
                 }
             }
 
-            // Page fault: fetch the page from `blob` since it wasn't in the buffer pool.
-            let (page_num, offset_in_page) = Self::offset_to_page(offset);
-            trace!(page_num, blob_id, "page fault");
-
-            let page_buf =
-                Self::fetch_and_cache_page(pool.clone(), blob, blob_id, page_num).await?;
-
-            // Copy the requested portion of the page into the buffer.
-            let bytes_to_copy = std::cmp::min(buf.len(), PAGE_SIZE - offset_in_page);
-            buf[..bytes_to_copy]
-                .copy_from_slice(&page_buf[offset_in_page..offset_in_page + bytes_to_copy]);
-            offset += bytes_to_copy as u64;
-            buf = &mut buf[bytes_to_copy..];
+            // Handle page fault.
+            let count =
+                Self::read_after_page_fault(pool.clone(), blob, blob_id, buf, offset).await?;
+            offset += count as u64;
+            buf = &mut buf[count..];
         }
 
         Ok(())
     }
 
-    /// Fetch the specified page from `blob`, cache it in `pool`, and return it.
-    async fn fetch_and_cache_page<B: Blob>(
+    /// Fetch the specified page after encountering a page fault, which may involve retrieving it
+    /// from `blob` & caching the result in `pool`. Returns the number of bytes read, which should
+    /// always be non-zero.
+    async fn read_after_page_fault<B: Blob>(
         pool: PoolRef<PAGE_SIZE>,
         blob: &B,
         blob_id: u64,
-        page_num: u64,
-    ) -> Result<Vec<u8>, Error> {
+        buf: &mut [u8],
+        offset: u64,
+    ) -> Result<usize, Error> {
+        assert!(!buf.is_empty());
+
+        let (page_num, offset_in_page) = Self::offset_to_page(offset);
+        trace!(page_num, blob_id, "page fault");
         let key = (blob_id, page_num);
 
         // Create or clone a future that retrieves the desired page from the underlying blob. This
         // requires a write lock on the buffer pool since we may need to modify `page_fetches` if
         // this is the first fetcher.
-        let fetch_future: PageFetchFut;
-        let is_first_fetcher: bool;
-        {
+        let (fetch_future, is_first_fetcher) = {
             let mut buffer_pool = pool.write().await;
 
-            let entry = buffer_pool.page_fetches.entry(key);
+            // There's a (small) chance the page was fetched & buffered by another task before we
+            // were able to acquire the write lock, so check the cache before doing anything else.
+            let count = buffer_pool.read_at(blob_id, buf, offset);
+            if count != 0 {
+                return Ok(count);
+            }
 
-            (fetch_future, is_first_fetcher) = match entry {
+            let entry = buffer_pool.page_fetches.entry(key);
+            match entry {
                 Entry::Occupied(o) => {
                     // Another thread is already fetching this page, so clone its existing future.
                     (o.get().clone(), false)
@@ -274,15 +274,20 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
 
                     (shareable, true)
                 }
-            };
-        }
+            }
+        };
 
         // Await the future and get the page buffer. If this isn't the task that initiated the
         // fetch, we can return immediately with the result. Note that we cannot return immediately
         // on error, since we'd bypass the cleanup required of the first fetcher.
         let fetch_result = fetch_future.await;
         if !is_first_fetcher {
-            return Ok(fetch_result.map_err(|_| Error::ReadFailed)?.into());
+            // Copy the requested portion of the page into the buffer and return immediately.
+            let page_buf: Vec<u8> = fetch_result.map_err(|_| Error::ReadFailed)?.into();
+            let bytes_to_copy = std::cmp::min(buf.len(), PAGE_SIZE - offset_in_page);
+            buf[..bytes_to_copy]
+                .copy_from_slice(&page_buf[offset_in_page..offset_in_page + bytes_to_copy]);
+            return Ok(bytes_to_copy);
         }
 
         // This is the task that initiated the fetch, so it is responsible for cleaning up the
@@ -290,14 +295,23 @@ impl<const PAGE_SIZE: usize> Pool<PAGE_SIZE> {
         // This requires a write lock on the buffer pool to modify `page_fetches` and cache the
         // page.
         let mut buffer_pool = pool.write().await;
+
+        // Remove the entry from `page_fetches`.
         let _ = buffer_pool.page_fetches.remove(&key);
 
+        // Cache the result in the buffer pool.
         let Ok(page_buf) = fetch_result else {
             return Err(Error::ReadFailed);
         };
         buffer_pool.cache(blob_id, page_buf.as_ref(), page_num);
 
-        Ok(page_buf.into())
+        // Copy the requested portion of the page into the buffer.
+        let page_buf: Vec<u8> = page_buf.into();
+        let bytes_to_copy = std::cmp::min(buf.len(), PAGE_SIZE - offset_in_page);
+        buf[..bytes_to_copy]
+            .copy_from_slice(&page_buf[offset_in_page..offset_in_page + bytes_to_copy]);
+
+        Ok(bytes_to_copy)
     }
 }
 
