@@ -14,6 +14,7 @@ use std::{future::Future, num::NonZeroU64};
 /// Trait for network communication with the sync server
 pub trait Resolver<H: Hasher, K: Array, V: Array> {
     /// Request proof and operations starting from the given index
+    #[allow(clippy::type_complexity)]
     fn get_proof(
         &mut self,
         start_index: u64,

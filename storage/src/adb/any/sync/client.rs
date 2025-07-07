@@ -12,8 +12,11 @@ use crate::{
     mmr::{self, iterator::leaf_num_to_pos},
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics as MetricsTrait, Storage};
+use commonware_runtime::{
+    telemetry::metrics::histogram::Buckets, Clock, Metrics as MetricsTrait, Storage,
+};
 use commonware_utils::Array;
+use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{marker::PhantomData, num::NonZeroU64};
 use tracing::{debug, info, warn};
 
@@ -62,9 +65,68 @@ where
     _phantom: PhantomData<(K, V)>,
 }
 
+/// Prometheus metrics for the sync client.
 pub struct Metrics {
-    valid_batches_received: u64,
-    invalid_batches_received: u64,
+    /// Number of valid batches successfully received and processed.
+    valid_batches_received: Counter<u64>,
+    /// Number of invalid batches received that failed validation.
+    invalid_batches_received: Counter<u64>,
+    /// Total number of operations fetched during sync.
+    operations_fetched: Counter<u64>,
+    /// Total time spent fetching operations from resolver (seconds).
+    fetch_duration: Histogram,
+    /// Total time spent verifying proofs (seconds).
+    proof_verification_duration: Histogram,
+    /// Total time spent applying operations to the log (seconds).
+    apply_duration: Histogram,
+}
+
+impl Metrics {
+    /// Register metrics with the provided runtime metrics context and return the struct.
+    pub fn new<E: MetricsTrait>(context: E) -> Self {
+        let metrics = Self {
+            valid_batches_received: Counter::default(),
+            invalid_batches_received: Counter::default(),
+            operations_fetched: Counter::default(),
+            fetch_duration: Histogram::new(Buckets::NETWORK.into_iter()),
+            proof_verification_duration: Histogram::new(Buckets::CRYPTOGRAPHY.into_iter()),
+            apply_duration: Histogram::new(Buckets::LOCAL.into_iter()),
+        };
+
+        // Register metrics.
+        context.register(
+            "valid_batches_received",
+            "Number of valid operation batches processed during ADB sync",
+            metrics.valid_batches_received.clone(),
+        );
+        context.register(
+            "invalid_batches_received",
+            "Number of invalid operation batches encountered during ADB sync",
+            metrics.invalid_batches_received.clone(),
+        );
+        context.register(
+            "operations_fetched",
+            "Total number of operations fetched during ADB sync",
+            metrics.operations_fetched.clone(),
+        );
+        context.register(
+            "fetch_duration_seconds",
+            "Histogram of durations spent fetching operation batches during ADB sync",
+            metrics.fetch_duration.clone(),
+        );
+        context.register(
+            "proof_verification_duration_seconds",
+            "Histogram of durations spent verifying proofs during ADB sync",
+            metrics.proof_verification_duration.clone(),
+        );
+        context.register(
+            "apply_duration_seconds",
+            "Histogram of durations spent applying operations during ADB sync",
+            metrics.apply_duration.clone(),
+        );
+
+        metrics
+    }
 }
 
 /// Client that syncs an [adb::any::Any] database.
@@ -95,10 +157,7 @@ where
         metrics: Metrics,
     },
     /// Sync completed, full database constructed.
-    Done {
-        db: adb::any::Any<E, K, V, H, T>,
-        metrics: Metrics,
-    },
+    Done { db: adb::any::Any<E, K, V, H, T> },
 }
 
 impl<E, K, V, H, T, R> Client<E, K, V, H, T, R>
@@ -134,14 +193,14 @@ where
         .map_err(adb::Error::JournalError)
         .map_err(Error::Adb)?;
 
+        // Initialize metrics
+        let metrics = Metrics::new(config.context.clone());
+
         Ok(Client::FetchData {
             config,
             log,
             pinned_nodes: None,
-            metrics: Metrics {
-                valid_batches_received: 0,
-                invalid_batches_received: 0,
-            },
+            metrics,
         })
     }
 
@@ -152,7 +211,7 @@ where
                 mut config,
                 log,
                 mut pinned_nodes,
-                mut metrics,
+                metrics,
             } => {
                 // Calculate total operations needed and current position (inclusive bounds)
                 let total_ops_needed = config
@@ -208,17 +267,25 @@ where
                     "Fetching proof and operations"
                 );
 
-                // Get proof and operations from resolver.
+                // Get proof and operations from resolver with timing
+                let fetch_start = config.context.current();
                 let (proof, new_operations) =
                     config.resolver.get_proof(next_op_loc, batch_size).await?;
+                let fetch_end = config.context.current();
+                let fetch_secs = fetch_end
+                    .duration_since(fetch_start)
+                    .unwrap_or_default()
+                    .as_secs_f64();
+                metrics.fetch_duration.observe(fetch_secs);
+
                 let new_operations_len = new_operations.len() as u64;
 
                 // Validate that we didn't get more operations than requested
                 // or that we didn't get an empty proof. We should never get an empty proof
                 // because we will never request an empty proof (i.e. a proof over an empty database).
                 if new_operations_len > batch_size.get() || new_operations_len == 0 {
-                    metrics.invalid_batches_received += 1;
-                    if metrics.invalid_batches_received > config.max_retries {
+                    metrics.invalid_batches_received.inc();
+                    if metrics.invalid_batches_received.get() > config.max_retries {
                         return Err(Error::MaxRetriesExceeded);
                     }
                     return Ok(Client::FetchData {
@@ -234,17 +301,26 @@ where
                     "Received operations from resolver"
                 );
 
-                // Verify the proof is valid over the given operations
-                if !adb::any::Any::<E, K, V, H, T>::verify_proof(
+                // Verify the proof is valid over the given operations with timing
+                let verification_start = config.context.current();
+                let proof_valid = adb::any::Any::<E, K, V, H, T>::verify_proof(
                     &mut config.hasher,
                     &proof,
                     next_op_loc,
                     &new_operations,
                     &config.target_hash,
-                ) {
+                );
+                let verification_end = config.context.current();
+                let verify_secs = verification_end
+                    .duration_since(verification_start)
+                    .unwrap_or_default()
+                    .as_secs_f64();
+                metrics.proof_verification_duration.observe(verify_secs);
+
+                if !proof_valid {
                     debug!("Proof verification failed, retrying");
-                    metrics.invalid_batches_received += 1;
-                    if metrics.invalid_batches_received > config.max_retries {
+                    metrics.invalid_batches_received.inc();
+                    if metrics.invalid_batches_received.get() > config.max_retries {
                         return Err(Error::MaxRetriesExceeded);
                     }
 
@@ -263,8 +339,8 @@ where
                     let Ok(new_pinned_nodes) = proof.extract_pinned_nodes(start_pos, end_pos)
                     else {
                         warn!("Failed to extract pinned nodes, retrying");
-                        metrics.invalid_batches_received += 1;
-                        if metrics.invalid_batches_received > config.max_retries {
+                        metrics.invalid_batches_received.inc();
+                        if metrics.invalid_batches_received.get() > config.max_retries {
                             return Err(Error::MaxRetriesExceeded);
                         }
                         return Ok(Client::FetchData {
@@ -277,7 +353,10 @@ where
                     pinned_nodes = Some(new_pinned_nodes);
                 }
 
-                metrics.valid_batches_received += 1;
+                // Record successful batch metrics
+                metrics.valid_batches_received.inc();
+                metrics.operations_fetched.inc_by(new_operations_len);
+
                 Ok(Client::ApplyData {
                     config,
                     log,
@@ -294,13 +373,21 @@ where
                 batch_ops,
                 metrics,
             } => {
-                // Append each operation to the log
+                // Apply operations to the log with timing
+                let apply_start = config.context.current();
                 for op in batch_ops.into_iter() {
                     log.append(op)
                         .await
                         .map_err(adb::Error::JournalError)
                         .map_err(Error::Adb)?;
                 }
+                let apply_end = config.context.current();
+                let apply_secs = apply_end
+                    .duration_since(apply_start)
+                    .unwrap_or_default()
+                    .as_secs_f64();
+                metrics.apply_duration.observe(apply_secs);
+
                 // No need to sync here -- we will occasionally do so on `append`
                 // and then when we're done.
 
@@ -334,7 +421,15 @@ where
                         });
                     }
 
-                    return Ok(Client::Done { db, metrics });
+                    info!(
+                        target_hash = ?config.target_hash,
+                        lower_bound_ops = config.lower_bound_ops,
+                        upper_bound_ops = config.upper_bound_ops,
+                        valid_batches_received = metrics.valid_batches_received.get(),
+                        invalid_batches_received = metrics.invalid_batches_received.get(),
+                        "Sync completed successfully");
+
+                    return Ok(Client::Done { db });
                 }
 
                 // Need to fetch more
@@ -356,12 +451,7 @@ where
 
         loop {
             self = self.step().await?;
-            if let Client::Done { db, metrics } = self {
-                info!(
-                    valid_batches_received = metrics.valid_batches_received,
-                    invalid_batches_received = metrics.invalid_batches_received,
-                    "Sync completed successfully"
-                );
+            if let Client::Done { db } = self {
                 return Ok(db);
             }
         }
