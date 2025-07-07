@@ -375,25 +375,17 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         }
         let rewind_to_offset = (journal_size % self.cfg.items_per_blob) * Self::CHUNK_SIZE_U64;
 
-        // Remove blobs until we reach the rewind point.
-        if rewind_to_blob_index < self.tail_index {
-            let mut current_blob_index = self.tail_index - 1;
-            while current_blob_index > rewind_to_blob_index {
-                let Some(blob) = self.blobs.remove(&current_blob_index) else {
-                    return Err(Error::MissingBlob(current_blob_index));
-                };
-                self.remove_blob(current_blob_index, blob).await?;
-                current_blob_index -= 1;
-            }
+        // Remove blobs until we reach the rewind point.  Blobs must be removed in reverse order to
+        // preserve consistency in the event of failures.
+        while rewind_to_blob_index < self.tail_index {
+            let (blob_index, mut new_tail) = self.blobs.pop_last().unwrap();
+            assert_eq!(blob_index, self.tail_index - 1);
+            std::mem::swap(&mut self.tail, &mut new_tail);
+            self.remove_blob(self.tail_index, new_tail).await?;
+            self.tail_index -= 1;
         }
 
-        // Set up the new tail blob and truncate it to the correct offset.
-        if rewind_to_blob_index != self.tail_index {
-            let mut blob = self.blobs.remove(&rewind_to_blob_index).unwrap();
-            std::mem::swap(&mut self.tail, &mut blob);
-            self.remove_blob(self.tail_index, blob).await?;
-            self.tail_index = rewind_to_blob_index;
-        }
+        // Truncate the tail blob to the correct offset.
         self.tail.resize(rewind_to_offset).await?;
 
         Ok(())
