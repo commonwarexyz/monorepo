@@ -1261,8 +1261,8 @@ mod tests {
             .await
             .unwrap();
 
-            for i in 0..8 {
-                ref_mmr.add(&mut hasher, &elements[i]).await.unwrap();
+            for elt in elements.iter().take(8) {
+                ref_mmr.add(&mut hasher, elt).await.unwrap();
             }
             let historical_size = ref_mmr.size();
             let historical_root = ref_mmr.root(&mut hasher);
@@ -1322,8 +1322,8 @@ mod tests {
             .await
             .unwrap();
 
-            for i in 0..41 {
-                ref_mmr.add(&mut hasher, &elements[i]).await.unwrap();
+            for elt in elements.iter().take(41) {
+                ref_mmr.add(&mut hasher, elt).await.unwrap();
             }
             let historical_size = ref_mmr.size();
             let historical_root = ref_mmr.root(&mut hasher);
@@ -1399,8 +1399,8 @@ mod tests {
             .unwrap();
 
             // Add elements up to end_pos to verify historical root
-            for i in 0..=end_pos {
-                ref_mmr.add(&mut hasher, &elements[i]).await.unwrap();
+            for elt in elements.iter().take(end_pos + 1) {
+                ref_mmr.add(&mut hasher, elt).await.unwrap();
             }
             let historical_size = ref_mmr.size();
             let expected_root = ref_mmr.root(&mut hasher);

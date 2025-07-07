@@ -1085,8 +1085,8 @@ mod tests {
             // Generate historical root and get correct size
             let mut historical_mmr = Mmr::new();
             let mut historical_hasher: Standard<Sha256> = Standard::new();
-            for i in 0..3 {
-                historical_mmr.add(&mut historical_hasher, &elements[i]);
+            for elt in elements.iter().take(3) {
+                historical_mmr.add(&mut historical_hasher, elt);
             }
             let historical_size = historical_mmr.size();
             let historical_root = historical_mmr.root(&mut historical_hasher);
@@ -1134,8 +1134,8 @@ mod tests {
             // Create historical MMR state as it would have been after sync_end elements
             let mut historical_mmr = Mmr::new();
             let mut historical_hasher: Standard<Sha256> = Standard::new();
-            for i in 0..=sync_end {
-                historical_mmr.add(&mut historical_hasher, &elements[i]);
+            for elt in elements.iter().take(sync_end + 1) {
+                historical_mmr.add(&mut historical_hasher, elt);
             }
             let historical_size = historical_mmr.size();
             let historical_root = historical_mmr.root(&mut historical_hasher);
@@ -1210,8 +1210,8 @@ mod tests {
                 // Create corresponding historical MMR to get the correct size
                 let mut historical_mmr = Mmr::new();
                 let mut historical_hasher: Standard<Sha256> = Standard::new();
-                for i in 0..=historical_end {
-                    historical_mmr.add(&mut historical_hasher, &elements[i]);
+                for elt in elements.iter().take(historical_end + 1) {
+                    historical_mmr.add(&mut historical_hasher, elt);
                 }
                 let historical_size = historical_mmr.size();
                 let historical_root = historical_mmr.root(&mut historical_hasher);

@@ -1785,10 +1785,7 @@ pub(super) mod test {
 
             // The historical proof should verify against a manually constructed historical root
             // We don't need to create a full historical database, just verify the proof structure
-            assert!(
-                historical_proof.digests.len() > 0,
-                "Proof should contain digests"
-            );
+            assert!(!historical_proof.digests.is_empty());
             db.destroy().await.unwrap();
         });
     }
@@ -1902,17 +1899,13 @@ pub(super) mod test {
                 let historical_root = historical_db.root(&mut hasher);
 
                 // Verify proof against historical root
-                assert!(
-                    Any::<Context, _, _, _, EightCap>::verify_proof(
-                        &mut hasher,
-                        &historical_proof,
-                        start_loc,
-                        &historical_ops,
-                        &historical_root
-                    ),
-                    "Historical proof should verify at position {}",
-                    historical_end
-                );
+                assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
+                    &mut hasher,
+                    &historical_proof,
+                    start_loc,
+                    &historical_ops,
+                    &historical_root
+                ),);
 
                 historical_db.destroy().await.unwrap();
             }
