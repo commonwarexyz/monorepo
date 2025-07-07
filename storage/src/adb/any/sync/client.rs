@@ -269,9 +269,10 @@ where
 
                 // Get proof and operations from resolver with timing
                 let fetch_start = config.context.current();
+                let target_db_size = config.upper_bound_ops + 1;
                 let (proof, new_operations) = config
                     .resolver
-                    .get_proof(config.upper_bound_ops + 1, next_op_loc, batch_size)
+                    .get_proof(target_db_size, next_op_loc, batch_size)
                     .await?;
                 let fetch_end = config.context.current();
                 let fetch_secs = fetch_end
@@ -346,7 +347,6 @@ where
                         if metrics.invalid_batches_received.get() > config.max_retries {
                             return Err(Error::MaxRetriesExceeded);
                         }
-                        config.resolver.notify_failure();
                         return Ok(Client::FetchData {
                             config,
                             log,
