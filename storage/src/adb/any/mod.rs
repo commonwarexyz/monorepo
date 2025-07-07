@@ -581,12 +581,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         self.log.append(op).await.map_err(Error::JournalError)
     }
 
-    /// Generate a proof for database operations starting at the specified location.
+    /// Generate and return:
+    ///  1. a proof of all operations applied to the db in the range starting at (and including)
+    ///     location `start_loc`, and ending at the first of either:
+    ///     - the last operation performed, or
+    ///     - the operation `max_ops` from the start.
+    ///  2. the operations corresponding to the leaves in this range.
     ///
-    /// This is a convenience method that generates a proof against the current database state.
-    /// For proofs against historical states, use [`historical_proof`].
+    /// # Warning
     ///
-    /// [`historical_proof`]: Self::historical_proof
+    /// Panics if there are uncommitted operations.
     pub async fn proof(
         &self,
         start_loc: u64,
@@ -596,34 +600,19 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             .await
     }
 
-    /// Generate a proof for database operations as the database existed at a specific historical position.
-    ///
-    /// This method is essential for sync operations where you need to prove a subset of operations
-    /// against a historical database state, rather than the current state. It generates proofs
-    /// against the MMR as it existed when the database had exactly `pos` operations.
-    ///
-    /// # Parameters
-    ///
-    /// * `pos`: The historical operation count to generate the proof against (must be ≤ current op count)
-    /// * `start_loc`: The location of the first operation to include in the proof
-    /// * `max_ops`: The maximum number of operations to include in the proof
-    ///
-    /// # Returns
-    ///
-    /// A tuple containing:
-    /// - A [`Proof`] that can verify the operations against the historical database root
-    /// - A vector of [`Operation`]s from the specified range
+    /// Analagous to [proof] but for a previous database state.
+    /// Specifically, the state when the MMR had `size` elements.
     pub async fn historical_proof(
         &self,
-        pos: u64,
+        size: u64,
         start_loc: u64,
         max_ops: u64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        if pos > self.op_count() {
-            return Err(Error::HistoricalSizeTooLarge(pos, self.op_count()));
+        if size > self.op_count() {
+            return Err(Error::HistoricalSizeTooLarge(size, self.op_count()));
         }
-        if pos < start_loc {
-            return Err(Error::HistoricalSizeTooSmall(pos, start_loc));
+        if size < start_loc {
+            return Err(Error::HistoricalSizeTooSmall(size, start_loc));
         }
 
         let mmr = &self.ops;
@@ -631,12 +620,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
         // The end position is capped by what was requested and what is available IN THE PAST state `pos`.
         let end_loc = std::cmp::min(
-            pos.saturating_sub(1),
+            size.saturating_sub(1),
             start_loc.saturating_add(max_ops).saturating_sub(1),
         );
         let end_pos = leaf_num_to_pos(end_loc);
 
-        let mmr_size_at_pos = leaf_num_to_pos(pos);
+        let mmr_size_at_pos = leaf_num_to_pos(size);
 
         let proof = mmr
             .historical_range_proof(mmr_size_at_pos, start_pos, end_pos)
