@@ -34,7 +34,7 @@ where
     pub db_config: adb::any::Config<T>,
 
     /// Maximum operations to fetch per batch.
-    pub max_ops_per_batch: NonZeroU64,
+    pub fetch_batch_size: NonZeroU64,
 
     /// Maximum number of retries for fetching operations.
     pub max_retries: u64,
@@ -57,7 +57,7 @@ where
     /// The maximum number of operations to keep in memory
     /// before committing the database while applying operations.
     /// Higher value will cause more memory usage during sync.
-    pub max_ops_in_memory: usize,
+    pub apply_ops_batch_size: usize,
 
     _phantom: PhantomData<(K, V)>,
 }
@@ -195,7 +195,7 @@ where
                     Error::InvalidState
                 })?;
 
-                let batch_size = std::cmp::min(config.max_ops_per_batch.get(), remaining_ops);
+                let batch_size = std::cmp::min(config.fetch_batch_size.get(), remaining_ops);
                 let batch_size = NonZeroU64::new(batch_size).ok_or(Error::InvalidState)?;
 
                 debug!(
@@ -318,7 +318,7 @@ where
                             log,
                             pruned_to_loc: config.lower_bound_ops,
                             pinned_nodes: pinned_nodes.unwrap(),
-                            max_ops_in_memory: config.max_ops_in_memory,
+                            apply_ops_batch_size: config.apply_ops_batch_size,
                         },
                     )
                     .await
@@ -425,7 +425,7 @@ pub(crate) mod tests {
     #[test_case(1000, NZU64!(1000))]
     #[test_case(1000, NZU64!(1001))]
     #[test_case(10_000, NZU64!(13))]
-    fn test_sync(target_db_ops: usize, max_ops_per_batch: NonZeroU64) {
+    fn test_sync(target_db_ops: usize, fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let target_db = create_test_db(context.clone()).await;
@@ -464,7 +464,7 @@ pub(crate) mod tests {
 
             let config = Config {
                 db_config: create_test_config(context.next_u64()),
-                max_ops_per_batch,
+                fetch_batch_size,
                 max_retries: 0,
                 target_hash,
                 lower_bound_ops,
@@ -472,7 +472,7 @@ pub(crate) mod tests {
                 context,
                 resolver: &mut target_db,
                 hasher,
-                max_ops_in_memory: 1024,
+                apply_ops_batch_size: 1024,
                 _phantom: PhantomData,
             };
             let got_db = sync(config).await.unwrap();
@@ -575,7 +575,7 @@ pub(crate) mod tests {
             let resolver = FailingResolver::new(get_proof_call_count.clone());
             let config = Config {
                 db_config: create_test_config(context.next_u64()),
-                max_ops_per_batch: NZU64!(10),
+                fetch_batch_size: NZU64!(10),
                 max_retries: MAX_RETRIES,
                 target_hash: Digest::from([1u8; 32]),
                 lower_bound_ops: 0,
@@ -583,7 +583,7 @@ pub(crate) mod tests {
                 context,
                 resolver,
                 hasher: create_test_hasher(),
-                max_ops_in_memory: 1024,
+                apply_ops_batch_size: 1024,
                 _phantom: PhantomData,
             };
 
@@ -611,7 +611,7 @@ pub(crate) mod tests {
 
             let config = Config {
                 db_config: create_test_config(context.next_u64()),
-                max_ops_per_batch: NZU64!(10),
+                fetch_batch_size: NZU64!(10),
                 max_retries: 0,
                 target_hash: Digest::from([1u8; 32]),
                 lower_bound_ops: 31, // Invalid: lower > upper
@@ -619,7 +619,7 @@ pub(crate) mod tests {
                 context,
                 resolver: target_db,
                 hasher: create_test_hasher(),
-                max_ops_in_memory: 1024,
+                apply_ops_batch_size: 1024,
                 _phantom: PhantomData,
             };
 
