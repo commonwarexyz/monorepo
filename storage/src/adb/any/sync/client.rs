@@ -323,6 +323,7 @@ where
                     if metrics.invalid_batches_received.get() > config.max_retries {
                         return Err(Error::MaxRetriesExceeded);
                     }
+                    config.resolver.notify_failure();
 
                     return Ok(Client::FetchData {
                         config,
@@ -648,6 +649,8 @@ pub(crate) mod tests {
                 ops,
             ))
         }
+
+        fn notify_failure(&mut self) {}
     }
 
     /// Test that we return an error after max_retries attempts to get a proof fail.

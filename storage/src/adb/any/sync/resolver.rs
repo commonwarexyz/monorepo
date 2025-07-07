@@ -20,6 +20,11 @@ pub trait Resolver<H: Hasher, K: Array, V: Array> {
         start_index: u64,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error>>;
+
+    /// Notify the resolver that the proof verification failed.
+    /// A server implementation could decide to connect to a different server
+    /// in response to several failed attempts, for example.
+    fn notify_failure(&mut self);
 }
 
 impl<E, K, V, H, T> Resolver<H, K, V> for Any<E, K, V, H, T>
@@ -39,6 +44,8 @@ where
             .await
             .map_err(Error::GetProofFailed)
     }
+
+    fn notify_failure(&mut self) {}
 }
 
 impl<E, K, V, H, T> Resolver<H, K, V> for &mut Any<E, K, V, H, T>
@@ -58,4 +65,6 @@ where
             .await
             .map_err(Error::GetProofFailed)
     }
+
+    fn notify_failure(&mut self) {}
 }
