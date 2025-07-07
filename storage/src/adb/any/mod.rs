@@ -611,7 +611,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         if size > self.op_count() {
             return Err(Error::HistoricalSizeTooLarge(size, self.op_count()));
         }
-        if size < start_loc {
+        if size <= start_loc {
             return Err(Error::HistoricalSizeTooSmall(size, start_loc));
         }
 

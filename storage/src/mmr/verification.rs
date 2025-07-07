@@ -348,7 +348,7 @@ impl<D: Digest> Proof<D> {
         if size > mmr.size() {
             return Err(Error::HistoricalSizeTooLarge(size, mmr.size()));
         }
-        if size < start_element_pos {
+        if size <= start_element_pos {
             return Err(Error::HistoricalSizeTooSmall(size, start_element_pos));
         }
         let mut digests: Vec<D> = Vec::new();
@@ -1231,6 +1231,24 @@ mod tests {
                     &historical_root
                 ),);
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_historical_range_proof_invalid_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut mmr = Mmr::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
+            for i in 0..10 {
+                mmr.add(&mut hasher, &test_digest(i));
+            }
+            let size = mmr.size();
+            let result = Proof::historical_range_proof(&mmr, size + 1, 1, 2).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooLarge(s, actual)) if s == size + 1 && actual == size));
+
+            let result = Proof::historical_range_proof(&mmr, 0, 1, 2).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(s, actual)) if s == 0 && actual == 1));
         });
     }
 }

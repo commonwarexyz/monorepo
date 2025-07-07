@@ -504,7 +504,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         if size > self.size() {
             return Err(Error::HistoricalSizeTooLarge(size, self.size()));
         }
-        if size < start_element_pos {
+        if size <= start_element_pos {
             return Err(Error::HistoricalSizeTooSmall(size, start_element_pos));
         }
 
@@ -1449,6 +1449,27 @@ mod tests {
             assert!(single_proof.verify_range_inclusion(&mut hasher, &[element], position, &root));
 
             mmr.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_historical_range_proof_invalid_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                .await
+                .unwrap();
+
+            for i in 0..10 {
+                mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+            }
+            let size = mmr.size();
+            let result = mmr.historical_range_proof(size + 1, 1, 2).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooLarge(s, actual)) if s == size + 1 && actual == size));
+
+            let result = mmr.historical_range_proof(0, 1, 2).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(s, actual)) if s == 0 && actual == 1));
         });
     }
 }
