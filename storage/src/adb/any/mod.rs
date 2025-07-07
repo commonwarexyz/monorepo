@@ -88,6 +88,11 @@ pub struct SyncConfig<E: RStorage + Metrics, K: Array, V: Array, T: Translator, 
     /// The pinned nodes the MMR needs at the pruning boundary given by
     /// `pruned_to_loc`, in the order specified by [Proof::nodes_to_pin].
     pub pinned_nodes: Vec<D>,
+
+    /// The maximum number of operations to keep in memory
+    /// before committing the database while applying operations.
+    /// Higher value will cause more memory usage during sync.
+    pub max_ops_in_memory: usize,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
@@ -214,6 +219,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             let op = cfg.log.read(i).await?;
             let digest = Self::op_digest(&mut hasher, &op);
             mmr.add_batched(&mut hasher, &digest).await?;
+            if i % cfg.max_ops_in_memory as u64 == 0 {
+                // Periodically sync the MMR to avoid memory bloat.
+                // Since the first value i takes is `cfg.pruned_to_loc`, the first sync
+                // may occur before `max_ops_in_memory` operations are applied. This is fine.
+                mmr.sync(&mut hasher).await?;
+            }
         }
 
         let mut snapshot = Index::init(
@@ -1486,6 +1497,7 @@ pub(super) mod test {
                 pruned_to_loc: 0, // No pruning
                 pinned_nodes: vec![],
                 log,
+                max_ops_in_memory: 1024,
             };
             let mut synced_db: Any<_, Digest, Digest, Sha256, EightCap> =
                 Any::init_pruned(context.clone(), sync_config)
@@ -1570,6 +1582,7 @@ pub(super) mod test {
                     log,
                     pruned_to_loc: lower_bound_ops,
                     pinned_nodes,
+                    max_ops_in_memory: 1024,
                 },
             )
             .await
@@ -1666,6 +1679,7 @@ pub(super) mod test {
                         log,
                         pruned_to_loc: lower_bound,
                         pinned_nodes,
+                        max_ops_in_memory: 1024,
                     },
                 )
                 .await

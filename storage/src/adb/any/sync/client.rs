@@ -54,6 +54,11 @@ where
     /// Hasher for root hashes.
     pub hasher: mmr::hasher::Standard<H>,
 
+    /// The maximum number of operations to keep in memory
+    /// before committing the database while applying operations.
+    /// Higher value will cause more memory usage during sync.
+    pub max_ops_in_memory: usize,
+
     _phantom: PhantomData<(K, V)>,
 }
 
@@ -313,6 +318,7 @@ where
                             log,
                             pruned_to_loc: config.lower_bound_ops,
                             pinned_nodes: pinned_nodes.unwrap(),
+                            max_ops_in_memory: config.max_ops_in_memory,
                         },
                     )
                     .await
@@ -466,6 +472,7 @@ pub(crate) mod tests {
                 context,
                 resolver: &mut target_db,
                 hasher,
+                max_ops_in_memory: 1024,
                 _phantom: PhantomData,
             };
             let got_db = sync(config).await.unwrap();
@@ -576,6 +583,7 @@ pub(crate) mod tests {
                 context,
                 resolver,
                 hasher: create_test_hasher(),
+                max_ops_in_memory: 1024,
                 _phantom: PhantomData,
             };
 
@@ -611,6 +619,7 @@ pub(crate) mod tests {
                 context,
                 resolver: target_db,
                 hasher: create_test_hasher(),
+                max_ops_in_memory: 1024,
                 _phantom: PhantomData,
             };
 
