@@ -16,6 +16,7 @@ criterion_main!(
     fixed_replay::benches,
 );
 
+/// The size of the write buffer used by the journal.
 const WRITE_BUFFER: usize = 1_024 * 1024; // 1MB
 
 /// Use a "prod sized" page size to test the performance of the journal.

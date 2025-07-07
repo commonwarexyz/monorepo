@@ -217,12 +217,14 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             tracked.inc();
         }
 
-        // Wrap all blobs with Append wrappers. Only the tail blob needs a non-0 write buffer.
+        // Wrap all blobs with Append wrappers.
+        // TODO(https://github.com/commonwarexyz/monorepo/issues/1219): Consider creating an
+        // Immutable wrapper which doesn't allocate a write buffer for these.
         let blobs = try_join_all(blobs.into_iter().map(|(index, blob)| {
             let pool = cfg.buffer_pool.clone();
+            let size = cfg.items_per_blob * Self::CHUNK_SIZE_U64;
             async move {
-                let blob =
-                    Append::new(blob, cfg.items_per_blob * Self::CHUNK_SIZE_U64, 0, pool).await?;
+                let blob = Append::new(blob, size, cfg.write_buffer, pool).await?;
                 Ok::<_, Error>((index, blob))
             }
         }))
@@ -323,10 +325,14 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         trace!(blob = self.tail_index, pos = item_pos, "appended item");
         size += Self::CHUNK_SIZE_U64;
 
-        // If the blob is now full, create a new one
+        // If the tail blob is now full we need to create a new empty one to fulfill the invariant
+        // that the tail blob always has room for a new element.
         if size == self.cfg.items_per_blob * Self::CHUNK_SIZE_U64 {
-            // Newest blob is now full so we need to create a new empty one to fulfill the invariant
-            // that the tail blob always has room for a new element.
+            // Sync the tail blob before creating a new one so if we crash we don't end up with a
+            // non-full historical blob.
+            self.tail.sync().await?;
+
+            // Create a new empty blob.
             let next_blob_index = self.tail_index + 1;
             debug!(blob = next_blob_index, "creating next blob");
             let (next_blob, size) = self
@@ -341,16 +347,12 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 self.cfg.buffer_pool.clone(),
             )
             .await?;
+            self.tracked.inc();
 
-            // Sync the previous blob and set its write buffer to 0 (since we won't be writing to
-            // it) before moving it to the historical blobs map.
-            self.tail.sync().await?;
-            self.tail.reset_buffer(0).await?;
+            // Move the old tail blob to the historical blobs map and set the new blob as the tail.
             let old_tail = std::mem::replace(&mut self.tail, next_blob);
             assert!(self.blobs.insert(self.tail_index, old_tail).is_none());
-
             self.tail_index = next_blob_index;
-            self.tracked.inc();
         }
 
         Ok(item_pos)
@@ -391,9 +393,6 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             std::mem::swap(&mut self.tail, &mut blob);
             self.remove_blob(self.tail_index, blob).await?;
             self.tail_index = rewind_to_blob_index;
-
-            // Make sure the new tail blob has the configured write buffer size.
-            self.tail.reset_buffer(self.cfg.write_buffer).await?;
         }
         self.tail.resize(rewind_to_offset).await?;
 

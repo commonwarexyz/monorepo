@@ -67,6 +67,7 @@ pub struct Config<T: Translator> {
     /// An optional thread pool to use for parallelizing batch operations.
     pub pool: Option<ThreadPool>,
 
+    /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
 }
 

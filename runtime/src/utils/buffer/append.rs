@@ -127,11 +127,10 @@ impl<B: Blob> Append<B> {
             buffer.data.extend_from_slice(&buf[buf.len() - remaining..])
         }
 
-        // Write the data buffer to the underlying blob. Note that the implementation will rewrite
-        // the last (blob_size % page_size) "trailing bytes" of the underlying blob since the
-        // write's starting offset is always page aligned. We don't expect this inefficiency to be a
-        // significant performance concern, but would be easy enough to avoid by maintaining the
-        // underlying blob's size.
+        // Write the data buffer to the underlying blob.
+        // TODO(https://github.com/commonwarexyz/monorepo/issues/1218): The implementation will
+        // unnecessarily rewrite the last (blob_size % page_size) "trailing bytes" of the underlying
+        // blob since the write's starting offset is always page aligned.
         self.blob.write_at(buf, offset).await?;
 
         Ok(())
@@ -180,10 +179,9 @@ impl<B: Blob> Blob for Append<B> {
     }
 
     /// This [Blob] trait method is unimplemented by [Append] and unconditionally panics.
-    ///
-    /// TODO(<https://github.com/commonwarexyz/monorepo/issues/1207>): Extend the buffer pool to
-    /// support arbitrary writes.
     async fn write_at(&self, _buf: impl Into<StableBuf> + Send, _offset: u64) -> Result<(), Error> {
+        // TODO(<https://github.com/commonwarexyz/monorepo/issues/1207>): Extend the buffer pool to
+        // support arbitrary writes.
         unimplemented!("append-only blob type does not support write_at")
     }
 
