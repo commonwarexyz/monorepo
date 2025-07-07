@@ -39,7 +39,7 @@ const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, const PAGE_SIZE: usize> {
+pub struct Config<T: Translator> {
     /// The name of the [RStorage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
@@ -67,26 +67,19 @@ pub struct Config<T: Translator, const PAGE_SIZE: usize> {
     /// An optional thread pool to use for parallelizing batch operations.
     pub pool: Option<ThreadPool>,
 
-    pub buffer_pool: PoolRef<PAGE_SIZE>,
+    pub buffer_pool: PoolRef,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: Array,
-    H: CHasher,
-    T: Translator,
-    const PAGE_SIZE: usize,
-> {
+pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
     ///
     /// The number of leaves in this MMR always equals the number of operations in the unpruned
     /// `log`.
-    pub(super) ops: Mmr<E, H, PAGE_SIZE>,
+    pub(super) ops: Mmr<E, H>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position of
     /// each operation in the log is called its _location_, which is a stable identifier. Pruning is
@@ -97,7 +90,7 @@ pub struct Any<
     ///
     /// An operation's location is always equal to the number of the MMR leaf storing the digest of
     /// the operation.
-    pub(super) log: Journal<E, Operation<K, V>, PAGE_SIZE>,
+    pub(super) log: Journal<E, Operation<K, V>>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
@@ -128,18 +121,12 @@ pub enum UpdateResult {
     Updated(u64, u64),
 }
 
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: Array,
-        H: CHasher,
-        T: Translator,
-        const PAGE_SIZE: usize,
-    > Any<E, K, V, H, T, PAGE_SIZE>
+impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator>
+    Any<E, K, V, H, T>
 {
     /// Returns any `Any` adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T, PAGE_SIZE>) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
         let mut snapshot: Index<T, u64> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
         let mut hasher = Standard::<H>::new();
@@ -187,9 +174,9 @@ impl<
     /// db will be as of the last committed operation.
     pub(super) async fn init_mmr_and_log(
         context: E,
-        cfg: Config<T, PAGE_SIZE>,
+        cfg: Config<T>,
         hasher: &mut Standard<H>,
-    ) -> Result<(Mmr<E, H, PAGE_SIZE>, Journal<E, Operation<K, V>, PAGE_SIZE>), Error> {
+    ) -> Result<(Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
         let mut mmr = Mmr::init(
             context.with_label("mmr"),
             hasher,
@@ -268,7 +255,7 @@ impl<
     /// the bitmap.
     pub(super) async fn build_snapshot_from_log<const N: usize>(
         start_leaf_num: u64,
-        log: &Journal<E, Operation<K, V>, PAGE_SIZE>,
+        log: &Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, u64>,
         mut bitmap: Option<&mut Bitmap<H, N>>,
     ) -> Result<u64, Error> {
@@ -290,8 +277,7 @@ impl<
                     match op {
                         Operation::Deleted(key) => {
                             let result =
-                                Any::<E, K, V, H, T, PAGE_SIZE>::delete_key(snapshot, log, &key, i)
-                                    .await?;
+                                Any::<E, K, V, H, T>::delete_key(snapshot, log, &key, i).await?;
                             if let Some(ref mut bitmap) = bitmap {
                                 // Mark previous location (if any) of the deleted key as inactive.
                                 if let Some(old_loc) = result {
@@ -300,10 +286,9 @@ impl<
                             }
                         }
                         Operation::Update(key, _) => {
-                            let result = Any::<E, K, V, H, T, PAGE_SIZE>::update_loc(
-                                snapshot, log, key, None, i,
-                            )
-                            .await?;
+                            let result =
+                                Any::<E, K, V, H, T>::update_loc(snapshot, log, key, None, i)
+                                    .await?;
                             if let Some(ref mut bitmap) = bitmap {
                                 match result {
                                     UpdateResult::NoOp => unreachable!("unexpected no-op update"),
@@ -337,7 +322,7 @@ impl<
     /// UpdateResult::NoOp is returned.
     async fn update_loc(
         snapshot: &mut Index<T, u64>,
-        log: &Journal<E, Operation<K, V>, PAGE_SIZE>,
+        log: &Journal<E, Operation<K, V>>,
         key: K,
         value: Option<&V>,
         new_loc: u64,
@@ -379,10 +364,7 @@ impl<
     /// Panics if the location does not reference an update operation. This should never happen
     /// unless the snapshot is buggy, or this method is being used to look up an operation
     /// independent of the snapshot contents.
-    async fn get_update_op(
-        log: &Journal<E, Operation<K, V>, PAGE_SIZE>,
-        loc: u64,
-    ) -> Result<(K, V), Error> {
+    async fn get_update_op(log: &Journal<E, Operation<K, V>>, loc: u64) -> Result<(K, V), Error> {
         let Operation::Update(k, v) = log.read(loc).await? else {
             panic!("location does not reference update operation. loc={loc}");
         };
@@ -431,7 +413,7 @@ impl<
     /// next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
         let new_loc = self.op_count();
-        let res = Any::<_, _, _, H, _, PAGE_SIZE>::update_loc(
+        let res = Any::<_, _, _, H, T>::update_loc(
             &mut self.snapshot,
             &self.log,
             key.clone(),
@@ -471,7 +453,7 @@ impl<
     /// associated with it.
     async fn delete_key(
         snapshot: &mut Index<T, u64>,
-        log: &Journal<E, Operation<K, V>, PAGE_SIZE>,
+        log: &Journal<E, Operation<K, V>>,
         key: &K,
         delete_loc: u64,
     ) -> Result<Option<u64>, Error> {
@@ -569,7 +551,7 @@ impl<
 
         let digests = ops
             .iter()
-            .map(|op| Any::<E, _, _, _, T, PAGE_SIZE>::op_digest(hasher, op))
+            .map(|op| Any::<E, _, _, _, T>::op_digest(hasher, op))
             .collect::<Vec<_>>();
 
         proof.verify_range_inclusion(hasher, &digests, start_pos, root_digest)
@@ -752,22 +734,18 @@ mod test {
     use commonware_codec::{DecodeExt, FixedSize};
     use commonware_cryptography::{hash, sha256::Digest, Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::Pool, deterministic, Runner as _, RwLock};
+    use commonware_runtime::{deterministic, Runner as _};
     use rand::{
         rngs::{OsRng, StdRng},
         RngCore, SeedableRng,
     };
-    use std::{
-        collections::{HashMap, HashSet},
-        sync::Arc,
-    };
+    use std::collections::{HashMap, HashSet};
 
     const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
+    const PAGE_SIZE: usize = 77;
+    const PAGE_CACHE_SIZE: usize = 9;
 
-    const TESTING_PAGE_SIZE: usize = 77;
-    const TESTING_PAGE_CACHE_SIZE: usize = 9;
-
-    fn any_db_config(suffix: &str) -> Config<TwoCap, TESTING_PAGE_SIZE> {
+    fn any_db_config(suffix: &str) -> Config<TwoCap> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -778,14 +756,12 @@ mod test {
             log_write_buffer: 1024,
             translator: TwoCap,
             pool: None,
-            buffer_pool: Arc::new(RwLock::new(Pool::<TESTING_PAGE_SIZE>::new(
-                TESTING_PAGE_CACHE_SIZE,
-            ))),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap, TESTING_PAGE_SIZE>;
+    type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {

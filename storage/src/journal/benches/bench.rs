@@ -1,9 +1,8 @@
-use commonware_runtime::{buffer::Pool, tokio::Context, RwLock};
+use commonware_runtime::{buffer::PoolRef, tokio::Context};
 use commonware_storage::journal::fixed::{Config as JConfig, Journal};
 use commonware_utils::array::FixedBytes;
 use criterion::criterion_main;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::sync::Arc;
 
 mod fixed_append;
 mod fixed_read_random;
@@ -29,20 +28,20 @@ async fn get_journal<const ITEM_SIZE: usize>(
     context: Context,
     partition_name: &str,
     items_per_blob: u64,
-) -> Journal<Context, FixedBytes<ITEM_SIZE>, PAGE_SIZE> {
+) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
     // Initialize the journal at the given partition.
     let journal_config = JConfig {
         partition: partition_name.to_string(),
         items_per_blob,
         write_buffer: 1024,
-        buffer_pool: Arc::new(RwLock::new(Pool::<PAGE_SIZE>::new(PAGE_CACHE_SIZE))),
+        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     };
     Journal::init(context, journal_config).await.unwrap()
 }
 
 /// Append `items_to_write` random items to the given journal, syncing the changes before returning.
 async fn append_random_data<const ITEM_SIZE: usize>(
-    journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>, PAGE_SIZE>,
+    journal: &mut Journal<Context, FixedBytes<ITEM_SIZE>>,
     items_to_write: u64,
 ) {
     // Append `items_to_write` random items to the journal.

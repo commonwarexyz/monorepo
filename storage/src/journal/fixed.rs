@@ -68,7 +68,7 @@ use tracing::{debug, trace, warn};
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
-pub struct Config<const PAGE_SIZE: usize> {
+pub struct Config {
     /// The `commonware-runtime::Storage` partition to use for storing journal blobs.
     pub partition: String,
 
@@ -79,16 +79,16 @@ pub struct Config<const PAGE_SIZE: usize> {
     pub items_per_blob: u64,
 
     /// The buffer pool to use for caching data.
-    pub buffer_pool: PoolRef<PAGE_SIZE>,
+    pub buffer_pool: PoolRef,
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: usize,
 }
 
 /// Implementation of `Journal` storage.
-pub struct Journal<E: Storage + Metrics, A, const PAGE_SIZE: usize> {
+pub struct Journal<E: Storage + Metrics, A> {
     context: E,
-    cfg: Config<PAGE_SIZE>,
+    cfg: Config,
 
     /// Stores the historical blobs. A BTreeMap allows iterating over them from oldest to newest.
     ///
@@ -97,14 +97,14 @@ pub struct Journal<E: Storage + Metrics, A, const PAGE_SIZE: usize> {
     /// - Indices are consecutive and without gaps.
     /// - Contains only full blobs.
     /// - Never contains the most recent blob.
-    blobs: BTreeMap<u64, Append<E::Blob, PAGE_SIZE>>,
+    blobs: BTreeMap<u64, Append<E::Blob>>,
 
     /// The most recent blob.
     ///
     /// # Invariant
     ///
     /// Always has room for at least one more item (and may be empty).
-    tail: Append<E::Blob, PAGE_SIZE>,
+    tail: Append<E::Blob>,
 
     /// The index of the most recent blob.
     tail_index: u64,
@@ -116,9 +116,7 @@ pub struct Journal<E: Storage + Metrics, A, const PAGE_SIZE: usize> {
     _array: PhantomData<A>,
 }
 
-impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize, const PAGE_SIZE: usize>
-    Journal<E, A, PAGE_SIZE>
-{
+impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     const CHUNK_SIZE: usize = u32::SIZE + A::SIZE;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
@@ -133,7 +131,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize, const PAGE_SIZE: usiz
     /// and [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
     /// the first invalid data read will be considered the new end of the journal (and the underlying [Blob] will be truncated to the last
     /// valid item).
-    pub async fn init(context: E, cfg: Config<PAGE_SIZE>) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
         let stored_blobs = match context.scan(&cfg.partition).await {
@@ -578,11 +576,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize, const PAGE_SIZE: usiz
     }
 
     /// Safely removes any previously tracked blob from underlying storage.
-    async fn remove_blob(
-        &mut self,
-        index: u64,
-        blob: Append<E::Blob, PAGE_SIZE>,
-    ) -> Result<(), Error> {
+    async fn remove_blob(&mut self, index: u64, blob: Append<E::Blob>) -> Result<(), Error> {
         blob.close().await?;
         self.context
             .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
@@ -639,28 +633,24 @@ mod tests {
     use commonware_cryptography::{hash, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::Pool,
         deterministic::{self, Context},
-        Blob, Runner, RwLock, Storage,
+        Blob, Runner, Storage,
     };
     use futures::{pin_mut, StreamExt};
-    use std::sync::Arc;
 
-    const TESTING_PAGE_SIZE: usize = 44;
-    const TESTING_PAGE_CACHE_SIZE: usize = 3;
+    const PAGE_SIZE: usize = 44;
+    const PAGE_CACHE_SIZE: usize = 3;
 
     /// Generate a SHA-256 digest for the given value.
     fn test_digest(value: u64) -> Digest {
         hash(&value.to_be_bytes())
     }
 
-    fn test_cfg(items_per_blob: u64) -> Config<TESTING_PAGE_SIZE> {
+    fn test_cfg(items_per_blob: u64) -> Config {
         Config {
             partition: "test_partition".into(),
             items_per_blob,
-            buffer_pool: Arc::new(RwLock::new(Pool::<TESTING_PAGE_SIZE>::new(
-                TESTING_PAGE_CACHE_SIZE,
-            ))),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: 2048,
         }
     }
@@ -998,8 +988,7 @@ mod tests {
                 .expect("Failed to open blob");
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
-            let result =
-                Journal::<_, Digest, TESTING_PAGE_SIZE>::init(context.clone(), cfg.clone()).await;
+            let result = Journal::<_, Digest>::init(context.clone(), cfg.clone()).await;
             assert!(matches!(
                 result.err().unwrap(),
                 Error::InvalidBlobSize(_, _)
@@ -1010,8 +999,7 @@ mod tests {
                 .remove(&cfg.partition, Some(&40u64.to_be_bytes()))
                 .await
                 .expect("Failed to remove blob");
-            let result =
-                Journal::<_, Digest, TESTING_PAGE_SIZE>::init(context.clone(), cfg.clone()).await;
+            let result = Journal::<_, Digest>::init(context.clone(), cfg.clone()).await;
             assert!(matches!(result.err().unwrap(), Error::MissingBlob(n) if n == 40));
         });
     }
@@ -1058,10 +1046,9 @@ mod tests {
                 .expect("Failed to write incorrect checksum");
             blob.close().await.expect("Failed to close blob");
 
-            let journal =
-                Journal::<_, Digest, TESTING_PAGE_SIZE>::init(context.clone(), cfg.clone())
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
 
             // Confirm 2 items were trimmed.
             assert_eq!(journal.size().await.unwrap(), item_count - 2);
@@ -1074,10 +1061,9 @@ mod tests {
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
             blob.close().await.expect("Failed to close blob");
 
-            let journal =
-                Journal::<_, Digest, TESTING_PAGE_SIZE>::init(context.clone(), cfg.clone())
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
 
             // Confirm last item in blob was trimmed.
             assert_eq!(journal.size().await.unwrap(), item_count - 3);
@@ -1188,10 +1174,9 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal =
-                Journal::<_, Digest, TESTING_PAGE_SIZE>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to re-initialize journal");
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to re-initialize journal");
             // the last corrupted item should get discarded
             assert_eq!(journal.size().await.unwrap(), 4);
             let buffer = context.encode();
@@ -1204,10 +1189,9 @@ mod tests {
                 .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
                 .await
                 .expect("Failed to remove blob");
-            let journal =
-                Journal::<_, Digest, TESTING_PAGE_SIZE>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to re-initialize journal");
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to re-initialize journal");
             assert_eq!(journal.size().await.unwrap(), 3);
             let buffer = context.encode();
             // Even though it was deleted, tail blob should be re-created and left empty by the
@@ -1247,10 +1231,9 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal =
-                Journal::<_, Digest, TESTING_PAGE_SIZE>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to re-initialize journal");
+            let mut journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to re-initialize journal");
 
             // Since there was only a single item appended which we then corrupted, recovery should
             // leave us in the state of an empty journal.
@@ -1298,10 +1281,9 @@ mod tests {
             blob.close().await.expect("Failed to close blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal =
-                Journal::<_, Digest, TESTING_PAGE_SIZE>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to re-initialize journal");
+            let mut journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to re-initialize journal");
 
             // Ensure we've recovered to the state of a single item.
             assert_eq!(journal.size().await.unwrap(), 1);
@@ -1416,10 +1398,9 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Make sure re-opened journal is as expected
-            let mut journal: Journal<_, Digest, TESTING_PAGE_SIZE> =
-                Journal::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("failed to re-initialize journal");
+            let mut journal: Journal<_, Digest> = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to re-initialize journal");
             assert_eq!(journal.size().await.unwrap(), 10 * (100 - 49));
 
             // Make sure rewinding works after pruning
@@ -1499,10 +1480,9 @@ mod tests {
             );
             blob.close().await.expect("Failed to close blob");
 
-            let journal =
-                Journal::<Context, Digest, TESTING_PAGE_SIZE>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("failed to initialize journal");
+            let journal = Journal::<Context, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
             journal.destroy().await.unwrap();
         });
     }

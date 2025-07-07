@@ -1,4 +1,4 @@
-use super::{append_random_data, get_journal, PAGE_SIZE};
+use super::{append_random_data, get_journal};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Context,
@@ -18,10 +18,7 @@ const ITEMS_PER_BLOB: u64 = 100_000;
 const ITEM_SIZE: usize = 32;
 
 /// Sequentially read `items_to_read` items in the given `journal` starting from item 0.
-async fn bench_run(
-    journal: &Journal<Context, FixedBytes<ITEM_SIZE>, PAGE_SIZE>,
-    items_to_read: u64,
-) {
+async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: u64) {
     for pos in 0..items_to_read {
         black_box(journal.read(pos).await.expect("failed to read data"));
     }

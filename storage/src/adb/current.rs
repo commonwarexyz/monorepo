@@ -28,7 +28,7 @@ use tracing::{debug, warn};
 
 /// Configuration for a [Current] authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, const PAGE_SIZE: usize> {
+pub struct Config<T: Translator> {
     /// The name of the [RStorage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
@@ -60,7 +60,7 @@ pub struct Config<T: Translator, const PAGE_SIZE: usize> {
     pub pool: Option<ThreadPool>,
 
     /// The buffer pool to use for caching data.
-    pub buffer_pool: PoolRef<PAGE_SIZE>,
+    pub buffer_pool: PoolRef,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
@@ -76,11 +76,10 @@ pub struct Current<
     H: CHasher,
     T: Translator,
     const N: usize,
-    const PAGE_SIZE: usize,
 > {
     /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    pub any: Any<E, K, V, H, T, PAGE_SIZE>,
+    pub any: Any<E, K, V, H, T>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
@@ -114,8 +113,7 @@ impl<
         H: CHasher,
         T: Translator,
         const N: usize,
-        const PAGE_SIZE: usize,
-    > Current<E, K, V, H, T, N, PAGE_SIZE>
+    > Current<E, K, V, H, T, N>
 {
     // A compile-time assertion that the chunk size is some multiple of digest size. A multiple of 1 is optimal with
     // respect to proof size, but a higher multiple allows for a smaller (RAM resident) merkle tree over the structure.
@@ -131,7 +129,7 @@ impl<
 
     /// Initializes a [Current] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
-    pub async fn init(context: E, config: Config<T, PAGE_SIZE>) -> Result<Self, Error> {
+    pub async fn init(context: E, config: Config<T>) -> Result<Self, Error> {
         // Initialize the MMR journal and metadata.
         let cfg = AConfig {
             mmr_journal_partition: config.mmr_journal_partition,
@@ -158,8 +156,7 @@ impl<
         // Initialize the db's mmr/log.
         let mut hasher = Standard::<H>::new();
         let (mut mmr, log) =
-            Any::<_, _, _, _, T, PAGE_SIZE>::init_mmr_and_log(context.clone(), cfg, &mut hasher)
-                .await?;
+            Any::<_, _, _, _, T>::init_mmr_and_log(context.clone(), cfg, &mut hasher).await?;
 
         // Ensure consistency between the bitmap and the db's MMR.
         let mmr_pruned_pos = mmr.pruned_to_pos();
@@ -500,7 +497,7 @@ impl<
 
         let digests = ops
             .iter()
-            .map(|op| Any::<E, _, _, _, T, PAGE_SIZE>::op_digest(hasher, op))
+            .map(|op| Any::<E, _, _, _, T>::op_digest(hasher, op))
             .collect::<Vec<_>>();
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
@@ -612,7 +609,7 @@ impl<
         let pos = leaf_num_to_pos(info.loc);
         let num = info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let mut verifier = GraftingVerifier::new(Self::grafting_height(), num, vec![&info.chunk]);
-        let digest = Any::<E, _, _, H, T, PAGE_SIZE>::op_digest(
+        let digest = Any::<E, _, _, H, T>::op_digest(
             verifier.standard(),
             &Operation::Update(info.key.clone(), info.value.clone()),
         );
@@ -738,14 +735,13 @@ pub mod test {
     use crate::index::translator::TwoCap;
     use commonware_cryptography::{hash, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::Pool, deterministic, Runner as _, RwLock};
+    use commonware_runtime::{deterministic, Runner as _};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
-    use std::sync::Arc;
 
-    const TESTING_PAGE_SIZE: usize = 88;
-    const TESTING_PAGE_CACHE_SIZE: usize = 8;
+    const PAGE_SIZE: usize = 88;
+    const PAGE_CACHE_SIZE: usize = 8;
 
-    fn current_db_config(partition_prefix: &str) -> Config<TwoCap, TESTING_PAGE_SIZE> {
+    fn current_db_config(partition_prefix: &str) -> Config<TwoCap> {
         Config {
             mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
             mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
@@ -757,13 +753,12 @@ pub mod test {
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: TwoCap,
             pool: None,
-            buffer_pool: Arc::new(RwLock::new(Pool::new(TESTING_PAGE_CACHE_SIZE))),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// A type alias for the concrete [Current] type used in these unit tests.
-    type CurrentTest =
-        Current<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32, TESTING_PAGE_SIZE>;
+    type CurrentTest = Current<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32>;
 
     /// Return an [Current] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context, partition_prefix: &str) -> CurrentTest {

@@ -51,11 +51,8 @@ pub async fn build_batched_and_check_test_roots(mem_mmr: &mut MemMmr<Sha256>) {
     );
 }
 
-pub async fn build_batched_and_check_test_roots_journaled<
-    E: RStorage + Clock + Metrics,
-    const PAGE_SIZE: usize,
->(
-    journaled_mmr: &mut JournaledMmr<E, Sha256, PAGE_SIZE>,
+pub async fn build_batched_and_check_test_roots_journaled<E: RStorage + Clock + Metrics>(
+    journaled_mmr: &mut JournaledMmr<E, Sha256>,
 ) {
     let mut hasher: Standard<Sha256> = Standard::new();
     for i in 0u64..199 {

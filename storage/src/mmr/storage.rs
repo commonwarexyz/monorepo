@@ -36,9 +36,7 @@ where
     }
 }
 
-impl<E: RStorage + Clock + Metrics, H: CHasher, const PAGE_SIZE: usize> Storage<H::Digest>
-    for JournaledMmr<E, H, PAGE_SIZE>
-{
+impl<E: RStorage + Clock + Metrics, H: CHasher> Storage<H::Digest> for JournaledMmr<E, H> {
     fn size(&self) -> u64 {
         self.size()
     }

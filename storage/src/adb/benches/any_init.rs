@@ -1,10 +1,10 @@
 use commonware_cryptography::{hash, Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
-    buffer::Pool,
+    buffer::PoolRef,
     create_pool,
     tokio::{Config, Context, Runner},
-    Runner as _, RwLock, ThreadPool,
+    Runner as _, ThreadPool,
 };
 use commonware_storage::{
     adb::any::{Any, Config as AConfig},
@@ -12,7 +12,7 @@ use commonware_storage::{
 };
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::{sync::Arc, time::Instant};
+use std::time::Instant;
 use tracing::info;
 
 const NUM_ELEMENTS: u64 = 100_000;
@@ -33,8 +33,8 @@ const PAGE_CACHE_SIZE: usize = 10_000;
 /// timing itself since any::init is single threaded.
 const THREADS: usize = 8;
 
-fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, PAGE_SIZE> {
-    AConfig::<EightCap, PAGE_SIZE> {
+fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
+    AConfig::<EightCap> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
@@ -44,7 +44,7 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, PAGE_SIZE> {
         log_write_buffer: 1024,
         translator: EightCap,
         pool: Some(pool),
-        buffer_pool: Arc::new(RwLock::new(Pool::new(PAGE_CACHE_SIZE))),
+        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
@@ -59,7 +59,7 @@ fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
         info!("Starting DB generation...");
         let pool = create_pool(ctx.clone(), THREADS).unwrap();
         let any_cfg = any_cfg(pool);
-        let mut db = Any::<_, _, _, Sha256, EightCap, PAGE_SIZE>::init(ctx, any_cfg)
+        let mut db = Any::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
             .await
             .unwrap();
 
@@ -94,6 +94,8 @@ fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
     });
 }
 
+type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+
 /// Benchmark the initialization of a large randomly generated any db.
 fn bench_any_init(c: &mut Criterion) {
     tracing_subscriber::fmt().try_init().ok();
@@ -118,18 +120,7 @@ fn bench_any_init(c: &mut Criterion) {
                         let any_cfg = any_cfg(pool);
                         let start = Instant::now();
                         for _ in 0..iters {
-                            let db = Any::<
-                                Context,
-                                <Sha256 as Hasher>::Digest,
-                                <Sha256 as Hasher>::Digest,
-                                Sha256,
-                                EightCap,
-                                PAGE_SIZE,
-                            >::init(
-                                ctx.clone(), any_cfg.clone()
-                            )
-                            .await
-                            .unwrap();
+                            let db = AnyDb::init(ctx.clone(), any_cfg.clone()).await.unwrap();
                             assert_ne!(db.op_count(), 0);
                             db.close().await.unwrap();
                         }
@@ -145,16 +136,7 @@ fn bench_any_init(c: &mut Criterion) {
                 let pool = commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
                 let any_cfg = any_cfg(pool);
                 // Clean up the database after the benchmark.
-                let db = Any::<
-                    Context,
-                    <Sha256 as Hasher>::Digest,
-                    <Sha256 as Hasher>::Digest,
-                    Sha256,
-                    EightCap,
-                    PAGE_SIZE,
-                >::init(ctx.clone(), any_cfg.clone())
-                .await
-                .unwrap();
+                let db = AnyDb::init(ctx.clone(), any_cfg.clone()).await.unwrap();
                 db.destroy().await.unwrap();
             });
         }
