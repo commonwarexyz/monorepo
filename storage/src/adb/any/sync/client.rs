@@ -68,7 +68,7 @@ pub struct Metrics {
 }
 
 /// Client that syncs an [adb::any::Any] database.
-#[allow(clippy::large_enum_variant)] // TODO danlaine: is this OK?
+#[allow(clippy::large_enum_variant)]
 pub(super) enum Client<E, K, V, H, T, R>
 where
     E: Storage + Clock + MetricsTrait,
