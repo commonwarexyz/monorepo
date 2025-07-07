@@ -57,7 +57,7 @@ where
     /// The maximum number of operations to keep in memory
     /// before committing the database while applying operations.
     /// Higher value will cause more memory usage during sync.
-    pub apply_ops_batch_size: usize,
+    pub apply_batch_size: usize,
 
     _phantom: PhantomData<(K, V)>,
 }
@@ -318,7 +318,7 @@ where
                             log,
                             pruned_to_loc: config.lower_bound_ops,
                             pinned_nodes: pinned_nodes.unwrap(),
-                            apply_ops_batch_size: config.apply_ops_batch_size,
+                            apply_batch_size: config.apply_batch_size,
                         },
                     )
                     .await
@@ -472,7 +472,7 @@ pub(crate) mod tests {
                 context,
                 resolver: &mut target_db,
                 hasher,
-                apply_ops_batch_size: 1024,
+                apply_batch_size: 1024,
                 _phantom: PhantomData,
             };
             let got_db = sync(config).await.unwrap();
@@ -583,7 +583,7 @@ pub(crate) mod tests {
                 context,
                 resolver,
                 hasher: create_test_hasher(),
-                apply_ops_batch_size: 1024,
+                apply_batch_size: 1024,
                 _phantom: PhantomData,
             };
 
@@ -619,7 +619,7 @@ pub(crate) mod tests {
                 context,
                 resolver: target_db,
                 hasher: create_test_hasher(),
-                apply_ops_batch_size: 1024,
+                apply_batch_size: 1024,
                 _phantom: PhantomData,
             };
 
