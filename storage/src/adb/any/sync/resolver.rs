@@ -17,7 +17,7 @@ pub trait Resolver<H: Hasher, K: Array, V: Array> {
     #[allow(clippy::type_complexity)]
     fn get_proof(
         &mut self,
-        pos: u64,
+        db_size: u64,
         start_index: u64,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error>>;
@@ -38,11 +38,11 @@ where
 {
     async fn get_proof(
         &mut self,
-        pos: u64,
+        db_size: u64,
         start_index: u64,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        self.proof_at_pos(pos, start_index, max_ops.get())
+        self.proof_at_pos(db_size, start_index, max_ops.get())
             .await
             .map_err(Error::GetProofFailed)
     }
@@ -60,11 +60,11 @@ where
 {
     async fn get_proof(
         &mut self,
-        pos: u64,
+        db_size: u64,
         start_index: u64,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        self.proof_at_pos(pos, start_index, max_ops.get())
+        self.proof_at_pos(db_size, start_index, max_ops.get())
             .await
             .map_err(Error::GetProofFailed)
     }

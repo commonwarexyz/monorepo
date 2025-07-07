@@ -596,27 +596,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         start_loc: u64,
         max_ops: u64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let mmr = &self.ops;
-        let start_pos = leaf_num_to_pos(start_loc);
-        let end_pos_last = mmr.last_leaf_pos().unwrap();
-        let end_pos_max = leaf_num_to_pos(start_loc + max_ops - 1);
-        let (end_pos, end_loc) = if end_pos_last < end_pos_max {
-            (end_pos_last, leaf_pos_to_num(end_pos_last).unwrap())
-        } else {
-            (end_pos_max, start_loc + max_ops - 1)
-        };
-
-        let proof = mmr.range_proof(start_pos, end_pos).await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
-        let futures = (start_loc..=end_loc)
-            .map(|i| self.log.read(i))
-            .collect::<Vec<_>>();
-        try_join_all(futures)
-            .await?
-            .into_iter()
-            .for_each(|op| ops.push(op));
-
-        Ok((proof, ops))
+        self.proof_at_pos(self.op_count(), start_loc, max_ops).await
     }
 
     pub async fn proof_at_pos(
@@ -627,23 +607,30 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         let mmr = &self.ops;
         let start_pos = leaf_num_to_pos(start_loc);
-        let end_pos_last = mmr.last_leaf_pos().unwrap();
-        let end_pos_max = leaf_num_to_pos(start_loc + max_ops - 1);
-        let (end_pos, end_loc) = if end_pos_last < end_pos_max {
-            (end_pos_last, leaf_pos_to_num(end_pos_last).unwrap())
-        } else {
-            (end_pos_max, start_loc + max_ops - 1)
-        };
 
-        let proof = mmr.range_proof_at_pos(pos, start_pos, end_pos).await?;
-        let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
-        let futures = (start_loc..=end_loc)
-            .map(|i| self.log.read(i))
-            .collect::<Vec<_>>();
-        try_join_all(futures)
-            .await?
-            .into_iter()
-            .for_each(|op| ops.push(op));
+        // The end position is capped by what was requested and what is available IN THE PAST state `pos`.
+        let end_loc = std::cmp::min(
+            pos.saturating_sub(1),
+            start_loc.saturating_add(max_ops).saturating_sub(1),
+        );
+        let end_pos = leaf_num_to_pos(end_loc);
+
+        let mmr_size_at_pos = leaf_num_to_pos(pos);
+
+        let proof = mmr
+            .range_proof_at_pos(mmr_size_at_pos, start_pos, end_pos)
+            .await?;
+        let mut ops =
+            Vec::with_capacity((end_loc.saturating_sub(start_loc).saturating_add(1)) as usize);
+        if end_loc >= start_loc {
+            let futures = (start_loc..=end_loc)
+                .map(|i| self.log.read(i))
+                .collect::<Vec<_>>();
+            try_join_all(futures)
+                .await?
+                .into_iter()
+                .for_each(|op| ops.push(op));
+        }
 
         Ok((proof, ops))
     }
