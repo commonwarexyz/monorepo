@@ -625,6 +625,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         start_loc: u64,
         max_ops: u64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+        if pos > self.op_count() {
+            return Err(Error::HistoricalSizeTooLarge(pos, self.op_count()));
+        }
+        if pos < start_loc {
+            return Err(Error::HistoricalSizeTooSmall(pos, start_loc));
+        }
+
         let mmr = &self.ops;
         let start_pos = leaf_num_to_pos(start_loc);
 
@@ -1231,7 +1238,10 @@ pub(super) mod test {
             assert!(start_loc < db.inactivity_floor_loc);
 
             for i in start_loc..end_loc {
-                let (proof, log) = db.historical_proof(i, start_loc, max_ops).await.unwrap();
+                let (proof, log) = db
+                    .historical_proof(db.op_count(), i, max_ops)
+                    .await
+                    .unwrap();
                 assert!(
                     Any::<deterministic::Context, _, _, _, EightCap>::verify_proof(
                         &mut hasher,
@@ -1855,7 +1865,7 @@ pub(super) mod test {
             // Create historical database with single operation
             let mut single_db = create_test_db(context.clone()).await;
             single_db = apply_ops(single_db, ops[0..1].to_vec()).await;
-            single_db.commit().await.unwrap();
+            // Don't commit - this changes the root due to commit operations
             let single_root = single_db.root(&mut hasher);
 
             assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
@@ -1907,7 +1917,8 @@ pub(super) mod test {
                 let mut historical_db = create_test_db(context.clone()).await;
                 historical_db =
                     apply_ops(historical_db, ops[0..historical_end as usize].to_vec()).await;
-                historical_db.commit().await.unwrap();
+                // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
+                historical_db.sync().await.unwrap();
                 let historical_root = historical_db.root(&mut hasher);
 
                 // Verify proof against historical root
@@ -1962,7 +1973,8 @@ pub(super) mod test {
             historical_db.update(key1, value1).await.unwrap();
             historical_db.update(key2, value2).await.unwrap();
             historical_db.update(key3, value3).await.unwrap();
-            historical_db.commit().await.unwrap();
+            // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
+            historical_db.sync().await.unwrap();
             let historical_root = historical_db.root(&mut hasher);
 
             // Verify historical proof
@@ -1987,6 +1999,56 @@ pub(super) mod test {
             );
 
             historical_db.destroy().await.unwrap();
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_any_db_historical_proof_size_too_large() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context.clone()).await;
+            let ops = create_test_ops(10);
+            db = apply_ops(db, ops).await;
+            db.commit().await.unwrap();
+
+            let current_op_count = db.op_count();
+
+            // Try to request proof for size larger than current
+            let result = db.historical_proof(current_op_count + 5, 0, 5).await;
+
+            match result {
+                Err(Error::HistoricalSizeTooLarge(requested, actual)) => {
+                    assert_eq!(requested, current_op_count + 5);
+                    assert_eq!(actual, current_op_count);
+                }
+                _ => panic!("Expected HistoricalSizeTooLarge error"),
+            }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_any_db_historical_proof_size_too_small() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context.clone()).await;
+            let ops = create_test_ops(10);
+            db = apply_ops(db, ops).await;
+            db.commit().await.unwrap();
+
+            // Try to request proof where historical size is smaller than start location
+            let result = db.historical_proof(5, 10, 5).await;
+
+            match result {
+                Err(Error::HistoricalSizeTooSmall(size, start_loc)) => {
+                    assert_eq!(size, 5);
+                    assert_eq!(start_loc, 10);
+                }
+                _ => panic!("Expected HistoricalSizeTooSmall error"),
+            }
+
             db.destroy().await.unwrap();
         });
     }
