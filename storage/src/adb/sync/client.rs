@@ -371,10 +371,10 @@ pub(crate) mod tests {
         index,
         mmr::verification::Proof,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Digest as _, Sha256};
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::NZU64;
-    use rand::RngCore as _;
+    use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
     use std::{
         collections::{HashMap, HashSet},
         sync::{atomic::AtomicU64, Arc},
@@ -384,7 +384,7 @@ pub(crate) mod tests {
     type TestHash = Sha256;
     type TestKey = Digest;
     type TestValue = Digest;
-    type TestTranslator = index::translator::TwoCap;
+    type TestTranslator = index::translator::EightCap;
 
     fn create_test_hasher() -> crate::mmr::hasher::Standard<TestHash> {
         crate::mmr::hasher::Standard::<TestHash>::new()
@@ -462,7 +462,7 @@ pub(crate) mod tests {
                 lower_bound_ops,
                 upper_bound_ops: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
                 context,
-                resolver: target_db,
+                resolver: &mut target_db,
                 hasher,
                 _phantom: PhantomData,
             };
@@ -483,6 +483,30 @@ pub(crate) mod tests {
             for key in &deleted_keys {
                 assert!(got_db.get_with_loc(key).await.unwrap().is_none(),);
             }
+
+            // Put more key-value pairs into both databases
+            let mut new_ops = Vec::new();
+            let mut rng = StdRng::seed_from_u64(42);
+            let mut new_kvs = HashMap::new();
+            for _ in 0..expected_kvs.len() {
+                let key = Digest::random(&mut rng);
+                let value = Digest::random(&mut rng);
+                new_ops.push(Operation::Update(key, value));
+                new_kvs.insert(key, value);
+            }
+            let mut got_db = apply_ops(got_db, new_ops.clone()).await;
+            let mut target_db = apply_ops(target_db, new_ops).await;
+            got_db.commit().await.unwrap();
+            target_db.commit().await.unwrap();
+
+            // Verify that the databases match
+            for (key, value) in &new_kvs {
+                let got_value = got_db.get(key).await.unwrap().unwrap();
+                let target_value = target_db.get(key).await.unwrap().unwrap();
+                assert_eq!(got_value, target_value);
+                assert_eq!(got_value, *value);
+            }
+            assert_eq!(got_db.root(&mut hasher), target_db.root(&mut hasher));
         });
     }
 

@@ -37,3 +37,22 @@ where
             .map_err(Error::GetProofFailed)
     }
 }
+
+impl<'a, E, K, V, H, T> Resolver<H, K, V> for &'a mut Any<E, K, V, H, T>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+{
+    async fn get_proof(
+        &mut self,
+        start_index: u64,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+        self.proof(start_index, max_ops.get())
+            .await
+            .map_err(Error::GetProofFailed)
+    }
+}
