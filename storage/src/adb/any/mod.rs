@@ -627,8 +627,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             .ops
             .historical_range_proof(mmr_size, start_pos, end_pos)
             .await?;
-        let mut ops =
-            Vec::with_capacity((end_loc.saturating_sub(start_loc).saturating_add(1)) as usize);
+        let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
         let futures = (start_loc..=end_loc)
             .map(|i| self.log.read(i))
             .collect::<Vec<_>>();
