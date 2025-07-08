@@ -370,11 +370,10 @@ where
                             .await
                             .map_err(adb::Error::JournalError)
                             .map_err(Error::Adb)?;
+                        // No need to sync here -- we will occasionally do so on `append`
+                        // and then when we're done.
                     }
                 }
-
-                // No need to sync here -- we will occasionally do so on `append`
-                // and then when we're done.
 
                 // Check if we've applied all needed operations
                 let next_op_loc = log.size().await.unwrap();
