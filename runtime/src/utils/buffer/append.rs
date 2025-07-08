@@ -64,17 +64,6 @@ impl<B: Blob> Append<B> {
         })
     }
 
-    /// Change the capacity of the write buffer.
-    ///
-    /// The buffer will be flushed, leaving an empty buffer upon return.
-    pub async fn reset_buffer(&mut self, buffer_size: usize) -> Result<(), Error> {
-        let mut buffer = self.buffer.write().await;
-        self.flush(&mut buffer).await?;
-        buffer.capacity = buffer_size.max(self.pool_ref.page_size * 2);
-
-        Ok(())
-    }
-
     /// Append all bytes in `buf` to the tip of the blob.
     pub async fn append(&self, buf: impl Into<StableBuf> + Send) -> Result<(), Error> {
         // Prepare `buf` to be written.

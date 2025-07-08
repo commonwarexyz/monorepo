@@ -449,28 +449,24 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         let start_blob = start_pos / self.cfg.items_per_blob;
         assert!(start_blob <= self.tail_index);
         let blobs = self.blobs.range(start_blob..).collect::<Vec<_>>();
+        let full_size = self.cfg.items_per_blob * Self::CHUNK_SIZE_U64;
         let mut blob_plus = blobs
             .into_iter()
-            .map(|(blob_index, blob)| (*blob_index, (*blob).clone_blob()))
+            .map(|(blob_index, blob)| (*blob_index, blob.clone_blob(), full_size))
             .collect::<Vec<_>>();
 
         // Include the tail blob.
         self.tail.sync().await?; // make sure no data is buffered
         let tail_size = self.tail.size().await;
-        blob_plus.push((self.tail_index, self.tail.clone_blob()));
+        blob_plus.push((self.tail_index, self.tail.clone_blob(), tail_size));
         let items_per_blob = self.cfg.items_per_blob;
         let start_offset = (start_pos % items_per_blob) * Self::CHUNK_SIZE_U64;
 
         // Replay all blobs in order and stream items as they are read (to avoid occupying too much
         // memory with buffered data).
-        let stream = stream::iter(blob_plus).flat_map(move |(blob_index, blob)| {
+        let stream = stream::iter(blob_plus).flat_map(move |(blob_index, blob, size)| {
             // Create a new reader and buffer for each blob. Preallocating the buffer here to avoid
             // a per-iteration allocation improves performance by ~20%.
-            let size = if blob_index == self.tail_index {
-                tail_size
-            } else {
-                items_per_blob * Self::CHUNK_SIZE_U64
-            };
             let mut reader = Read::new(blob, size, buffer);
             let buf = vec![0u8; Self::CHUNK_SIZE];
             let initial_offset = if blob_index == start_blob {
