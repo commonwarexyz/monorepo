@@ -28,6 +28,7 @@ pub struct GetProofResult<H: Hasher, K: Array, V: Array> {
 pub trait Resolver<H: Hasher, K: Array, V: Array> {
     /// Request proof and operations starting from the given index into an [Any] database's
     /// operation log. Returns at most `max_ops` operations.
+    // TODO allow for fetching historical proofs; https://github.com/commonwarexyz/monorepo/issues/1216
     fn get_proof(
         &self,
         start_loc: u64,
