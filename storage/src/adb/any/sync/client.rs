@@ -151,7 +151,7 @@ where
     T: Translator,
     R: Resolver<H, K, V>,
 {
-    /// Next step: fetch and verify proofs, holding only the pruned log.
+    /// Next step is to fetch and verify operations.
     FetchData {
         config: Config<E, K, V, H, T, R>,
         log: Journal<E, Operation<K, V>>,
@@ -159,7 +159,7 @@ where
         pinned_nodes: Option<Vec<H::Digest>>,
         metrics: Metrics<E>,
     },
-    /// Apply fetched operations to the log only.
+    /// Next step is to apply fetched operations to the log.
     ApplyData {
         config: Config<E, K, V, H, T, R>,
         log: Journal<E, Operation<K, V>>,
@@ -167,7 +167,7 @@ where
         batch_ops: Vec<Operation<K, V>>,
         metrics: Metrics<E>,
     },
-    /// Sync completed, full database constructed.
+    /// Sync completed. Database is fully constructed.
     Done { db: adb::any::Any<E, K, V, H, T> },
 }
 
@@ -204,14 +204,11 @@ where
         .map_err(adb::Error::JournalError)
         .map_err(Error::Adb)?;
 
-        // Initialize metrics
-        let metrics = Metrics::new(config.context.clone());
-
         Ok(Client::FetchData {
+            metrics: Metrics::new(config.context.clone()),
             config,
             log,
             pinned_nodes: None,
-            metrics,
         })
     }
 
@@ -224,46 +221,30 @@ where
                 mut pinned_nodes,
                 metrics,
             } => {
-                // Calculate total operations needed and current position (inclusive bounds)
-                let total_ops_needed = config
-                    .upper_bound_ops
-                    .checked_sub(config.lower_bound_ops)
-                    .ok_or(Error::InvalidTarget {
-                    lower_bound_pos: config.lower_bound_ops,
-                    upper_bound_pos: config.upper_bound_ops,
-                })? + 1;
-                // Get the absolute position of the next operation to be appended
-                let next_op_loc = log.size().await.unwrap();
+                // Get current position in the log
+                let log_size = log.size().await.unwrap();
 
-                // Calculate relative count of operations applied since pruning boundary
-                let applied_ops =
-                    next_op_loc
-                        .checked_sub(config.lower_bound_ops)
-                        .ok_or_else(|| {
-                            warn!(
-                                next_op_loc,
-                                lower_bound_ops = config.lower_bound_ops,
-                                "InvalidState: next_op_pos < lower_bound_ops"
-                            );
-                            Error::InvalidState
-                        })?;
-
-                debug!(
-                    lower_bound_ops = config.lower_bound_ops,
-                    upper_bound_ops = config.upper_bound_ops,
-                    total_ops_needed = total_ops_needed,
-                    next_op_pos = next_op_loc,
-                    applied_ops = applied_ops,
-                    "Calculating remaining operations"
-                );
-
-                let remaining_ops = total_ops_needed.checked_sub(applied_ops).ok_or_else(|| {
+                if log_size < config.lower_bound_ops {
                     warn!(
-                        total_ops_needed,
-                        applied_ops, "InvalidState: applied_ops > total_ops_needed"
+                        log_size,
+                        lower_bound_ops = config.lower_bound_ops,
+                        "Log position before lower bound"
                     );
-                    Error::InvalidState
-                })?;
+                    return Err(Error::InvalidState);
+                }
+
+                // Calculate remaining operations to sync (inclusive upper bound)
+                let remaining_ops = if log_size <= config.upper_bound_ops {
+                    config.upper_bound_ops - log_size + 1
+                } else {
+                    // We're at/past the target.
+                    warn!(
+                        log_size,
+                        upper_bound = config.upper_bound_ops,
+                        "Sync target exceeded"
+                    );
+                    return Err(Error::InvalidState);
+                };
 
                 let batch_size = std::cmp::min(config.fetch_batch_size.get(), remaining_ops);
                 let batch_size = NonZeroU64::new(batch_size).ok_or(Error::InvalidState)?;
@@ -272,7 +253,7 @@ where
                     target_hash = ?config.target_hash,
                     lower_bound_pos = config.lower_bound_ops,
                     upper_bound_pos = config.upper_bound_ops,
-                    next_op_loc = next_op_loc,
+                    current_pos = log_size,
                     remaining_ops = remaining_ops,
                     batch_size = batch_size.get(),
                     "Fetching proof and operations"
@@ -285,7 +266,7 @@ where
                     success_tx,
                 } = {
                     let _timer = metrics.fetch_duration.timer();
-                    config.resolver.get_proof(next_op_loc, batch_size).await?
+                    config.resolver.get_proof(log_size, batch_size).await?
                 };
 
                 let operations_len = operations.len() as u64;
@@ -318,7 +299,7 @@ where
                     adb::any::Any::<E, K, V, H, T>::verify_proof(
                         &mut config.hasher,
                         &proof,
-                        next_op_loc,
+                        log_size,
                         &operations,
                         &config.target_hash,
                     )
@@ -341,9 +322,9 @@ where
                 }
 
                 // Install pinned nodes on first successful batch.
-                if applied_ops == 0 {
-                    let start_pos = leaf_num_to_pos(next_op_loc);
-                    let end_pos = leaf_num_to_pos(next_op_loc + operations_len - 1);
+                if log_size == config.lower_bound_ops {
+                    let start_pos = leaf_num_to_pos(log_size);
+                    let end_pos = leaf_num_to_pos(log_size + operations_len - 1);
                     let Ok(new_pinned_nodes) = proof.extract_pinned_nodes(start_pos, end_pos)
                     else {
                         warn!("Failed to extract pinned nodes, retrying");
