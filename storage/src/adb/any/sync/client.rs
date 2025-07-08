@@ -43,9 +43,6 @@ where
     /// Maximum operations to fetch per batch.
     pub fetch_batch_size: NonZeroU64,
 
-    /// Maximum number of retries for fetching operations.
-    pub max_retries: u64,
-
     /// Target hash of the database.
     pub target_hash: H::Digest,
 
@@ -197,6 +194,7 @@ where
                 partition: config.db_config.log_journal_partition.clone(),
                 items_per_blob: config.db_config.log_items_per_blob,
                 write_buffer: config.db_config.log_write_buffer,
+                buffer_pool: config.db_config.buffer_pool.clone(),
             },
             config.lower_bound_ops,
         )
@@ -222,7 +220,10 @@ where
                 metrics,
             } => {
                 // Get current position in the log
-                let log_size = log.size().await.unwrap();
+                let log_size = log
+                    .size()
+                    .await
+                    .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
                 // Calculate remaining operations to sync (inclusive upper bound)
                 let remaining_ops = if log_size <= config.upper_bound_ops {
@@ -250,7 +251,7 @@ where
                     "Fetching proof and operations"
                 );
 
-                // Get proof and operations from resolver with timing
+                // Get proof and operations from resolver
                 let GetOperationsResult {
                     proof,
                     operations,
@@ -272,9 +273,6 @@ where
                 if operations_len > batch_size.get() || operations_len == 0 {
                     metrics.invalid_batches_received.inc();
                     let _ = success_tx.send(false);
-                    if metrics.invalid_batches_received.get() > config.max_retries {
-                        return Err(Error::MaxRetriesExceeded);
-                    }
                     return Ok(Client::FetchData {
                         config,
                         log,
@@ -288,7 +286,7 @@ where
                     "Received operations from resolver"
                 );
 
-                // Verify the proof is valid over the given operations with timing
+                // Verify the proof is valid over the given operations
                 let proof_valid = {
                     let _timer = metrics.proof_verification_duration.timer();
                     adb::any::Any::<E, K, V, H, T>::verify_proof(
@@ -304,10 +302,6 @@ where
                 if !proof_valid {
                     debug!("Proof verification failed, retrying");
                     metrics.invalid_batches_received.inc();
-                    if metrics.invalid_batches_received.get() > config.max_retries {
-                        return Err(Error::MaxRetriesExceeded);
-                    }
-
                     return Ok(Client::FetchData {
                         config,
                         log,
@@ -324,9 +318,6 @@ where
                     else {
                         warn!("Failed to extract pinned nodes, retrying");
                         metrics.invalid_batches_received.inc();
-                        if metrics.invalid_batches_received.get() > config.max_retries {
-                            return Err(Error::MaxRetriesExceeded);
-                        }
                         return Ok(Client::FetchData {
                             config,
                             log,
@@ -357,7 +348,7 @@ where
                 batch_ops,
                 metrics,
             } => {
-                // Apply operations to the log with timing
+                // Apply operations to the log
                 {
                     let _timer = metrics.apply_duration.timer();
                     for op in batch_ops.into_iter() {
@@ -365,13 +356,16 @@ where
                             .await
                             .map_err(adb::Error::JournalError)
                             .map_err(Error::Adb)?;
-                        // No need to sync here -- we will occasionally do so on `append`
-                        // and then when we're done.
+                        // No need to sync here -- the log will periodically sync its storage
+                        // and we will also sync when we're done.
                     }
                 }
 
                 // Check if we've applied all needed operations
-                let log_size = log.size().await.unwrap();
+                let log_size = log
+                    .size()
+                    .await
+                    .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
                 // Calculate the target log size (upper bound is inclusive)
                 let target_log_size = config
@@ -457,23 +451,19 @@ pub(crate) mod tests {
             test::{apply_ops, create_test_db, create_test_ops},
         },
         index,
-        mmr::verification::Proof,
     };
     use commonware_cryptography::{sha256::Digest, Digest as _, Sha256};
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
     use commonware_utils::NZU64;
-    use futures::channel::oneshot;
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
-    use std::{
-        collections::{HashMap, HashSet},
-        sync::{atomic::AtomicU64, Arc},
-    };
+    use std::collections::{HashMap, HashSet};
     use test_case::test_case;
 
     type TestHash = Sha256;
-    type TestKey = Digest;
-    type TestValue = Digest;
     type TestTranslator = index::translator::EightCap;
+
+    const PAGE_SIZE: usize = 111;
+    const PAGE_CACHE_SIZE: usize = 5;
 
     fn create_test_hasher() -> crate::mmr::hasher::Standard<TestHash> {
         crate::mmr::hasher::Standard::<TestHash>::new()
@@ -490,6 +480,7 @@ pub(crate) mod tests {
             log_write_buffer: 64,
             translator: TestTranslator::default(),
             pool: None,
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -541,7 +532,6 @@ pub(crate) mod tests {
             let config = Config {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size,
-                max_retries: 0,
                 target_hash,
                 lower_bound_ops,
                 upper_bound_ops: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
@@ -595,85 +585,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// A simple resolver that always returns too many operations to trigger retry logic.
-    /// Increments `call_count` on each call to `get_operations`.
-    struct FailingResolver {
-        call_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    }
-
-    impl FailingResolver {
-        fn new(call_count: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Self {
-            Self { call_count }
-        }
-    }
-
-    impl Resolver<TestHash, TestKey, TestValue> for FailingResolver {
-        async fn get_operations(
-            &self,
-            _size: u64,
-            _start_loc: u64,
-            max_ops: NonZeroU64,
-        ) -> Result<GetOperationsResult<TestHash, TestKey, TestValue>, Error> {
-            self.call_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-            // Return more operations than requested to trigger retry logic
-            let mut operations = Vec::new();
-            for i in 0..(max_ops.get() + 1) {
-                operations.push(Operation::Update(
-                    TestKey::from([(i % 256) as u8; 32]),
-                    TestValue::from([0u8; 32]),
-                ));
-            }
-
-            Ok(GetOperationsResult {
-                proof: Proof {
-                    size: 1,
-                    digests: vec![Digest::from([0u8; 32])],
-                },
-                operations,
-                success_tx: oneshot::channel().0,
-            })
-        }
-    }
-
-    /// Test that we return an error after max_retries attempts to get a proof fail.
-    #[test]
-    fn test_sync_max_retries() {
-        const MAX_RETRIES: u64 = 2;
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            let get_operations_call_count = Arc::new(AtomicU64::new(0));
-            let resolver = FailingResolver::new(get_operations_call_count.clone());
-            let config = Config {
-                db_config: create_test_config(context.next_u64()),
-                fetch_batch_size: NZU64!(10),
-                max_retries: MAX_RETRIES,
-                target_hash: Digest::from([1u8; 32]),
-                lower_bound_ops: 0,
-                upper_bound_ops: 100,
-                context,
-                resolver,
-                hasher: create_test_hasher(),
-                apply_batch_size: 1024,
-                _phantom: PhantomData,
-            };
-
-            let result = sync(config).await;
-
-            // Should fail after max_retries attempts
-            match result {
-                Err(Error::MaxRetriesExceeded) => {}
-                _ => panic!("Expected MaxRetriesExceeded error for max retries exceeded"),
-            }
-            // Verify we made max_retries + 1 calls before giving up
-            assert_eq!(
-                get_operations_call_count.load(std::sync::atomic::Ordering::SeqCst),
-                MAX_RETRIES + 1
-            );
-        });
-    }
-
     /// Test that invalid bounds are rejected
     #[test]
     fn test_sync_invalid_bounds() {
@@ -684,7 +595,6 @@ pub(crate) mod tests {
             let config = Config {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(10),
-                max_retries: 0,
                 target_hash: Digest::from([1u8; 32]),
                 lower_bound_ops: 31, // Invalid: lower > upper
                 upper_bound_ops: 30,
@@ -737,7 +647,6 @@ pub(crate) mod tests {
             let config = Config {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(10),
-                max_retries: 0,
                 target_hash,
                 lower_bound_ops,
                 upper_bound_ops,

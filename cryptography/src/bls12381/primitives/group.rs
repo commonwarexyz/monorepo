@@ -189,14 +189,23 @@ impl Scalar {
         Self(ret)
     }
 
-    /// Sets the scalar to be the provided integer.
-    pub fn set_int(&mut self, i: u32) {
+    /// Creates a new scalar from the provided integer.
+    fn from(i: u64) -> Self {
+        // Create a new scalar
+        let mut ret = blst_fr::default();
+
         // blst requires a buffer of 4 uint64 values. Failure to provide one will
         // result in unexpected behavior (will read past the provided buffer).
         //
         // Reference: https://github.com/supranational/blst/blob/415d4f0e2347a794091836a3065206edfd9c72f3/bindings/blst.h#L102
-        let buffer = [i as u64, 0, 0, 0];
-        unsafe { blst_fr_from_uint64(&mut self.0, buffer.as_ptr()) };
+        let buffer = [i, 0, 0, 0];
+        unsafe { blst_fr_from_uint64(&mut ret, buffer.as_ptr()) };
+        Self(ret)
+    }
+
+    /// Creates a new scalar from the provided index (a scalar offset by 1).
+    pub fn from_index(i: u32) -> Self {
+        Self::from(i as u64 + 1)
     }
 
     /// Computes the inverse of the scalar.
@@ -230,6 +239,18 @@ impl Scalar {
         let mut scalar = blst_scalar::default();
         unsafe { blst_scalar_from_fr(&mut scalar, &self.0) };
         scalar
+    }
+}
+
+impl From<u32> for Scalar {
+    fn from(i: u32) -> Self {
+        Self::from(i as u64)
+    }
+}
+
+impl From<u64> for Scalar {
+    fn from(i: u64) -> Self {
+        Self::from(i)
     }
 }
 
