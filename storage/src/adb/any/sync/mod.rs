@@ -57,7 +57,6 @@ pub enum Error {
 ///
 /// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
 //
-// # Future Work
 // TODO(#1213) Handle existing state: https://github.com/commonwarexyz/monorepo/issues/1213
 // TODO(#1214) Parallelize operation fetching: https://github.com/commonwarexyz/monorepo/issues/1214
 // TODO(#1215) Add example: https://github.com/commonwarexyz/monorepo/issues/1215
