@@ -1213,10 +1213,7 @@ pub(super) mod test {
             assert!(start_loc < db.inactivity_floor_loc);
 
             for i in start_loc..end_loc {
-                let (proof, log) = db
-                    .historical_proof(db.op_count(), i, max_ops)
-                    .await
-                    .unwrap();
+                let (proof, log) = db.proof(i, max_ops).await.unwrap();
                 assert!(
                     Any::<deterministic::Context, _, _, _, EightCap>::verify_proof(
                         &mut hasher,
@@ -1747,13 +1744,13 @@ pub(super) mod test {
             let ops = create_test_ops(20);
             db = apply_ops(db, ops.clone()).await;
             db.commit().await.unwrap();
-
             let mut hasher = Standard::<Sha256>::new();
             let root_hash = db.root(&mut hasher);
+            let original_op_count = db.op_count();
 
             // Test proof at current position (should match regular proof)
             let (historical_proof, historical_ops) =
-                db.historical_proof(db.op_count(), 5, 10).await.unwrap();
+                db.historical_proof(original_op_count, 5, 10).await.unwrap();
             let (regular_proof, regular_ops) = db.proof(5, 10).await.unwrap();
 
             assert_eq!(historical_proof.size, regular_proof.size);
@@ -1769,14 +1766,29 @@ pub(super) mod test {
                 &root_hash
             ));
 
-            // Test proof at historical position (after 10 operations)
-            let historical_pos = 10;
-            let (historical_proof, historical_ops) =
-                db.historical_proof(historical_pos, 0, 5).await.unwrap();
+            // Add more operations to the database
+            let more_ops = create_test_ops(5);
+            db = apply_ops(db, more_ops.clone()).await;
+            db.commit().await.unwrap();
 
-            assert_eq!(historical_proof.size, leaf_num_to_pos(historical_pos));
-            assert_eq!(historical_ops.len(), 5);
-            assert!(!historical_proof.digests.is_empty());
+            // Generate a historical proof for the old operations
+            let (historical_proof, historical_ops) =
+                db.historical_proof(original_op_count, 5, 10).await.unwrap();
+            assert_eq!(historical_proof.size, leaf_num_to_pos(original_op_count));
+            assert_eq!(historical_ops.len(), 10);
+            assert_eq!(historical_proof.size, regular_proof.size);
+            assert_eq!(historical_proof.digests, regular_proof.digests);
+            assert_eq!(historical_ops, regular_ops);
+
+            // Verify the proof
+            assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
+                &mut hasher,
+                &historical_proof,
+                5,
+                &historical_ops,
+                &root_hash
+            ));
+
             db.destroy().await.unwrap();
         });
     }
