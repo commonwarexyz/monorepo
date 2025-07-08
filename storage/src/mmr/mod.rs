@@ -114,8 +114,8 @@ pub enum Error {
     InvalidProofLength,
     #[error("proof missing digest at position: {0}")]
     MissingDigest(u64),
-    #[error("historical MMR size > current size: {0} > {1}")]
+    #[error("historical size >= database size: ({0}) >= ({1})")]
     HistoricalSizeTooLarge(u64, u64),
-    #[error("historical MMR size < lower bound: {0} < {1}")]
+    #[error("historical size <= start location: ({0}) <= ({1})")]
     HistoricalSizeTooSmall(u64, u64),
 }

@@ -33,10 +33,10 @@ pub enum Error {
     KeyNotFound,
 
     /// The requested historical size is larger than the current database size.
-    #[error("historical size {0} is larger than current database size {1}")]
+    #[error("historical size >= database size: ({0}) >= ({1})")]
     HistoricalSizeTooLarge(u64, u64),
 
     /// The requested historical size is smaller than the start location.
-    #[error("historical size {0} is smaller than start location {1}")]
+    #[error("historical size <= start location: ({0}) <= ({1})")]
     HistoricalSizeTooSmall(u64, u64),
 }
