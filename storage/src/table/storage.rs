@@ -305,8 +305,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
     ) -> Result<Self, Error> {
         // Validate that initial_table_size is a power of 2
         assert!(
-            config.initial_table_size.is_power_of_two(),
-            "initial_table_size must be a power of 2"
+            config.table_initial_size.is_power_of_two(),
+            "table_initial_size must be a power of 2"
         );
 
         // Initialize variable journal with a separate partition
@@ -330,11 +330,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
                 assert_eq!(checkpoint.section, 0);
                 assert_eq!(checkpoint.size, 0);
             }
-            let table_data_size = config.initial_table_size as u64 * FULL_TABLE_ENTRY_SIZE as u64;
+            let table_data_size = config.table_initial_size as u64 * FULL_TABLE_ENTRY_SIZE as u64;
             table.resize(table_data_size).await?;
             table.sync().await?;
             Checkpoint {
-                table_size: config.initial_table_size,
+                table_size: config.table_initial_size,
                 ..Default::default()
             }
         } else if let Some(checkpoint) = checkpoint {
