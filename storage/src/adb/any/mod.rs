@@ -1893,24 +1893,28 @@ pub(super) mod test {
 
                 assert_eq!(historical_proof.size, leaf_num_to_pos(historical_end));
 
-                // Create corresponding historical database
-                let mut historical_db = create_test_db(context.clone()).await;
-                historical_db =
-                    apply_ops(historical_db, ops[0..historical_end as usize].to_vec()).await;
+                // Create corresponding reference database at the given historical end
+                let mut ref_db = create_test_db(context.clone()).await;
+                ref_db = apply_ops(ref_db, ops[0..historical_end as usize].to_vec()).await;
                 // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
-                historical_db.sync().await.unwrap();
-                let historical_root = historical_db.root(&mut hasher);
+                ref_db.sync().await.unwrap();
+
+                let (ref_proof, ref_ops) = ref_db.proof(start_loc, max_ops).await.unwrap();
+                assert_eq!(ref_proof.size, historical_proof.size);
+                assert_eq!(ref_ops, historical_ops);
+                assert_eq!(ref_proof.digests, historical_proof.digests);
 
                 // Verify proof against historical root
+                let ref_root = ref_db.root(&mut hasher);
                 assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
                     &mut hasher,
                     &historical_proof,
                     start_loc,
                     &historical_ops,
-                    &historical_root
+                    &ref_root
                 ),);
 
-                historical_db.destroy().await.unwrap();
+                ref_db.destroy().await.unwrap();
             }
 
             db.destroy().await.unwrap();
@@ -1918,7 +1922,7 @@ pub(super) mod test {
     }
 
     #[test]
-    fn test_any_db_historical_proof_with_database_operations() {
+    fn test_any_db_historical_proof_verify_operations_correctness() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
@@ -1944,14 +1948,14 @@ pub(super) mod test {
             // Test proof at historical position after 3 operations (before key1 deletion)
             let (historical_proof, historical_ops) = db.historical_proof(3, 0, 3).await.unwrap();
 
-            // Create historical database state
-            let mut historical_db = create_test_db(context.clone()).await;
-            historical_db.update(key1, value1).await.unwrap();
-            historical_db.update(key2, value2).await.unwrap();
-            historical_db.update(key3, value3).await.unwrap();
+            // Create reference database state at the given historical position
+            let mut ref_db = create_test_db(context.clone()).await;
+            ref_db.update(key1, value1).await.unwrap();
+            ref_db.update(key2, value2).await.unwrap();
+            ref_db.update(key3, value3).await.unwrap();
             // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
-            historical_db.sync().await.unwrap();
-            let historical_root = historical_db.root(&mut hasher);
+            ref_db.sync().await.unwrap();
+            let ref_root = ref_db.root(&mut hasher);
 
             // Verify historical proof
             assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
@@ -1959,7 +1963,7 @@ pub(super) mod test {
                 &historical_proof,
                 0,
                 &historical_ops,
-                &historical_root
+                &ref_root
             ));
 
             // Verify the operations are correct
@@ -1974,7 +1978,7 @@ pub(super) mod test {
                 matches!(historical_ops[2], Operation::Update(k, v) if k == key3 && v == value3)
             );
 
-            historical_db.destroy().await.unwrap();
+            ref_db.destroy().await.unwrap();
             db.destroy().await.unwrap();
         });
     }
