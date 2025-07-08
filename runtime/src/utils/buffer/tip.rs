@@ -150,9 +150,7 @@ impl Buffer {
     /// capacity. If above capacity, the caller is responsible for using `take` to bring it back
     /// under.
     pub(super) fn append(&mut self, data: &[u8]) -> bool {
-        println!("appending to buffer {} bytes", data.len());
         self.data.extend_from_slice(data);
-        println!("buffer size: {}", self.data.len());
         self.data.len() > self.capacity
     }
 }

@@ -162,7 +162,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 prev_index = *index;
                 if *size != full_size {
                     // Non-final blobs that have invalid sizes are not recoverable.
-                    return Err(Error::InvalidBlobSize(full_size, *size));
+                    return Err(Error::InvalidBlobSize(*index, *size));
                 }
             }
         } else {
@@ -186,6 +186,9 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
         // Trim invalid items from the tail blob.
         tail_size = Self::trim_tail(&tail, tail_size, tail_index).await?;
+        if tail_size > full_size {
+            return Err(Error::InvalidBlobSize(tail_index, tail_size));
+        }
 
         // If the tail blob is full we need to start a new one to maintain its invariant that there
         // is always room for another item.
