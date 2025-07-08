@@ -141,8 +141,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             assert!(metadata_prune_pos >= oldest_retained_pos);
             // These positions may differ only due to blob boundary alignment, so this case isn't
             // unusual.
-            let actual_prune_point = journal.prune(metadata_prune_pos).await?;
-            if actual_prune_point != oldest_retained_pos {
+            journal.prune(metadata_prune_pos).await?;
+            if journal.oldest_retained_pos().await?.unwrap_or(0) != oldest_retained_pos {
                 // This should only happen in the event of some failure during the last attempt to
                 // prune the journal.
                 warn!(

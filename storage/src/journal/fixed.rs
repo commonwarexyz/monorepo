@@ -350,9 +350,10 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     }
 
     /// Rewind the journal to the given `journal_size`. Returns MissingBlob error if the rewind
-    /// point precedes the oldest retained element point.
+    /// point precedes the oldest retained element point. The journal is not synced after rewinding.
     ///
-    /// The journal is not synced after rewinding.
+    /// Note that this operation is not atomic, but it will always leave the journal in a consistent
+    /// state in the event of failure since blobs are always removed from newest to oldest.
     pub async fn rewind(&mut self, journal_size: u64) -> Result<(), Error> {
         let size = self.size().await?;
         match journal_size.cmp(&size) {
@@ -519,24 +520,14 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
     /// Allow the journal to prune items older than `min_item_pos`. The journal may not prune all
     /// such items in order to preserve blob boundaries, but the amount of such items will always be
-    /// less than the configured number of items per blob. The result will contain the actual
-    /// pruning position.
+    /// less than the configured number of items per blob.
     ///
     /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
     /// event of failure as items are always pruned in order from oldest to newest.
-    pub async fn prune(&mut self, min_item_pos: u64) -> Result<u64, Error> {
+    pub async fn prune(&mut self, min_item_pos: u64) -> Result<(), Error> {
         let oldest_blob_index = self.oldest_blob_index();
-        if oldest_blob_index == self.tail_index {
-            // Never prune the most recent blob.
-            return Ok(self.tail_index * self.cfg.items_per_blob);
-        }
-
-        let mut new_oldest_blob = min_item_pos / self.cfg.items_per_blob;
-        if new_oldest_blob <= oldest_blob_index {
-            // nothing to prune
-            return Ok(oldest_blob_index * self.cfg.items_per_blob);
-        }
-        new_oldest_blob = std::cmp::min(new_oldest_blob, self.tail_index);
+        let new_oldest_blob =
+            std::cmp::min(min_item_pos / self.cfg.items_per_blob, self.tail_index);
 
         for index in oldest_blob_index..new_oldest_blob {
             let blob = self.blobs.remove(&index).unwrap();
@@ -544,7 +535,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             self.pruned.inc();
         }
 
-        Ok(new_oldest_blob * self.cfg.items_per_blob)
+        Ok(())
     }
 
     /// Safely removes any previously tracked blob from underlying storage.
