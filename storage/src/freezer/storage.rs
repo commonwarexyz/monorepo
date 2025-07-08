@@ -253,11 +253,11 @@ impl<K: Array, V: Codec> EncodeSize for JournalEntry<K, V> {
 }
 
 /// Implementation of immutable key-value storage.
-pub struct Table<E: Storage + Metrics + Clock, K: Array, V: Codec> {
+pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Context for storage operations
     context: E,
 
-    // Table size
+    // Table configuration
     table_partition: String,
     table_size: u32,
     table_initial_size: u32,
@@ -268,9 +268,7 @@ pub struct Table<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 
     // Variable journal for storing entries
     journal: Journal<E, JournalEntry<K, V>>,
-
-    // Target size of each journal
-    target_journal_size: u64,
+    journal_target_size: u64,
 
     // Current section for new writes
     current_section: u64,
@@ -289,13 +287,13 @@ pub struct Table<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     _phantom: PhantomData<(K, V)>,
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
-    /// Initialize a new [Table] instance.
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
+    /// Initialize a new [Freezer] instance.
     pub async fn init(context: E, config: Config<V::Cfg>) -> Result<Self, Error> {
         Self::init_synchronized(context, config, None).await
     }
 
-    /// Initialize a new [Table] instance with a [Checkpoint].
+    /// Initialize a new [Freezer] instance with a [Checkpoint].
     pub async fn init_synchronized(
         context: E,
         config: Config<V::Cfg>,
@@ -312,7 +310,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
             partition: config.journal_partition,
             compression: config.journal_compression,
             codec_config: config.codec_config,
-            write_buffer: config.write_buffer,
+            write_buffer: config.journal_write_buffer,
         };
         let mut journal = Journal::init(context.clone(), journal_config).await?;
 
@@ -472,13 +470,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
 
         Ok(Self {
             context,
+            table_partition: config.table_partition,
             table_size: checkpoint.table_size,
             table_initial_size: config.table_initial_size,
             table_resize_frequency: config.table_resize_frequency,
             table,
-            table_partition: config.table_partition,
             journal,
-            target_journal_size: config.target_journal_size,
+            journal_target_size: config.journal_target_size,
             current_section: checkpoint.section,
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
             puts,
@@ -612,7 +610,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         let size = self.journal.size(self.current_section).await?;
 
         // If the current section has reached the target size, create a new section
-        if size >= self.target_journal_size {
+        if size >= self.journal_target_size {
             self.current_section += 1;
             debug!(size, section = self.current_section, "updated section");
         }
@@ -620,7 +618,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         Ok(())
     }
 
-    /// Put a key-value pair into the store.
+    /// Put a key-value pair into the freezer.
     pub async fn put(&mut self, key: K, value: V) -> Result<Cursor, Error> {
         self.puts.inc();
 
@@ -718,7 +716,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         }
     }
 
-    /// Check if a key exists in the store.
+    /// Check if a key exists in the freezer.
     pub async fn has(&self, key: &K) -> Result<bool, Error> {
         Ok(self.get(Identifier::Key(key)).await?.is_some())
     }
@@ -758,7 +756,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         Ok(())
     }
 
-    /// Sync all data to the underlying store.
+    /// Sync all data to the underlying freezer.
     pub async fn sync(&mut self) -> Result<Checkpoint, Error> {
         // Sync all modified journal sections
         let mut updates = Vec::with_capacity(self.modified_sections.len());
@@ -784,7 +782,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         })
     }
 
-    /// Close the store and underlying journal.
+    /// Close the freezer and underlying journal.
     pub async fn close(mut self) -> Result<Checkpoint, Error> {
         // Sync any pending updates before closing
         let checkpoint = self.sync().await?;
@@ -794,7 +792,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         Ok(checkpoint)
     }
 
-    /// Close and remove any underlying blobs created by the store.
+    /// Close and remove any underlying blobs created by the freezer.
     pub async fn destroy(self) -> Result<(), Error> {
         // Destroy the journal (removes all journal sections)
         self.journal.destroy().await?;

@@ -1,8 +1,8 @@
 use crate::{
     archive::{immutable::Config, Error, Identifier},
+    freezer::{self, Checkpoint, Cursor, Freezer},
     metadata::{self, Metadata},
     ordinal::{self, Ordinal},
-    table::{self, Checkpoint, Cursor, Table},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write};
@@ -81,7 +81,7 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     items_per_section: u64,
 
     metadata: Metadata<E, U64, Record>,
-    table: Table<E, K, V>,
+    freezer: Freezer<E, K, V>,
     ordinal: Ordinal<E, Cursor>,
 
     // Metrics
@@ -118,17 +118,17 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         // Initialize table
         //
         // TODO (#1227): Use sharded metadata to provide consistency
-        let table = Table::init_synchronized(
-            context.with_label("table"),
-            table::Config {
+        let freezer = Freezer::init_synchronized(
+            context.with_label("freezer"),
+            freezer::Config {
                 journal_partition: cfg.journal_partition,
                 journal_compression: cfg.compression,
+                journal_write_buffer: cfg.write_buffer,
+                journal_target_size: cfg.journal_target_size,
                 table_partition: cfg.table_partition,
                 table_initial_size: cfg.table_initial_size,
                 table_resize_frequency: cfg.table_resize_frequency,
                 codec_config: cfg.codec_config,
-                write_buffer: cfg.write_buffer,
-                target_journal_size: cfg.target_journal_size,
             },
             Some(checkpoint),
         )
@@ -172,7 +172,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         Ok(Self {
             items_per_section: cfg.items_per_section,
             metadata,
-            table,
+            freezer,
             ordinal,
             gets,
             has,
@@ -187,7 +187,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         };
 
         // Get journal entry
-        let result = self.table.get(table::Identifier::Cursor(cursor)).await?;
+        let result = self
+            .freezer
+            .get(freezer::Identifier::Cursor(cursor))
+            .await?;
 
         // Get value
         Ok(result)
@@ -195,7 +198,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
 
     async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
         // Get table entry
-        let result = self.table.get(table::Identifier::Key(key)).await?;
+        let result = self.freezer.get(freezer::Identifier::Key(key)).await?;
 
         // Get value
         Ok(result)
@@ -244,7 +247,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         }
 
         // Put in table
-        let cursor = self.table.put(key, data).await?;
+        let cursor = self.freezer.put(key, data).await?;
 
         // Put section and offset in ordinal
         self.ordinal.put(index, cursor).await?;
@@ -274,8 +277,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         self.syncs.inc();
 
         // Sync journal and ordinal
-        let (table_result, ordinal_result) = join!(self.table.sync(), self.ordinal.sync());
-        let checkpoint = table_result?;
+        let (freezer_result, ordinal_result) = join!(self.freezer.sync(), self.ordinal.sync());
+        let checkpoint = freezer_result?;
         ordinal_result?;
 
         // Update checkpoint
@@ -298,7 +301,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         self.ordinal.close().await?;
 
         // Close table
-        let checkpoint = self.table.close().await?;
+        let checkpoint = self.freezer.close().await?;
 
         // Update checkpoint
         let checkpoint_key = U64::new(CHECKPOINT_PREFIX, 0);
@@ -315,8 +318,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         // Destroy ordinal
         self.ordinal.destroy().await?;
 
-        // Destroy table
-        self.table.destroy().await?;
+        // Destroy freezer
+        self.freezer.destroy().await?;
 
         // Destroy metadata
         self.metadata.destroy().await?;

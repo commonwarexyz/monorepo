@@ -68,7 +68,7 @@ impl ArchiveFactory for ImmutableArchiveFactory {
             table_initial_size: 131_072, // 50B per entry * 131_072 = 6.5MB
             table_resize_frequency: 4,
             journal_partition: format!("{PARTITION}_journal"),
-            target_journal_size: 1024 * 1024 * 1024, // 1GB
+            journal_target_size: 1024 * 1024 * 1024, // 1GB
             ordinal_partition: format!("{PARTITION}_ordinal"),
             compression,
             codec_config: (),

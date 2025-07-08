@@ -20,7 +20,7 @@ pub struct Config<C> {
     pub journal_partition: String,
 
     /// The target size of the archive's journal.
-    pub target_journal_size: u64,
+    pub journal_target_size: u64,
 
     /// The partition to use for the archive's ordinal.
     pub ordinal_partition: String,
