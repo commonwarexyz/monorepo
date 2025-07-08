@@ -65,7 +65,7 @@ impl ArchiveFactory for ImmutableArchiveFactory {
         let cfg = commonware_storage::archive::immutable::Config {
             metadata_partition: format!("{PARTITION}_metadata"),
             table_partition: format!("{PARTITION}_table"),
-            table_initial_size: 131_072, // 48B per entry * 131_072 = 6MB
+            table_initial_size: 131_072, // 50B per entry * 131_072 = 6.5MB
             table_resize_frequency: 4,
             journal_partition: format!("{PARTITION}_journal"),
             target_journal_size: 1024 * 1024 * 1024, // 1GB
