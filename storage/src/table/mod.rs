@@ -73,7 +73,7 @@
 //!         journal_compression: Some(3),
 //!         table_partition: "table_table".into(),
 //!         table_initial_size: 65536, // 64K buckets
-//!         table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY, // Force resize once 4 writes to the same entry occur
+//!         table_resize_frequency: 4, // Force resize once 4 writes to the same entry occur
 //!         codec_config: (),
 //!         write_buffer: 1024 * 1024,
 //!         target_journal_size: 100 * 1024 * 1024, // 100MB journals
