@@ -251,8 +251,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Store the pruning boundary in metadata
         let prune_key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
         metadata.put(prune_key, cfg.pruned_to_pos.to_be_bytes().into());
-
-        // Sync metadata to ensure it's persisted
         metadata.sync().await.map_err(Error::MetadataError)?;
 
         Ok(Self {
@@ -1118,18 +1116,13 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
 
-            // First, create a regular MMR and add some elements
             let mut source_mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
                 .unwrap();
-
-            // add 10 elements
             let mut operations = vec![];
             for i in 0..NUM_OPERATIONS {
                 operations.push(test_digest(i));
-            }
-            for operation in &operations {
-                source_mmr.add(&mut hasher, operation).await.unwrap();
+                source_mmr.add(&mut hasher, &operations[i]).await.unwrap();
             }
             source_mmr.sync(&mut hasher).await.unwrap();
 
@@ -1145,7 +1138,7 @@ mod tests {
                 .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
                 .collect();
 
-            // Now create a new MMR using init_pruned
+            // Create a new MMR using init_pruned
             // After pruning to position 7, the remaining leaves are at positions 7, 8, 10, 11, 15, 16
             // These correspond to operations 4, 5, 6, 7, 8, 9 (0-indexed)
             let sync_config = SyncConfig {
@@ -1182,11 +1175,10 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
 
-            // Create source MMR with 5 elements, then prune all of them
+            // Create source MMR with 5 elements
             let mut source_mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
                 .unwrap();
-
             for i in 0..5 {
                 source_mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
             }
