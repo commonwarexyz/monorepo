@@ -534,7 +534,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         let mut new_oldest_blob = min_item_pos / self.cfg.items_per_blob;
         if new_oldest_blob <= oldest_blob_index {
             // nothing to prune
-            return Ok(new_oldest_blob * self.cfg.items_per_blob);
+            return Ok(oldest_blob_index * self.cfg.items_per_blob);
         }
         new_oldest_blob = std::cmp::min(new_oldest_blob, self.tail_index);
 
