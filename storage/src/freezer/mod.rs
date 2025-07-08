@@ -491,6 +491,7 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Initialize the freezer
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
@@ -501,8 +502,6 @@ mod tests {
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
             };
-
-            // Create freezer with data
             {
                 let mut freezer =
                     Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -548,6 +547,7 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Initialize the freezer
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
@@ -558,8 +558,6 @@ mod tests {
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
             };
-
-            // Create freezer with data and sync
             let checkpoint = {
                 let mut freezer =
                     Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -737,6 +735,7 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Initialize the freezer
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
@@ -747,7 +746,6 @@ mod tests {
                 table_resize_frequency: 2, // Resize after 2 items per bucket
                 codec_config: (),
             };
-
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to initialize freezer");
@@ -776,7 +774,6 @@ mod tests {
 
             // Close and reopen to verify persistence
             let checkpoint = freezer.close().await.expect("Failed to close");
-
             let freezer = Freezer::<_, FixedBytes<64>, i32>::init_synchronized(
                 context.clone(),
                 cfg.clone(),
@@ -805,6 +802,7 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
+            // Initialize the freezer
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
@@ -815,8 +813,6 @@ mod tests {
                 table_resize_frequency: 2, // Force resize frequently
                 codec_config: (),
             };
-
-            // Initialize the freezer
             let mut freezer =
                 Freezer::<_, FixedBytes<96>, FixedBytes<256>>::init(context.clone(), cfg.clone())
                     .await
