@@ -429,11 +429,10 @@ fn arbitrary_scalar(u: &mut Unstructured) -> Result<Scalar, arbitrary::Error> {
     let bytes: [u8; PRIVATE_KEY_LENGTH] = u.arbitrary()?;
     let scalar = Scalar::zero();
 
-    // Try to decode from bytes, if that fails use set_int
     match Scalar::read(&mut bytes.as_slice()) {
         Ok(s) => Ok(s),
         Err(_) => {
-            Scalar::from_index(u.int_in_range(0..=u64::MAX)? as u32);
+            Scalar::from_index(u.int_in_range(0..=u32::MAX)?);
             Ok(scalar)
         }
     }
@@ -442,7 +441,6 @@ fn arbitrary_scalar(u: &mut Unstructured) -> Result<Scalar, arbitrary::Error> {
 fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
     let bytes: [u8; 48] = u.arbitrary()?;
 
-    // Try to decode from bytes, if that fails use identity or generator
     match G1::read(&mut bytes.as_slice()) {
         Ok(point) => Ok(point),
         Err(_) => {
@@ -458,7 +456,6 @@ fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
 fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
     let bytes: [u8; 96] = u.arbitrary()?;
 
-    // Try to decode from bytes, if that fails use identity or generator
     match G2::read(&mut bytes.as_slice()) {
         Ok(point) => Ok(point),
         Err(_) => {
