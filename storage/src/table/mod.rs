@@ -10,23 +10,25 @@
 //! - **Variable Journal**: Stores key-value entries in an append-only log with optional compression
 //! - **Hash Table**: A persistent hash table stored in a blob that maps keys to journal locations
 //!
-//! The hash table uses a dual-entry design where each bucket contains two slots. This provides
-//! redundancy and enables atomic updates without locks or complex coordination.
-//!
 //! # Hash Table Design
 //!
 //! ```text
-//! Bucket Layout (48 bytes total, 2 slots of 24 bytes each):
-//! +--------+--------+--------+--------+
-//! | Slot 1                           |
-//! | epoch  | section| offset | crc   |
-//! | (8B)   | (8B)   | (4B)   | (4B)  |
-//! +--------+--------+--------+--------+
-//! | Slot 2                           |
-//! | epoch  | section| offset | crc   |
-//! | (8B)   | (8B)   | (4B)   | (4B)  |
-//! +--------+--------+--------+--------+
+//! Bucket Layout (50 bytes total, 2 slots of 25 bytes each):
+//! +--------+--------+--------+--------+------+
+//! | Slot 1                                   |
+//! | epoch  | section| offset | added | crc   |
+//! | (8B)   | (8B)   | (4B)   | (1B)  | (4B)  |
+//! +--------+--------+--------+--------+------+
+//! | Slot 2                                   |
+//! | epoch  | section| offset | added | crc   |
+//! | (8B)   | (8B)   | (4B)   | (1B)  | (4B)  |
+//! +--------+--------+--------+--------+------+
 //! ```
+//!
+//! # Resizing
+//!
+//! The table is resized by doubling its size and splitting each bucket into two. This doesn't
+//! require rewriting any of the journal but does require copying all buckets in the table.
 //!
 //! # Crash Consistency
 //!
