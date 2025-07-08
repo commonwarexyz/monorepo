@@ -779,8 +779,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_initial_size: 64, // Small table to force collisions
-                table_resize_frequency: 8,
+                table_initial_size: 8,     // Small table to force collisions
+                table_resize_frequency: 2, // Force resize frequently
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
