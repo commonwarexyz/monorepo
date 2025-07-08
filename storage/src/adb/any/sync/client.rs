@@ -13,11 +13,12 @@ use crate::{
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{
-    telemetry::metrics::histogram::Buckets, Clock, Metrics as MetricsTrait, Storage,
+    telemetry::metrics::histogram::{Buckets, Timed},
+    Clock, Metrics as MetricsTrait, Storage,
 };
 use commonware_utils::Array;
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
-use std::{marker::PhantomData, num::NonZeroU64};
+use std::{marker::PhantomData, num::NonZeroU64, sync::Arc};
 use tracing::{debug, info, warn};
 
 /// Configuration for the sync client
@@ -66,7 +67,7 @@ where
 }
 
 /// Prometheus metrics for the sync client.
-pub struct Metrics {
+pub struct Metrics<E: Clock> {
     /// Number of valid batches successfully received and processed.
     valid_batches_received: Counter<u64>,
     /// Number of invalid batches received that failed validation.
@@ -74,23 +75,30 @@ pub struct Metrics {
     /// Total number of operations fetched during sync.
     operations_fetched: Counter<u64>,
     /// Total time spent fetching operations from resolver (seconds).
-    fetch_duration: Histogram,
+    fetch_duration: Timed<E>,
     /// Total time spent verifying proofs (seconds).
-    proof_verification_duration: Histogram,
+    proof_verification_duration: Timed<E>,
     /// Total time spent applying operations to the log (seconds).
-    apply_duration: Histogram,
+    apply_duration: Timed<E>,
 }
 
-impl Metrics {
+impl<E: Clock + MetricsTrait> Metrics<E> {
     /// Register metrics with the provided runtime metrics context and return the struct.
-    pub fn new<E: MetricsTrait>(context: E) -> Self {
+    pub fn new(context: E) -> Self {
+        let fetch_histogram = Histogram::new(Buckets::NETWORK.into_iter());
+        let proof_verification_histogram = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
+        let apply_histogram = Histogram::new(Buckets::LOCAL.into_iter());
+
         let metrics = Self {
             valid_batches_received: Counter::default(),
             invalid_batches_received: Counter::default(),
             operations_fetched: Counter::default(),
-            fetch_duration: Histogram::new(Buckets::NETWORK.into_iter()),
-            proof_verification_duration: Histogram::new(Buckets::CRYPTOGRAPHY.into_iter()),
-            apply_duration: Histogram::new(Buckets::LOCAL.into_iter()),
+            fetch_duration: Timed::new(fetch_histogram.clone(), Arc::new(context.clone())),
+            proof_verification_duration: Timed::new(
+                proof_verification_histogram.clone(),
+                Arc::new(context.clone()),
+            ),
+            apply_duration: Timed::new(apply_histogram.clone(), Arc::new(context.clone())),
         };
 
         // Register metrics.
@@ -112,17 +120,17 @@ impl Metrics {
         context.register(
             "fetch_duration_seconds",
             "Histogram of durations spent fetching operation batches during ADB sync",
-            metrics.fetch_duration.clone(),
+            fetch_histogram,
         );
         context.register(
             "proof_verification_duration_seconds",
             "Histogram of durations spent verifying proofs during ADB sync",
-            metrics.proof_verification_duration.clone(),
+            proof_verification_histogram,
         );
         context.register(
             "apply_duration_seconds",
             "Histogram of durations spent applying operations during ADB sync",
-            metrics.apply_duration.clone(),
+            apply_histogram,
         );
 
         metrics
@@ -146,7 +154,7 @@ where
         log: Journal<E, Operation<K, V>>,
         /// Extracted pinned nodes from first batch proof
         pinned_nodes: Option<Vec<H::Digest>>,
-        metrics: Metrics,
+        metrics: Metrics<E>,
     },
     /// Apply fetched operations to the log only.
     ApplyData {
@@ -154,7 +162,7 @@ where
         log: Journal<E, Operation<K, V>>,
         pinned_nodes: Option<Vec<H::Digest>>,
         batch_ops: Vec<Operation<K, V>>,
-        metrics: Metrics,
+        metrics: Metrics<E>,
     },
     /// Sync completed, full database constructed.
     Done { db: adb::any::Any<E, K, V, H, T> },
@@ -268,15 +276,10 @@ where
                 );
 
                 // Get proof and operations from resolver with timing
-                let fetch_start = config.context.current();
-                let (proof, new_operations) =
-                    config.resolver.get_proof(next_op_loc, batch_size).await?;
-                let fetch_end = config.context.current();
-                let fetch_secs = fetch_end
-                    .duration_since(fetch_start)
-                    .unwrap_or_default()
-                    .as_secs_f64();
-                metrics.fetch_duration.observe(fetch_secs);
+                let (proof, new_operations) = {
+                    let _timer = metrics.fetch_duration.timer();
+                    config.resolver.get_proof(next_op_loc, batch_size).await?
+                };
 
                 let new_operations_len = new_operations.len() as u64;
 
@@ -302,20 +305,16 @@ where
                 );
 
                 // Verify the proof is valid over the given operations with timing
-                let verification_start = config.context.current();
-                let proof_valid = adb::any::Any::<E, K, V, H, T>::verify_proof(
-                    &mut config.hasher,
-                    &proof,
-                    next_op_loc,
-                    &new_operations,
-                    &config.target_hash,
-                );
-                let verification_end = config.context.current();
-                let verify_secs = verification_end
-                    .duration_since(verification_start)
-                    .unwrap_or_default()
-                    .as_secs_f64();
-                metrics.proof_verification_duration.observe(verify_secs);
+                let proof_valid = {
+                    let _timer = metrics.proof_verification_duration.timer();
+                    adb::any::Any::<E, K, V, H, T>::verify_proof(
+                        &mut config.hasher,
+                        &proof,
+                        next_op_loc,
+                        &new_operations,
+                        &config.target_hash,
+                    )
+                };
 
                 if !proof_valid {
                     debug!("Proof verification failed, retrying");
@@ -375,19 +374,15 @@ where
                 metrics,
             } => {
                 // Apply operations to the log with timing
-                let apply_start = config.context.current();
-                for op in batch_ops.into_iter() {
-                    log.append(op)
-                        .await
-                        .map_err(adb::Error::JournalError)
-                        .map_err(Error::Adb)?;
+                {
+                    let _timer = metrics.apply_duration.timer();
+                    for op in batch_ops.into_iter() {
+                        log.append(op)
+                            .await
+                            .map_err(adb::Error::JournalError)
+                            .map_err(Error::Adb)?;
+                    }
                 }
-                let apply_end = config.context.current();
-                let apply_secs = apply_end
-                    .duration_since(apply_start)
-                    .unwrap_or_default()
-                    .as_secs_f64();
-                metrics.apply_duration.observe(apply_secs);
 
                 // No need to sync here -- we will occasionally do so on `append`
                 // and then when we're done.
