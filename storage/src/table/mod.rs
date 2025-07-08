@@ -72,8 +72,8 @@
 //!         journal_partition: "table_journal".into(),
 //!         journal_compression: Some(3),
 //!         table_partition: "table_table".into(),
-//!         initial_table_size: 65536, // 64K buckets
-//!         max_chain_depth: 32,
+//!         table_initial_size: 65536, // 64K buckets
+//!         table_resize_frequency: 4, // Force resize once 4 writes to the same entry occur
 //!         codec_config: (),
 //!         write_buffer: 1024 * 1024,
 //!         target_journal_size: 100 * 1024 * 1024, // 100MB journals
