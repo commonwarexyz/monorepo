@@ -2376,14 +2376,14 @@ mod tests {
 
     fn threshold_derive_missing_partials<V: Variant>() {
         // Helper to compute the Lagrange basis polynomial l_i(x) evaluated at a specific point `eval_at_x`.
-        fn lagrange_coeff(eval_at_x: u32, i_x: u32, x_coords: &[u32]) -> Scalar {
+        fn lagrange_coeff(eval_x: u32, i_x: u32, x_coords: &[u32]) -> Scalar {
             // Initialize the numerator and denominator.
             let mut num = Scalar::one();
             let mut den = Scalar::one();
 
             // Initialize the evaluation point and the index.
-            let eval_at_scalar = Scalar::from(eval_at_x as u64 + 1);
-            let xi = Scalar::from(i_x as u64 + 1);
+            let eval_x = Scalar::from_index(eval_x);
+            let xi = Scalar::from_index(i_x);
 
             // Compute the Lagrange coefficients.
             for &j_x in x_coords {
@@ -2393,10 +2393,10 @@ mod tests {
                 }
 
                 // Initialize the other index.
-                let xj = Scalar::from(j_x as u64 + 1);
+                let xj = Scalar::from_index(j_x);
 
-                // Numerator: product over j!=i of (eval_at - x_j)
-                let mut term = eval_at_scalar.clone();
+                // Numerator: product over j!=i of (eval_x - x_j)
+                let mut term = eval_x.clone();
                 term.sub(&xj);
                 num.mul(&term);
 

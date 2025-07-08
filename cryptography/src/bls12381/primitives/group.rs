@@ -203,6 +203,11 @@ impl Scalar {
         Self(ret)
     }
 
+    /// Creates a new scalar from the provided index (a scalar offset by 1).
+    pub fn from_index(i: u32) -> Self {
+        Self::from(i as u64 + 1)
+    }
+
     /// Computes the inverse of the scalar.
     pub fn inverse(&self) -> Option<Self> {
         if *self == Self::zero() {

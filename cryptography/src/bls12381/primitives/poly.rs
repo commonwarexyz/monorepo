@@ -132,7 +132,7 @@ pub fn compute_weights(indices: Vec<u32>) -> Result<BTreeMap<u32, Weight>, Error
     let mut weights = BTreeMap::new();
     for i in &indices {
         // Convert i_eval.index to x-coordinate (x = index + 1)
-        let xi = Scalar::from((*i as u64) + 1);
+        let xi = Scalar::from_index(*i);
 
         // Compute product terms for Lagrange basis polynomial
         let (mut num, mut den) = (Scalar::one(), Scalar::one());
@@ -143,7 +143,7 @@ pub fn compute_weights(indices: Vec<u32>) -> Result<BTreeMap<u32, Weight>, Error
             }
 
             // Convert j_eval.index to x-coordinate
-            let xj = Scalar::from((*j as u64) + 1);
+            let xj = Scalar::from_index(*j);
 
             // Include `xj` in the numerator product for `l_i(0)`
             num.mul(&xj);
@@ -230,7 +230,7 @@ impl<C: Element> Poly<C> {
         self.0[index as usize] = value;
     }
 
-    /// Performs polynomial addition in place
+    /// Performs polynomial addition in place.
     pub fn add(&mut self, other: &Self) {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L87-L95
 
@@ -242,25 +242,22 @@ impl<C: Element> Poly<C> {
         self.0.iter_mut().zip(&other.0).for_each(|(a, b)| a.add(b))
     }
 
-    /// Evaluates the polynomial at the specified value.
-    pub fn evaluate(&self, i: u32) -> Eval<C> {
+    /// Evaluates the polynomial at the specified index (provided value offset by 1).
+    pub fn evaluate(&self, index: u32) -> Eval<C> {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L111-L129
 
         // We add +1 because we must never evaluate the polynomial at its first point
         // otherwise it reveals the "secret" value after a reshare (where the constant
         // term is set to be the secret of the previous dealing).
-        let xi = Scalar::from((i as u64) + 1);
+        let xi = Scalar::from_index(index);
 
         // Use Horner's method to evaluate the polynomial
-        let res = self.0.iter().rev().fold(C::zero(), |mut sum, coeff| {
+        let value = self.0.iter().rev().fold(C::zero(), |mut sum, coeff| {
             sum.mul(&xi);
             sum.add(coeff);
             sum
         });
-        Eval {
-            value: res,
-            index: i,
-        }
+        Eval { value, index }
     }
 
     /// Recovers the constant term of a polynomial of degree less than `t` using `t` evaluations of the polynomial
@@ -506,7 +503,7 @@ pub mod tests {
     fn evaluate() {
         for d in 0..100u32 {
             for idx in 0..100_u32 {
-                let x = Scalar::from(idx + 1);
+                let x = Scalar::from_index(idx);
 
                 let p1 = new(d);
                 let evaluation = p1.evaluate(idx).value;
