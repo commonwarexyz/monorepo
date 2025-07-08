@@ -600,7 +600,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             .await
     }
 
-    /// Analagous to [proof] but for a previous database state.
+    /// Analagous to proof but for a previous database state.
     /// Specifically, the state when the MMR had `size` elements.
     pub async fn historical_proof(
         &self,
