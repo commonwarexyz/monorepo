@@ -282,6 +282,7 @@ pub struct Table<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 
     // Pending table updates to be written on sync (table_index -> (section, offset))
     modified_sections: BTreeSet<u64>,
+    should_resize: bool,
 
     // Phantom data to satisfy the compiler about generic types
     _phantom: PhantomData<(K, V)>,
@@ -472,6 +473,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
             gets,
             resizes,
             modified_sections: BTreeSet::new(),
+            should_resize: false,
             _phantom: PhantomData,
         })
     }
@@ -586,18 +588,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         self.update_section().await?;
 
         // Get head of the chain from table
-        let mut table_index = self.table_index(&key);
-        let mut head = self.get_head(table_index).await?;
-
-        // Check chain depth and resize if necessary
-        if head.map(|(_, _, added)| added).unwrap_or(0) >= self.table_resize_frequency {
-            // Double the table size
-            self.resize().await?;
-
-            // Re-calculate table index and head
-            table_index = self.table_index(&key);
-            head = self.get_head(table_index).await?;
-        }
+        let table_index = self.table_index(&key);
+        let head = self.get_head(table_index).await?;
 
         // Create new head of the chain
         let entry = JournalEntry::new(
@@ -610,15 +602,21 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         let (offset, _) = self.journal.append(self.current_section, entry).await?;
 
         // Push table update
+        let added = head.map(|(_, _, added)| added).unwrap_or(0);
         self.modified_sections.insert(self.current_section);
         self.update_head(
             self.next_epoch,
             table_index,
             self.current_section,
             offset,
-            head.map(|(_, _, added)| added).unwrap_or(0) + 1,
+            added.checked_add(1).expect("added overflow"),
         )
         .await?;
+
+        // Determine if we should resize the table
+        if added >= self.table_resize_frequency {
+            self.should_resize = true;
+        }
 
         Ok(Cursor::new(self.current_section, offset))
     }
@@ -679,8 +677,42 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         Ok(self.get(Identifier::Key(key)).await?.is_some())
     }
 
+    /// Resize the table by doubling its size and re-sharding all entries.
+    async fn resize(&mut self) -> Result<(), Error> {
+        self.resizes.inc();
+
+        // Double the table size
+        let old = self.table_size;
+        let new = old.checked_mul(2).expect("table size overflow");
+        debug!(old, new, "resizing table");
+        self.table
+            .resize(new as u64 * TableEntry::FULL_SIZE as u64)
+            .await?;
+
+        // For each bucket in the old table, copy its head to the new position
+        let mut updates = Vec::with_capacity(old as usize * 2);
+        for i in 0..old {
+            let head = self.get_head(i).await?;
+            if let Some((section, offset, _)) = head {
+                // Write the same head to both i and i + old_size
+                updates.push(self.update_head(self.next_epoch, i, section, offset, 0));
+                updates.push(self.update_head(self.next_epoch, i + old, section, offset, 0));
+            } else {
+                // No chain at this position, write empty entries
+                updates.push(self.update_head(self.next_epoch, i, 0, 0, 0));
+                updates.push(self.update_head(self.next_epoch, i + old, 0, 0, 0));
+            }
+        }
+        try_join_all(updates).await?;
+
+        // Update the table size
+        self.table_size = new;
+        self.should_resize = false;
+
+        Ok(())
+    }
+
     /// Sync all data to the underlying store.
-    /// First syncs all journal sections, then flushes pending table updates, and finally syncs the table.
     pub async fn sync(&mut self) -> Result<Checkpoint, Error> {
         // Sync all modified journal sections
         let mut updates = Vec::with_capacity(self.modified_sections.len());
@@ -691,6 +723,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         self.modified_sections.clear();
 
         // Sync updated table entries
+        if self.should_resize {
+            self.resize().await?;
+        }
         self.table.sync().await?;
         let stored_epoch = self.next_epoch;
         self.next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
@@ -724,41 +759,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
             .remove(&self.table_partition, Some(TABLE_BLOB_NAME))
             .await?;
         self.context.remove(&self.table_partition, None).await?;
-
-        Ok(())
-    }
-
-    /// Resize the table by doubling its size and re-sharding all entries.
-    async fn resize(&mut self) -> Result<(), Error> {
-        unimplemented!("only resize during sync");
-        self.resizes.inc();
-
-        // Double the table size
-        let old = self.table_size;
-        let new = old.checked_mul(2).expect("table size overflow");
-        debug!(old, new, "resizing table");
-        self.table
-            .resize(new as u64 * TableEntry::FULL_SIZE as u64)
-            .await?;
-
-        // For each bucket in the old table, copy its head to the new position
-        // When we double the table size, bucket i maps to buckets i and i + old_size
-        for i in 0..old {
-            let head = self.get_head(i).await?;
-            unimplemented!("perform updates concurrently");
-            if let Some((section, offset, _)) = head {
-                // Write the same head to both i and i + old_size
-                self.update_head(self.next_epoch, i, section, offset, 0)
-                    .await?;
-                self.update_head(self.next_epoch, i + old, section, offset, 0)
-                    .await?;
-            } else {
-                // No chain at this position, write empty entries
-                self.update_head(self.next_epoch, i, 0, 0, 0).await?;
-                self.update_head(self.next_epoch, i + old, 0, 0, 0).await?;
-            }
-        }
-        self.table_size = new;
 
         Ok(())
     }
