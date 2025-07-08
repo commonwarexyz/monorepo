@@ -127,16 +127,16 @@ impl FixedSize for Checkpoint {
 // -------------------------------------------------------------------------------------------------
 // Table layout
 // -------------------------------------------------------------------------------------------------
-// Bucket slot (28 bytes):
+// Bucket slot (25 bytes):
 //   u64 epoch                – epoch in which this slot was written
 //   u64 section
 //   u32 offset
-//   u32 depth_since_resize   – depth of chain since last resize
-//   u32 crc                  – CRC of (epoch | section | offset | depth_since_resize)
+//   u8  added                – items added to this bucket since last resize
+//   u32 crc                  – CRC of (epoch | section | offset | added)
 
-/// Two slots per bucket, each slot now 28 bytes.
+/// Two slots per bucket, each slot now 25 bytes.
 const TABLE_BLOB_NAME: &[u8] = b"table";
-const TABLE_ENTRY_SIZE: usize = 28;
+const TABLE_ENTRY_SIZE: usize = 25;
 const FULL_TABLE_ENTRY_SIZE: usize = 2 * TABLE_ENTRY_SIZE;
 
 /// Single table entry stored in the table blob.
@@ -145,23 +145,23 @@ struct TableEntry {
     epoch: u64,
     section: u64,
     offset: u32,
-    depth_since_resize: u32,
+    added: u8,
     crc: u32,
 }
 
 impl TableEntry {
     /// Create a new [TableEntry] with a CRC.
-    fn new(epoch: u64, section: u64, offset: u32, depth_since_resize: u32) -> Self {
+    fn new(epoch: u64, section: u64, offset: u32, added: u8) -> Self {
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(&epoch.to_be_bytes());
         hasher.update(&section.to_be_bytes());
         hasher.update(&offset.to_be_bytes());
-        hasher.update(&depth_since_resize.to_be_bytes());
+        hasher.update(&added.to_be_bytes());
         Self {
             epoch,
             section,
             offset,
-            depth_since_resize,
+            added,
             crc: hasher.finalize(),
         }
     }
@@ -177,7 +177,7 @@ impl TableEntry {
         hasher.update(&self.epoch.to_be_bytes());
         hasher.update(&self.section.to_be_bytes());
         hasher.update(&self.offset.to_be_bytes());
-        hasher.update(&self.depth_since_resize.to_be_bytes());
+        hasher.update(&self.added.to_be_bytes());
         hasher.finalize() == self.crc
     }
 }
@@ -191,7 +191,7 @@ impl CodecWrite for TableEntry {
         self.epoch.write(buf);
         self.section.write(buf);
         self.offset.write(buf);
-        self.depth_since_resize.write(buf);
+        self.added.write(buf);
         self.crc.write(buf);
     }
 }
@@ -203,14 +203,14 @@ impl Read for TableEntry {
         let epoch = u64::read(buf)?;
         let section = u64::read(buf)?;
         let offset = u32::read(buf)?;
-        let depth_since_resize = u32::read(buf)?;
+        let added = u8::read(buf)?;
         let crc = u32::read(buf)?;
 
         Ok(Self {
             epoch,
             section,
             offset,
-            depth_since_resize,
+            added,
             crc,
         })
     }
@@ -264,7 +264,7 @@ pub struct Table<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Table size
     table_partition: String,
     table_size: u32,
-    max_chain_depth: u32,
+    table_resize_frequency: u8,
 
     // Table blob that maps hash values to journal locations (journal_id, offset)
     table: E::Blob,
@@ -337,15 +337,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
                 table_size: config.initial_table_size,
                 ..Default::default()
             }
-        } else if let Some(mut checkpoint) = checkpoint {
-            if checkpoint.table_size == 0 {
-                checkpoint.table_size = config.initial_table_size;
-            }
+        } else if let Some(checkpoint) = checkpoint {
             // Rewind the journal to the committed section and offset and drop all values larger
             journal.rewind(checkpoint.section, checkpoint.size).await?;
 
-            // Zero out any table entries whose epoch is greater than the committed epoch
+            // Resize the table
             let mut modified = false;
+            let table_data_size = checkpoint.table_size as u64 * FULL_TABLE_ENTRY_SIZE as u64;
+            if table_data_size != table_len {
+                table.resize(table_data_size).await?;
+                modified = true;
+            }
+
+            // Zero out any table entries whose epoch is greater than the committed epoch
             let zero_buf = vec![0u8; TABLE_ENTRY_SIZE];
             for table_index in 0..checkpoint.table_size {
                 let offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
@@ -389,11 +393,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
             // Open the table blob and construct a checkpoint from what is written
             let mut modified = false;
             let mut checkpoint = Checkpoint {
-                table_size: config.initial_table_size,
+                table_size: (table_len / FULL_TABLE_ENTRY_SIZE as u64) as u32,
                 ..Default::default()
             };
             let zero_buf = vec![0u8; TABLE_ENTRY_SIZE];
-            for table_index in 0..config.initial_table_size {
+            for table_index in 0..checkpoint.table_size {
                 let offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
                 let result = table
                     .read_at(vec![0u8; FULL_TABLE_ENTRY_SIZE], offset)
@@ -461,7 +465,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         Ok(Self {
             context,
             table_size: checkpoint.table_size,
-            max_chain_depth: config.max_chain_depth,
+            table_resize_frequency: config.table_resize_frequency,
             table,
             table_partition: config.table_partition,
             journal,
@@ -487,28 +491,26 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         &self,
         entry1: &TableEntry,
         entry2: &TableEntry,
-    ) -> Option<(u64, u32, u32)> {
+    ) -> Option<(u64, u32, u8)> {
         match (
             !entry1.is_empty() && entry1.is_valid(),
             !entry2.is_empty() && entry2.is_valid(),
         ) {
             (true, true) => match entry1.epoch.cmp(&entry2.epoch) {
-                Ordering::Greater => {
-                    Some((entry1.section, entry1.offset, entry1.depth_since_resize))
-                }
-                Ordering::Less => Some((entry2.section, entry2.offset, entry2.depth_since_resize)),
+                Ordering::Greater => Some((entry1.section, entry1.offset, entry1.added)),
+                Ordering::Less => Some((entry2.section, entry2.offset, entry2.added)),
                 Ordering::Equal => {
                     unreachable!("two valid entries with the same epoch")
                 }
             },
-            (true, false) => Some((entry1.section, entry1.offset, entry1.depth_since_resize)),
-            (false, true) => Some((entry2.section, entry2.offset, entry2.depth_since_resize)),
+            (true, false) => Some((entry1.section, entry1.offset, entry1.added)),
+            (false, true) => Some((entry2.section, entry2.offset, entry2.added)),
             (false, false) => None,
         }
     }
 
     /// Get the head of the journal chain for a given table index, along with its depth.
-    async fn get_head(&self, table_index: u32) -> Result<Option<(u64, u32, u32)>, Error> {
+    async fn get_head(&self, table_index: u32) -> Result<Option<(u64, u32, u8)>, Error> {
         // Read the table entry
         let offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
         let buf = vec![0u8; FULL_TABLE_ENTRY_SIZE];
@@ -529,7 +531,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         table_index: u32,
         section: u64,
         offset: u32,
-        depth_since_resize: u32,
+        added: u8,
     ) -> Result<(), Error> {
         // Read current entries to determine which slot to update
         let table_offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
@@ -558,7 +560,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         };
 
         // Build the new entry
-        let entry = TableEntry::new(epoch, section, offset, depth_since_resize);
+        let entry = TableEntry::new(epoch, section, offset, added);
 
         // Write the new entry
         self.table
@@ -589,33 +591,36 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
 
         // Get head of the chain from table
         let mut table_index = self.table_index(&key);
-        let mut head_info = self.get_head(table_index).await?;
+        let mut head = self.get_head(table_index).await?;
 
         // Check chain depth and resize if necessary
-        let depth = head_info.map(|(_, _, d)| d).unwrap_or(0);
-
-        if depth >= self.max_chain_depth {
+        if head.map(|(_, _, added)| added).unwrap_or(0) >= self.table_resize_frequency {
+            // Double the table size
             self.resize().await?;
-            // After resize, must re-calculate everything for this put
+
+            // Re-calculate table index and head
             table_index = self.table_index(&key);
-            head_info = self.get_head(table_index).await?;
+            head = self.get_head(table_index).await?;
         }
 
         // Create new head of the chain
-        let head = head_info.map(|(section, offset, _)| (section, offset));
-        let entry = JournalEntry::new(key, value, head);
+        let entry = JournalEntry::new(
+            key,
+            value,
+            head.map(|(section, offset, _)| (section, offset)),
+        );
 
         // Append entry to the variable journal
         let (offset, _) = self.journal.append(self.current_section, entry).await?;
 
-        // Push table update with incremented depth
+        // Push table update
         self.modified_sections.insert(self.current_section);
         self.update_head(
             self.next_epoch,
             table_index,
             self.current_section,
             offset,
-            depth + 1,
+            head.map(|(_, _, added)| added).unwrap_or(0) + 1,
         )
         .await?;
 
@@ -730,37 +735,33 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
     /// Resize the table by doubling its size and re-sharding all entries.
     async fn resize(&mut self) -> Result<(), Error> {
         self.resizes.inc();
-        let old_size = self.table_size;
-        let new_size = old_size * 2;
-        debug!("resizing table from {} to {}", old_size, new_size);
 
-        // Resize the table blob
+        // Double the table size
+        let old = self.table_size;
+        let new = old.checked_mul(2).expect("table size overflow");
+        debug!(old, new, "resizing table");
         self.table
-            .resize(new_size as u64 * FULL_TABLE_ENTRY_SIZE as u64)
+            .resize(new as u64 * FULL_TABLE_ENTRY_SIZE as u64)
             .await?;
 
         // For each bucket in the old table, copy its head to the new position
         // When we double the table size, bucket i maps to buckets i and i + old_size
-        for i in 0..old_size {
+        for i in 0..old {
             let head = self.get_head(i).await?;
-
             if let Some((section, offset, _)) = head {
                 // Write the same head to both i and i + old_size
-                // This works because items will naturally partition based on their hash
-                // Reset depth to 0 after resize
                 self.update_head(self.next_epoch, i, section, offset, 0)
                     .await?;
-                self.update_head(self.next_epoch, i + old_size, section, offset, 0)
+                self.update_head(self.next_epoch, i + old, section, offset, 0)
                     .await?;
             } else {
                 // No chain at this position, write empty entries
                 self.update_head(self.next_epoch, i, 0, 0, 0).await?;
-                self.update_head(self.next_epoch, i + old_size, 0, 0, 0)
-                    .await?;
+                self.update_head(self.next_epoch, i + old, 0, 0, 0).await?;
             }
         }
+        self.table_size = new;
 
-        self.table_size = new_size;
         Ok(())
     }
 }
