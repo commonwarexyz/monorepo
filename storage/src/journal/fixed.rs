@@ -60,10 +60,7 @@ use futures::{
     StreamExt,
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::{
-    collections::{BTreeMap, HashMap},
-    marker::PhantomData,
-};
+use std::{collections::BTreeMap, marker::PhantomData};
 use tracing::{debug, trace, warn};
 
 /// Configuration for `Journal` storage.
@@ -139,7 +136,6 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             Err(RError::PartitionMissing(_)) => Vec::new(),
             Err(err) => return Err(Error::Runtime(err)),
         };
-        let mut sizes = HashMap::new();
         for name in stored_blobs {
             let (blob, size) = context
                 .open(&cfg.partition, &name)
@@ -150,39 +146,30 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 Err(nm) => return Err(Error::InvalidBlobName(hex(&nm))),
             };
             debug!(blob = index, size, "loaded blob");
-            sizes.insert(index, size);
-            blobs.insert(index, blob);
+            blobs.insert(index, (blob, size));
         }
+
+        // Check that there are no gaps in the historical blobs and that they are all full.
+        let full_size = cfg.items_per_blob * Self::CHUNK_SIZE_U64;
         if !blobs.is_empty() {
-            // Check that there are no gaps in the blob numbering, which would indicate missing data.
-            let mut it = blobs.keys();
-            let mut previous_index = *it.next().unwrap();
+            let mut it = blobs.keys().rev();
+            let mut prev_index = *it.next().unwrap();
             for index in it {
-                if *index != previous_index + 1 {
-                    return Err(Error::MissingBlob(previous_index + 1));
+                let (_, size) = blobs.get(index).unwrap();
+                if *index != prev_index - 1 {
+                    return Err(Error::MissingBlob(prev_index - 1));
                 }
-                previous_index = *index;
-            }
-            // Check that all blobs except the last is full.
-            let expected_size = cfg.items_per_blob * Self::CHUNK_SIZE_U64;
-            for index in blobs.keys() {
-                if previous_index == *index {
-                    // This is the last blob, which should never be full. Its size may be
-                    // invalid, but we'll repair it later if so.
-                    break;
-                }
-                let size = *sizes.get(index).unwrap();
-                if size != expected_size {
+                prev_index = *index;
+                if *size != full_size {
                     // Non-final blobs that have invalid sizes are not recoverable.
-                    return Err(Error::InvalidBlobSize(*index, size));
+                    return Err(Error::InvalidBlobSize(full_size, *size));
                 }
             }
         } else {
             debug!("no blobs found");
             let (blob, size) = context.open(&cfg.partition, &0u64.to_be_bytes()).await?;
             assert_eq!(size, 0);
-            blobs.insert(0, blob);
-            sizes.insert(0, 0);
+            blobs.insert(0, (blob, size));
         }
 
         // Initialize metrics.
@@ -195,20 +182,19 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         tracked.set(blobs.len() as i64);
 
         // Initialize the tail blob.
-        let (mut tail_index, mut tail) = blobs.pop_last().unwrap();
-        let mut tail_size = *sizes.get(&tail_index).unwrap();
+        let (mut tail_index, (mut tail, mut tail_size)) = blobs.pop_last().unwrap();
 
         // Trim invalid items from the tail blob.
         tail_size = Self::trim_tail(&tail, tail_size, tail_index).await?;
 
         // If the tail blob is full we need to start a new one to maintain its invariant that there
         // is always room for another item.
-        if tail_size == cfg.items_per_blob * Self::CHUNK_SIZE_U64 {
+        if tail_size == full_size {
             warn!(
                 blob = tail_index,
                 "tail blob is full, creating a new empty one"
             );
-            blobs.insert(tail_index, tail);
+            blobs.insert(tail_index, (tail, tail_size));
             tail_index += 1;
             (tail, tail_size) = context
                 .open(&cfg.partition, &tail_index.to_be_bytes())
@@ -220,12 +206,11 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         // Wrap all blobs with Append wrappers.
         // TODO(https://github.com/commonwarexyz/monorepo/issues/1219): Consider creating an
         // Immutable wrapper which doesn't allocate a write buffer for these.
-        let blobs = try_join_all(blobs.into_iter().map(|(index, blob)| {
+        let blobs = try_join_all(blobs.into_iter().map(|(index, (blob, size))| {
             let pool = cfg.buffer_pool.clone();
-            let size = cfg.items_per_blob * Self::CHUNK_SIZE_U64;
             async move {
                 let blob = Append::new(blob, size, cfg.write_buffer, pool).await?;
-                Ok::<_, Error>((index, blob))
+                Ok::<_, Error>((index, (blob, size)))
             }
         }))
         .await?;
@@ -234,7 +219,10 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         Ok(Self {
             context,
             cfg,
-            blobs: blobs.into_iter().collect(),
+            blobs: blobs
+                .into_iter()
+                .map(|(index, (blob, _))| (index, blob))
+                .collect(),
             tail,
             tail_index,
             tracked,
