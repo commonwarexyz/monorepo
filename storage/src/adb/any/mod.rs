@@ -1756,8 +1756,6 @@ pub(super) mod test {
             assert_eq!(historical_proof.size, regular_proof.size);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-
-            // Verify current proof
             assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
                 &mut hasher,
                 &historical_proof,
@@ -1779,8 +1777,6 @@ pub(super) mod test {
             assert_eq!(historical_proof.size, regular_proof.size);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-
-            // Verify the proof
             assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
                 &mut hasher,
                 &historical_proof,
@@ -1790,39 +1786,6 @@ pub(super) mod test {
             ));
 
             db.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_any_db_historical_proof_sync_scenario() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Create server database with many operations
-            let mut server_db = create_test_db(context.clone()).await;
-            let ops = create_test_ops(100);
-            server_db = apply_ops(server_db, ops.clone()).await;
-            server_db.commit().await.unwrap();
-
-            // Client wants to sync operations 60-79 (20 operations)
-            let start_loc = 60;
-            let sync_ops_size = 20;
-
-            // Generate proof at historical position (after sync range)
-            let historical_size = start_loc + sync_ops_size;
-            let (sync_proof, sync_ops) = server_db
-                .historical_proof(historical_size, start_loc, sync_ops_size)
-                .await
-                .unwrap();
-
-            assert_eq!(sync_proof.size, leaf_num_to_pos(historical_size));
-            assert_eq!(sync_ops.len(), sync_ops_size as usize);
-
-            // Verify operations are correct
-            for (i, op) in sync_ops.iter().enumerate() {
-                assert_eq!(*op, ops[start_loc as usize + i]);
-            }
-
-            server_db.destroy().await.unwrap();
         });
     }
 
@@ -1837,7 +1800,7 @@ pub(super) mod test {
 
             let mut hasher = Standard::<Sha256>::new();
 
-            // Test single operation at historical position
+            // Test singleton database
             let (single_proof, single_ops) = db.historical_proof(1, 0, 1).await.unwrap();
             assert_eq!(single_proof.size, leaf_num_to_pos(1));
             assert_eq!(single_ops.len(), 1);
@@ -1846,6 +1809,7 @@ pub(super) mod test {
             let mut single_db = create_test_db(context.clone()).await;
             single_db = apply_ops(single_db, ops[0..1].to_vec()).await;
             // Don't commit - this changes the root due to commit operations
+            single_db.sync().await.unwrap();
             let single_root = single_db.root(&mut hasher);
 
             assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
@@ -1859,11 +1823,13 @@ pub(super) mod test {
             // Test requesting more operations than available in historical position
             let (_limited_proof, limited_ops) = db.historical_proof(10, 5, 20).await.unwrap();
             assert_eq!(limited_ops.len(), 5); // Should be limited by historical position
+            assert_eq!(limited_ops, ops[5..10]);
 
             // Test proof at minimum historical position
             let (min_proof, min_ops) = db.historical_proof(3, 0, 3).await.unwrap();
             assert_eq!(min_proof.size, leaf_num_to_pos(3));
             assert_eq!(min_ops.len(), 3);
+            assert_eq!(min_ops, ops[0..3]);
 
             single_db.destroy().await.unwrap();
             db.destroy().await.unwrap();
@@ -1903,8 +1869,10 @@ pub(super) mod test {
                 assert_eq!(ref_proof.size, historical_proof.size);
                 assert_eq!(ref_ops, historical_ops);
                 assert_eq!(ref_proof.digests, historical_proof.digests);
+                let end_loc = std::cmp::min(start_loc + max_ops, historical_end);
+                assert_eq!(ref_ops, ops[start_loc as usize..end_loc as usize]);
 
-                // Verify proof against historical root
+                // Verify proof against reference root
                 let ref_root = ref_db.root(&mut hasher);
                 assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
                     &mut hasher,
@@ -1917,68 +1885,6 @@ pub(super) mod test {
                 ref_db.destroy().await.unwrap();
             }
 
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_any_db_historical_proof_verify_operations_correctness() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = create_test_db(context.clone()).await;
-
-            // Create specific operations for testing
-            let key1 = hash(b"key1");
-            let value1 = hash(b"value1");
-            let key2 = hash(b"key2");
-            let value2 = hash(b"value2");
-            let key3 = hash(b"key3");
-            let value3 = hash(b"value3");
-
-            // Apply operations in sequence
-            db.update(key1, value1).await.unwrap(); // op 0
-            db.update(key2, value2).await.unwrap(); // op 1
-            db.update(key3, value3).await.unwrap(); // op 2
-            db.delete(key1).await.unwrap(); // op 3
-            db.update(key1, value1).await.unwrap(); // op 4 (re-add key1)
-            db.commit().await.unwrap();
-
-            let mut hasher = Standard::<Sha256>::new();
-
-            // Test proof at historical position after 3 operations (before key1 deletion)
-            let (historical_proof, historical_ops) = db.historical_proof(3, 0, 3).await.unwrap();
-
-            // Create reference database state at the given historical position
-            let mut ref_db = create_test_db(context.clone()).await;
-            ref_db.update(key1, value1).await.unwrap();
-            ref_db.update(key2, value2).await.unwrap();
-            ref_db.update(key3, value3).await.unwrap();
-            // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
-            ref_db.sync().await.unwrap();
-            let ref_root = ref_db.root(&mut hasher);
-
-            // Verify historical proof
-            assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
-                &mut hasher,
-                &historical_proof,
-                0,
-                &historical_ops,
-                &ref_root
-            ));
-
-            // Verify the operations are correct
-            assert_eq!(historical_ops.len(), 3);
-            assert!(
-                matches!(historical_ops[0], Operation::Update(k, v) if k == key1 && v == value1)
-            );
-            assert!(
-                matches!(historical_ops[1], Operation::Update(k, v) if k == key2 && v == value2)
-            );
-            assert!(
-                matches!(historical_ops[2], Operation::Update(k, v) if k == key3 && v == value3)
-            );
-
-            ref_db.destroy().await.unwrap();
             db.destroy().await.unwrap();
         });
     }
