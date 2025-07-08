@@ -132,9 +132,7 @@ pub fn compute_weights(indices: Vec<u32>) -> Result<BTreeMap<u32, Weight>, Error
     let mut weights = BTreeMap::new();
     for i in &indices {
         // Convert i_eval.index to x-coordinate (x = index + 1)
-        let mut xi = Scalar::zero();
-        xi.set_int(*i);
-        xi.add(&Scalar::one());
+        let xi = Scalar::from((*i as u64) + 1);
 
         // Compute product terms for Lagrange basis polynomial
         let (mut num, mut den) = (Scalar::one(), Scalar::one());
@@ -145,9 +143,7 @@ pub fn compute_weights(indices: Vec<u32>) -> Result<BTreeMap<u32, Weight>, Error
             }
 
             // Convert j_eval.index to x-coordinate
-            let mut xj = Scalar::zero();
-            xj.set_int(*j);
-            xj.add(&Scalar::one());
+            let xj = Scalar::from((*j as u64) + 1);
 
             // Include `xj` in the numerator product for `l_i(0)`
             num.mul(&xj);
@@ -253,9 +249,7 @@ impl<C: Element> Poly<C> {
         // We add +1 because we must never evaluate the polynomial at its first point
         // otherwise it reveals the "secret" value after a reshare (where the constant
         // term is set to be the secret of the previous dealing).
-        let mut xi = Scalar::zero();
-        xi.set_int(i);
-        xi.add(&Scalar::one());
+        let xi = Scalar::from((i as u64) + 1);
 
         // Use Horner's method to evaluate the polynomial
         let res = self.0.iter().rev().fold(C::zero(), |mut sum, coeff| {
@@ -512,8 +506,7 @@ pub mod tests {
     fn evaluate() {
         for d in 0..100u32 {
             for idx in 0..100_u32 {
-                let mut x = Scalar::zero();
-                x.set_int(idx + 1);
+                let x = Scalar::from(idx + 1);
 
                 let p1 = new(d);
                 let evaluation = p1.evaluate(idx).value;

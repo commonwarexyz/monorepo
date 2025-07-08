@@ -2382,13 +2382,8 @@ mod tests {
             let mut den = Scalar::one();
 
             // Initialize the evaluation point and the index.
-            let mut eval_at_scalar = Scalar::zero();
-            eval_at_scalar.set_int(eval_at_x);
-            eval_at_scalar.add(&Scalar::one());
-
-            let mut xi = Scalar::zero();
-            xi.set_int(i_x);
-            xi.add(&Scalar::one());
+            let eval_at_scalar = Scalar::from(eval_at_x as u64 + 1);
+            let xi = Scalar::from(i_x as u64 + 1);
 
             // Compute the Lagrange coefficients.
             for &j_x in x_coords {
@@ -2398,9 +2393,7 @@ mod tests {
                 }
 
                 // Initialize the other index.
-                let mut xj = Scalar::zero();
-                xj.set_int(j_x);
-                xj.add(&Scalar::one());
+                let xj = Scalar::from(j_x as u64 + 1);
 
                 // Numerator: product over j!=i of (eval_at - x_j)
                 let mut term = eval_at_scalar.clone();
