@@ -220,7 +220,10 @@ where
                 metrics,
             } => {
                 // Get current position in the log
-                let log_size = log.size().await.unwrap();
+                let log_size = log
+                    .size()
+                    .await
+                    .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
                 // Calculate remaining operations to sync (inclusive upper bound)
                 let remaining_ops = if log_size <= config.upper_bound_ops {
@@ -355,7 +358,10 @@ where
                 }
 
                 // Check if we've applied all needed operations
-                let log_size = log.size().await.unwrap();
+                let log_size = log
+                    .size()
+                    .await
+                    .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
                 // Calculate the target log size (upper bound is inclusive)
                 let target_log_size = config
