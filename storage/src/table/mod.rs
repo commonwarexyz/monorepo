@@ -387,7 +387,7 @@ mod tests {
 
             // Reopen and verify data persisted
             {
-                let store = Table::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+                let store = Table::<_, FixedBytes<64>, i32>::init_synchronized(
                     context.clone(),
                     cfg.clone(),
                     Some(checkpoint),
@@ -463,7 +463,7 @@ mod tests {
 
             // Reopen and verify only committed data is present
             {
-                let store = Table::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+                let store = Table::<_, FixedBytes<64>, i32>::init_synchronized(
                     context.clone(),
                     cfg.clone(),
                     Some(checkpoint),
@@ -634,7 +634,7 @@ mod tests {
 
             // Reopen and verify it handles the corruption
             {
-                let store = Table::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+                let store = Table::<_, FixedBytes<64>, i32>::init_synchronized(
                     context.clone(),
                     cfg.clone(),
                     Some(checkpoint),
@@ -691,7 +691,7 @@ mod tests {
 
             // Reopen and verify it handles invalid CRC
             {
-                let store = Table::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+                let store = Table::<_, FixedBytes<64>, i32>::init_synchronized(
                     context.clone(),
                     cfg.clone(),
                     Some(checkpoint),
@@ -746,7 +746,7 @@ mod tests {
 
             // Reopen and verify it handles extra bytes gracefully
             {
-                let store = Table::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+                let store = Table::<_, FixedBytes<64>, i32>::init_synchronized(
                     context.clone(),
                     cfg.clone(),
                     Some(checkpoint),
@@ -819,7 +819,7 @@ mod tests {
             // Close and reopen to verify persistence
             let checkpoint = store.close().await.expect("Failed to close");
 
-            let store = Table::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+            let store = Table::<_, FixedBytes<64>, i32>::init_synchronized(
                 context.clone(),
                 cfg.clone(),
                 Some(checkpoint),
@@ -921,7 +921,7 @@ mod tests {
             let checkpoint = store.close().await.expect("Failed to close store");
 
             // Reopen the store
-            let mut store = Table::<_, FixedBytes<96>, FixedBytes<256>>::init_with_checkpoint(
+            let mut store = Table::<_, FixedBytes<96>, FixedBytes<256>>::init_synchronized(
                 context.clone(),
                 cfg.clone(),
                 Some(checkpoint),

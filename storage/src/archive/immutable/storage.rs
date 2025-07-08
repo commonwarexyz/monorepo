@@ -116,7 +116,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         };
 
         // Initialize table
-        let table = Table::init_with_checkpoint(
+        //
+        // TODO (#1227): Use sharded metadata to provide consistency
+        let table = Table::init_synchronized(
             context.with_label("table"),
             table::Config {
                 journal_partition: cfg.journal_partition,
@@ -145,7 +147,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         }
 
         // Initialize ordinal
-        let ordinal = Ordinal::init_align(
+        //
+        // TODO (#1227): Use sharded metadata to provide consistency
+        let ordinal = Ordinal::init_synchronized(
             context.with_label("ordinal"),
             ordinal::Config {
                 partition: cfg.ordinal_partition,

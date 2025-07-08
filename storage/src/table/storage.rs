@@ -292,11 +292,11 @@ pub struct Table<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
     /// Initialize a new [Table] instance.
     pub async fn init(context: E, config: Config<V::Cfg>) -> Result<Self, Error> {
-        Self::init_with_checkpoint(context, config, None).await
+        Self::init_synchronized(context, config, None).await
     }
 
     /// Initialize a new [Table] instance with a [Checkpoint].
-    pub async fn init_with_checkpoint(
+    pub async fn init_synchronized(
         context: E,
         config: Config<V::Cfg>,
         checkpoint: Option<Checkpoint>,

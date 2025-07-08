@@ -84,12 +84,12 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
 impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
     /// Initialize a new [Ordinal] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
-        Self::init_align(context, config, None).await
+        Self::init_synchronized(context, config, None).await
     }
 
     /// Initialize a new [Ordinal] instance with a collection of [BitVec]s that indicate
     /// which items should be considered available.
-    pub async fn init_align(
+    pub async fn init_synchronized(
         context: E,
         config: Config,
         bits: Option<HashMap<u64, &Option<BitVec>>>,
