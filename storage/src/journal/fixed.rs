@@ -294,7 +294,6 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             .await
             .map_err(Error::Runtime)?;
         assert_eq!(tail_actual_size, 0, "we just emptied all blobs");
-
         let tail = Append::new(tail_blob, 0, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
         if tail_items > 0 {
             tail.resize(tail_size).await.map_err(Error::Runtime)?;
