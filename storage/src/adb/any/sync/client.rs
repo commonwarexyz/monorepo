@@ -394,7 +394,7 @@ where
 
                 if applied_ops >= total_ops_needed {
                     // Build the complete database from the log
-                    let db = adb::any::Any::init_pruned(
+                    let db = adb::any::Any::init_synced(
                         config.context.clone(),
                         SyncConfig {
                             db_config: config.db_config.clone(),
