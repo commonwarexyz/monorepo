@@ -2,7 +2,10 @@ use crate::{
     adb::{
         self,
         any::{
-            sync::{resolver::Resolver, Error},
+            sync::{
+                resolver::{GetProofResult, Resolver},
+                Error,
+            },
             SyncConfig,
         },
         operation::Operation,
@@ -276,18 +279,23 @@ where
                 );
 
                 // Get proof and operations from resolver with timing
-                let (proof, new_operations) = {
+                let GetProofResult {
+                    proof,
+                    operations,
+                    success_tx,
+                } = {
                     let _timer = metrics.fetch_duration.timer();
                     config.resolver.get_proof(next_op_loc, batch_size).await?
                 };
 
-                let new_operations_len = new_operations.len() as u64;
+                let operations_len = operations.len() as u64;
 
                 // Validate that we didn't get more operations than requested
                 // or that we didn't get an empty proof. We should never get an empty proof
                 // because we will never request an empty proof (i.e. a proof over an empty database).
-                if new_operations_len > batch_size.get() || new_operations_len == 0 {
+                if operations_len > batch_size.get() || operations_len == 0 {
                     metrics.invalid_batches_received.inc();
+                    let _ = success_tx.send(false);
                     if metrics.invalid_batches_received.get() > config.max_retries {
                         return Err(Error::MaxRetriesExceeded);
                     }
@@ -300,7 +308,7 @@ where
                 }
 
                 debug!(
-                    num_ops = new_operations_len,
+                    ops_len = operations_len,
                     "Received operations from resolver"
                 );
 
@@ -311,10 +319,11 @@ where
                         &mut config.hasher,
                         &proof,
                         next_op_loc,
-                        &new_operations,
+                        &operations,
                         &config.target_hash,
                     )
                 };
+                let _ = success_tx.send(proof_valid);
 
                 if !proof_valid {
                     debug!("Proof verification failed, retrying");
@@ -322,7 +331,6 @@ where
                     if metrics.invalid_batches_received.get() > config.max_retries {
                         return Err(Error::MaxRetriesExceeded);
                     }
-                    config.resolver.notify_failure();
 
                     return Ok(Client::FetchData {
                         config,
@@ -335,7 +343,7 @@ where
                 // Install pinned nodes on first successful batch.
                 if applied_ops == 0 {
                     let start_pos = leaf_num_to_pos(next_op_loc);
-                    let end_pos = leaf_num_to_pos(next_op_loc + new_operations_len - 1);
+                    let end_pos = leaf_num_to_pos(next_op_loc + operations_len - 1);
                     let Ok(new_pinned_nodes) = proof.extract_pinned_nodes(start_pos, end_pos)
                     else {
                         warn!("Failed to extract pinned nodes, retrying");
@@ -355,13 +363,13 @@ where
 
                 // Record successful batch metrics
                 metrics.valid_batches_received.inc();
-                metrics.operations_fetched.inc_by(new_operations_len);
+                metrics.operations_fetched.inc_by(operations_len);
 
                 Ok(Client::ApplyData {
                     config,
                     log,
                     pinned_nodes,
-                    batch_ops: new_operations,
+                    batch_ops: operations,
                     metrics,
                 })
             }
@@ -468,6 +476,7 @@ pub(crate) mod tests {
     use commonware_cryptography::{sha256::Digest, Digest as _, Sha256};
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::NZU64;
+    use futures::channel::oneshot;
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
     use std::{
         collections::{HashMap, HashSet},
@@ -617,35 +626,28 @@ pub(crate) mod tests {
             &mut self,
             _start_index: u64,
             max_ops: NonZeroU64,
-        ) -> Result<
-            (
-                Proof<<TestHash as Hasher>::Digest>,
-                Vec<Operation<TestKey, TestValue>>,
-            ),
-            Error,
-        > {
+        ) -> Result<GetProofResult<TestHash, TestKey, TestValue>, Error> {
             self.call_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
             // Return more operations than requested to trigger retry logic
-            let mut ops = Vec::new();
+            let mut operations = Vec::new();
             for i in 0..(max_ops.get() + 1) {
-                ops.push(Operation::Update(
+                operations.push(Operation::Update(
                     TestKey::from([(i % 256) as u8; 32]),
                     TestValue::from([0u8; 32]),
                 ));
             }
 
-            Ok((
-                Proof {
+            Ok(GetProofResult {
+                proof: Proof {
                     size: 1,
                     digests: vec![Digest::from([0u8; 32])],
                 },
-                ops,
-            ))
+                operations,
+                success_tx: oneshot::channel().0,
+            })
         }
-
-        fn notify_failure(&mut self) {}
     }
 
     /// Test that we return an error after max_retries attempts to get a proof fail.

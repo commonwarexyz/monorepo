@@ -9,22 +9,30 @@ use crate::{
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
+use futures::channel::oneshot;
 use std::{future::Future, num::NonZeroU64};
+
+/// Result of a call to [Resolver::get_proof].
+pub struct GetProofResult<H: Hasher, K: Array, V: Array> {
+    /// Proof that the operations are valid.
+    pub proof: Proof<H::Digest>,
+    /// The operations in the requested range.
+    pub operations: Vec<Operation<K, V>>,
+    /// A channel to send the result of the proof verification.
+    /// Caller should send `true` if the proof is valid, `false` otherwise.
+    /// Caller should ignore error if the channel is closed.
+    pub success_tx: oneshot::Sender<bool>,
+}
 
 /// Trait for network communication with the sync server
 pub trait Resolver<H: Hasher, K: Array, V: Array> {
-    /// Request proof and operations starting from the given index
-    #[allow(clippy::type_complexity)]
+    /// Request proof and operations starting from the given index into an [Any] database's
+    /// operation log. Returns at most `max_ops` operations.
     fn get_proof(
         &mut self,
-        start_index: u64,
+        start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error>>;
-
-    /// Notify the resolver that the proof verification failed.
-    /// A server implementation could decide to connect to a different server
-    /// in response to several failed attempts, for example.
-    fn notify_failure(&mut self);
+    ) -> impl Future<Output = Result<GetProofResult<H, K, V>, Error>>;
 }
 
 impl<E, K, V, H, T> Resolver<H, K, V> for Any<E, K, V, H, T>
@@ -37,15 +45,19 @@ where
 {
     async fn get_proof(
         &mut self,
-        start_index: u64,
+        start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        self.proof(start_index, max_ops.get())
+    ) -> Result<GetProofResult<H, K, V>, Error> {
+        self.proof(start_loc, max_ops.get())
             .await
             .map_err(Error::GetProofFailed)
+            .map(|(proof, operations)| GetProofResult {
+                proof,
+                operations,
+                // Result of proof verification isn't used by this implementation.
+                success_tx: oneshot::channel().0,
+            })
     }
-
-    fn notify_failure(&mut self) {}
 }
 
 impl<E, K, V, H, T> Resolver<H, K, V> for &mut Any<E, K, V, H, T>
@@ -60,11 +72,15 @@ where
         &mut self,
         start_index: u64,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+    ) -> Result<GetProofResult<H, K, V>, Error> {
         self.proof(start_index, max_ops.get())
             .await
             .map_err(Error::GetProofFailed)
+            .map(|(proof, operations)| GetProofResult {
+                proof,
+                operations,
+                // Result of proof verification isn't used by this implementation.
+                success_tx: oneshot::channel().0,
+            })
     }
-
-    fn notify_failure(&mut self) {}
 }
