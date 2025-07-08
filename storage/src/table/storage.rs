@@ -127,15 +127,16 @@ impl FixedSize for Checkpoint {
 // -------------------------------------------------------------------------------------------------
 // Table layout
 // -------------------------------------------------------------------------------------------------
-// Bucket slot (24 bytes):
+// Bucket slot (28 bytes):
 //   u64 epoch                – epoch in which this slot was written
 //   u64 section
 //   u32 offset
-//   u32 crc                  – CRC of (epoch | section | offset )
+//   u32 depth_since_resize   – depth of chain since last resize
+//   u32 crc                  – CRC of (epoch | section | offset | depth_since_resize)
 
-/// Two slots per bucket, each slot now 24 bytes.
+/// Two slots per bucket, each slot now 28 bytes.
 const TABLE_BLOB_NAME: &[u8] = b"table";
-const TABLE_ENTRY_SIZE: usize = 24;
+const TABLE_ENTRY_SIZE: usize = 28;
 const FULL_TABLE_ENTRY_SIZE: usize = 2 * TABLE_ENTRY_SIZE;
 
 /// Single table entry stored in the table blob.
@@ -144,20 +145,23 @@ struct TableEntry {
     epoch: u64,
     section: u64,
     offset: u32,
+    depth_since_resize: u32,
     crc: u32,
 }
 
 impl TableEntry {
     /// Create a new [TableEntry] with a CRC.
-    fn new(epoch: u64, section: u64, offset: u32) -> Self {
+    fn new(epoch: u64, section: u64, offset: u32, depth_since_resize: u32) -> Self {
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(&epoch.to_be_bytes());
         hasher.update(&section.to_be_bytes());
         hasher.update(&offset.to_be_bytes());
+        hasher.update(&depth_since_resize.to_be_bytes());
         Self {
             epoch,
             section,
             offset,
+            depth_since_resize,
             crc: hasher.finalize(),
         }
     }
@@ -173,6 +177,7 @@ impl TableEntry {
         hasher.update(&self.epoch.to_be_bytes());
         hasher.update(&self.section.to_be_bytes());
         hasher.update(&self.offset.to_be_bytes());
+        hasher.update(&self.depth_since_resize.to_be_bytes());
         hasher.finalize() == self.crc
     }
 }
@@ -186,6 +191,7 @@ impl CodecWrite for TableEntry {
         self.epoch.write(buf);
         self.section.write(buf);
         self.offset.write(buf);
+        self.depth_since_resize.write(buf);
         self.crc.write(buf);
     }
 }
@@ -197,12 +203,14 @@ impl Read for TableEntry {
         let epoch = u64::read(buf)?;
         let section = u64::read(buf)?;
         let offset = u32::read(buf)?;
+        let depth_since_resize = u32::read(buf)?;
         let crc = u32::read(buf)?;
 
         Ok(Self {
             epoch,
             section,
             offset,
+            depth_since_resize,
             crc,
         })
     }
@@ -212,19 +220,13 @@ impl Read for TableEntry {
 struct JournalEntry<K: Array, V: Codec> {
     key: K,
     value: V,
-    depth: u32,
     next: Option<(u64, u32)>,
 }
 
 impl<K: Array, V: Codec> JournalEntry<K, V> {
     /// Create a new `JournalEntry`.
-    fn new(key: K, value: V, depth: u32, next: Option<(u64, u32)>) -> Self {
-        Self {
-            key,
-            value,
-            depth,
-            next,
-        }
+    fn new(key: K, value: V, next: Option<(u64, u32)>) -> Self {
+        Self { key, value, next }
     }
 }
 
@@ -232,7 +234,6 @@ impl<K: Array, V: Codec> CodecWrite for JournalEntry<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         self.key.write(buf);
         self.value.write(buf);
-        self.depth.write(buf);
         self.next.write(buf);
     }
 }
@@ -243,21 +244,15 @@ impl<K: Array, V: Codec> Read for JournalEntry<K, V> {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let key = K::read(buf)?;
         let value = V::read_cfg(buf, cfg)?;
-        let depth = u32::read(buf)?;
         let next = Option::<(u64, u32)>::read_cfg(buf, &((), ()))?;
 
-        Ok(Self {
-            key,
-            value,
-            depth,
-            next,
-        })
+        Ok(Self { key, value, next })
     }
 }
 
 impl<K: Array, V: Codec> EncodeSize for JournalEntry<K, V> {
     fn encode_size(&self) -> usize {
-        K::SIZE + self.value.encode_size() + u32::SIZE + self.next.encode_size()
+        K::SIZE + self.value.encode_size() + self.next.encode_size()
     }
 }
 
@@ -488,26 +483,32 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
     }
 
     /// Choose the newer valid entry between two table slots.
-    fn select_valid_entry(&self, entry1: &TableEntry, entry2: &TableEntry) -> Option<(u64, u32)> {
+    fn select_valid_entry(
+        &self,
+        entry1: &TableEntry,
+        entry2: &TableEntry,
+    ) -> Option<(u64, u32, u32)> {
         match (
             !entry1.is_empty() && entry1.is_valid(),
             !entry2.is_empty() && entry2.is_valid(),
         ) {
             (true, true) => match entry1.epoch.cmp(&entry2.epoch) {
-                Ordering::Greater => Some((entry1.section, entry1.offset)),
-                Ordering::Less => Some((entry2.section, entry2.offset)),
+                Ordering::Greater => {
+                    Some((entry1.section, entry1.offset, entry1.depth_since_resize))
+                }
+                Ordering::Less => Some((entry2.section, entry2.offset, entry2.depth_since_resize)),
                 Ordering::Equal => {
                     unreachable!("two valid entries with the same epoch")
                 }
             },
-            (true, false) => Some((entry1.section, entry1.offset)),
-            (false, true) => Some((entry2.section, entry2.offset)),
+            (true, false) => Some((entry1.section, entry1.offset, entry1.depth_since_resize)),
+            (false, true) => Some((entry2.section, entry2.offset, entry2.depth_since_resize)),
             (false, false) => None,
         }
     }
 
-    /// Get the head of the journal chain for a given table index.
-    async fn get_head(&self, table_index: u32) -> Result<Option<(u64, u32)>, Error> {
+    /// Get the head of the journal chain for a given table index, along with its depth.
+    async fn get_head(&self, table_index: u32) -> Result<Option<(u64, u32, u32)>, Error> {
         // Read the table entry
         let offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
         let buf = vec![0u8; FULL_TABLE_ENTRY_SIZE];
@@ -517,7 +518,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         let mut buf2 = &read_buf.as_ref()[TABLE_ENTRY_SIZE..FULL_TABLE_ENTRY_SIZE];
         let entry2 = TableEntry::read(&mut buf2)?;
 
-        // Select the valid entry
+        // Select the valid entry and return with depth
         Ok(self.select_valid_entry(&entry1, &entry2))
     }
 
@@ -528,6 +529,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         table_index: u32,
         section: u64,
         offset: u32,
+        depth_since_resize: u32,
     ) -> Result<(), Error> {
         // Read current entries to determine which slot to update
         let table_offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
@@ -556,7 +558,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         };
 
         // Build the new entry
-        let entry = TableEntry::new(epoch, section, offset);
+        let entry = TableEntry::new(epoch, section, offset, depth_since_resize);
 
         // Write the new entry
         self.table
@@ -587,38 +589,35 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
 
         // Get head of the chain from table
         let mut table_index = self.table_index(&key);
-        let mut next = self.get_head(table_index).await?;
+        let mut head_info = self.get_head(table_index).await?;
 
         // Check chain depth and resize if necessary
-        let depth = if let Some((section, offset)) = next {
-            self.journal.get(section, offset).await?.unwrap().depth
-        } else {
-            0
-        };
+        let depth = head_info.map(|(_, _, d)| d).unwrap_or(0);
 
-        if depth + 1 > self.max_chain_depth {
+        if depth >= self.max_chain_depth {
             self.resize().await?;
             // After resize, must re-calculate everything for this put
             table_index = self.table_index(&key);
-            next = self.get_head(table_index).await?;
+            head_info = self.get_head(table_index).await?;
         }
 
-        let new_depth = if let Some((section, offset)) = next {
-            self.journal.get(section, offset).await?.unwrap().depth + 1
-        } else {
-            1
-        };
-
         // Create new head of the chain
-        let entry = JournalEntry::new(key, value, new_depth, next);
+        let head = head_info.map(|(section, offset, _)| (section, offset));
+        let entry = JournalEntry::new(key, value, head);
 
         // Append entry to the variable journal
         let (offset, _) = self.journal.append(self.current_section, entry).await?;
 
-        // Push table update
+        // Push table update with incremented depth
         self.modified_sections.insert(self.current_section);
-        self.update_head(self.next_epoch, table_index, self.current_section, offset)
-            .await?;
+        self.update_head(
+            self.next_epoch,
+            table_index,
+            self.current_section,
+            offset,
+            depth + 1,
+        )
+        .await?;
 
         Ok(Cursor::new(self.current_section, offset))
     }
@@ -639,7 +638,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
 
         // Get head of the chain from table
         let table_index = self.table_index(key);
-        let Some((mut section, mut offset)) = self.get_head(table_index).await? else {
+        let Some((mut section, mut offset, _)) = self.get_head(table_index).await? else {
             return Ok(None);
         };
 
@@ -740,25 +739,24 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
             .resize(new_size as u64 * FULL_TABLE_ENTRY_SIZE as u64)
             .await?;
 
-        // We need a new epoch for the resized entries
-        let resize_epoch = self.next_epoch;
-        self.next_epoch += 1;
-
         // For each bucket in the old table, copy its head to the new position
         // When we double the table size, bucket i maps to buckets i and i + old_size
         for i in 0..old_size {
             let head = self.get_head(i).await?;
 
-            if let Some((section, offset)) = head {
+            if let Some((section, offset, _)) = head {
                 // Write the same head to both i and i + old_size
                 // This works because items will naturally partition based on their hash
-                self.update_head(resize_epoch, i, section, offset).await?;
-                self.update_head(resize_epoch, i + old_size, section, offset)
+                // Reset depth to 0 after resize
+                self.update_head(self.next_epoch, i, section, offset, 0)
+                    .await?;
+                self.update_head(self.next_epoch, i + old_size, section, offset, 0)
                     .await?;
             } else {
                 // No chain at this position, write empty entries
-                self.update_head(resize_epoch, i, 0, 0).await?;
-                self.update_head(resize_epoch, i + old_size, 0, 0).await?;
+                self.update_head(self.next_epoch, i, 0, 0, 0).await?;
+                self.update_head(self.next_epoch, i + old_size, 0, 0, 0)
+                    .await?;
             }
         }
 
