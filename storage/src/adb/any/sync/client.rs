@@ -248,7 +248,7 @@ where
                     "Fetching proof and operations"
                 );
 
-                // Get proof and operations from resolver with timing
+                // Get proof and operations from resolver
                 let GetProofResult {
                     proof,
                     operations,
@@ -279,7 +279,7 @@ where
                     "Received operations from resolver"
                 );
 
-                // Verify the proof is valid over the given operations with timing
+                // Verify the proof is valid over the given operations
                 let proof_valid = {
                     let _timer = metrics.proof_verification_duration.timer();
                     adb::any::Any::<E, K, V, H, T>::verify_proof(
@@ -341,7 +341,7 @@ where
                 batch_ops,
                 metrics,
             } => {
-                // Apply operations to the log with timing
+                // Apply operations to the log
                 {
                     let _timer = metrics.apply_duration.timer();
                     for op in batch_ops.into_iter() {
@@ -349,8 +349,8 @@ where
                             .await
                             .map_err(adb::Error::JournalError)
                             .map_err(Error::Adb)?;
-                        // No need to sync here -- we will occasionally do so on `append`
-                        // and then when we're done.
+                        // No need to sync here -- the log will periodically sync its storage
+                        // and we will also sync when we're done.
                     }
                 }
 
