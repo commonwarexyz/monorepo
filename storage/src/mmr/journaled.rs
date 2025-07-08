@@ -19,7 +19,7 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::array::prefixed_u64::U64;
 use std::collections::HashMap;
 use tracing::{debug, error, warn};
@@ -44,6 +44,9 @@ pub struct Config {
 
     /// Optional thread pool to use for parallelizing batch operations.
     pub pool: Option<ThreadPool>,
+
+    /// The buffer pool to use for caching data.
+    pub buffer_pool: PoolRef,
 }
 
 /// Configuration for initializing a journaled MMR in a synced state.
@@ -102,6 +105,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         let journal_cfg = JConfig {
             partition: cfg.journal_partition,
             items_per_blob: cfg.items_per_blob,
+            buffer_pool: cfg.buffer_pool,
             write_buffer: cfg.write_buffer,
         };
         let mut journal =
@@ -149,8 +153,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             assert!(metadata_prune_pos >= oldest_retained_pos);
             // These positions may differ only due to blob boundary alignment, so this case isn't
             // unusual.
-            let actual_prune_point = journal.prune(metadata_prune_pos).await?;
-            if actual_prune_point != oldest_retained_pos {
+            journal.prune(metadata_prune_pos).await?;
+            if journal.oldest_retained_pos().await?.unwrap_or(0) != oldest_retained_pos {
                 // This should only happen in the event of some failure during the last attempt to
                 // prune the journal.
                 warn!(
@@ -231,6 +235,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 partition: cfg.config.journal_partition,
                 items_per_blob: cfg.config.items_per_blob,
                 write_buffer: cfg.config.write_buffer,
+                buffer_pool: cfg.config.buffer_pool.clone(),
             },
             cfg.pruned_to_pos,
         )
@@ -623,12 +628,15 @@ mod tests {
     };
     use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob as _, Runner};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
     use commonware_utils::hex;
 
     fn test_digest(v: usize) -> Digest {
         hash(&v.to_be_bytes())
     }
+
+    const PAGE_SIZE: usize = 111;
+    const PAGE_CACHE_SIZE: usize = 5;
 
     fn test_config() -> Config {
         Config {
@@ -637,6 +645,7 @@ mod tests {
             items_per_blob: 7,
             write_buffer: 1024,
             pool: None,
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -917,6 +926,7 @@ mod tests {
                 items_per_blob: 7,
                 write_buffer: 1024,
                 pool: None,
+                buffer_pool: cfg_pruned.buffer_pool.clone(),
             };
             let mut mmr = Mmr::init(context.clone(), &mut hasher, cfg_unpruned)
                 .await
@@ -1120,6 +1130,7 @@ mod tests {
                     items_per_blob: 7,
                     write_buffer: 1024,
                     pool: None,
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
                 pruned_to_pos: PRUNED_TO_POS,
                 pinned_nodes,
@@ -1177,6 +1188,7 @@ mod tests {
                     items_per_blob: 7,
                     write_buffer: 1024,
                     pool: None,
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
                 pruned_to_pos: source_mmr_size,
                 pinned_nodes,

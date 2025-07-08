@@ -197,6 +197,7 @@ where
                 partition: config.db_config.log_journal_partition.clone(),
                 items_per_blob: config.db_config.log_items_per_blob,
                 write_buffer: config.db_config.log_write_buffer,
+                buffer_pool: config.db_config.buffer_pool.clone(),
             },
             config.lower_bound_ops,
         )
@@ -456,7 +457,7 @@ pub(crate) mod tests {
         mmr::verification::Proof,
     };
     use commonware_cryptography::{sha256::Digest, Digest as _, Sha256};
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
     use commonware_utils::NZU64;
     use futures::channel::oneshot;
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
@@ -470,6 +471,9 @@ pub(crate) mod tests {
     type TestKey = Digest;
     type TestValue = Digest;
     type TestTranslator = index::translator::EightCap;
+
+    const PAGE_SIZE: usize = 111;
+    const PAGE_CACHE_SIZE: usize = 5;
 
     fn create_test_hasher() -> crate::mmr::hasher::Standard<TestHash> {
         crate::mmr::hasher::Standard::<TestHash>::new()
@@ -486,6 +490,7 @@ pub(crate) mod tests {
             log_write_buffer: 64,
             translator: TestTranslator::default(),
             pool: None,
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 

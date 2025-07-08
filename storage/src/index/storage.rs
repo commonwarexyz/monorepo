@@ -409,6 +409,13 @@ impl<T: Translator, V: Eq> Index<T, V> {
         self.map.len()
     }
 
+    /// Returns the number of items in the index, for use in testing. The number of items is always
+    /// at least as large as the number of keys, but may be larger in the case of collisions.
+    #[cfg(test)]
+    pub fn items(&self) -> usize {
+        self.items.get() as usize
+    }
+
     /// Returns an iterator over all values associated with a translated key.
     pub fn get(&self, key: &[u8]) -> impl Iterator<Item = &V> {
         let k = self.translator.transform(key);

@@ -174,7 +174,6 @@ fn fuzz(data: FuzzInput) {
 
                     // Verify the result against our tracked items
                     if let Ok(has) = result {
-                        //println!("items {:?}", items);
                         if has {
                             assert!(our_result.is_some(), "stub archive doesn't have key {key_data:?} that we added");
                         } else {
