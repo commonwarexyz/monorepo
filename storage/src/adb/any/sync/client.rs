@@ -224,15 +224,6 @@ where
                 // Get current position in the log
                 let log_size = log.size().await.unwrap();
 
-                if log_size < config.lower_bound_ops {
-                    warn!(
-                        log_size,
-                        lower_bound_ops = config.lower_bound_ops,
-                        "Log position before lower bound"
-                    );
-                    return Err(Error::InvalidState);
-                }
-
                 // Calculate remaining operations to sync (inclusive upper bound)
                 let remaining_ops = if log_size <= config.upper_bound_ops {
                     config.upper_bound_ops - log_size + 1
@@ -376,11 +367,21 @@ where
                 }
 
                 // Check if we've applied all needed operations
-                let next_op_loc = log.size().await.unwrap();
-                let applied_ops = next_op_loc - config.lower_bound_ops;
-                let total_ops_needed = config.upper_bound_ops - config.lower_bound_ops + 1;
+                let log_size = log.size().await.unwrap();
 
-                if applied_ops >= total_ops_needed {
+                // Calculate the target log size (upper bound is inclusive)
+                let target_log_size = config
+                    .upper_bound_ops
+                    .checked_add(1)
+                    .ok_or(Error::InvalidState)?;
+
+                // Check if we've completed sync
+                if log_size >= target_log_size {
+                    if log_size > target_log_size {
+                        warn!(log_size, target_log_size, "Log size exceeded sync target");
+                        return Err(Error::InvalidState);
+                    }
+
                     // Build the complete database from the log
                     let db = adb::any::Any::init_synced(
                         config.context.clone(),
@@ -409,6 +410,7 @@ where
                         target_hash = ?config.target_hash,
                         lower_bound_ops = config.lower_bound_ops,
                         upper_bound_ops = config.upper_bound_ops,
+                        log_size = log_size,
                         valid_batches_received = metrics.valid_batches_received.get(),
                         invalid_batches_received = metrics.invalid_batches_received.get(),
                         "Sync completed successfully");
