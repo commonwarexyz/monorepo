@@ -621,23 +621,21 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             start_loc.saturating_add(max_ops).saturating_sub(1),
         );
         let end_pos = leaf_num_to_pos(end_loc);
-        let mmr_size_at_pos = leaf_num_to_pos(size);
+        let mmr_size = leaf_num_to_pos(size);
 
         let proof = self
             .ops
-            .historical_range_proof(mmr_size_at_pos, start_pos, end_pos)
+            .historical_range_proof(mmr_size, start_pos, end_pos)
             .await?;
         let mut ops =
             Vec::with_capacity((end_loc.saturating_sub(start_loc).saturating_add(1)) as usize);
-        if end_loc >= start_loc {
-            let futures = (start_loc..=end_loc)
-                .map(|i| self.log.read(i))
-                .collect::<Vec<_>>();
-            try_join_all(futures)
-                .await?
-                .into_iter()
-                .for_each(|op| ops.push(op));
-        }
+        let futures = (start_loc..=end_loc)
+            .map(|i| self.log.read(i))
+            .collect::<Vec<_>>();
+        try_join_all(futures)
+            .await?
+            .into_iter()
+            .for_each(|op| ops.push(op));
 
         Ok((proof, ops))
     }
