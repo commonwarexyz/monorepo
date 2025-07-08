@@ -26,8 +26,10 @@ enum FuzzOperation {
     ScalarInverse {
         scalar: Scalar,
     },
-    ScalarSetInt {
-        scalar: Scalar,
+    ScalarSetFrom {
+        value: u64,
+    },
+    ScalarSetFromIndex {
         value: u32,
     },
 
@@ -226,7 +228,7 @@ enum FuzzOperation {
 
 impl<'a> Arbitrary<'a> for FuzzOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
-        let choice = u.int_in_range(0..=47)?;
+        let choice = u.int_in_range(0..=48)?;
 
         match choice {
             0 => Ok(FuzzOperation::ScalarArithmetic {
@@ -240,8 +242,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             2 => Ok(FuzzOperation::ScalarInverse {
                 scalar: arbitrary_scalar(u)?,
             }),
-            3 => Ok(FuzzOperation::ScalarSetInt {
-                scalar: arbitrary_scalar(u)?,
+            3 => Ok(FuzzOperation::ScalarSetFrom {
                 value: u.arbitrary()?,
             }),
             4 => Ok(FuzzOperation::G1Arithmetic {
@@ -416,6 +417,9 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             47 => Ok(FuzzOperation::SerializeShare {
                 share: arbitrary_share(u)?,
             }),
+            48 => Ok(FuzzOperation::ScalarSetFromIndex {
+                value: u.arbitrary()?,
+            }),
             _ => Ok(FuzzOperation::KeypairGeneration),
         }
     }
@@ -423,13 +427,13 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 
 fn arbitrary_scalar(u: &mut Unstructured) -> Result<Scalar, arbitrary::Error> {
     let bytes: [u8; PRIVATE_KEY_LENGTH] = u.arbitrary()?;
-    let mut scalar = Scalar::zero();
+    let scalar = Scalar::zero();
 
     // Try to decode from bytes, if that fails use set_int
     match Scalar::read(&mut bytes.as_slice()) {
         Ok(s) => Ok(s),
         Err(_) => {
-            scalar.set_int(u.int_in_range(0..=u32::MAX)?);
+            Scalar::from_index(u.int_in_range(0..=u64::MAX)? as u32);
             Ok(scalar)
         }
     }
@@ -552,8 +556,12 @@ fn execute_operation(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::ScalarSetInt { mut scalar, value } => {
-            scalar.set_int(value);
+        FuzzOperation::ScalarSetFromIndex { value } => {
+            Scalar::from_index(value);
+        }
+
+        FuzzOperation::ScalarSetFrom { value } => {
+            let _ = Scalar::from(value);
         }
 
         FuzzOperation::G1Arithmetic { mut a, b } => {
