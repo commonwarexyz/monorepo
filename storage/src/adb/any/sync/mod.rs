@@ -51,7 +51,7 @@ pub enum Error {
 /// Synchronizes a database by fetching, verifying, and applying operations from a remote source.
 ///
 /// We repeatedly:
-/// 1. Fetch operations in batches from a [Resolver] (i.e. a server of operations)
+/// 1. Fetch operations in batches from a Resolver (i.e. a server of operations)
 /// 2. Verify cryptographic proofs for each batch to ensure correctness
 /// 3. Apply operations to reconstruct the database's operation log.
 ///
