@@ -260,7 +260,6 @@ impl<D: Digest> Proof<D> {
         start_element_pos: u64,
         end_element_pos: u64,
     ) -> Vec<u64> {
-        assert!(size >= end_element_pos);
         let mut positions = Vec::new();
 
         // Find the mountains that contain no elements from the range. The peaks of these mountains
