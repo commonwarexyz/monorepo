@@ -1756,6 +1756,7 @@ pub(super) mod test {
             assert_eq!(historical_proof.size, regular_proof.size);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
+            assert_eq!(historical_ops, ops[5..15]);
             assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
                 &mut hasher,
                 &historical_proof,
@@ -1847,10 +1848,9 @@ pub(super) mod test {
 
             let mut hasher = Standard::<Sha256>::new();
 
-            // Test proofs at different historical positions for the same range
+            // Test historical proof generation for several historical states.
             let start_loc = 20;
             let max_ops = 10;
-
             for historical_end in 31..50 {
                 let (historical_proof, historical_ops) = db
                     .historical_proof(historical_end, start_loc, max_ops)
