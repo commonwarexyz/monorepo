@@ -652,8 +652,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             ))
             .map(|(&s, _)| s)
             .collect();
-        for index in trailing {
-            if let Some(blob) = self.blobs.remove(&index) {
+        for index in &trailing {
+            if let Some(blob) = self.blobs.remove(index) {
                 // Remove the underlying blob from storage.
                 blob.close().await?;
                 self.context
@@ -665,6 +665,30 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         }
 
         // If the section exists, truncate it to the given offset
+        let blob = match self.blobs.get_mut(&section) {
+            Some(blob) => blob,
+            None => return Ok(()),
+        };
+        let current = blob.size().await;
+        if size >= current {
+            return Ok(()); // Already smaller than or equal to target size
+        }
+        blob.resize(size).await?;
+        debug!(
+            section,
+            from = current,
+            to = size,
+            ?trailing,
+            "rewound journal"
+        );
+        Ok(())
+    }
+
+    /// Rewinds the `section` to the given `size`.
+    ///
+    /// Unlike [Self::rewind], this method does not modify anything other than the given `section`.
+    pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        self.prune_guard(section, false)?;
         let blob = match self.blobs.get_mut(&section) {
             Some(blob) => blob,
             None => return Ok(()),
@@ -1759,14 +1783,86 @@ mod tests {
             let size = journal.size(1).await.unwrap();
             assert!(size > 0);
 
+            // Append more data and verify size increases
+            journal.append(1, 43i32).await.unwrap();
+            let new_size = journal.size(1).await.unwrap();
+            assert!(new_size > size);
+
             // Check size of different section - should still be 0
             let size = journal.size(2).await.unwrap();
             assert_eq!(size, 0);
+
+            // Append data to section 2
+            journal.append(2, 44i32).await.unwrap();
+
+            // Check size of section 2 - should be greater than 0
+            let size = journal.size(2).await.unwrap();
+            assert!(size > 0);
+
+            // Rollback everything in section 1 and 2
+            journal.rewind(1, 0).await.unwrap();
+
+            // Check size of section 1 - should be 0
+            let size = journal.size(1).await.unwrap();
+            assert_eq!(size, 0);
+
+            // Check size of section 2 - should be 0
+            let size = journal.size(2).await.unwrap();
+            assert_eq!(size, 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_rewind_section() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create journal
+            let cfg = Config {
+                partition: "test_partition".to_string(),
+                compression: None,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+            let mut journal = Journal::init(context, cfg).await.unwrap();
+
+            // Check size of non-existent section
+            let size = journal.size(1).await.unwrap();
+            assert_eq!(size, 0);
+
+            // Append data to section 1
+            journal.append(1, 42i32).await.unwrap();
+
+            // Check size of section 1 - should be greater than 0
+            let size = journal.size(1).await.unwrap();
+            assert!(size > 0);
 
             // Append more data and verify size increases
             journal.append(1, 43i32).await.unwrap();
             let new_size = journal.size(1).await.unwrap();
             assert!(new_size > size);
+
+            // Check size of different section - should still be 0
+            let size = journal.size(2).await.unwrap();
+            assert_eq!(size, 0);
+
+            // Append data to section 2
+            journal.append(2, 44i32).await.unwrap();
+
+            // Check size of section 2 - should be greater than 0
+            let size = journal.size(2).await.unwrap();
+            assert!(size > 0);
+
+            // Rollback everything in section 1
+            journal.rewind_section(1, 0).await.unwrap();
+
+            // Check size of section 1 - should be 0
+            let size = journal.size(1).await.unwrap();
+            assert_eq!(size, 0);
+
+            // Check size of section 2 - should be greater than 0
+            let size = journal.size(2).await.unwrap();
+            assert!(size > 0);
         });
     }
 

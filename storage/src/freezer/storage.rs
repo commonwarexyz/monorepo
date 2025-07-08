@@ -9,7 +9,7 @@ use prometheus_client::metrics::counter::Counter;
 use std::{cmp::Ordering, collections::BTreeSet, marker::PhantomData, ops::Deref};
 use tracing::debug;
 
-/// Cursor for item in table.
+/// Cursor for an item in the [Freezer].
 #[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 #[repr(transparent)]
 pub struct Cursor([u8; u64::SIZE + u32::SIZE]);
@@ -86,7 +86,7 @@ impl std::fmt::Display for Cursor {
     }
 }
 
-/// Checkpoint for table progress.
+/// Checkpoint for [Freezer] progress.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Copy, Default)]
 pub struct Checkpoint {
     epoch: u64,
@@ -143,7 +143,7 @@ struct TableEntry {
 }
 
 impl TableEntry {
-    /// The full size of a table entry.
+    /// The full size of a table entry (2 slots).
     const FULL_SIZE: usize = Self::SIZE * 2;
 
     /// Create a new [TableEntry] with a CRC.
@@ -153,6 +153,7 @@ impl TableEntry {
         hasher.update(&section.to_be_bytes());
         hasher.update(&offset.to_be_bytes());
         hasher.update(&added.to_be_bytes());
+
         Self {
             epoch,
             section,
@@ -220,7 +221,7 @@ struct JournalEntry<K: Array, V: Codec> {
 }
 
 impl<K: Array, V: Codec> JournalEntry<K, V> {
-    /// Create a new `JournalEntry`.
+    /// Create a new [JournalEntry].
     fn new(key: K, value: V, next: Option<(u64, u32)>) -> Self {
         Self { key, value, next }
     }
@@ -252,7 +253,7 @@ impl<K: Array, V: Codec> EncodeSize for JournalEntry<K, V> {
     }
 }
 
-/// Implementation of immutable key-value storage.
+/// Implementation of [Freezer].
 pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Context for storage operations
     context: E,
@@ -301,7 +302,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     ) -> Result<Self, Error> {
         // Validate that initial_table_size is a power of 2
         assert!(
-            config.table_initial_size.is_power_of_two(),
+            config.table_initial_size > 0 && config.table_initial_size.is_power_of_two(),
             "table_initial_size must be a power of 2"
         );
 
@@ -340,7 +341,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         } else if let Some(checkpoint) = checkpoint {
             // Assert that the checkpoint is valid
             assert!(
-                checkpoint.table_size.is_power_of_two(),
+                checkpoint.table_size > 0 && checkpoint.table_size.is_power_of_two(),
                 "table_size must be a power of 2"
             );
 
