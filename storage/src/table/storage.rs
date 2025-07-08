@@ -92,6 +92,7 @@ pub struct Checkpoint {
     epoch: u64,
     section: u64,
     size: u64,
+    table_size: u32,
 }
 
 impl Read for Checkpoint {
@@ -100,10 +101,12 @@ impl Read for Checkpoint {
         let epoch = u64::read(buf)?;
         let section = u64::read(buf)?;
         let size = u64::read(buf)?;
+        let table_size = u32::read(buf)?;
         Ok(Self {
             epoch,
             section,
             size,
+            table_size,
         })
     }
 }
@@ -113,47 +116,48 @@ impl CodecWrite for Checkpoint {
         self.epoch.write(buf);
         self.section.write(buf);
         self.size.write(buf);
+        self.table_size.write(buf);
     }
 }
 
 impl FixedSize for Checkpoint {
-    const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE;
+    const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE + u32::SIZE;
 }
 
-// -------------------------------------------------------------------------------------------------
-// Table layout
-// -------------------------------------------------------------------------------------------------
-// Bucket slot (24 bytes):
-//   u64 epoch                – epoch in which this slot was written
-//   u64 section
-//   u32 offset
-//   u32 crc                  – CRC of (epoch | section | offset )
-
-/// Two slots per bucket, each slot now 24 bytes.
+/// Name of the table blob.
 const TABLE_BLOB_NAME: &[u8] = b"table";
-const TABLE_ENTRY_SIZE: usize = 24;
-const FULL_TABLE_ENTRY_SIZE: usize = 2 * TABLE_ENTRY_SIZE;
 
 /// Single table entry stored in the table blob.
 #[derive(Debug, Clone, PartialEq)]
 struct TableEntry {
+    // Epoch in which this slot was written
     epoch: u64,
+    // Section in which this slot was written
     section: u64,
+    // Offset in the section where this slot was written
     offset: u32,
+    // Number of items added to this bucket since last resize
+    added: u8,
+    // CRC of (epoch | section | offset | added)
     crc: u32,
 }
 
 impl TableEntry {
+    /// The full size of a table entry.
+    const FULL_SIZE: usize = Self::SIZE * 2;
+
     /// Create a new [TableEntry] with a CRC.
-    fn new(epoch: u64, section: u64, offset: u32) -> Self {
+    fn new(epoch: u64, section: u64, offset: u32, added: u8) -> Self {
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(&epoch.to_be_bytes());
         hasher.update(&section.to_be_bytes());
         hasher.update(&offset.to_be_bytes());
+        hasher.update(&added.to_be_bytes());
         Self {
             epoch,
             section,
             offset,
+            added,
             crc: hasher.finalize(),
         }
     }
@@ -169,12 +173,13 @@ impl TableEntry {
         hasher.update(&self.epoch.to_be_bytes());
         hasher.update(&self.section.to_be_bytes());
         hasher.update(&self.offset.to_be_bytes());
+        hasher.update(&self.added.to_be_bytes());
         hasher.finalize() == self.crc
     }
 }
 
 impl FixedSize for TableEntry {
-    const SIZE: usize = TABLE_ENTRY_SIZE;
+    const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE + u8::SIZE + u32::SIZE;
 }
 
 impl CodecWrite for TableEntry {
@@ -182,6 +187,7 @@ impl CodecWrite for TableEntry {
         self.epoch.write(buf);
         self.section.write(buf);
         self.offset.write(buf);
+        self.added.write(buf);
         self.crc.write(buf);
     }
 }
@@ -193,12 +199,14 @@ impl Read for TableEntry {
         let epoch = u64::read(buf)?;
         let section = u64::read(buf)?;
         let offset = u32::read(buf)?;
+        let added = u8::read(buf)?;
         let crc = u32::read(buf)?;
 
         Ok(Self {
             epoch,
             section,
             offset,
+            added,
             crc,
         })
     }
@@ -208,7 +216,6 @@ impl Read for TableEntry {
 struct JournalEntry<K: Array, V: Codec> {
     key: K,
     value: V,
-
     next: Option<(u64, u32)>,
 }
 
@@ -253,6 +260,7 @@ pub struct Table<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Table size
     table_partition: String,
     table_size: u32,
+    table_resize_frequency: u8,
 
     // Table blob that maps hash values to journal locations (journal_id, offset)
     table: E::Blob,
@@ -270,9 +278,11 @@ pub struct Table<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Metrics
     puts: Counter,
     gets: Counter,
+    resizes: Counter,
 
     // Pending table updates to be written on sync (table_index -> (section, offset))
     modified_sections: BTreeSet<u64>,
+    should_resize: bool,
 
     // Phantom data to satisfy the compiler about generic types
     _phantom: PhantomData<(K, V)>,
@@ -290,6 +300,12 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         config: Config<V::Cfg>,
         checkpoint: Option<Checkpoint>,
     ) -> Result<Self, Error> {
+        // Validate that initial_table_size is a power of 2
+        assert!(
+            config.table_initial_size.is_power_of_two(),
+            "table_initial_size must be a power of 2"
+        );
+
         // Initialize variable journal with a separate partition
         let journal_config = JournalConfig {
             partition: config.journal_partition,
@@ -306,29 +322,49 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
 
         // If the blob is brand new, create header + zeroed buckets.
         let checkpoint = if table_len == 0 {
+            // Assert that the checkpoint is valid
             if let Some(checkpoint) = checkpoint {
                 assert_eq!(checkpoint.epoch, 0);
                 assert_eq!(checkpoint.section, 0);
                 assert_eq!(checkpoint.size, 0);
+                assert_eq!(checkpoint.table_size, 0);
             }
-            let table_data_size = config.table_size as u64 * FULL_TABLE_ENTRY_SIZE as u64;
+
+            // Create the table
+            let table_data_size = config.table_initial_size as u64 * TableEntry::FULL_SIZE as u64;
             table.resize(table_data_size).await?;
             table.sync().await?;
-            Checkpoint::default()
+            Checkpoint {
+                table_size: config.table_initial_size,
+                ..Default::default()
+            }
         } else if let Some(checkpoint) = checkpoint {
+            // Assert that the checkpoint is valid
+            assert!(
+                checkpoint.table_size.is_power_of_two(),
+                "table_size must be a power of 2"
+            );
+
             // Rewind the journal to the committed section and offset and drop all values larger
             journal.rewind(checkpoint.section, checkpoint.size).await?;
 
-            // Zero out any table entries whose epoch is greater than the committed epoch
+            // Resize the table
             let mut modified = false;
-            let zero_buf = vec![0u8; TABLE_ENTRY_SIZE];
-            for table_index in 0..config.table_size {
-                let offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
+            let table_data_size = checkpoint.table_size as u64 * TableEntry::FULL_SIZE as u64;
+            if table_data_size != table_len {
+                table.resize(table_data_size).await?;
+                modified = true;
+            }
+
+            // Zero out any table entries whose epoch is greater than the committed epoch
+            let zero_buf = vec![0u8; TableEntry::SIZE];
+            for table_index in 0..checkpoint.table_size {
+                let offset = table_index as u64 * TableEntry::FULL_SIZE as u64;
                 let result = table
-                    .read_at(vec![0u8; FULL_TABLE_ENTRY_SIZE], offset)
+                    .read_at(vec![0u8; TableEntry::FULL_SIZE], offset)
                     .await?;
 
-                let mut buf1 = &result.as_ref()[0..TABLE_ENTRY_SIZE];
+                let mut buf1 = &result.as_ref()[0..TableEntry::SIZE];
                 let entry1 = TableEntry::read(&mut buf1)?;
                 if !entry1.is_empty() && (!entry1.is_valid() || entry1.epoch > checkpoint.epoch) {
                     debug!(
@@ -340,7 +376,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
                     modified = true;
                 }
 
-                let mut buf2 = &result.as_ref()[TABLE_ENTRY_SIZE..FULL_TABLE_ENTRY_SIZE];
+                let mut buf2 = &result.as_ref()[TableEntry::SIZE..TableEntry::FULL_SIZE];
                 let entry2 = TableEntry::read(&mut buf2)?;
                 if !entry2.is_empty() && (!entry2.is_valid() || entry2.epoch > checkpoint.epoch) {
                     debug!(
@@ -349,7 +385,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
                         "found invalid table entry"
                     );
                     table
-                        .write_at(zero_buf.clone(), offset + TABLE_ENTRY_SIZE as u64)
+                        .write_at(zero_buf.clone(), offset + TableEntry::SIZE as u64)
                         .await?;
                     modified = true;
                 }
@@ -363,15 +399,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         } else {
             // Open the table blob and construct a checkpoint from what is written
             let mut modified = false;
-            let mut checkpoint = Checkpoint::default();
-            let zero_buf = vec![0u8; TABLE_ENTRY_SIZE];
-            for table_index in 0..config.table_size {
-                let offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
+            let mut checkpoint = Checkpoint {
+                table_size: (table_len / TableEntry::FULL_SIZE as u64) as u32,
+                ..Default::default()
+            };
+            let zero_buf = vec![0u8; TableEntry::SIZE];
+            for table_index in 0..checkpoint.table_size {
+                let offset = table_index as u64 * TableEntry::FULL_SIZE as u64;
                 let result = table
-                    .read_at(vec![0u8; FULL_TABLE_ENTRY_SIZE], offset)
+                    .read_at(vec![0u8; TableEntry::FULL_SIZE], offset)
                     .await?;
 
-                let mut buf1 = &result.as_ref()[0..TABLE_ENTRY_SIZE];
+                let mut buf1 = &result.as_ref()[0..TableEntry::SIZE];
                 let entry1 = TableEntry::read(&mut buf1)?;
                 if !entry1.is_empty() {
                     if !entry1.is_valid() {
@@ -388,7 +427,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
                     }
                 }
 
-                let mut buf2 = &result.as_ref()[TABLE_ENTRY_SIZE..FULL_TABLE_ENTRY_SIZE];
+                let mut buf2 = &result.as_ref()[TableEntry::SIZE..TableEntry::FULL_SIZE];
                 let entry2 = TableEntry::read(&mut buf2)?;
                 if !entry2.is_empty() {
                     if !entry2.is_valid() {
@@ -398,7 +437,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
                             "found invalid table entry"
                         );
                         table
-                            .write_at(zero_buf.clone(), offset + TABLE_ENTRY_SIZE as u64)
+                            .write_at(zero_buf.clone(), offset + TableEntry::SIZE as u64)
                             .await?;
                         modified = true;
                     } else if entry2.epoch > checkpoint.epoch {
@@ -421,12 +460,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         // Create metrics
         let puts = Counter::default();
         let gets = Counter::default();
+        let resizes = Counter::default();
         context.register("puts", "number of put operations", puts.clone());
         context.register("gets", "number of get operations", gets.clone());
+        context.register(
+            "resizes",
+            "number of table resizing operations",
+            resizes.clone(),
+        );
 
         Ok(Self {
             context,
-            table_size: config.table_size,
+            table_size: checkpoint.table_size,
+            table_resize_frequency: config.table_resize_frequency,
             table,
             table_partition: config.table_partition,
             journal,
@@ -435,7 +481,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
             puts,
             gets,
+            resizes,
             modified_sections: BTreeSet::new(),
+            should_resize: false,
             _phantom: PhantomData,
         })
     }
@@ -447,36 +495,40 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
     }
 
     /// Choose the newer valid entry between two table slots.
-    fn select_valid_entry(&self, entry1: &TableEntry, entry2: &TableEntry) -> Option<(u64, u32)> {
+    fn select_valid_entry(
+        &self,
+        entry1: &TableEntry,
+        entry2: &TableEntry,
+    ) -> Option<(u64, u32, u8)> {
         match (
             !entry1.is_empty() && entry1.is_valid(),
             !entry2.is_empty() && entry2.is_valid(),
         ) {
             (true, true) => match entry1.epoch.cmp(&entry2.epoch) {
-                Ordering::Greater => Some((entry1.section, entry1.offset)),
-                Ordering::Less => Some((entry2.section, entry2.offset)),
+                Ordering::Greater => Some((entry1.section, entry1.offset, entry1.added)),
+                Ordering::Less => Some((entry2.section, entry2.offset, entry2.added)),
                 Ordering::Equal => {
                     unreachable!("two valid entries with the same epoch")
                 }
             },
-            (true, false) => Some((entry1.section, entry1.offset)),
-            (false, true) => Some((entry2.section, entry2.offset)),
+            (true, false) => Some((entry1.section, entry1.offset, entry1.added)),
+            (false, true) => Some((entry2.section, entry2.offset, entry2.added)),
             (false, false) => None,
         }
     }
 
-    /// Get the head of the journal chain for a given table index.
-    async fn get_head(&self, table_index: u32) -> Result<Option<(u64, u32)>, Error> {
+    /// Get the head of the journal chain for a given table index, along with its depth.
+    async fn get_head(&self, table_index: u32) -> Result<Option<(u64, u32, u8)>, Error> {
         // Read the table entry
-        let offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
-        let buf = vec![0u8; FULL_TABLE_ENTRY_SIZE];
+        let offset = table_index as u64 * TableEntry::FULL_SIZE as u64;
+        let buf = vec![0u8; TableEntry::FULL_SIZE];
         let read_buf = self.table.read_at(buf, offset).await?;
-        let mut buf1 = &read_buf.as_ref()[0..TABLE_ENTRY_SIZE];
+        let mut buf1 = &read_buf.as_ref()[0..TableEntry::SIZE];
         let entry1 = TableEntry::read(&mut buf1)?;
-        let mut buf2 = &read_buf.as_ref()[TABLE_ENTRY_SIZE..FULL_TABLE_ENTRY_SIZE];
+        let mut buf2 = &read_buf.as_ref()[TableEntry::SIZE..TableEntry::FULL_SIZE];
         let entry2 = TableEntry::read(&mut buf2)?;
 
-        // Select the valid entry
+        // Select the valid entry and return with depth
         Ok(self.select_valid_entry(&entry1, &entry2))
     }
 
@@ -487,16 +539,17 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         table_index: u32,
         section: u64,
         offset: u32,
+        added: u8,
     ) -> Result<(), Error> {
         // Read current entries to determine which slot to update
-        let table_offset = table_index as u64 * FULL_TABLE_ENTRY_SIZE as u64;
-        let buf = vec![0u8; FULL_TABLE_ENTRY_SIZE];
+        let table_offset = table_index as u64 * TableEntry::FULL_SIZE as u64;
+        let buf = vec![0u8; TableEntry::FULL_SIZE];
         let read_buf = self.table.read_at(buf, table_offset).await?;
 
         // Parse current entries using codec
-        let mut buf1 = &read_buf.as_ref()[0..TABLE_ENTRY_SIZE];
+        let mut buf1 = &read_buf.as_ref()[0..TableEntry::SIZE];
         let entry1 = TableEntry::read(&mut buf1)?;
-        let mut buf2 = &read_buf.as_ref()[TABLE_ENTRY_SIZE..FULL_TABLE_ENTRY_SIZE];
+        let mut buf2 = &read_buf.as_ref()[TableEntry::SIZE..TableEntry::FULL_SIZE];
         let entry2 = TableEntry::read(&mut buf2)?;
 
         // Determine where to start writing the new entry
@@ -505,17 +558,17 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
             0
         } else if !entry2.is_empty() && entry2.epoch == epoch {
             // Overwrite existing entry for this epoch
-            TABLE_ENTRY_SIZE
+            TableEntry::SIZE
         } else if entry1.is_empty() || entry1.epoch < entry2.epoch {
             0
         } else if entry2.is_empty() || entry2.epoch < entry1.epoch {
-            TABLE_ENTRY_SIZE
+            TableEntry::SIZE
         } else {
             unreachable!("two valid entries with the same epoch");
         };
 
         // Build the new entry
-        let entry = TableEntry::new(epoch, section, offset);
+        let entry = TableEntry::new(epoch, section, offset, added);
 
         // Write the new entry
         self.table
@@ -546,18 +599,34 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
 
         // Get head of the chain from table
         let table_index = self.table_index(&key);
-        let next = self.get_head(table_index).await?;
+        let head = self.get_head(table_index).await?;
 
         // Create new head of the chain
-        let entry = JournalEntry::new(key, value, next);
+        let entry = JournalEntry::new(
+            key,
+            value,
+            head.map(|(section, offset, _)| (section, offset)),
+        );
 
         // Append entry to the variable journal
         let (offset, _) = self.journal.append(self.current_section, entry).await?;
 
         // Push table update
+        let added = head.map(|(_, _, added)| added).unwrap_or(0);
         self.modified_sections.insert(self.current_section);
-        self.update_head(self.next_epoch, table_index, self.current_section, offset)
-            .await?;
+        self.update_head(
+            self.next_epoch,
+            table_index,
+            self.current_section,
+            offset,
+            added.checked_add(1).expect("added overflow"),
+        )
+        .await?;
+
+        // Determine if we should resize the table
+        if added >= self.table_resize_frequency {
+            self.should_resize = true;
+        }
 
         Ok(Cursor::new(self.current_section, offset))
     }
@@ -578,7 +647,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
 
         // Get head of the chain from table
         let table_index = self.table_index(key);
-        let Some((mut section, mut offset)) = self.get_head(table_index).await? else {
+        let Some((mut section, mut offset, _)) = self.get_head(table_index).await? else {
             return Ok(None);
         };
 
@@ -618,8 +687,42 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         Ok(self.get(Identifier::Key(key)).await?.is_some())
     }
 
+    /// Resize the table by doubling its size and re-sharding all entries.
+    async fn resize(&mut self) -> Result<(), Error> {
+        self.resizes.inc();
+
+        // Double the table size
+        let old = self.table_size;
+        let new = old.checked_mul(2).expect("table size overflow");
+        debug!(old, new, "resizing table");
+        self.table
+            .resize(new as u64 * TableEntry::FULL_SIZE as u64)
+            .await?;
+
+        // For each bucket in the old table, copy its head to the new position
+        let mut updates = Vec::with_capacity(old as usize * 2);
+        for i in 0..old {
+            let head = self.get_head(i).await?;
+            if let Some((section, offset, _)) = head {
+                // Write the same head to both i and i + old_size
+                updates.push(self.update_head(self.next_epoch, i, section, offset, 0));
+                updates.push(self.update_head(self.next_epoch, i + old, section, offset, 0));
+            } else {
+                // No chain at this position, write empty entries
+                updates.push(self.update_head(self.next_epoch, i, 0, 0, 0));
+                updates.push(self.update_head(self.next_epoch, i + old, 0, 0, 0));
+            }
+        }
+        try_join_all(updates).await?;
+
+        // Update the table size
+        self.table_size = new;
+        self.should_resize = false;
+
+        Ok(())
+    }
+
     /// Sync all data to the underlying store.
-    /// First syncs all journal sections, then flushes pending table updates, and finally syncs the table.
     pub async fn sync(&mut self) -> Result<Checkpoint, Error> {
         // Sync all modified journal sections
         let mut updates = Vec::with_capacity(self.modified_sections.len());
@@ -630,6 +733,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         self.modified_sections.clear();
 
         // Sync updated table entries
+        if self.should_resize {
+            self.resize().await?;
+        }
         self.table.sync().await?;
         let stored_epoch = self.next_epoch;
         self.next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
@@ -638,6 +744,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
             epoch: stored_epoch,
             section: self.current_section,
             size: self.journal.size(self.current_section).await?,
+            table_size: self.table_size,
         })
     }
 

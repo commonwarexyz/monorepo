@@ -10,23 +10,25 @@
 //! - **Variable Journal**: Stores key-value entries in an append-only log with optional compression
 //! - **Hash Table**: A persistent hash table stored in a blob that maps keys to journal locations
 //!
-//! The hash table uses a dual-entry design where each bucket contains two slots. This provides
-//! redundancy and enables atomic updates without locks or complex coordination.
-//!
 //! # Hash Table Design
 //!
 //! ```text
-//! Bucket Layout (48 bytes total, 2 slots of 24 bytes each):
-//! +--------+--------+--------+--------+
-//! | Slot 1                           |
-//! | epoch  | section| offset | crc   |
-//! | (8B)   | (8B)   | (4B)   | (4B)  |
-//! +--------+--------+--------+--------+
-//! | Slot 2                           |
-//! | epoch  | section| offset | crc   |
-//! | (8B)   | (8B)   | (4B)   | (4B)  |
-//! +--------+--------+--------+--------+
+//! Bucket Layout (50 bytes total, 2 slots of 25 bytes each):
+//! +--------+--------+--------+--------+------+
+//! | Slot 1                                   |
+//! | epoch  | section| offset | added | crc   |
+//! | (8B)   | (8B)   | (4B)   | (1B)  | (4B)  |
+//! +--------+--------+--------+--------+------+
+//! | Slot 2                                   |
+//! | epoch  | section| offset | added | crc   |
+//! | (8B)   | (8B)   | (4B)   | (1B)  | (4B)  |
+//! +--------+--------+--------+--------+------+
 //! ```
+//!
+//! # Resizing
+//!
+//! The table is resized by doubling its size and splitting each bucket into two. This doesn't
+//! require rewriting any of the journal but does require copying all buckets in the table.
 //!
 //! # Crash Consistency
 //!
@@ -70,7 +72,8 @@
 //!         journal_partition: "table_journal".into(),
 //!         journal_compression: Some(3),
 //!         table_partition: "table_table".into(),
-//!         table_size: 65536, // 64K buckets
+//!         table_initial_size: 65536, // 64K buckets
+//!         table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY, // Force resize once 4 writes to the same entry occur
 //!         codec_config: (),
 //!         write_buffer: 1024 * 1024,
 //!         target_journal_size: 100 * 1024 * 1024, // 100MB journals
@@ -141,7 +144,10 @@ pub struct Config<C> {
     ///
     /// To tune this value, consider how many hops you'd like each lookup to take for a key.
     /// If the keyspace is uniformly distributed, this is simply total keys divided by table_size.
-    pub table_size: u32,
+    pub table_initial_size: u32,
+
+    /// The number of items added to a bucket before the table is resized.
+    pub table_resize_frequency: u8,
 
     /// The codec configuration to use for the value stored in the store.
     pub codec_config: C,
@@ -162,7 +168,8 @@ mod tests {
     use commonware_utils::array::FixedBytes;
     use rand::RngCore;
 
-    const DEFAULT_TABLE_SIZE: u32 = 256;
+    const DEFAULT_TABLE_INITIAL_SIZE: u32 = 256;
+    const DEFAULT_TABLE_RESIZE_FREQUENCY: u8 = 4;
     const DEFAULT_WRITE_BUFFER: usize = 1024;
     const DEFAULT_TARGET_JOURNAL_SIZE: u64 = 10 * 1024 * 1024;
 
@@ -183,7 +190,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: compression,
                 table_partition: "test_table".into(),
-                table_size: DEFAULT_TABLE_SIZE,
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -247,7 +255,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: DEFAULT_TABLE_SIZE,
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -294,7 +303,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: 4, // Very small to force collisions
+                table_initial_size: 4, // Very small to force collisions
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -346,7 +356,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: DEFAULT_TABLE_SIZE,
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -411,7 +422,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: DEFAULT_TABLE_SIZE,
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -505,7 +517,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: DEFAULT_TABLE_SIZE,
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -537,7 +550,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: DEFAULT_TABLE_SIZE,
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -592,7 +606,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: 4,
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -644,7 +659,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: 4,
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -700,7 +716,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: 4,
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -765,7 +782,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_size: 64, // Small table to force collisions
+                table_initial_size: 8,     // Small table to force collisions
+                table_resize_frequency: 2, // Force resize frequently
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,

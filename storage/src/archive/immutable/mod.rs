@@ -11,7 +11,10 @@ pub struct Config<C> {
     pub table_partition: String,
 
     /// The size of the archive's table.
-    pub table_size: u32,
+    pub table_initial_size: u32,
+
+    /// The number of items added to the table before it is resized.
+    pub table_resize_frequency: u8,
 
     /// The partition to use for the archive's journal.
     pub journal_partition: String,
