@@ -2,7 +2,7 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::hash;
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::journal::fixed::{
     Config as FixedConfig, Config as VariableConfig, Journal as FixedJournal,
     Journal as VariableJournal,
@@ -60,6 +60,9 @@ struct FuzzInput {
     journal_type: JournalType,
 }
 
+const PAGE_SIZE: usize = 128;
+const PAGE_CACHE_SIZE: usize = 1;
+
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
@@ -69,11 +72,13 @@ fn fuzz(input: FuzzInput) {
                 partition: "fixed_journal_operations_fuzz_test".to_string(),
                 items_per_blob: 3,
                 write_buffer: 512,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             JournalType::Variable => VariableConfig {
                 partition: "variable_journal_operations_fuzz_test".to_string(),
                 items_per_blob: 3,
                 write_buffer: 512,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         };
 
@@ -84,6 +89,7 @@ fn fuzz(input: FuzzInput) {
 
         let mut next_value = 0u64;
         let mut journal_size = 0u64;
+        let mut oldest_retained_pos = 0u64;
 
         for op in input.operations.iter() {
             match op {
@@ -109,8 +115,8 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Rewind { size } => {
-                    // Only rewind to valid positions within current journal size
-                    if *size <= journal_size {
+                    // Only rewind to valid positions within current journal size and after oldest retained position
+                    if *size <= journal_size && *size >= oldest_retained_pos {
                         journal.rewind(*size).await.unwrap();
                         journal_size = *size;
                     }
@@ -124,6 +130,9 @@ fn fuzz(input: FuzzInput) {
                     // Only prune positions within current journal size
                     if *min_pos <= journal_size {
                         journal.prune(*min_pos).await.unwrap();
+                        // Update oldest retained position based on actual pruning
+                        oldest_retained_pos =
+                            journal.oldest_retained_pos().await.unwrap().unwrap_or(0);
                     }
                 }
 
