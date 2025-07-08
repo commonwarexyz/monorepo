@@ -44,3 +44,10 @@ path = "fuzz_targets/sha256_hasher.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bls12381_primitive_operations"
+path = "fuzz_targets/bls12381_primitive_operations.rs"
+test = false
+doc = false
+bench = false
