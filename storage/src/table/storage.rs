@@ -730,6 +730,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
 
     /// Resize the table by doubling its size and re-sharding all entries.
     async fn resize(&mut self) -> Result<(), Error> {
+        unimplemented!("only resize during sync");
         self.resizes.inc();
 
         // Double the table size
@@ -744,6 +745,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         // When we double the table size, bucket i maps to buckets i and i + old_size
         for i in 0..old {
             let head = self.get_head(i).await?;
+            unimplemented!("perform updates concurrently");
             if let Some((section, offset, _)) = head {
                 // Write the same head to both i and i + old_size
                 self.update_head(self.next_epoch, i, section, offset, 0)
