@@ -257,10 +257,10 @@ where
                     success_tx,
                 } = {
                     let _timer = metrics.fetch_duration.timer();
-                    let target_db_size = config.upper_bound_ops + 1;
+                    let target_size = config.upper_bound_ops + 1;
                     config
                         .resolver
-                        .get_operations(target_db_size, log_size, batch_size)
+                        .get_operations(target_size, log_size, batch_size)
                         .await?
                 };
 
@@ -610,7 +610,7 @@ pub(crate) mod tests {
     impl Resolver<TestHash, TestKey, TestValue> for FailingResolver {
         async fn get_operations(
             &self,
-            _db_size: u64,
+            _size: u64,
             _start_loc: u64,
             max_ops: NonZeroU64,
         ) -> Result<GetOperationsResult<TestHash, TestKey, TestValue>, Error> {

@@ -28,10 +28,10 @@ pub struct GetOperationsResult<H: Hasher, K: Array, V: Array> {
 pub trait Resolver<H: Hasher, K: Array, V: Array> {
     /// Get the operations starting at `start_loc` in the database, up to `max_ops` operations.
     /// Returns the operations and a proof that they were present in the database when it had
-    /// `db_size` operations.
+    /// `size` operations.
     fn get_operations(
         &self,
-        db_size: u64,
+        size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<GetOperationsResult<H, K, V>, Error>>;
@@ -47,11 +47,11 @@ where
 {
     async fn get_operations(
         &self,
-        db_size: u64,
+        size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
     ) -> Result<GetOperationsResult<H, K, V>, Error> {
-        self.historical_proof(db_size, start_loc, max_ops.get())
+        self.historical_proof(size, start_loc, max_ops.get())
             .await
             .map_err(Error::Adb)
             .map(|(proof, operations)| GetOperationsResult {
