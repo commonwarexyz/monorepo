@@ -166,7 +166,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::array::FixedBytes;
-    use rand::RngCore;
+    use rand::{Rng, RngCore};
 
     const DEFAULT_TABLE_INITIAL_SIZE: u32 = 256;
     const DEFAULT_TABLE_RESIZE_FREQUENCY: u8 = 4;
@@ -774,6 +774,75 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_bit_based_indexing_across_resizes() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                journal_partition: "test_journal".into(),
+                journal_compression: None,
+                table_partition: "test_table".into(),
+                table_initial_size: 2, // Very small initial size to force multiple resizes
+                table_resize_frequency: 2, // Resize after 2 items per bucket
+                codec_config: (),
+                write_buffer: DEFAULT_WRITE_BUFFER,
+                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
+            };
+
+            let mut store = Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            // Insert many keys to force multiple table resizes
+            // Table will grow from 2 -> 4 -> 8 -> 16 -> 32 -> 64 -> 128 -> 256 -> 512 -> 1024
+            let mut keys = Vec::new();
+            for i in 0..1000 {
+                let key = test_key(&format!("key{i}"));
+                keys.push((key.clone(), i));
+
+                // Force sync to ensure resize occurs ASAP
+                store.put(key, i).await.expect("Failed to put data");
+                store.sync().await.expect("Failed to sync");
+            }
+
+            // Verify all keys can still be found after multiple resizes
+            for (key, value) in &keys {
+                let retrieved = store
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(retrieved, *value, "Value mismatch for key after resizes");
+            }
+
+            // Close and reopen to verify persistence
+            let checkpoint = store.close().await.expect("Failed to close");
+
+            let store = Table::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+                context.clone(),
+                cfg.clone(),
+                Some(checkpoint),
+            )
+            .await
+            .expect("Failed to reinitialize store");
+
+            // Verify all keys can still be found after restart
+            for (key, value) in &keys {
+                let retrieved = store
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(retrieved, *value, "Value mismatch for key after restart");
+            }
+
+            // Verify metrics show resize operations occurred
+            let buffer = context.encode();
+            assert!(buffer.contains("resizes_total 9"));
+        });
+    }
+
     fn test_store_operations_and_restart(num_keys: usize) -> String {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
@@ -786,7 +855,7 @@ mod tests {
                 table_resize_frequency: 2, // Force resize frequently
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
-                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
+                target_journal_size: 128, // Force multiple journal sections
             };
 
             // Initialize the store
@@ -809,11 +878,17 @@ mod tests {
                 context.fill_bytes(&mut value);
                 let value = FixedBytes::<256>::new(value);
 
+                // Store the key-value pair
                 store
                     .put(key.clone(), value.clone())
                     .await
                     .expect("Failed to put data");
                 pairs.push((key, value));
+
+                // Randomly sync to test resizing
+                if context.gen_bool(0.1) {
+                    store.sync().await.expect("Failed to sync");
+                }
             }
 
             // Sync data
@@ -906,8 +981,8 @@ mod tests {
     #[test_traced]
     #[ignore]
     fn test_determinism() {
-        let state1 = test_store_operations_and_restart(200);
-        let state2 = test_store_operations_and_restart(200);
+        let state1 = test_store_operations_and_restart(1000);
+        let state2 = test_store_operations_and_restart(1000);
         assert_eq!(state1, state2);
     }
 }

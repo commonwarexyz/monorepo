@@ -260,6 +260,7 @@ pub struct Table<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Table size
     table_partition: String,
     table_size: u32,
+    table_initial_size: u32,
     table_resize_frequency: u8,
 
     // Table blob that maps hash values to journal locations (journal_id, offset)
@@ -472,6 +473,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         Ok(Self {
             context,
             table_size: checkpoint.table_size,
+            table_initial_size: config.table_initial_size,
             table_resize_frequency: config.table_resize_frequency,
             table,
             table_partition: config.table_partition,
@@ -488,10 +490,37 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         })
     }
 
-    /// Compute the table index for a given key.
+    /// Compute the table index for a given key using bit-based indexing.
+    ///
+    /// This method uses a bit-based approach instead of modulo to ensure that
+    /// values can be correctly looked up as the table grows. When the table
+    /// doubles in size, each bucket splits into two: the original bucket and
+    /// a new bucket at position (original + old_size).
+    ///
+    /// For example, with initial size 4 (2^2):
+    /// - Initially: use 2 bits, so buckets are 0, 1, 2, 3
+    /// - After resize to 8: use 3 bits, bucket 0 splits into 0 and 4
+    /// - After resize to 16: use 4 bits, bucket 0 splits into 0 and 8, etc.
+    ///
+    /// This ensures that entries inserted before a resize can still be found
+    /// after the resize, as they will be in one of the two possible locations.
     fn table_index(&self, key: &K) -> u32 {
         let hash = crc32fast::hash(key.as_ref());
-        hash % self.table_size
+
+        // Calculate the depth (how many times the table has been resized)
+        // depth = log2(table_size / table_initial_size)
+        let depth = (self.table_size / self.table_initial_size).trailing_zeros();
+
+        // Calculate the number of bits to use
+        // initial_bits = log2(table_initial_size)
+        let initial_bits = self.table_initial_size.trailing_zeros();
+        let total_bits = initial_bits + depth;
+
+        // Extract the lower 'total_bits' bits from the hash
+        // This ensures that when the table doubles, entries at position X
+        // will either stay at X or move to X + old_size
+        let mask = (1u32 << total_bits) - 1;
+        hash & mask
     }
 
     /// Choose the newer valid entry between two table slots.
@@ -585,6 +614,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         // If the current section has reached the target size, create a new section
         if size >= self.target_journal_size {
             self.current_section += 1;
+            debug!(size, section = self.current_section, "updated section");
         }
 
         Ok(())
@@ -612,21 +642,27 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
         let (offset, _) = self.journal.append(self.current_section, entry).await?;
 
         // Push table update
-        let added = head.map(|(_, _, added)| added).unwrap_or(0);
+        let mut added = head.map(|(_, _, added)| added).unwrap_or(0);
+
+        // Determine if we should resize the table
+        if added >= self.table_resize_frequency {
+            // We don't need to keep incrementing added because we are already resizing.
+            //
+            // This prevents an overflow of the added field when there are many operations before resize.
+            self.should_resize = true;
+        } else {
+            added = added.checked_add(1).expect("added overflow");
+        }
+
         self.modified_sections.insert(self.current_section);
         self.update_head(
             self.next_epoch,
             table_index,
             self.current_section,
             offset,
-            added.checked_add(1).expect("added overflow"),
+            added,
         )
         .await?;
-
-        // Determine if we should resize the table
-        if added >= self.table_resize_frequency {
-            self.should_resize = true;
-        }
 
         Ok(Cursor::new(self.current_section, offset))
     }
