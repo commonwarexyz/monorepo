@@ -29,13 +29,13 @@ pub trait Resolver<H: Hasher, K: Array, V: Array> {
     /// Request proof and operations starting from the given index into an [Any] database's
     /// operation log. Returns at most `max_ops` operations.
     fn get_proof(
-        &mut self,
+        &self,
         start_loc: u64,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<GetProofResult<H, K, V>, Error>>;
 }
 
-impl<E, K, V, H, T> Resolver<H, K, V> for Any<E, K, V, H, T>
+impl<E, K, V, H, T> Resolver<H, K, V> for &Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -44,32 +44,7 @@ where
     T: Translator,
 {
     async fn get_proof(
-        &mut self,
-        start_loc: u64,
-        max_ops: NonZeroU64,
-    ) -> Result<GetProofResult<H, K, V>, Error> {
-        self.proof(start_loc, max_ops.get())
-            .await
-            .map_err(Error::GetProofFailed)
-            .map(|(proof, operations)| GetProofResult {
-                proof,
-                operations,
-                // Result of proof verification isn't used by this implementation.
-                success_tx: oneshot::channel().0,
-            })
-    }
-}
-
-impl<E, K, V, H, T> Resolver<H, K, V> for &mut Any<E, K, V, H, T>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-{
-    async fn get_proof(
-        &mut self,
+        &self,
         start_index: u64,
         max_ops: NonZeroU64,
     ) -> Result<GetProofResult<H, K, V>, Error> {

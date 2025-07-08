@@ -541,7 +541,7 @@ pub(crate) mod tests {
                 lower_bound_ops,
                 upper_bound_ops: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
                 context,
-                resolver: &mut target_db,
+                resolver: &target_db,
                 hasher,
                 apply_batch_size: 1024,
                 _phantom: PhantomData,
@@ -604,7 +604,7 @@ pub(crate) mod tests {
 
     impl Resolver<TestHash, TestKey, TestValue> for FailingResolver {
         async fn get_proof(
-            &mut self,
+            &self,
             _start_index: u64,
             max_ops: NonZeroU64,
         ) -> Result<GetProofResult<TestHash, TestKey, TestValue>, Error> {
@@ -683,7 +683,7 @@ pub(crate) mod tests {
                 lower_bound_ops: 31, // Invalid: lower > upper
                 upper_bound_ops: 30,
                 context,
-                resolver: target_db,
+                resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 _phantom: PhantomData,
