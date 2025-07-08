@@ -3,7 +3,7 @@ use crate::{
         self,
         any::{
             sync::{
-                resolver::{GetProofResult, Resolver},
+                resolver::{GetOperationsResult, Resolver},
                 Error,
             },
             SyncConfig,
@@ -224,15 +224,6 @@ where
                 // Get current position in the log
                 let log_size = log.size().await.unwrap();
 
-                if log_size < config.lower_bound_ops {
-                    warn!(
-                        log_size,
-                        lower_bound_ops = config.lower_bound_ops,
-                        "Log position before lower bound"
-                    );
-                    return Err(Error::InvalidState);
-                }
-
                 // Calculate remaining operations to sync (inclusive upper bound)
                 let remaining_ops = if log_size <= config.upper_bound_ops {
                     config.upper_bound_ops - log_size + 1
@@ -260,7 +251,7 @@ where
                 );
 
                 // Get proof and operations from resolver with timing
-                let GetProofResult {
+                let GetOperationsResult {
                     proof,
                     operations,
                     success_tx,
@@ -374,18 +365,27 @@ where
                             .await
                             .map_err(adb::Error::JournalError)
                             .map_err(Error::Adb)?;
+                        // No need to sync here -- we will occasionally do so on `append`
+                        // and then when we're done.
                     }
                 }
 
-                // No need to sync here -- we will occasionally do so on `append`
-                // and then when we're done.
-
                 // Check if we've applied all needed operations
-                let next_op_loc = log.size().await.unwrap();
-                let applied_ops = next_op_loc - config.lower_bound_ops;
-                let total_ops_needed = config.upper_bound_ops - config.lower_bound_ops + 1;
+                let log_size = log.size().await.unwrap();
 
-                if applied_ops >= total_ops_needed {
+                // Calculate the target log size (upper bound is inclusive)
+                let target_log_size = config
+                    .upper_bound_ops
+                    .checked_add(1)
+                    .ok_or(Error::InvalidState)?;
+
+                // Check if we've completed sync
+                if log_size >= target_log_size {
+                    if log_size > target_log_size {
+                        warn!(log_size, target_log_size, "Log size exceeded sync target");
+                        return Err(Error::InvalidState);
+                    }
+
                     // Build the complete database from the log
                     let db = adb::any::Any::init_synced(
                         config.context.clone(),
@@ -414,6 +414,7 @@ where
                         target_hash = ?config.target_hash,
                         lower_bound_ops = config.lower_bound_ops,
                         upper_bound_ops = config.upper_bound_ops,
+                        log_size = log_size,
                         valid_batches_received = metrics.valid_batches_received.get(),
                         invalid_batches_received = metrics.invalid_batches_received.get(),
                         "Sync completed successfully");
@@ -545,7 +546,7 @@ pub(crate) mod tests {
                 lower_bound_ops,
                 upper_bound_ops: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
                 context,
-                resolver: &mut target_db,
+                resolver: &target_db,
                 hasher,
                 apply_batch_size: 1024,
                 _phantom: PhantomData,
@@ -595,7 +596,7 @@ pub(crate) mod tests {
     }
 
     /// A simple resolver that always returns too many operations to trigger retry logic.
-    /// Increments `call_count` on each call to `get_proof`.
+    /// Increments `call_count` on each call to `get_operations`.
     struct FailingResolver {
         call_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
     }
@@ -608,11 +609,11 @@ pub(crate) mod tests {
 
     impl Resolver<TestHash, TestKey, TestValue> for FailingResolver {
         async fn get_operations(
-            &mut self,
-            _pos: u64,
-            _start_index: u64,
+            &self,
+            _db_size: u64,
+            _start_loc: u64,
             max_ops: NonZeroU64,
-        ) -> Result<GetProofResult<TestHash, TestKey, TestValue>, Error> {
+        ) -> Result<GetOperationsResult<TestHash, TestKey, TestValue>, Error> {
             self.call_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
@@ -625,7 +626,7 @@ pub(crate) mod tests {
                 ));
             }
 
-            Ok(GetProofResult {
+            Ok(GetOperationsResult {
                 proof: Proof {
                     size: 1,
                     digests: vec![Digest::from([0u8; 32])],
@@ -642,8 +643,8 @@ pub(crate) mod tests {
         const MAX_RETRIES: u64 = 2;
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let get_proof_call_count = Arc::new(AtomicU64::new(0));
-            let resolver = FailingResolver::new(get_proof_call_count.clone());
+            let get_operations_call_count = Arc::new(AtomicU64::new(0));
+            let resolver = FailingResolver::new(get_operations_call_count.clone());
             let config = Config {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(10),
@@ -667,7 +668,7 @@ pub(crate) mod tests {
             }
             // Verify we made max_retries + 1 calls before giving up
             assert_eq!(
-                get_proof_call_count.load(std::sync::atomic::Ordering::SeqCst),
+                get_operations_call_count.load(std::sync::atomic::Ordering::SeqCst),
                 MAX_RETRIES + 1
             );
         });
@@ -688,7 +689,7 @@ pub(crate) mod tests {
                 lower_bound_ops: 31, // Invalid: lower > upper
                 upper_bound_ops: 30,
                 context,
-                resolver: target_db,
+                resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 _phantom: PhantomData,
@@ -741,7 +742,7 @@ pub(crate) mod tests {
                 lower_bound_ops,
                 upper_bound_ops,
                 context,
-                resolver: &mut target_db,
+                resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 _phantom: PhantomData,
