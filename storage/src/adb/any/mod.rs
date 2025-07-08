@@ -1541,11 +1541,8 @@ pub(super) mod test {
             let pinned_nodes = nodes_to_pin
                 .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
                 .collect();
-
-            let target_hash = {
-                let mut hasher = Standard::<Sha256>::new();
-                source_db.root(&mut hasher)
-            };
+            let mut hasher = Standard::<Sha256>::new();
+            let target_hash = source_db.root(&mut hasher);
 
             // Create log with operations
             let mut log = Journal::<_, Operation<Digest, Digest>>::init_pruned(
@@ -1583,7 +1580,6 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc, lower_bound_ops);
 
             // Verify the root hash matches the target
-            let mut hasher = Standard::<Sha256>::new();
             assert_eq!(db.root(&mut hasher), target_hash);
 
             // Verify state matches the source operations
