@@ -322,11 +322,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
 
         // If the blob is brand new, create header + zeroed buckets.
         let checkpoint = if table_len == 0 {
+            // Assert that the checkpoint is valid
             if let Some(checkpoint) = checkpoint {
                 assert_eq!(checkpoint.epoch, 0);
                 assert_eq!(checkpoint.section, 0);
                 assert_eq!(checkpoint.size, 0);
+                assert_eq!(checkpoint.table_size, 0);
             }
+
+            // Create the table
             let table_data_size = config.table_initial_size as u64 * TableEntry::FULL_SIZE as u64;
             table.resize(table_data_size).await?;
             table.sync().await?;
@@ -335,6 +339,12 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Table<E, K, V> {
                 ..Default::default()
             }
         } else if let Some(checkpoint) = checkpoint {
+            // Assert that the checkpoint is valid
+            assert!(
+                checkpoint.table_size.is_power_of_two(),
+                "table_size must be a power of 2"
+            );
+
             // Rewind the journal to the committed section and offset and drop all values larger
             journal.rewind(checkpoint.section, checkpoint.size).await?;
 
