@@ -195,7 +195,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Initialize an [Any] database in a pruned state.
     /// Removes all existing persisted data and applies the state given in `cfg`.
-    pub(super) async fn init_pruned(
+    pub(super) async fn init_synced(
         context: E,
         cfg: SyncConfig<E, K, V, T, H::Digest>,
     ) -> Result<Self, Error> {
@@ -921,10 +921,7 @@ pub(super) mod test {
         ops
     }
 
-    // Apply n updates to the database. Some portion of the updates are deletes.
-    // It's guaranteed that calling this function with n' > n will apply the same updates
-    // as calling this function with n, followed by additional updates.
-    // Note that we don't commit after applying the updates.
+    /// Applies the given operations to the database.
     pub(crate) async fn apply_ops(
         mut db: Any<Context, Digest, Digest, Sha256, EightCap>,
         ops: Vec<Operation<Digest, Digest>>,
@@ -1502,9 +1499,9 @@ pub(super) mod test {
         });
     }
 
-    /// Test init_pruned where the target state is empty and unpruned.
+    /// Test init_synced where the target state is empty and unpruned.
     #[test_traced("WARN")]
-    pub fn test_any_db_init_pruned_empty() {
+    pub fn test_any_db_init_synced_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let log = Journal::<Context, Operation<Digest, Digest>>::init(
@@ -1525,7 +1522,7 @@ pub(super) mod test {
                 apply_batch_size: 1024,
             };
             let mut synced_db: Any<_, Digest, Digest, Sha256, EightCap> =
-                Any::init_pruned(context.clone(), sync_config)
+                Any::init_synced(context.clone(), sync_config)
                     .await
                     .unwrap();
 
@@ -1554,9 +1551,9 @@ pub(super) mod test {
         });
     }
 
-    /// Test init_pruned with non-empty source database
+    /// Test with non-empty source database
     #[test]
-    fn test_any_db_init_pruned_nonempty() {
+    fn test_any_db_init_synced_nonempty() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate a source database
@@ -1600,7 +1597,7 @@ pub(super) mod test {
                 log.append(op).await.unwrap();
             }
 
-            let db = Any::init_pruned(
+            let db = Any::init_synced(
                 context.clone(),
                 SyncConfig {
                     db_config: create_test_config(context.next_u64()),
@@ -1652,9 +1649,9 @@ pub(super) mod test {
         });
     }
 
-    /// Test init_pruned with different pruning boundaries
+    /// Test init_synced with different pruning boundaries
     #[test]
-    fn test_any_db_init_different_pruning_boundaries() {
+    fn test_any_db_init_synced_different_pruning_boundaries() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate a source database
@@ -1697,7 +1694,7 @@ pub(super) mod test {
                     .map(|node| node.as_ref().unwrap().unwrap())
                     .collect::<Vec<_>>();
 
-                let db: Any<Context, Digest, Digest, Sha256, EightCap> = Any::init_pruned(
+                let db: Any<Context, Digest, Digest, Sha256, EightCap> = Any::init_synced(
                     context.clone(),
                     SyncConfig {
                         db_config: create_test_config(context.next_u64()),

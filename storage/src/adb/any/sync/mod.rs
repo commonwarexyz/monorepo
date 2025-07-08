@@ -51,16 +51,16 @@ pub enum Error {
 /// Synchronizes a database by fetching, verifying, and applying operations from a remote source.
 ///
 /// We repeatedly:
-/// 1. Fetch operations in batches from a [Resolver] (i.e. a server of operations)
+/// 1. Fetch operations in batches from a Resolver (i.e. a server of operations)
 /// 2. Verify cryptographic proofs for each batch to ensure correctness
 /// 3. Apply operations to reconstruct the database's operation log.
 ///
 /// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
-///
-/// # Future Work
-/// Handle existing state: https://github.com/commonwarexyz/monorepo/issues/1213.
-/// Parallelize operation fetching: https://github.com/commonwarexyz/monorepo/issues/1214.
-/// Add example: https://github.com/commonwarexyz/monorepo/issues/1215
+//
+// # Future Work
+// Handle existing state: https://github.com/commonwarexyz/monorepo/issues/1213.
+// Parallelize operation fetching: https://github.com/commonwarexyz/monorepo/issues/1214.
+// Add example: https://github.com/commonwarexyz/monorepo/issues/1215
 pub async fn sync<E, K, V, H, T, R>(
     config: Config<E, K, V, H, T, R>,
 ) -> Result<Any<E, K, V, H, T>, Error>

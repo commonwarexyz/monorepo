@@ -2,7 +2,10 @@ use crate::{
     adb::{
         self,
         any::{
-            sync::{resolver::Resolver, Error},
+            sync::{
+                resolver::{GetProofResult, Resolver},
+                Error,
+            },
             SyncConfig,
         },
         operation::Operation,
@@ -13,11 +16,12 @@ use crate::{
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{
-    telemetry::metrics::histogram::Buckets, Clock, Metrics as MetricsTrait, Storage,
+    telemetry::metrics::histogram::{Buckets, Timed},
+    Clock, Metrics as MetricsTrait, Storage,
 };
 use commonware_utils::Array;
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
-use std::{marker::PhantomData, num::NonZeroU64};
+use std::{marker::PhantomData, num::NonZeroU64, sync::Arc};
 use tracing::{debug, info, warn};
 
 /// Configuration for the sync client
@@ -66,7 +70,7 @@ where
 }
 
 /// Prometheus metrics for the sync client.
-pub struct Metrics {
+pub struct Metrics<E: Clock> {
     /// Number of valid batches successfully received and processed.
     valid_batches_received: Counter<u64>,
     /// Number of invalid batches received that failed validation.
@@ -74,23 +78,30 @@ pub struct Metrics {
     /// Total number of operations fetched during sync.
     operations_fetched: Counter<u64>,
     /// Total time spent fetching operations from resolver (seconds).
-    fetch_duration: Histogram,
+    fetch_duration: Timed<E>,
     /// Total time spent verifying proofs (seconds).
-    proof_verification_duration: Histogram,
+    proof_verification_duration: Timed<E>,
     /// Total time spent applying operations to the log (seconds).
-    apply_duration: Histogram,
+    apply_duration: Timed<E>,
 }
 
-impl Metrics {
+impl<E: Clock + MetricsTrait> Metrics<E> {
     /// Register metrics with the provided runtime metrics context and return the struct.
-    pub fn new<E: MetricsTrait>(context: E) -> Self {
+    pub fn new(context: E) -> Self {
+        let fetch_histogram = Histogram::new(Buckets::NETWORK.into_iter());
+        let proof_verification_histogram = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
+        let apply_histogram = Histogram::new(Buckets::LOCAL.into_iter());
+
         let metrics = Self {
             valid_batches_received: Counter::default(),
             invalid_batches_received: Counter::default(),
             operations_fetched: Counter::default(),
-            fetch_duration: Histogram::new(Buckets::NETWORK.into_iter()),
-            proof_verification_duration: Histogram::new(Buckets::CRYPTOGRAPHY.into_iter()),
-            apply_duration: Histogram::new(Buckets::LOCAL.into_iter()),
+            fetch_duration: Timed::new(fetch_histogram.clone(), Arc::new(context.clone())),
+            proof_verification_duration: Timed::new(
+                proof_verification_histogram.clone(),
+                Arc::new(context.clone()),
+            ),
+            apply_duration: Timed::new(apply_histogram.clone(), Arc::new(context.clone())),
         };
 
         // Register metrics.
@@ -112,17 +123,17 @@ impl Metrics {
         context.register(
             "fetch_duration_seconds",
             "Histogram of durations spent fetching operation batches during ADB sync",
-            metrics.fetch_duration.clone(),
+            fetch_histogram,
         );
         context.register(
             "proof_verification_duration_seconds",
             "Histogram of durations spent verifying proofs during ADB sync",
-            metrics.proof_verification_duration.clone(),
+            proof_verification_histogram,
         );
         context.register(
             "apply_duration_seconds",
             "Histogram of durations spent applying operations during ADB sync",
-            metrics.apply_duration.clone(),
+            apply_histogram,
         );
 
         metrics
@@ -140,23 +151,23 @@ where
     T: Translator,
     R: Resolver<H, K, V>,
 {
-    /// Next step: fetch and verify proofs, holding only the pruned log.
+    /// Next step is to fetch and verify operations.
     FetchData {
         config: Config<E, K, V, H, T, R>,
         log: Journal<E, Operation<K, V>>,
         /// Extracted pinned nodes from first batch proof
         pinned_nodes: Option<Vec<H::Digest>>,
-        metrics: Metrics,
+        metrics: Metrics<E>,
     },
-    /// Apply fetched operations to the log only.
+    /// Next step is to apply fetched operations to the log.
     ApplyData {
         config: Config<E, K, V, H, T, R>,
         log: Journal<E, Operation<K, V>>,
         pinned_nodes: Option<Vec<H::Digest>>,
         batch_ops: Vec<Operation<K, V>>,
-        metrics: Metrics,
+        metrics: Metrics<E>,
     },
-    /// Sync completed, full database constructed.
+    /// Sync completed. Database is fully constructed.
     Done { db: adb::any::Any<E, K, V, H, T> },
 }
 
@@ -193,14 +204,11 @@ where
         .map_err(adb::Error::JournalError)
         .map_err(Error::Adb)?;
 
-        // Initialize metrics
-        let metrics = Metrics::new(config.context.clone());
-
         Ok(Client::FetchData {
+            metrics: Metrics::new(config.context.clone()),
             config,
             log,
             pinned_nodes: None,
-            metrics,
         })
     }
 
@@ -213,46 +221,30 @@ where
                 mut pinned_nodes,
                 metrics,
             } => {
-                // Calculate total operations needed and current position (inclusive bounds)
-                let total_ops_needed = config
-                    .upper_bound_ops
-                    .checked_sub(config.lower_bound_ops)
-                    .ok_or(Error::InvalidTarget {
-                    lower_bound_pos: config.lower_bound_ops,
-                    upper_bound_pos: config.upper_bound_ops,
-                })? + 1;
-                // Get the absolute position of the next operation to be appended
-                let next_op_loc = log.size().await.unwrap();
+                // Get current position in the log
+                let log_size = log.size().await.unwrap();
 
-                // Calculate relative count of operations applied since pruning boundary
-                let applied_ops =
-                    next_op_loc
-                        .checked_sub(config.lower_bound_ops)
-                        .ok_or_else(|| {
-                            warn!(
-                                next_op_loc,
-                                lower_bound_ops = config.lower_bound_ops,
-                                "InvalidState: next_op_pos < lower_bound_ops"
-                            );
-                            Error::InvalidState
-                        })?;
-
-                debug!(
-                    lower_bound_ops = config.lower_bound_ops,
-                    upper_bound_ops = config.upper_bound_ops,
-                    total_ops_needed = total_ops_needed,
-                    next_op_pos = next_op_loc,
-                    applied_ops = applied_ops,
-                    "Calculating remaining operations"
-                );
-
-                let remaining_ops = total_ops_needed.checked_sub(applied_ops).ok_or_else(|| {
+                if log_size < config.lower_bound_ops {
                     warn!(
-                        total_ops_needed,
-                        applied_ops, "InvalidState: applied_ops > total_ops_needed"
+                        log_size,
+                        lower_bound_ops = config.lower_bound_ops,
+                        "Log position before lower bound"
                     );
-                    Error::InvalidState
-                })?;
+                    return Err(Error::InvalidState);
+                }
+
+                // Calculate remaining operations to sync (inclusive upper bound)
+                let remaining_ops = if log_size <= config.upper_bound_ops {
+                    config.upper_bound_ops - log_size + 1
+                } else {
+                    // We're at/past the target.
+                    warn!(
+                        log_size,
+                        upper_bound = config.upper_bound_ops,
+                        "Sync target exceeded"
+                    );
+                    return Err(Error::InvalidState);
+                };
 
                 let batch_size = std::cmp::min(config.fetch_batch_size.get(), remaining_ops);
                 let batch_size = NonZeroU64::new(batch_size).ok_or(Error::InvalidState)?;
@@ -261,33 +253,34 @@ where
                     target_hash = ?config.target_hash,
                     lower_bound_pos = config.lower_bound_ops,
                     upper_bound_pos = config.upper_bound_ops,
-                    next_op_loc = next_op_loc,
+                    current_pos = log_size,
                     remaining_ops = remaining_ops,
                     batch_size = batch_size.get(),
                     "Fetching proof and operations"
                 );
 
                 // Get proof and operations from resolver with timing
-                let fetch_start = config.context.current();
-                let target_db_size = config.upper_bound_ops + 1;
-                let (proof, new_operations) = config
-                    .resolver
-                    .get_proof(target_db_size, next_op_loc, batch_size)
-                    .await?;
-                let fetch_end = config.context.current();
-                let fetch_secs = fetch_end
-                    .duration_since(fetch_start)
-                    .unwrap_or_default()
-                    .as_secs_f64();
-                metrics.fetch_duration.observe(fetch_secs);
+                let GetProofResult {
+                    proof,
+                    operations,
+                    success_tx,
+                } = {
+                    let _timer = metrics.fetch_duration.timer();
+                    let target_db_size = config.upper_bound_ops + 1;
+                    config
+                        .resolver
+                        .get_operations(target_db_size, log_size, batch_size)
+                        .await?
+                };
 
-                let new_operations_len = new_operations.len() as u64;
+                let operations_len = operations.len() as u64;
 
                 // Validate that we didn't get more operations than requested
                 // or that we didn't get an empty proof. We should never get an empty proof
                 // because we will never request an empty proof (i.e. a proof over an empty database).
-                if new_operations_len > batch_size.get() || new_operations_len == 0 {
+                if operations_len > batch_size.get() || operations_len == 0 {
                     metrics.invalid_batches_received.inc();
+                    let _ = success_tx.send(false);
                     if metrics.invalid_batches_received.get() > config.max_retries {
                         return Err(Error::MaxRetriesExceeded);
                     }
@@ -300,25 +293,22 @@ where
                 }
 
                 debug!(
-                    num_ops = new_operations_len,
+                    ops_len = operations_len,
                     "Received operations from resolver"
                 );
 
                 // Verify the proof is valid over the given operations with timing
-                let verification_start = config.context.current();
-                let proof_valid = adb::any::Any::<E, K, V, H, T>::verify_proof(
-                    &mut config.hasher,
-                    &proof,
-                    next_op_loc,
-                    &new_operations,
-                    &config.target_hash,
-                );
-                let verification_end = config.context.current();
-                let verify_secs = verification_end
-                    .duration_since(verification_start)
-                    .unwrap_or_default()
-                    .as_secs_f64();
-                metrics.proof_verification_duration.observe(verify_secs);
+                let proof_valid = {
+                    let _timer = metrics.proof_verification_duration.timer();
+                    adb::any::Any::<E, K, V, H, T>::verify_proof(
+                        &mut config.hasher,
+                        &proof,
+                        log_size,
+                        &operations,
+                        &config.target_hash,
+                    )
+                };
+                let _ = success_tx.send(proof_valid);
 
                 if !proof_valid {
                     debug!("Proof verification failed, retrying");
@@ -326,7 +316,6 @@ where
                     if metrics.invalid_batches_received.get() > config.max_retries {
                         return Err(Error::MaxRetriesExceeded);
                     }
-                    config.resolver.notify_failure();
 
                     return Ok(Client::FetchData {
                         config,
@@ -337,9 +326,9 @@ where
                 }
 
                 // Install pinned nodes on first successful batch.
-                if applied_ops == 0 {
-                    let start_pos = leaf_num_to_pos(next_op_loc);
-                    let end_pos = leaf_num_to_pos(next_op_loc + new_operations_len - 1);
+                if log_size == config.lower_bound_ops {
+                    let start_pos = leaf_num_to_pos(log_size);
+                    let end_pos = leaf_num_to_pos(log_size + operations_len - 1);
                     let Ok(new_pinned_nodes) = proof.extract_pinned_nodes(start_pos, end_pos)
                     else {
                         warn!("Failed to extract pinned nodes, retrying");
@@ -359,13 +348,13 @@ where
 
                 // Record successful batch metrics
                 metrics.valid_batches_received.inc();
-                metrics.operations_fetched.inc_by(new_operations_len);
+                metrics.operations_fetched.inc_by(operations_len);
 
                 Ok(Client::ApplyData {
                     config,
                     log,
                     pinned_nodes,
-                    batch_ops: new_operations,
+                    batch_ops: operations,
                     metrics,
                 })
             }
@@ -378,19 +367,15 @@ where
                 metrics,
             } => {
                 // Apply operations to the log with timing
-                let apply_start = config.context.current();
-                for op in batch_ops.into_iter() {
-                    log.append(op)
-                        .await
-                        .map_err(adb::Error::JournalError)
-                        .map_err(Error::Adb)?;
+                {
+                    let _timer = metrics.apply_duration.timer();
+                    for op in batch_ops.into_iter() {
+                        log.append(op)
+                            .await
+                            .map_err(adb::Error::JournalError)
+                            .map_err(Error::Adb)?;
+                    }
                 }
-                let apply_end = config.context.current();
-                let apply_secs = apply_end
-                    .duration_since(apply_start)
-                    .unwrap_or_default()
-                    .as_secs_f64();
-                metrics.apply_duration.observe(apply_secs);
 
                 // No need to sync here -- we will occasionally do so on `append`
                 // and then when we're done.
@@ -402,7 +387,7 @@ where
 
                 if applied_ops >= total_ops_needed {
                     // Build the complete database from the log
-                    let db = adb::any::Any::init_pruned(
+                    let db = adb::any::Any::init_synced(
                         config.context.clone(),
                         SyncConfig {
                             db_config: config.db_config.clone(),
@@ -476,6 +461,7 @@ pub(crate) mod tests {
     use commonware_cryptography::{sha256::Digest, Digest as _, Sha256};
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::NZU64;
+    use futures::channel::oneshot;
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
     use std::{
         collections::{HashMap, HashSet},
@@ -621,40 +607,33 @@ pub(crate) mod tests {
     }
 
     impl Resolver<TestHash, TestKey, TestValue> for FailingResolver {
-        async fn get_proof(
+        async fn get_operations(
             &mut self,
             _pos: u64,
             _start_index: u64,
             max_ops: NonZeroU64,
-        ) -> Result<
-            (
-                Proof<<TestHash as Hasher>::Digest>,
-                Vec<Operation<TestKey, TestValue>>,
-            ),
-            Error,
-        > {
+        ) -> Result<GetProofResult<TestHash, TestKey, TestValue>, Error> {
             self.call_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
             // Return more operations than requested to trigger retry logic
-            let mut ops = Vec::new();
+            let mut operations = Vec::new();
             for i in 0..(max_ops.get() + 1) {
-                ops.push(Operation::Update(
+                operations.push(Operation::Update(
                     TestKey::from([(i % 256) as u8; 32]),
                     TestValue::from([0u8; 32]),
                 ));
             }
 
-            Ok((
-                Proof {
+            Ok(GetProofResult {
+                proof: Proof {
                     size: 1,
                     digests: vec![Digest::from([0u8; 32])],
                 },
-                ops,
-            ))
+                operations,
+                success_tx: oneshot::channel().0,
+            })
         }
-
-        fn notify_failure(&mut self) {}
     }
 
     /// Test that we return an error after max_retries attempts to get a proof fail.
