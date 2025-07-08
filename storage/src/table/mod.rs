@@ -73,7 +73,7 @@
 //!         journal_compression: Some(3),
 //!         table_partition: "table_table".into(),
 //!         table_initial_size: 65536, // 64K buckets
-//!         table_resize_frequency: 4, // Force resize once 4 writes to the same entry occur
+//!         table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY, // Force resize once 4 writes to the same entry occur
 //!         codec_config: (),
 //!         write_buffer: 1024 * 1024,
 //!         target_journal_size: 100 * 1024 * 1024, // 100MB journals
@@ -168,7 +168,8 @@ mod tests {
     use commonware_utils::array::FixedBytes;
     use rand::RngCore;
 
-    const DEFAULT_TABLE_SIZE: u32 = 256;
+    const DEFAULT_TABLE_INITIAL_SIZE: u32 = 256;
+    const DEFAULT_TABLE_RESIZE_FREQUENCY: u8 = 4;
     const DEFAULT_WRITE_BUFFER: usize = 1024;
     const DEFAULT_TARGET_JOURNAL_SIZE: u64 = 10 * 1024 * 1024;
 
@@ -189,8 +190,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: compression,
                 table_partition: "test_table".into(),
-                table_initial_size: DEFAULT_TABLE_SIZE,
-                table_resize_frequency: 4,
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -254,8 +255,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_initial_size: DEFAULT_TABLE_SIZE,
-                table_resize_frequency: 4,
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -303,7 +304,7 @@ mod tests {
                 journal_compression: None,
                 table_partition: "test_table".into(),
                 table_initial_size: 4, // Very small to force collisions
-                table_resize_frequency: 4,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -355,8 +356,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_initial_size: DEFAULT_TABLE_SIZE,
-                table_resize_frequency: 4,
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -421,8 +422,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_initial_size: DEFAULT_TABLE_SIZE,
-                table_resize_frequency: 4,
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -516,8 +517,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_initial_size: DEFAULT_TABLE_SIZE,
-                table_resize_frequency: 4,
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -549,8 +550,8 @@ mod tests {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
                 table_partition: "test_table".into(),
-                table_initial_size: DEFAULT_TABLE_SIZE,
-                table_resize_frequency: 4,
+                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -606,7 +607,7 @@ mod tests {
                 journal_compression: None,
                 table_partition: "test_table".into(),
                 table_initial_size: 4,
-                table_resize_frequency: 4,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -659,7 +660,7 @@ mod tests {
                 journal_compression: None,
                 table_partition: "test_table".into(),
                 table_initial_size: 4,
-                table_resize_frequency: 4,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
@@ -716,7 +717,7 @@ mod tests {
                 journal_compression: None,
                 table_partition: "test_table".into(),
                 table_initial_size: 4,
-                table_resize_frequency: 4,
+                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 codec_config: (),
                 write_buffer: DEFAULT_WRITE_BUFFER,
                 target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
