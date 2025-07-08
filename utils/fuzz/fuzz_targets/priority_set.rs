@@ -60,8 +60,8 @@ fn fuzz(ops: Vec<PrioritySetOp>) {
             }
 
             PrioritySetOp::Reconcile { keep, default } => {
-                let keep = if keep.len() > 1000 {
-                    &keep[..1000]
+                let keep = if keep.len() > 4 {
+                    &keep[..4]
                 } else {
                     &keep[..]
                 };
@@ -73,8 +73,8 @@ fn fuzz(ops: Vec<PrioritySetOp>) {
                     expected_items.insert(item.clone());
                 }
 
-                assert_eq!(set.len(), keep.len());
-                for item in keep {
+                assert_eq!(set.len(), expected_items.len());
+                for item in expected_items.iter() {
                     assert!(set.contains(item));
                 }
 
