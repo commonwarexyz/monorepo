@@ -133,7 +133,8 @@ pub fn compute_weights(indices: Vec<u32>) -> Result<BTreeMap<u32, Weight>, Error
     for i in &indices {
         // Convert i_eval.index to x-coordinate (x = index + 1)
         let mut xi = Scalar::zero();
-        xi.set_int(i + 1);
+        xi.set_int(*i);
+        xi.add(&Scalar::one());
 
         // Compute product terms for Lagrange basis polynomial
         let (mut num, mut den) = (Scalar::one(), Scalar::one());
@@ -145,7 +146,8 @@ pub fn compute_weights(indices: Vec<u32>) -> Result<BTreeMap<u32, Weight>, Error
 
             // Convert j_eval.index to x-coordinate
             let mut xj = Scalar::zero();
-            xj.set_int(j + 1);
+            xj.set_int(*j);
+            xj.add(&Scalar::one());
 
             // Include `xj` in the numerator product for `l_i(0)`
             num.mul(&xj);
@@ -252,7 +254,8 @@ impl<C: Element> Poly<C> {
         // otherwise it reveals the "secret" value after a reshare (where the constant
         // term is set to be the secret of the previous dealing).
         let mut xi = Scalar::zero();
-        xi.set_int(i + 1);
+        xi.set_int(i);
+        xi.add(&Scalar::one());
 
         // Use Horner's method to evaluate the polynomial
         let res = self.0.iter().rev().fold(C::zero(), |mut sum, coeff| {
@@ -417,6 +420,13 @@ pub mod tests {
             .map(|i| poly.evaluate(i))
             .collect::<Vec<_>>();
         Poly::recover(threshold, &shares).unwrap_err();
+    }
+
+    #[test]
+    fn evaluate_with_overflow() {
+        let degree = 4;
+        let poly = new(degree);
+        poly.evaluate(u32::MAX);
     }
 
     #[test]
