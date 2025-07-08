@@ -21,7 +21,7 @@ use crate::{
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::{
     future::{try_join_all, TryFutureExt},
@@ -66,6 +66,9 @@ pub struct Config<T: Translator> {
 
     /// An optional thread pool to use for parallelizing batch operations.
     pub pool: Option<ThreadPool>,
+
+    /// The buffer pool to use for caching data.
+    pub buffer_pool: PoolRef,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
@@ -140,6 +143,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 log_write_buffer: cfg.log_write_buffer,
                 translator: cfg.translator,
                 pool: cfg.pool,
+                buffer_pool: cfg.buffer_pool,
             },
             &mut hasher,
         )
@@ -183,6 +187,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 items_per_blob: cfg.mmr_items_per_blob,
                 write_buffer: cfg.mmr_write_buffer,
                 pool: cfg.pool,
+                buffer_pool: cfg.buffer_pool.clone(),
             },
         )
         .await?;
@@ -193,6 +198,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 partition: cfg.log_journal_partition,
                 items_per_blob: cfg.log_items_per_blob,
                 write_buffer: cfg.log_write_buffer,
+                buffer_pool: cfg.buffer_pool,
             },
         )
         .await?;
@@ -408,7 +414,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
         let new_loc = self.op_count();
-        let res = Any::<_, _, _, H, _>::update_loc(
+        let res = Any::<_, _, _, H, T>::update_loc(
             &mut self.snapshot,
             &self.log,
             key.clone(),
@@ -723,7 +729,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 mod test {
     use super::*;
     use crate::{
-        index::translator::{EightCap, TwoCap},
+        index::translator::TwoCap,
         mmr::{hasher::Standard, mem::Mmr as MemMmr},
     };
     use commonware_codec::{DecodeExt, FixedSize};
@@ -737,8 +743,10 @@ mod test {
     use std::collections::{HashMap, HashSet};
 
     const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
+    const PAGE_SIZE: usize = 77;
+    const PAGE_CACHE_SIZE: usize = 9;
 
-    fn any_db_config<T: Translator>(suffix: &str, translator: T) -> Config<T> {
+    fn any_db_config(suffix: &str) -> Config<TwoCap> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -747,21 +755,20 @@ mod test {
             log_journal_partition: format!("log_journal_{suffix}"),
             log_items_per_blob: 7,
             log_write_buffer: 1024,
-            translator,
+            translator: TwoCap,
             pool: None,
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
+    /// A type alias for the concrete [Any] type used in these unit tests.
+    type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+
     /// Return an `Any` database initialized with a fixed config.
-    async fn open_db<E: RStorage + Clock + Metrics>(
-        context: E,
-    ) -> Any<E, Digest, Digest, Sha256, EightCap> {
-        Any::<E, Digest, Digest, Sha256, EightCap>::init(
-            context,
-            any_db_config("partition", EightCap),
-        )
-        .await
-        .unwrap()
+    async fn open_db(context: deterministic::Context) -> AnyTest {
+        AnyTest::init(context, any_db_config("partition"))
+            .await
+            .unwrap()
     }
 
     #[test_traced("WARN")]
@@ -986,13 +993,13 @@ mod test {
             assert_eq!(db.inactivity_floor_loc, 0);
             assert_eq!(db.log.size().await.unwrap(), 1477);
             assert_eq!(db.oldest_retained_loc().unwrap(), 0); // no pruning yet
-            assert_eq!(db.snapshot.keys(), 857);
+            assert_eq!(db.snapshot.items(), 857);
 
             // Test that commit will raise the activity floor.
             db.commit().await.unwrap();
             assert_eq!(db.op_count(), 2336);
             assert_eq!(db.oldest_retained_loc().unwrap(), 1478);
-            assert_eq!(db.snapshot.keys(), 857);
+            assert_eq!(db.snapshot.items(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
             let root_digest = db.root(&mut hasher);
@@ -1001,7 +1008,7 @@ mod test {
             assert_eq!(root_digest, db.root(&mut hasher));
             assert_eq!(db.op_count(), 2336);
             assert_eq!(db.inactivity_floor_loc, 1478);
-            assert_eq!(db.snapshot.keys(), 857);
+            assert_eq!(db.snapshot.items(), 857);
 
             // Raise the inactivity floor to the point where all inactive operations can be pruned.
             db.raise_inactivity_floor(3000).await.unwrap();
@@ -1010,7 +1017,7 @@ mod test {
             // Inactivity floor should be 858 operations from tip since 858 operations are active
             // (counting the floor op itself).
             assert_eq!(db.op_count(), 4478 + 858);
-            assert_eq!(db.snapshot.keys(), 857);
+            assert_eq!(db.snapshot.items(), 857);
 
             // Confirm the db's state matches that of the separate map we computed independently.
             for i in 0u64..1000 {
@@ -1039,15 +1046,7 @@ mod test {
 
             for i in start_loc..end_loc {
                 let (proof, log) = db.proof(i, max_ops).await.unwrap();
-                assert!(
-                    Any::<deterministic::Context, _, _, _, EightCap>::verify_proof(
-                        &mut hasher,
-                        &proof,
-                        i,
-                        &log,
-                        &root
-                    ),
-                );
+                assert!(AnyTest::verify_proof(&mut hasher, &proof, i, &log, &root));
             }
 
             db.destroy().await.unwrap();
@@ -1103,12 +1102,7 @@ mod test {
             db.destroy().await.unwrap();
 
             // Recreate the database without any failures and make sure the roots match.
-            let mut new_db = Any::<_, Digest, Digest, Sha256, EightCap>::init(
-                context,
-                any_db_config("new_partition", EightCap),
-            )
-            .await
-            .unwrap();
+            let mut new_db = open_db(context.clone()).await;
             assert_eq!(new_db.op_count(), 0);
             // Insert 1000 keys then sync.
             for i in 0u64..ELEMENTS {
@@ -1255,29 +1249,26 @@ mod test {
             db.close().await.unwrap();
 
             // Initialize the db's mmr/log.
-            let cfg = any_db_config("partition", TwoCap);
-            let (mmr, log) = Any::<_, Digest, Digest, _, TwoCap>::init_mmr_and_log(
-                context.clone(),
-                cfg,
-                &mut hasher,
-            )
-            .await
-            .unwrap();
+            let cfg = any_db_config("partition");
+            let (mmr, log) = AnyTest::init_mmr_and_log(context.clone(), cfg, &mut hasher)
+                .await
+                .unwrap();
             let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
 
             // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
             let mut snapshot: Index<TwoCap, u64> =
                 Index::init(context.with_label("snapshot"), TwoCap);
-            let inactivity_floor_loc = Any::<_, _, _, Sha256, TwoCap>::build_snapshot_from_log::<
-                SHA256_SIZE,
-            >(
-                start_leaf_num, &log, &mut snapshot, Some(&mut bitmap)
+            let inactivity_floor_loc = AnyTest::build_snapshot_from_log::<SHA256_SIZE>(
+                start_leaf_num,
+                &log,
+                &mut snapshot,
+                Some(&mut bitmap),
             )
             .await
             .unwrap();
 
             // Check the recovered state is correct.
-            let db = Any::<_, _, _, _, TwoCap> {
+            let db = AnyTest {
                 ops: mmr,
                 log,
                 snapshot,

@@ -2,7 +2,7 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::hash;
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::journal::fixed::{
     Config as FixedConfig, Config as VariableConfig, Journal as FixedJournal,
     Journal as VariableJournal,
@@ -60,6 +60,9 @@ struct FuzzInput {
     journal_type: JournalType,
 }
 
+const PAGE_SIZE: usize = 128;
+const PAGE_CACHE_SIZE: usize = 1;
+
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
@@ -69,11 +72,13 @@ fn fuzz(input: FuzzInput) {
                 partition: "fixed_journal_operations_fuzz_test".to_string(),
                 items_per_blob: 3,
                 write_buffer: 512,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             JournalType::Variable => VariableConfig {
                 partition: "variable_journal_operations_fuzz_test".to_string(),
                 items_per_blob: 3,
                 write_buffer: 512,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         };
 
@@ -124,9 +129,10 @@ fn fuzz(input: FuzzInput) {
                 JournalOperation::Prune { min_pos } => {
                     // Only prune positions within current journal size
                     if *min_pos <= journal_size {
-                        let actual_pruned_pos = journal.prune(*min_pos).await.unwrap();
+                        journal.prune(*min_pos).await.unwrap();
                         // Update oldest retained position based on actual pruning
-                        oldest_retained_pos = actual_pruned_pos;
+                        oldest_retained_pos =
+                            journal.oldest_retained_pos().await.unwrap().unwrap_or(0);
                     }
                 }
 
