@@ -898,10 +898,7 @@ pub(super) mod test {
         ops
     }
 
-    // Apply n updates to the database. Some portion of the updates are deletes.
-    // It's guaranteed that calling this function with n' > n will apply the same updates
-    // as calling this function with n, followed by additional updates.
-    // Note that we don't commit after applying the updates.
+    /// Applies the given operations to the database.
     pub(crate) async fn apply_ops(
         mut db: Any<Context, Digest, Digest, Sha256, EightCap>,
         ops: Vec<Operation<Digest, Digest>>,
