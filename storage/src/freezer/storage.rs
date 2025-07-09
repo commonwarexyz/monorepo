@@ -839,8 +839,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
             // Write to new position (i + old_size)
             {
-                let new_index = i + old_size;
-                let table_offset = new_index as u64 * Entry::FULL_SIZE as u64;
+                let table_offset = (i + old_size) as u64 * Entry::FULL_SIZE as u64;
                 let entry = Entry::new(self.next_epoch, section, offset, 0);
                 new_buffered_table
                     .write_at(entry.encode(), table_offset)
