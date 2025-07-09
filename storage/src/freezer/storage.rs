@@ -278,6 +278,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Metrics
     puts: Counter,
     gets: Counter,
+    useless_reads: Counter,
     resizes: Counter,
 
     // Pending table updates to be written on sync (table_index -> (section, offset))
@@ -456,9 +457,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Create metrics
         let puts = Counter::default();
         let gets = Counter::default();
+        let useless_reads = Counter::default();
         let resizes = Counter::default();
         context.register("puts", "number of put operations", puts.clone());
         context.register("gets", "number of get operations", gets.clone());
+        context.register(
+            "useless_reads",
+            "number of get operations that didn't match the key",
+            useless_reads.clone(),
+        );
         context.register(
             "resizes",
             "number of table resizing operations",
@@ -478,6 +485,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
             puts,
             gets,
+            useless_reads,
             resizes,
             modified_sections: BTreeSet::new(),
             should_resize: false,
@@ -690,6 +698,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             if entry.key.as_ref() == key.as_ref() {
                 return Ok(Some(entry.value));
             }
+
+            // Increment useless reads
+            self.useless_reads.inc();
 
             // Follow the chain
             let Some(next) = entry.next else {
