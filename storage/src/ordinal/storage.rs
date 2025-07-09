@@ -87,8 +87,13 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         Self::init_with_bits(context, config, None).await
     }
 
-    /// Initialize a new [Ordinal] instance with a collection of [BitVec]s that indicate
-    /// which items should be considered available.
+    /// Initialize a new [Ordinal] instance with a collection of [BitVec]s (indicating which
+    /// records should be considered available).
+    ///
+    /// If a section is not provided in the [BTreeMap], all records in that section are considered
+    /// unavailable. If a [BitVec] is provided for a section, all records in that section are
+    /// considered available if and only if the [BitVec] is set for the record. If a section is provided
+    /// but no [BitVec] is populated, all records in that section are considered available.
     pub async fn init_with_bits(
         context: E,
         config: Config,
