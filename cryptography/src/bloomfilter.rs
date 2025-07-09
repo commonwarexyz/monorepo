@@ -37,30 +37,22 @@ impl BloomFilter {
         }
     }
 
-    /// Extract two 128-bit hash values from a 32-byte [Digest].
-    fn extract_hashes(digest: &Digest) -> (u128, u128) {
+    /// Generate `num_hashers` hashes for the given item.
+    fn hashes(&self, item: &[u8]) -> impl Iterator<Item = u128> {
+        // Extract two 128-bit hash values from the SHA256 digest of the item
+        let digest = hash(item);
         let mut h1_bytes = [0u8; HALF_DIGEST_LEN];
         h1_bytes.copy_from_slice(&digest[0..HALF_DIGEST_LEN]);
         let h1 = u128::from_be_bytes(h1_bytes);
-
         let mut h2_bytes = [0u8; HALF_DIGEST_LEN];
         h2_bytes.copy_from_slice(&digest[HALF_DIGEST_LEN..FULL_DIGEST_LEN]);
         let h2 = u128::from_be_bytes(h2_bytes);
 
-        (h1, h2)
-    }
-
-    /// Generate `num_hashers` hashes for the given item.
-    ///
-    /// It uses the Kirsch-Mitzenmacher optimization:
-    /// * `h_i(x) = (h1(x) + i * h2(x)) mod m`
-    /// * `h1` and `h2` are derived from the SHA256 digest of the item.
-    fn hashes(&self, item: &[u8]) -> impl Iterator<Item = u128> {
-        let digest = hash(item);
-        let (h1, h2) = Self::extract_hashes(&digest);
-
-        let hashers = self.hashers;
-        (0..hashers).map(move |i| h1.wrapping_add(u128::from(i).wrapping_mul(h2)))
+        // Generate `hashers` hashes using the Kirsch-Mitzenmacher optimization:
+        //
+        // `h_i(x) = (h1(x) + i * h2(x)) mod m`
+        let hashers = self.hashers as u128;
+        (0..hashers).map(move |i| h1.wrapping_add(i.wrapping_mul(h2)))
     }
 
     /// Inserts an item into the [BloomFilter].
