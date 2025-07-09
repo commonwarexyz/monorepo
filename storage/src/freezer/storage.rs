@@ -813,16 +813,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         self.table.resize(Self::table_offset(new_size)).await?;
 
         // Create write buffers for efficient batched writes
-        let half_table_write_buffer = self.table_write_buffer / 2;
         let old_buffered_table = buffer::Write::new(
             self.table.clone(),
             0, // start at beginning of table
-            half_table_write_buffer,
+            self.table_write_buffer,
         );
         let new_buffered_table = buffer::Write::new(
             self.table.clone(),
             Self::table_offset(old_size), // start at end of old table
-            half_table_write_buffer,
+            self.table_write_buffer,
         );
 
         // Create a buffered reader for efficient scanning

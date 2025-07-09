@@ -6,13 +6,13 @@ use commonware_utils::array::FixedBytes;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 /// Number of bytes that can be buffered before being written to disk.
-const JOURNAL_WRITE_BUFFER: usize = 1024;
+const JOURNAL_WRITE_BUFFER: usize = 1024 * 1024; // 1MB
 
 /// Target size of each journal section before creating a new one.
-const JOURNAL_TARGET_SIZE: u64 = 10 * 1024 * 1024; // 10MB
+const JOURNAL_TARGET_SIZE: u64 = 100 * 1024 * 1024; // 100MB
 
 /// Initial size of the table.
-const TABLE_INITIAL_SIZE: u32 = 65536; // 64K buckets
+const TABLE_INITIAL_SIZE: u32 = 65_536;
 
 /// Number of items added to a table entry before resize.
 const TABLE_RESIZE_FREQUENCY: u8 = 4;

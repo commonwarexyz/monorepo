@@ -138,13 +138,13 @@
 //!     let cfg = Config {
 //!         journal_partition: "freezer_journal".into(),
 //!         journal_compression: Some(3),
-//!         journal_write_buffer: 1024 * 1024,
-//!         journal_target_size: 100 * 1024 * 1024, // 100MB journals
+//!         journal_write_buffer: 1024 * 1024, // 1MB
+//!         journal_target_size: 100 * 1024 * 1024, // 100MB
 //!         table_partition: "freezer_table".into(),
-//!         table_initial_size: 65536, // 64K buckets
+//!         table_initial_size: 65_536,
 //!         table_resize_frequency: 4, // Force resize once 4 writes to the same entry occur
-//!         table_read_buffer: 64 * 1024, // 64KB read buffer
-//!         table_write_buffer: 64 * 1024, // 64KB write buffer
+//!         table_read_buffer: 1024 * 1024, // 1MB
+//!         table_write_buffer: 1024 * 1024, // 1MB
 //!         codec_config: (),
 //!     };
 //!     let mut freezer = Freezer::<_, FixedBytes<32>, i32>::init(context, cfg).await.unwrap();
