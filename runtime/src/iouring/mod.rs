@@ -1,3 +1,55 @@
+//! Asynchronous io_uring event loop implementation.
+//!
+//! This module provides a high-level interface for submitting operations to Linux's io_uring
+//! subsystem and receiving their results asynchronously. The design centers around a single
+//! event loop that manages the submission queue (SQ) and completion queue (CQ) of an io_uring
+//! instance.
+//!
+//! # Architecture
+//!
+//! ## Event Loop
+//! The core of this implementation is the [run] function, which operates an event loop that:
+//! 1. Receives operation requests via an MPSC channel
+//! 2. Assigns unique IDs to each operation and submits them to io_uring's submission queue (SQE)
+//! 3. Polls io_uring's completion queue (CQE) for completed operations
+//! 4. Routes completion results back to the original requesters via oneshot channels
+//!
+//! ## Operation Flow
+//! ```text
+//! Client Code ─[Op]→ MPSC Channel ─→ Event Loop ─[SQE]→ io_uring Kernel
+//!      ↑                                                 ↓
+//! Oneshot Channel ←─ Waiter Tracking ←[CQE]─ io_uring Kernel
+//! ```
+//!
+//! ## Work Tracking
+//! Each submitted operation is assigned a unique work ID that serves as the `user_data` field
+//! in the SQE. The event loop maintains a `waiters` HashMap that maps each work ID to:
+//! - A oneshot sender for returning results to the caller
+//! - An optional buffer that must be kept alive for the duration of the operation
+//!
+//! ## Timeout Handling
+//! Operations can be configured with timeouts using `Config::op_timeout`. When enabled:
+//! - Each operation is linked to a timeout using io_uring's `IOSQE_IO_LINK` flag
+//! - If the timeout fires first, the operation is canceled and returns `ETIMEDOUT`
+//! - Reserved work IDs distinguish timeout completions from regular operations
+//!
+//! ## Deadlock Prevention
+//! The [Config::force_poll] option prevents deadlocks in scenarios where:
+//! - Multiple tasks use the same io_uring instance
+//! - One task's completion depends on another task's submission
+//! - The event loop is blocked waiting for completions and can't process new submissions
+//!
+//! When enabled, the event loop periodically wakes up to check for new work, ensuring
+//! forward progress even when no completions are immediately available.
+//!
+//! ## Shutdown Process
+//! When the operation channel closes, the event loop enters a drain phase:
+//! 1. Stops accepting new operations
+//! 2. Waits for all in-flight operations to complete
+//! 3. If `shutdown_timeout` is configured, abandons remaining operations after the timeout
+//! 4. Cleans up and exits
+//!
+
 use commonware_utils::StableBuf;
 use futures::{
     channel::{mpsc, oneshot},
