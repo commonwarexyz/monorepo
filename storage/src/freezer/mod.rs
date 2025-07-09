@@ -1,113 +1,182 @@
-//! A persistent, immutable key-value store with efficient lookups.
+//! An immutable key-value store that minimizes memory usage and write amplification.
 //!
-//! [Table] is a key-value store designed for permanent storage where data is written once and never
-//! modified. Unlike in-memory stores, this implementation uses persistent on-disk structures to
-//! minimize memory usage while maintaining fast lookups through a hash table approach.
+//! [Freezer] is a key-value store designed for permanent storage where data is written once and never
+//! modified. Unlike [crate::index::Index], this implementation exclusively uses disk-resident data
+//! structures to serve reads and extendible hashing to logarithmically bound read amplification as
+//! the size of data grows. Notably, this approach never requires data to be rewritten (i.e. compacted).
 //!
-//! # Architecture
+//! # Format
 //!
-//! [Table] uses a multi-component architecture:
-//! - **Variable Journal**: Stores key-value entries in an append-only log with optional compression
-//! - **Hash Table**: A persistent hash table stored in a blob that maps keys to journal locations
-//!
-//! # Hash Table Design
+//! The [Freezer] uses a two-level architecture: an extendible hash table (written in a single [commonware_runtime::Blob])
+//! that maps keys to locations and a [crate::journal::variable::Journal] that stores key-value data.
 //!
 //! ```text
-//! Bucket Layout (50 bytes total, 2 slots of 25 bytes each):
-//! +--------+--------+--------+--------+------+
-//! | Slot 1                                   |
-//! | epoch  | section| offset | added | crc   |
-//! | (8B)   | (8B)   | (4B)   | (1B)  | (4B)  |
-//! +--------+--------+--------+--------+------+
-//! | Slot 2                                   |
-//! | epoch  | section| offset | added | crc   |
-//! | (8B)   | (8B)   | (4B)   | (1B)  | (4B)  |
-//! +--------+--------+--------+--------+------+
+//! +-----------------------------------------------------------------+
+//! |                           Hash Table                            |
+//! |  +---------+---------+---------+---------+---------+---------+  |
+//! |  | Entry 0 | Entry 1 | Entry 2 | Entry 3 | Entry 4 |   ...   |  |
+//! |  +----+----+----+----+----+----+----+----+----+----+---------+  |
+//! +-------|---------|---------|---------|---------|---------|-------+
+//!         |         |         |         |         |         |
+//!         v         v         v         v         v         v
+//! +-----------------------------------------------------------------+
+//! |                             Journal                             |
+//! |  Section 0: [Record 0][Record 1][Record 2]...                   |
+//! |  Section 1: [Record 10][Record 11][Record 12]...                |
+//! |  Section N: [Record 100][Record 101][Record 102]...             |
+//! +-----------------------------------------------------------------+
 //! ```
 //!
-//! # Resizing
-//!
-//! The table is resized by doubling its size and splitting each bucket into two. This doesn't
-//! require rewriting any of the journal but does require copying all buckets in the table.
-//!
-//! # Crash Consistency
-//!
-//! [Table] ensures crash consistency through:
-//! 1. **Checksums**: All table entries include CRC32 checksums
-//! 2. **Epochs**: Each write increments an epoch counter, invalid epochs are cleaned on restart
-//!
-//! On restart, any table entries with epochs greater than the last committed epoch are zeroed out,
-//! ensuring the store returns to a consistent state.
-//!
-//! # Collision Resolution
-//!
-//! When multiple keys hash to the same bucket, they form a linked list in the journal:
+//! The table uses two, fixed-size slots to provide atomic updates. Each slot contains an epoch
+//! number that monotonically increases with each sync operation. During reads, the slot with the
+//! higher epoch is selected (that is less than the last committed epoch), ensuring consistency even
+//! during unclean shutdown.
 //!
 //! ```text
-//! Table Bucket → Journal Entry 1 → Journal Entry 2 → ... → None
-//!                [key1, value1]     [key2, value2]
-//!                next=(s2, o2)      next=None
+//! +-------------------------------------+
+//! |          Hash Table Entry           |
+//! +-------------------------------------+
+//! |     Slot 0      |      Slot 1       |
+//! +-----------------+-------------------+
+//! | epoch:    u64   | epoch:    u64     |
+//! | section:  u64   | section:  u64     |
+//! | offset:   u32   | offset:   u32     |
+//! | added:    u8    | added:    u8      |
+//! +-----------------+-------------------+
+//! | CRC32:    u32   | CRC32:    u32     |
+//! +-----------------+-------------------+
 //! ```
 //!
-//! This design trades write complexity for read efficiency - lookups may need to follow
-//! the chain but writes can simply prepend to the list.
+//! The journal is a sequence of variable size records containing key-value pairs and an optional pointer
+//! to the next record that mapped to the same table index (at some point in the past).
 //!
-//! # Memory Usage
+//! ```text
+//! +-------------------------------------+
+//! |           Journal Record            |
+//! +-------------------------------------+
+//! | Key:   Array                        |
+//! | Value: Codec                        |
+//! | Next:  Option<(u64, u32)>           |
+//! +-------------------------------------+
+//! ```
 //!
-//! The store minimizes memory usage by keeping all data structures on disk:
-//! - Hash table: Fixed size on disk (table_size * 48 bytes)
-//! - Journal: Append-only logs split into sections
+//! # Traversing Conflicts
+//!
+//! When multiple keys hash to the same table index, they form a linked list within the journal:
+//!
+//! ```text
+//! Hash Table:
+//! [Index 42]      +-------------------+
+//!                 | section: 2        |
+//!                 | offset: 768       |
+//!                 +---------+---------+
+//!                           |
+//! Journal:                  v
+//! [Section 2]     +-----+------------+-----+-----+-----+-----+-----+-----+
+//!                 | ... | Key: "foo" | ... | ... | ... | ... | ... | ... |
+//!                 |     | Value: 42  |     |     |     |     |     |     |
+//!                 |     | Next:(1,512)---+ |     |     |     |     |     |
+//!                 +-----+------------+---+-+-----+-----+-----+-----+-----+
+//!                                        |
+//!                                        v
+//! [Section 1]     +-----+-----+-----+------------+-----+-----+-----+-----+
+//!                 | ... | ... | ... | Key: "bar" | ... | ... | ... | ... |
+//!                 |     |     |     | Value: 84  |     |     |     |     |
+//!                 |     |     | +---| Next:(0,256)     |     |     |     |
+//!                 +-----+-----+-+---+------------+-----+-----+-----+-----+
+//!                               |
+//!                               v
+//! [Section 0]     +-----+------------+-----+-----+-----+-----+-----+-----+
+//!                 | ... | Key: "baz" | ... | ... | ... | ... | ... | ... |
+//!                 |     | Value: 126 |     |     |     |     |     |     |
+//!                 |     | Next: None |     |     |     |     |     |     |
+//!                 +-----+------------+-----+-----+-----+-----+-----+-----+
+//! ```
+//!
+//! New entries are prepended to the chain, becoming the new head. During lookup, the chain
+//! is traversed until a matching key is found. The `added` field in the table entry tracks
+//! insertions since the last resize, triggering table growth when it exceeds `table_resize_frequency`.
+//!
+//! # Extendible Hashing
+//!
+//! The [Freezer] uses bit-based indexing to enable efficient table growth without rehashing existing entries:
+//!
+//! ```text
+//! Initial state (table_size=4, using 2 bits of hash):
+//! Hash: 0b...00 -> Index 0
+//! Hash: 0b...01 -> Index 1
+//! Hash: 0b...10 -> Index 2
+//! Hash: 0b...11 -> Index 3
+//!
+//! After resize (table_size=8, using 3 bits of hash):
+//! Hash: 0b...000 -> Index 0 -+
+//! ...                        |
+//! Hash: 0b...100 -> Index 4 -+- Both map to old Index 0
+//! Hash: 0b...001 -> Index 1 -+
+//! ...                        |
+//! Hash: 0b...101 -> Index 5 -+- Both map to old Index 1
+//! ```
+//!
+//! When the table doubles in size:
+//! 1. Each bucket at index `i` splits into two buckets: `i` and `i + old_size`
+//! 2. The existing chain head is copied to both locations with `added=0`
+//! 3. Future insertions will naturally distribute between the two buckets based on their hash
+//!
+//! This approach ensures that entries inserted before a resize remain discoverable after the resize,
+//! as the lookup algorithm checks the appropriate bucket based on the current table size.
 //!
 //! # Example
 //!
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic};
-//! use commonware_storage::table::{Table, Config, Identifier};
+//! use commonware_storage::freezer::{Freezer, Config, Identifier};
 //! use commonware_utils::array::FixedBytes;
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
-//!     // Create a store
+//!     // Create a freezer
 //!     let cfg = Config {
-//!         journal_partition: "table_journal".into(),
+//!         journal_partition: "freezer_journal".into(),
 //!         journal_compression: Some(3),
-//!         table_partition: "table_table".into(),
+//!         journal_write_buffer: 1024 * 1024,
+//!         journal_target_size: 100 * 1024 * 1024, // 100MB journals
+//!         table_partition: "freezer_table".into(),
 //!         table_initial_size: 65536, // 64K buckets
 //!         table_resize_frequency: 4, // Force resize once 4 writes to the same entry occur
+//!         table_read_buffer: 64 * 1024, // 64KB read buffer
+//!         table_write_buffer: 64 * 1024, // 64KB write buffer
 //!         codec_config: (),
-//!         write_buffer: 1024 * 1024,
-//!         target_journal_size: 100 * 1024 * 1024, // 100MB journals
 //!     };
-//!     let mut store = Table::<_, FixedBytes<32>, i32>::init(context, cfg).await.unwrap();
+//!     let mut freezer = Freezer::<_, FixedBytes<32>, i32>::init(context, cfg).await.unwrap();
 //!
 //!     // Put a key-value pair
 //!     let key = FixedBytes::new([1u8; 32]);
-//!     store.put(key.clone(), 42).await.unwrap();
+//!     freezer.put(key.clone(), 42).await.unwrap();
 //!
 //!     // Sync to disk
-//!     store.sync().await.unwrap();
+//!     freezer.sync().await.unwrap();
 //!
 //!     // Get the value
-//!     let value = store.get(Identifier::Key(&key)).await.unwrap().unwrap();
+//!     let value = freezer.get(Identifier::Key(&key)).await.unwrap().unwrap();
 //!     assert_eq!(value, 42);
 //!
-//!     // Close the store
-//!     store.close().await.unwrap();
+//!     // Close the freezer
+//!     freezer.close().await.unwrap();
 //! });
 //! ```
 
 mod storage;
 use commonware_utils::Array;
-pub use storage::{Checkpoint, Cursor, Table};
+pub use storage::{Checkpoint, Cursor, Freezer};
 use thiserror::Error;
 
-/// Subject of a [Table::get] operation.
+/// Subject of a [Freezer::get] operation.
 pub enum Identifier<'a, K: Array> {
     Cursor(Cursor),
     Key(&'a K),
 }
 
-/// Errors that can occur when interacting with the [Table].
+/// Errors that can occur when interacting with the [Freezer].
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("runtime error: {0}")]
@@ -128,35 +197,38 @@ pub enum Error {
     ChecksumMismatch { expected: u32, actual: u32 },
 }
 
-/// Configuration for [Table].
+/// Configuration for [Freezer].
 #[derive(Clone)]
 pub struct Config<C> {
     /// The [commonware_runtime::Storage] partition to use for storing the journal.
     pub journal_partition: String,
 
-    /// The compression algorithm to use for the journal.
+    /// The compression level to use for the [crate::journal::variable::Journal].
     pub journal_compression: Option<u8>,
 
-    /// The [commonware_runtime::Storage] partition to use for storing the hash table.
-    pub table_partition: String,
-
-    /// The number of items in the table.
-    ///
-    /// To tune this value, consider how many hops you'd like each lookup to take for a key.
-    /// If the keyspace is uniformly distributed, this is simply total keys divided by table_size.
-    pub table_initial_size: u32,
-
-    /// The number of items added to a bucket before the table is resized.
-    pub table_resize_frequency: u8,
-
-    /// The codec configuration to use for the value stored in the store.
-    pub codec_config: C,
-
     /// The size of the write buffer to use for the journal.
-    pub write_buffer: usize,
+    pub journal_write_buffer: usize,
 
     /// The target size of each journal before creating a new one.
-    pub target_journal_size: u64,
+    pub journal_target_size: u64,
+
+    /// The [commonware_runtime::Storage] partition to use for storing the table.
+    pub table_partition: String,
+
+    /// The initial number of items in the table.
+    pub table_initial_size: u32,
+
+    /// The number of items added to an table entry before the table is resized.
+    pub table_resize_frequency: u8,
+
+    /// The size of the read buffer to use when scanning the table (e.g., during recovery or resize).
+    pub table_read_buffer: usize,
+
+    /// The size of the write buffer to use when scanning the table (e.g., during resize).
+    pub table_write_buffer: usize,
+
+    /// The codec configuration to use for the value stored in the freezer.
+    pub codec_config: C,
 }
 
 #[cfg(test)]
@@ -168,10 +240,12 @@ mod tests {
     use commonware_utils::array::FixedBytes;
     use rand::{Rng, RngCore};
 
+    const DEFAULT_JOURNAL_WRITE_BUFFER: usize = 1024;
+    const DEFAULT_JOURNAL_TARGET_SIZE: u64 = 10 * 1024 * 1024;
     const DEFAULT_TABLE_INITIAL_SIZE: u32 = 256;
     const DEFAULT_TABLE_RESIZE_FREQUENCY: u8 = 4;
-    const DEFAULT_WRITE_BUFFER: usize = 1024;
-    const DEFAULT_TARGET_JOURNAL_SIZE: u64 = 10 * 1024 * 1024;
+    const DEFAULT_TABLE_READ_BUFFER: usize = 64 * 1024; // 64KB
+    const DEFAULT_TABLE_WRITE_BUFFER: usize = 64 * 1024; // 64KB
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -181,89 +255,93 @@ mod tests {
         FixedBytes::decode(buf.as_ref()).unwrap()
     }
 
-    fn test_store_put_get(compression: Option<u8>) {
+    fn test_put_get(compression: Option<u8>) {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize the store
+            // Initialize the freezer
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: compression,
+                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
-            let mut store = Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to initialize store");
+                .expect("Failed to initialize freezer");
 
             let key = test_key("testkey");
             let data = 42;
 
             // Check key doesn't exist
-            let has = store.has(&key).await.expect("Failed to check key");
-            assert!(!has);
+            let value = freezer
+                .get(Identifier::Key(&key))
+                .await
+                .expect("Failed to check key");
+            assert!(value.is_none());
 
             // Put the key-data pair
-            store
+            freezer
                 .put(key.clone(), data)
                 .await
                 .expect("Failed to put data");
 
-            // Check key exists
-            let has = store.has(&key).await.expect("Failed to check key");
-            assert!(has);
-
             // Get the data back
-            let retrieved = store
+            let value = freezer
                 .get(Identifier::Key(&key))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
-            assert_eq!(retrieved, data);
+            assert_eq!(value, data);
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("gets_total 3"), "{}", buffer); // has calls get internally
+            assert!(buffer.contains("gets_total 2"), "{}", buffer);
             assert!(buffer.contains("puts_total 1"), "{}", buffer);
+            assert!(buffer.contains("unnecessary_reads_total 0"), "{}", buffer);
 
             // Force a sync
-            store.sync().await.expect("Failed to sync data");
+            freezer.sync().await.expect("Failed to sync data");
         });
     }
 
     #[test_traced]
-    fn test_store_put_get_no_compression() {
-        test_store_put_get(None);
+    fn test_put_get_no_compression() {
+        test_put_get(None);
     }
 
     #[test_traced]
-    fn test_store_put_get_compression() {
-        test_store_put_get(Some(3));
+    fn test_put_get_compression() {
+        test_put_get(Some(3));
     }
 
     #[test_traced]
-    fn test_store_multiple_keys() {
+    fn test_multiple_keys() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize the store
+            // Initialize the freezer
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
+                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
-            let mut store = Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to initialize store");
+                .expect("Failed to initialize freezer");
 
             // Insert multiple keys
             let keys = vec![
@@ -275,7 +353,7 @@ mod tests {
             ];
 
             for (key, data) in &keys {
-                store
+                freezer
                     .put(key.clone(), *data)
                     .await
                     .expect("Failed to put data");
@@ -283,7 +361,7 @@ mod tests {
 
             // Retrieve all keys and verify
             for (key, data) in &keys {
-                let retrieved = store
+                let retrieved = freezer
                     .get(Identifier::Key(key))
                     .await
                     .expect("Failed to get data")
@@ -294,24 +372,26 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_collision_handling() {
+    fn test_collision_handling() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize the store with a very small table to force collisions
+            // Initialize the freezer with a very small table to force collisions
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
+                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: 4, // Very small to force collisions
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
-            let mut store = Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to initialize store");
+                .expect("Failed to initialize freezer");
 
             // Insert multiple keys that will likely collide
             let keys = vec![
@@ -326,48 +406,56 @@ mod tests {
             ];
 
             for (key, data) in &keys {
-                store
+                freezer
                     .put(key.clone(), *data)
                     .await
                     .expect("Failed to put data");
             }
 
             // Sync to disk
-            store.sync().await.expect("Failed to sync");
+            freezer.sync().await.expect("Failed to sync");
 
             // Retrieve all keys and verify they can still be found
             for (key, data) in &keys {
-                let retrieved = store
+                let retrieved = freezer
                     .get(Identifier::Key(key))
                     .await
                     .expect("Failed to get data")
                     .expect("Data not found");
                 assert_eq!(retrieved, *data);
             }
+
+            // Check metrics
+            let buffer = context.encode();
+            assert!(buffer.contains("gets_total 8"), "{}", buffer);
+            assert!(buffer.contains("unnecessary_reads_total 5"), "{}", buffer);
         });
     }
 
     #[test_traced]
-    fn test_store_restart() {
+    fn test_restart() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
+                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
 
-            // Insert data and close
+            // Insert data and close the freezer
             let checkpoint = {
-                let mut store = Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                        .await
+                        .expect("Failed to initialize freezer");
 
                 let keys = vec![
                     (test_key("persist1"), 100),
@@ -376,24 +464,24 @@ mod tests {
                 ];
 
                 for (key, data) in &keys {
-                    store
+                    freezer
                         .put(key.clone(), *data)
                         .await
                         .expect("Failed to put data");
                 }
 
-                store.close().await.expect("Failed to close store")
+                freezer.close().await.expect("Failed to close freezer")
             };
 
             // Reopen and verify data persisted
             {
-                let store = Table::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init_synchronized(
                     context.clone(),
                     cfg.clone(),
                     Some(checkpoint),
                 )
                 .await
-                .expect("Failed to initialize store");
+                .expect("Failed to initialize freezer");
 
                 let keys = vec![
                     (test_key("persist1"), 100),
@@ -402,7 +490,7 @@ mod tests {
                 ];
 
                 for (key, data) in &keys {
-                    let retrieved = store
+                    let retrieved = freezer
                         .get(Identifier::Key(key))
                         .await
                         .expect("Failed to get data")
@@ -414,73 +502,76 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_crash_consistency() {
+    fn test_crash_consistency() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
+                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
 
-            // First, create some committed data
+            // First, create some committed data and close the freezer
             let checkpoint = {
-                let mut store = Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                        .await
+                        .expect("Failed to initialize freezer");
 
-                store
+                freezer
                     .put(test_key("committed1"), 1)
                     .await
                     .expect("Failed to put data");
-                store
+                freezer
                     .put(test_key("committed2"), 2)
                     .await
                     .expect("Failed to put data");
 
                 // Sync to ensure data is committed
-                store.sync().await.expect("Failed to sync");
+                freezer.sync().await.expect("Failed to sync");
 
                 // Add more data but don't sync (simulating crash)
-                store
+                freezer
                     .put(test_key("uncommitted1"), 3)
                     .await
                     .expect("Failed to put data");
-                store
+                freezer
                     .put(test_key("uncommitted2"), 4)
                     .await
                     .expect("Failed to put data");
 
                 // Close without syncing to simulate crash
-                store.close().await.expect("Failed to close")
+                freezer.close().await.expect("Failed to close")
             };
 
             // Reopen and verify only committed data is present
             {
-                let store = Table::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init_synchronized(
                     context.clone(),
                     cfg.clone(),
                     Some(checkpoint),
                 )
                 .await
-                .expect("Failed to initialize store");
+                .expect("Failed to initialize freezer");
 
                 // Committed data should be present
                 assert_eq!(
-                    store
+                    freezer
                         .get(Identifier::Key(&test_key("committed1")))
                         .await
                         .unwrap(),
                     Some(1)
                 );
                 assert_eq!(
-                    store
+                    freezer
                         .get(Identifier::Key(&test_key("committed2")))
                         .await
                         .unwrap(),
@@ -489,14 +580,14 @@ mod tests {
 
                 // Uncommitted data might or might not be present depending on implementation
                 // But if present, it should be correct
-                if let Some(val) = store
+                if let Some(val) = freezer
                     .get(Identifier::Key(&test_key("uncommitted1")))
                     .await
                     .unwrap()
                 {
                     assert_eq!(val, 3);
                 }
-                if let Some(val) = store
+                if let Some(val) = freezer
                     .get(Identifier::Key(&test_key("uncommitted2")))
                     .await
                     .unwrap()
@@ -508,87 +599,55 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_get_nonexistent() {
+    fn test_destroy() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize the store
+            // Initialize the freezer
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
+                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
-            let store = Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize store");
-
-            // Attempt to get a key that doesn't exist
-            let key = test_key("nonexistent");
-            let retrieved = store
-                .get(Identifier::Key(&key))
-                .await
-                .expect("Failed to get data");
-            assert!(retrieved.is_none());
-
-            // Check has returns false
-            let has = store.has(&key).await.expect("Failed to check key");
-            assert!(!has);
-        });
-    }
-
-    #[test_traced]
-    fn test_store_destroy() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                table_partition: "test_table".into(),
-                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
-                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
-                codec_config: (),
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
-            };
-
-            // Create store with data
             {
-                let mut store = Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                        .await
+                        .expect("Failed to initialize freezer");
 
-                store
+                freezer
                     .put(test_key("destroy1"), 1)
                     .await
                     .expect("Failed to put data");
-                store
+                freezer
                     .put(test_key("destroy2"), 2)
                     .await
                     .expect("Failed to put data");
 
-                // Destroy the store
-                store.destroy().await.expect("Failed to destroy store");
+                // Destroy the freezer
+                freezer.destroy().await.expect("Failed to destroy freezer");
             }
 
-            // Try to create a new store - it should be empty
+            // Try to create a new freezer - it should be empty
             {
-                let store = Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
                     .await
-                    .expect("Failed to initialize store");
+                    .expect("Failed to initialize freezer");
 
                 // Should not find any data
-                assert!(store
+                assert!(freezer
                     .get(Identifier::Key(&test_key("destroy1")))
                     .await
                     .unwrap()
                     .is_none());
-                assert!(store
+                assert!(freezer
                     .get(Identifier::Key(&test_key("destroy2")))
                     .await
                     .unwrap()
@@ -598,30 +657,32 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_partial_table_entry_write() {
+    fn test_partial_table_entry_write() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Initialize the freezer
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
+                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
-
-            // Create store with data and sync
             let checkpoint = {
-                let mut store = Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                        .await
+                        .expect("Failed to initialize freezer");
 
-                store.put(test_key("key1"), 42).await.unwrap();
-                store.sync().await.unwrap();
-                store.close().await.unwrap()
+                freezer.put(test_key("key1"), 42).await.unwrap();
+                freezer.sync().await.unwrap();
+                freezer.close().await.unwrap()
             };
 
             // Corrupt the table by writing partial entry
@@ -634,50 +695,56 @@ mod tests {
 
             // Reopen and verify it handles the corruption
             {
-                let store = Table::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init_synchronized(
                     context.clone(),
                     cfg.clone(),
                     Some(checkpoint),
                 )
                 .await
-                .expect("Failed to initialize store");
+                .expect("Failed to initialize freezer");
 
                 // The key should still be retrievable from journal if table is corrupted
                 // but the table entry is zeroed out
-                let result = store.get(Identifier::Key(&test_key("key1"))).await.unwrap();
+                let result = freezer
+                    .get(Identifier::Key(&test_key("key1")))
+                    .await
+                    .unwrap();
                 assert!(result.is_none() || result == Some(42));
             }
         });
     }
 
     #[test_traced]
-    fn test_store_table_entry_invalid_crc() {
+    fn test_table_entry_invalid_crc() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
+                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
 
-            // Create store with data
+            // Create freezer with data
             let checkpoint = {
-                let mut store = Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                        .await
+                        .expect("Failed to initialize freezer");
 
-                store.put(test_key("key1"), 42).await.unwrap();
-                store.sync().await.unwrap();
-                store.close().await.unwrap()
+                freezer.put(test_key("key1"), 42).await.unwrap();
+                freezer.sync().await.unwrap();
+                freezer.close().await.unwrap()
             };
 
-            // Corrupt the CRC in the table entry
+            // Corrupt the CRC in the index entry
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Read the first entry
@@ -691,47 +758,53 @@ mod tests {
 
             // Reopen and verify it handles invalid CRC
             {
-                let store = Table::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init_synchronized(
                     context.clone(),
                     cfg.clone(),
                     Some(checkpoint),
                 )
                 .await
-                .expect("Failed to initialize store");
+                .expect("Failed to initialize freezer");
 
                 // With invalid CRC, the entry should be treated as invalid
-                let result = store.get(Identifier::Key(&test_key("key1"))).await.unwrap();
-                // The store should still work but may not find the key due to invalid table entry
+                let result = freezer
+                    .get(Identifier::Key(&test_key("key1")))
+                    .await
+                    .unwrap();
+                // The freezer should still work but may not find the key due to invalid table entry
                 assert!(result.is_none() || result == Some(42));
             }
         });
     }
 
     #[test_traced]
-    fn test_store_table_with_extra_bytes() {
+    fn test_table_extra_bytes() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
+                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
 
-            // Create store with data
+            // Create freezer with data
             let checkpoint = {
-                let mut store = Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                        .await
+                        .expect("Failed to initialize freezer");
 
-                store.put(test_key("key1"), 42).await.unwrap();
-                store.sync().await.unwrap();
-                store.close().await.unwrap()
+                freezer.put(test_key("key1"), 42).await.unwrap();
+                freezer.sync().await.unwrap();
+                freezer.close().await.unwrap()
             };
 
             // Add extra bytes to the table blob
@@ -746,25 +819,28 @@ mod tests {
 
             // Reopen and verify it handles extra bytes gracefully
             {
-                let store = Table::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init_synchronized(
                     context.clone(),
                     cfg.clone(),
                     Some(checkpoint),
                 )
                 .await
-                .expect("Failed to initialize store");
+                .expect("Failed to initialize freezer");
 
                 // Should still be able to read the key
                 assert_eq!(
-                    store.get(Identifier::Key(&test_key("key1"))).await.unwrap(),
+                    freezer
+                        .get(Identifier::Key(&test_key("key1")))
+                        .await
+                        .unwrap(),
                     Some(42)
                 );
 
                 // And write new data
-                let mut store_mut = store;
-                store_mut.put(test_key("key2"), 43).await.unwrap();
+                let mut freezer_mut = freezer;
+                freezer_mut.put(test_key("key2"), 43).await.unwrap();
                 assert_eq!(
-                    store_mut
+                    freezer_mut
                         .get(Identifier::Key(&test_key("key2")))
                         .await
                         .unwrap(),
@@ -775,24 +851,26 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_bit_based_indexing_across_resizes() {
+    fn test_indexing_across_resizes() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Initialize the freezer
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
+                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: 2, // Very small initial size to force multiple resizes
                 table_resize_frequency: 2, // Resize after 2 items per bucket
+                table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                target_journal_size: DEFAULT_TARGET_JOURNAL_SIZE,
             };
-
-            let mut store = Table::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
                 .await
-                .expect("Failed to initialize store");
+                .expect("Failed to initialize freezer");
 
             // Insert many keys to force multiple table resizes
             // Table will grow from 2 -> 4 -> 8 -> 16 -> 32 -> 64 -> 128 -> 256 -> 512 -> 1024
@@ -802,13 +880,13 @@ mod tests {
                 keys.push((key.clone(), i));
 
                 // Force sync to ensure resize occurs ASAP
-                store.put(key, i).await.expect("Failed to put data");
-                store.sync().await.expect("Failed to sync");
+                freezer.put(key, i).await.expect("Failed to put data");
+                freezer.sync().await.expect("Failed to sync");
             }
 
             // Verify all keys can still be found after multiple resizes
             for (key, value) in &keys {
-                let retrieved = store
+                let retrieved = freezer
                     .get(Identifier::Key(key))
                     .await
                     .expect("Failed to get data")
@@ -817,19 +895,18 @@ mod tests {
             }
 
             // Close and reopen to verify persistence
-            let checkpoint = store.close().await.expect("Failed to close");
-
-            let store = Table::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+            let checkpoint = freezer.close().await.expect("Failed to close");
+            let freezer = Freezer::<_, FixedBytes<64>, i32>::init_synchronized(
                 context.clone(),
                 cfg.clone(),
                 Some(checkpoint),
             )
             .await
-            .expect("Failed to reinitialize store");
+            .expect("Failed to reinitialize freezer");
 
             // Verify all keys can still be found after restart
             for (key, value) in &keys {
-                let retrieved = store
+                let retrieved = freezer
                     .get(Identifier::Key(key))
                     .await
                     .expect("Failed to get data")
@@ -843,26 +920,27 @@ mod tests {
         });
     }
 
-    fn test_store_operations_and_restart(num_keys: usize) -> String {
+    fn test_operations_and_restart(num_keys: usize) -> String {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
+            // Initialize the freezer
             let cfg = Config {
                 journal_partition: "test_journal".into(),
                 journal_compression: None,
+                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_target_size: 128, // Force multiple journal sections
                 table_partition: "test_table".into(),
                 table_initial_size: 8,     // Small table to force collisions
                 table_resize_frequency: 2, // Force resize frequently
+                table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                target_journal_size: 128, // Force multiple journal sections
             };
-
-            // Initialize the store
-            let mut store =
-                Table::<_, FixedBytes<96>, FixedBytes<256>>::init(context.clone(), cfg.clone())
+            let mut freezer =
+                Freezer::<_, FixedBytes<96>, FixedBytes<256>>::init(context.clone(), cfg.clone())
                     .await
-                    .expect("Failed to initialize store");
+                    .expect("Failed to initialize freezer");
 
             // Generate and insert random key-value pairs
             let mut pairs = Vec::new();
@@ -879,7 +957,7 @@ mod tests {
                 let value = FixedBytes::<256>::new(value);
 
                 // Store the key-value pair
-                store
+                freezer
                     .put(key.clone(), value.clone())
                     .await
                     .expect("Failed to put data");
@@ -887,16 +965,16 @@ mod tests {
 
                 // Randomly sync to test resizing
                 if context.gen_bool(0.1) {
-                    store.sync().await.expect("Failed to sync");
+                    freezer.sync().await.expect("Failed to sync");
                 }
             }
 
             // Sync data
-            store.sync().await.expect("Failed to sync");
+            freezer.sync().await.expect("Failed to sync");
 
             // Verify all pairs can be retrieved
             for (key, value) in &pairs {
-                let retrieved = store
+                let retrieved = freezer
                     .get(Identifier::Key(key))
                     .await
                     .expect("Failed to get data")
@@ -904,9 +982,13 @@ mod tests {
                 assert_eq!(&retrieved, value);
             }
 
-            // Test has() on all keys plus some non-existent ones
+            // Test get() on all keys
             for (key, _) in &pairs {
-                assert!(store.has(key).await.expect("Failed to check key"));
+                assert!(freezer
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to check key")
+                    .is_some());
             }
 
             // Check some non-existent keys
@@ -914,24 +996,28 @@ mod tests {
                 let mut key = [0u8; 96];
                 context.fill_bytes(&mut key);
                 let key = FixedBytes::<96>::new(key);
-                let _ = store.has(&key).await;
+                assert!(freezer
+                    .get(Identifier::Key(&key))
+                    .await
+                    .expect("Failed to check key")
+                    .is_none());
             }
 
-            // Close the store
-            let checkpoint = store.close().await.expect("Failed to close store");
+            // Close the freezer
+            let checkpoint = freezer.close().await.expect("Failed to close freezer");
 
-            // Reopen the store
-            let mut store = Table::<_, FixedBytes<96>, FixedBytes<256>>::init_with_checkpoint(
+            // Reopen the freezer
+            let mut freezer = Freezer::<_, FixedBytes<96>, FixedBytes<256>>::init_synchronized(
                 context.clone(),
                 cfg.clone(),
                 Some(checkpoint),
             )
             .await
-            .expect("Failed to initialize store");
+            .expect("Failed to initialize freezer");
 
             // Verify all pairs are still there after restart
             for (key, value) in &pairs {
-                let retrieved = store
+                let retrieved = freezer
                     .get(Identifier::Key(key))
                     .await
                     .expect("Failed to get data")
@@ -949,12 +1035,12 @@ mod tests {
                 context.fill_bytes(&mut value);
                 let value = FixedBytes::<256>::new(value);
 
-                store.put(key, value).await.expect("Failed to put data");
+                freezer.put(key, value).await.expect("Failed to put data");
             }
 
             // Multiple syncs to test epoch progression
             for _ in 0..3 {
-                store.sync().await.expect("Failed to sync");
+                freezer.sync().await.expect("Failed to sync");
 
                 // Add a few more entries between syncs
                 for _ in 0..5 {
@@ -966,12 +1052,12 @@ mod tests {
                     context.fill_bytes(&mut value);
                     let value = FixedBytes::<256>::new(value);
 
-                    store.put(key, value).await.expect("Failed to put data");
+                    freezer.put(key, value).await.expect("Failed to put data");
                 }
             }
 
             // Final sync
-            store.sync().await.expect("Failed to sync");
+            freezer.sync().await.expect("Failed to sync");
 
             // Return the auditor state for comparison
             context.auditor().state()
@@ -981,8 +1067,8 @@ mod tests {
     #[test_traced]
     #[ignore]
     fn test_determinism() {
-        let state1 = test_store_operations_and_restart(1000);
-        let state2 = test_store_operations_and_restart(1000);
+        let state1 = test_operations_and_restart(1000);
+        let state2 = test_operations_and_restart(1000);
         assert_eq!(state1, state2);
     }
 }

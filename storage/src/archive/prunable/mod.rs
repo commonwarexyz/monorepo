@@ -1,4 +1,4 @@
-//! A write-once key-value store optimized for low-latency reads.
+//! A prunable key-value store optimized for low-latency reads.
 //!
 //! `Archive` is a key-value store designed for workloads where all data is written only once and is
 //! uniquely associated with both an `index` and a `key`.
