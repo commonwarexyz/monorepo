@@ -37,7 +37,7 @@ impl BloomFilter {
         }
     }
 
-    /// Generate `num_hashers` indices for a given item.
+    /// Generate `num_hashers` bit indices for a given item.
     fn indices(&self, item: &[u8], bits: usize) -> impl Iterator<Item = usize> {
         // Extract two 128-bit hash values from the SHA256 digest of the item
         let digest = hash(item);
@@ -53,7 +53,9 @@ impl BloomFilter {
         // `h_i(x) = (h1(x) + i * h2(x)) mod m`
         let hashers = self.hashers as u128;
         let bits = bits as u128;
-        (0..hashers).map(move |i| (h1.wrapping_add(i.wrapping_mul(h2)) % bits) as usize)
+        (0..hashers)
+            .map(move |hasher| h1.wrapping_add(hasher.wrapping_mul(h2)) % bits)
+            .map(|index| index as usize)
     }
 
     /// Inserts an item into the [BloomFilter].
