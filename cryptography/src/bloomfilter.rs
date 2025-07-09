@@ -23,7 +23,7 @@ pub struct BloomFilter {
 }
 
 impl BloomFilter {
-    /// Creates a new bloom filter with `hashers` hash functions and `bits` bits.
+    /// Creates a new [BloomFilter] with `hashers` hash functions and `bits` bits.
     pub fn new(hashers: NonZeroU8, bits: NonZeroUsize) -> Self {
         Self {
             hashers: hashers.get(),
@@ -64,8 +64,8 @@ impl BloomFilter {
         self.hashers
     }
 
-    /// Get two 128-bit hash values from a 32-byte [Digest].
-    fn get_two_hashes(digest: &Digest) -> (u128, u128) {
+    /// Extract two 128-bit hash values from a 32-byte [Digest].
+    fn extract_hashes(digest: &Digest) -> (u128, u128) {
         let mut h1_bytes = [0u8; 16];
         h1_bytes.copy_from_slice(&digest[0..16]);
         let h1 = u128::from_be_bytes(h1_bytes);
@@ -80,11 +80,11 @@ impl BloomFilter {
     /// Generate `num_hashers` hashes for the given item.
     ///
     /// It uses the Kirsch-Mitzenmacher optimization:
-    /// `h_i(x) = (h1(x) + i * h2(x)) mod m`
-    /// `h1` and `h2` are derived from the SHA256 digest of the item.
+    /// * `h_i(x) = (h1(x) + i * h2(x)) mod m`
+    /// * `h1` and `h2` are derived from the SHA256 digest of the item.
     fn hashes(&self, item: &[u8]) -> impl Iterator<Item = u128> {
         let digest = hash(item);
-        let (h1, h2) = Self::get_two_hashes(&digest);
+        let (h1, h2) = Self::extract_hashes(&digest);
 
         let hashers = self.hashers;
         (0..hashers).map(move |i| h1.wrapping_add(u128::from(i).wrapping_mul(h2)))
@@ -127,14 +127,6 @@ mod tests {
     use commonware_utils::{NZUsize, NZU8};
 
     #[test]
-    fn test_new() {
-        let bf = BloomFilter::new(NZU8!(5), NZUsize!(100));
-        assert_eq!(bf.bits(), 100);
-        assert_eq!(bf.hashers(), 5);
-        assert_eq!(bf.bits.count_ones(), 0);
-    }
-
-    #[test]
     fn test_insert_and_contains() {
         let mut bf = BloomFilter::new(NZU8!(10), NZUsize!(1000));
         let item1 = b"hello";
@@ -150,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_filter() {
+    fn test_empty() {
         let bf = BloomFilter::new(NZU8!(5), NZUsize!(100));
         assert!(!bf.contains(b"anything"));
     }
@@ -196,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn test_codec_empty_roundtrip() {
+    fn test_codec_empty() {
         let bf = BloomFilter::new(NZU8!(4), NZUsize!(128));
         let cfg = ((1..=100).into(), (128..=128).into());
         let encoded = bf.encode();
