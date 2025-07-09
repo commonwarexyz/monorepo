@@ -698,7 +698,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         Ok(())
     }
 
-    /// Put a key-value pair into the freezer.
+    /// Put a key-value pair into the [Freezer].
     pub async fn put(&mut self, key: K, value: V) -> Result<Cursor, Error> {
         self.puts.inc();
 
@@ -802,7 +802,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         }
     }
 
-    /// Resize the table by doubling its size and re-sharding all entries.
+    /// Resize the table by doubling its size and split each bucket into two.
     async fn resize(&mut self) -> Result<(), Error> {
         let start = self.context.current();
         self.resizes.inc();
@@ -881,7 +881,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         Ok(())
     }
 
-    /// Sync all data to the underlying freezer.
+    /// Sync all pending data in [Freezer].
+    ///
+    /// If the table needs to be resized, it will occur during [Freezer::sync] (rather than unexpectedly
+    /// during [Freezer::put]).
     pub async fn sync(&mut self) -> Result<Checkpoint, Error> {
         // Sync all modified journal sections
         let mut updates = Vec::with_capacity(self.modified_sections.len());
@@ -907,7 +910,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         })
     }
 
-    /// Close the freezer and underlying journal.
+    /// Close the [Freezer] and return a [Checkpoint] for recovery.
     pub async fn close(mut self) -> Result<Checkpoint, Error> {
         // Sync any pending updates before closing
         let checkpoint = self.sync().await?;
@@ -917,7 +920,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         Ok(checkpoint)
     }
 
-    /// Close and remove any underlying blobs created by the freezer.
+    /// Close and remove any underlying blobs created by the [Freezer].
     pub async fn destroy(self) -> Result<(), Error> {
         // Destroy the journal (removes all journal sections)
         self.journal.destroy().await?;
