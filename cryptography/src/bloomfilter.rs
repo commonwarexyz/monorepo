@@ -34,8 +34,9 @@ impl BloomFilter {
     /// Inserts an item into the [BloomFilter].
     pub fn insert(&mut self, item: &[u8]) {
         let hashes = self.hashes(item);
+        let bit_len = self.bits.len() as u128;
         for hash in hashes {
-            let index = (hash % self.bits.len() as u128) as usize;
+            let index = (hash % bit_len) as usize;
             self.bits.set(index);
         }
     }
@@ -45,8 +46,9 @@ impl BloomFilter {
     /// Returns `true` if the item is probably in the set, and `false` if it is definitely not.
     pub fn contains(&self, item: &[u8]) -> bool {
         let hashes = self.hashes(item);
+        let bit_len = self.bits.len() as u128;
         for hash in hashes {
-            let index = (hash % self.bits.len() as u128) as usize;
+            let index = (hash % bit_len) as usize;
             if !self.bits.get(index).unwrap_or(false) {
                 return false;
             }
