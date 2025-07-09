@@ -300,22 +300,8 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 }
 
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
-    /// Read a table entry pair at the given index.
-    async fn read_table_entry(&self, table_index: u32) -> Result<(Entry, Entry), Error> {
-        let offset = table_index as u64 * Entry::FULL_SIZE as u64;
-        let buf = vec![0u8; Entry::FULL_SIZE];
-        let read_buf = self.table.read_at(buf, offset).await?;
-
-        let mut buf1 = &read_buf.as_ref()[0..Entry::SIZE];
-        let entry1 = Entry::read(&mut buf1)?;
-        let mut buf2 = &read_buf.as_ref()[Entry::SIZE..Entry::FULL_SIZE];
-        let entry2 = Entry::read(&mut buf2)?;
-
-        Ok((entry1, entry2))
-    }
-
     /// Read table entries from a blob at the given index.
-    async fn read_table_entries(blob: &E::Blob, table_index: u32) -> Result<(Entry, Entry), Error> {
+    async fn read_table(blob: &E::Blob, table_index: u32) -> Result<(Entry, Entry), Error> {
         let offset = table_index as u64 * Entry::FULL_SIZE as u64;
         let buf = vec![0u8; Entry::FULL_SIZE];
         let read_buf = blob.read_at(buf, offset).await?;
@@ -339,14 +325,14 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         table_size: u32,
         max_valid_epoch: Option<u64>,
     ) -> Result<(bool, u64, u64), Error> {
+        // Iterate over all table entires and overwrite invalid ones
         let mut modified = false;
         let mut max_epoch = 0u64;
         let mut max_section = 0u64;
         let zero_buf = vec![0u8; Entry::SIZE];
-
         for table_index in 0..table_size {
             let offset = table_index as u64 * Entry::FULL_SIZE as u64;
-            let (entry1, entry2) = Self::read_table_entries(blob, table_index).await?;
+            let (entry1, entry2) = Self::read_table(blob, table_index).await?;
 
             // Check first entry
             if !entry1.is_empty() {
@@ -625,7 +611,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Get the head of the journal chain for a given table index, along with its depth.
     async fn get_head(&self, table_index: u32) -> Result<Option<(u64, u32, u8)>, Error> {
-        let (entry1, entry2) = self.read_table_entry(table_index).await?;
+        let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
         Ok(self.select_valid_entry(&entry1, &entry2))
     }
 
@@ -640,7 +626,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     ) -> Result<(), Error> {
         // Read current entries to determine which slot to update
         let table_offset = table_index as u64 * Entry::FULL_SIZE as u64;
-        let (entry1, entry2) = self.read_table_entry(table_index).await?;
+        let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
 
         // Determine where to start writing the new entry
         let start = Self::select_write_slot(&entry1, &entry2, epoch);
