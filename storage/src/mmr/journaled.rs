@@ -1461,12 +1461,12 @@ mod tests {
             assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 1 && start_loc == 1));
             let result = mmr.historical_range_proof(mmr_size, mmr_size, BATCH_SIZE).await;
             assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == mmr_size && start_loc == mmr_size));
-            
+
             // Historical size < start location is invalid
             let result = mmr.historical_range_proof(0, 1, BATCH_SIZE).await;
             assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 0 && start_loc == 1));
             let result = mmr.historical_range_proof(mmr_size-1, mmr_size, BATCH_SIZE).await;
             assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == mmr_size-1 && start_loc == mmr_size));
-        });
+});
     }
 }
