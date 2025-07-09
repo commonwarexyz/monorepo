@@ -37,8 +37,8 @@ impl BloomFilter {
         }
     }
 
-    /// Generate `num_hashers` hashes for the given item.
-    fn hashes(&self, item: &[u8]) -> impl Iterator<Item = u128> {
+    /// Generate `num_hashers` indices for a given item.
+    fn indices(&self, item: &[u8], bits: usize) -> impl Iterator<Item = usize> {
         // Extract two 128-bit hash values from the SHA256 digest of the item
         let digest = hash(item);
         let mut h1_bytes = [0u8; HALF_DIGEST_LEN];
@@ -52,15 +52,14 @@ impl BloomFilter {
         //
         // `h_i(x) = (h1(x) + i * h2(x)) mod m`
         let hashers = self.hashers as u128;
-        (0..hashers).map(move |i| h1.wrapping_add(i.wrapping_mul(h2)))
+        let bits = bits as u128;
+        (0..hashers).map(move |i| (h1.wrapping_add(i.wrapping_mul(h2)) % bits) as usize)
     }
 
     /// Inserts an item into the [BloomFilter].
     pub fn insert(&mut self, item: &[u8]) {
-        let hashes = self.hashes(item);
-        let bit_len = self.bits.len() as u128;
-        for hash in hashes {
-            let index = (hash % bit_len) as usize;
+        let indices = self.indices(item, self.bits.len());
+        for index in indices {
             self.bits.set(index);
         }
     }
@@ -69,11 +68,9 @@ impl BloomFilter {
     ///
     /// Returns `true` if the item is probably in the set, and `false` if it is definitely not.
     pub fn contains(&self, item: &[u8]) -> bool {
-        let hashes = self.hashes(item);
-        let bit_len = self.bits.len() as u128;
-        for hash in hashes {
-            let index = (hash % bit_len) as usize;
-            if !self.bits.get(index).unwrap_or(false) {
+        let indices = self.indices(item, self.bits.len());
+        for index in indices {
+            if !self.bits.get(index).expect("index out of bounds") {
                 return false;
             }
         }
