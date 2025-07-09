@@ -454,11 +454,12 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Initialize a new [Freezer] instance.
     pub async fn init(context: E, config: Config<V::Cfg>) -> Result<Self, Error> {
-        Self::init_synchronized(context, config, None).await
+        Self::init_with_checkpoint(context, config, None).await
     }
 
     /// Initialize a new [Freezer] instance with a [Checkpoint].
-    pub async fn init_synchronized(
+    // TODO(#1228): Hide this complexity from the caller.
+    pub async fn init_with_checkpoint(
         context: E,
         config: Config<V::Cfg>,
         checkpoint: Option<Checkpoint>,
