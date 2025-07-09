@@ -193,7 +193,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
                 // If record is invalid, it may either be empty or corrupted. We only care
                 // which is which if the provided bits indicate that the record must exist.
                 if must_exist {
-                    panic!("missing record at {index}");
+                    return Err(Error::MissingRecord(index));
                 }
             }
         }

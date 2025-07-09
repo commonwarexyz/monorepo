@@ -109,6 +109,8 @@ pub enum Error {
     InvalidBlobName(String),
     #[error("invalid record: {0}")]
     InvalidRecord(u64),
+    #[error("missing record at {0}")]
+    MissingRecord(u64),
 }
 
 /// Configuration for [Ordinal] storage.
@@ -1708,7 +1710,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(expected = "missing record at 6")]
+    #[should_panic(expected = "Failed to initialize store with bits: MissingRecord(6)")]
     fn test_init_with_bits_none_option_missing_record_panics() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
@@ -1841,7 +1843,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(expected = "missing record at 2")]
+    #[should_panic(expected = "Failed to initialize store with bits: MissingRecord(2)")]
     fn test_init_with_bits_corrupted_records() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
