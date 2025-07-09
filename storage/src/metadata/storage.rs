@@ -286,31 +286,13 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
     }
 
     /// Remove all keys that start with the given prefix.
-    ///
-    /// Returns the number of keys removed.
-    pub fn remove_prefix(&mut self, prefix: &[u8]) -> usize {
-        // Collect keys to remove (we can't modify while iterating)
-        let keys_to_remove: Vec<K> = self
-            .map
-            .keys()
-            .filter(|key| key.as_ref().starts_with(prefix))
-            .cloned()
-            .collect();
+    pub fn remove_prefix(&mut self, prefix: &[u8]) {
+        // Retain only keys that do not start with the prefix
+        self.map.retain(|key, _| !key.as_ref().starts_with(prefix));
 
-        let count = keys_to_remove.len();
-
-        // Remove each key
-        if count > 0 {
-            for key in keys_to_remove {
-                self.map.remove(&key);
-            }
-
-            // Mark key order as changed since we removed keys
-            self.key_order_changed = self.next_version;
-            self.keys.set(self.map.len() as i64);
-        }
-
-        count
+        // Mark key order as changed since we may have removed keys
+        self.key_order_changed = self.next_version;
+        self.keys.set(self.map.len() as i64);
     }
 
     /// Atomically commit the current state of [Metadata].

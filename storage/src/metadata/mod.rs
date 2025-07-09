@@ -1131,8 +1131,7 @@ mod tests {
 
             // Remove keys with prefix 0x10
             let prefix = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10];
-            let removed_count = metadata.remove_prefix(&prefix);
-            assert_eq!(removed_count, 3);
+            metadata.remove_prefix(&prefix);
 
             // Check metrics after removal
             let buffer = context.encode();
@@ -1164,13 +1163,11 @@ mod tests {
 
             // Remove non-existing prefix
             let prefix = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40];
-            let removed_count = metadata.remove_prefix(&prefix);
-            assert_eq!(removed_count, 0);
+            metadata.remove_prefix(&prefix);
 
             // Remove all remaining keys
             let prefix = vec![]; // Empty prefix matches all
-            let removed_count = metadata.remove_prefix(&prefix);
-            assert_eq!(removed_count, 3);
+            metadata.remove_prefix(&prefix);
             assert_eq!(metadata.keys(None).count(), 0);
 
             metadata.destroy().await.unwrap();
