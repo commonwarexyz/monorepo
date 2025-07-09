@@ -11,17 +11,17 @@ const JOURNAL_WRITE_BUFFER: usize = 1024;
 /// Target size of each journal section before creating a new one.
 const JOURNAL_TARGET_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 
-/// Initial size of the hash table.
-const TABLE_INITIAL_SIZE: u32 = 256;
+/// Initial size of the table.
+const TABLE_INITIAL_SIZE: u32 = 65536; // 64K buckets
 
 /// Number of items added to a table entry before resize.
 const TABLE_RESIZE_FREQUENCY: u8 = 4;
 
 /// Size of the read buffer when scanning the table.
-const TABLE_READ_BUFFER: usize = 64 * 1024; // 64KB
+const TABLE_READ_BUFFER: usize = 1024 * 1024; // 1MB
 
 /// Size of the write buffer when scanning the table.
-const TABLE_WRITE_BUFFER: usize = 64 * 1024; // 64KB
+const TABLE_WRITE_BUFFER: usize = 1024 * 1024; // 1MB
 
 /// Partition for [Freezer] journal benchmarks.
 pub const JOURNAL_PARTITION: &str = "freezer_bench_journal";
