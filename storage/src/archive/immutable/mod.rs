@@ -19,6 +19,9 @@ pub struct Config<C> {
     /// The size of the read buffer to use when scanning the table (e.g., during recovery or resize).
     pub table_read_buffer: usize,
 
+    /// The size of the write buffer to use when scanning the table (e.g., during resize).
+    pub table_write_buffer: usize,
+
     /// The partition to use for the archive's journal.
     pub journal_partition: String,
 
