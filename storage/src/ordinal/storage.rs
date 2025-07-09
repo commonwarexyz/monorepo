@@ -165,9 +165,8 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
                 // If bits are provided, skip if not set
                 let mut must_exist = false;
                 if let Some(bits) = &bits {
-                    let bits = bits.get(section).unwrap();
-
                     // If bits are provided, check if the record exists
+                    let bits = bits.get(section).unwrap();
                     if let Some(bits) = bits {
                         let bit_index = offset as usize / Record::<V>::SIZE;
                         if !bits.get(bit_index).expect("invalid index") {
