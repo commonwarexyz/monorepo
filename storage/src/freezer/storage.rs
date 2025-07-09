@@ -2,9 +2,12 @@ use super::{Config, Error, Identifier};
 use crate::journal::variable::{Config as JournalConfig, Journal};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
-use commonware_runtime::{buffer::Read as BufferedRead, Blob, Clock, Metrics, Storage};
+use commonware_runtime::{
+    buffer::{Read as BufferedRead, Write},
+    Blob, Clock, Metrics, Storage,
+};
 use commonware_utils::Array;
-use futures::future::try_join_all;
+use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
 use std::{cmp::Ordering, collections::BTreeSet, marker::PhantomData, ops::Deref};
 use tracing::debug;
@@ -622,15 +625,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         }
     }
 
-    /// Get the head of the journal chain for a given table index, along with its depth.
-    async fn get_head(&self, table_index: u32) -> Result<Option<(u64, u32, u8)>, Error> {
-        let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
-        Ok(self.select_valid_entry(&entry1, &entry2))
-    }
-
     /// Write a table entry to disk using atomic dual-entry writes.
-    async fn update_head(
-        &self,
+    async fn update_head<B: Blob>(
+        table: &B,
+        entry1: &Entry,
+        entry2: &Entry,
         epoch: u64,
         table_index: u32,
         section: u64,
@@ -639,16 +638,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     ) -> Result<(), Error> {
         // Read current entries to determine which slot to update
         let table_offset = table_index as u64 * Entry::FULL_SIZE as u64;
-        let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
 
         // Determine where to start writing the new entry
-        let start = Self::select_write_slot(&entry1, &entry2, epoch);
+        let start = Self::select_write_slot(entry1, entry2, epoch);
 
         // Build the new entry
         let entry = Entry::new(epoch, section, offset, added);
 
         // Write the new entry
-        self.table
+        table
             .write_at(entry.encode(), table_offset + start as u64)
             .await
             .map_err(Error::Runtime)
@@ -677,7 +675,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Get head of the chain from table
         let table_index = self.table_index(&key);
-        let head = self.get_head(table_index).await?;
+        let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
+        let head = self.select_valid_entry(&entry1, &entry2);
 
         // Create new head of the chain
         let entry = Record::new(
@@ -703,7 +702,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         }
 
         self.modified_sections.insert(self.current_section);
-        self.update_head(
+        Self::update_head(
+            &self.table,
+            &entry1,
+            &entry2,
             self.next_epoch,
             table_index,
             self.current_section,
@@ -731,7 +733,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Get head of the chain from table
         let table_index = self.table_index(key);
-        let Some((mut section, mut offset, _)) = self.get_head(table_index).await? else {
+        let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
+        let Some((mut section, mut offset, _)) = self.select_valid_entry(&entry1, &entry2) else {
             return Ok(None);
         };
 
@@ -791,13 +794,25 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             .resize(new_size as u64 * Entry::FULL_SIZE as u64)
             .await?;
 
+        // Create Write buffers for efficient batched writes
+        // Use a buffer size that can hold multiple entries
+        let old_buffered_table = Write::new(
+            self.table.clone(),
+            new_size as u64 * Entry::FULL_SIZE as u64,
+            1024 * 1024,
+        );
+        let new_buffered_table = Write::new(
+            self.table.clone(),
+            new_size as u64 * Entry::FULL_SIZE as u64,
+            1024 * 1024,
+        );
+
         // Create a buffered reader for efficient scanning
         let old_blob_size = old_size as u64 * Entry::FULL_SIZE as u64;
         let mut reader =
             BufferedRead::new(self.table.clone(), old_blob_size, self.table_read_buffer);
 
         // For each bucket in the old table, copy its head to the new position
-        let mut updates = Vec::with_capacity(old_size as usize * 2);
         for i in 0..old_size {
             // Read the entries from the buffer
             let mut entry_buf = [0u8; Entry::FULL_SIZE];
@@ -812,11 +827,29 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 .map(|(section, offset, _)| (section, offset))
                 .unwrap_or((0, 0));
 
-            // Write the same head to both i and i + old_size
-            updates.push(self.update_head(self.next_epoch, i, section, offset, 0));
-            updates.push(self.update_head(self.next_epoch, i + old_size, section, offset, 0));
+            // Write to old position
+            {
+                let table_offset = i as u64 * Entry::FULL_SIZE as u64;
+                let start = Self::select_write_slot(&entry1, &entry2, self.next_epoch);
+                let entry = Entry::new(self.next_epoch, section, offset, 0);
+                old_buffered_table
+                    .write_at(entry.encode(), table_offset + start as u64)
+                    .await?;
+            }
+
+            // Write to new position (i + old_size)
+            {
+                let new_index = i + old_size;
+                let table_offset = new_index as u64 * Entry::FULL_SIZE as u64;
+                let entry = Entry::new(self.next_epoch, section, offset, 0);
+                new_buffered_table
+                    .write_at(entry.encode(), table_offset)
+                    .await?;
+            }
         }
-        try_join_all(updates).await?;
+
+        // Sync the buffered writes to the underlying blob
+        try_join(old_buffered_table.sync(), new_buffered_table.sync()).await?;
 
         // Update the table size
         self.table_size = new_size;
