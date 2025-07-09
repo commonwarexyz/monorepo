@@ -457,10 +457,10 @@ impl<H: CHasher> Mmr<H> {
     /// Process any pending batched updates, using parallel hash workers as long as the number of
     /// computations that can be parallelized exceeds `min_to_parallelize`.
     ///
-    /// This implementation parallelizes the digest of computations of nodes at the same height,
-    /// starting from the bottom and working up to the peaks. If ever the number of remaining digest
-    /// computations is less than the `min_to_parallelize`, it switches to the serial
-    /// implementation.
+    /// This implementation parallelizes the computation of digests across all nodes at the same
+    /// height, starting from the bottom and working up to the peaks. If ever the number of
+    /// remaining digest computations is less than the `min_to_parallelize`, it switches to the
+    /// serial implementation.
     ///
     /// # Warning
     ///
