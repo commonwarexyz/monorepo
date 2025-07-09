@@ -5,32 +5,27 @@ use bytes::{Bytes, BytesMut};
 use commonware_utils::StableBuf;
 use libfuzzer_sys::fuzz_target;
 
+const MAX_SIZE: usize = 100_000;
+
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
     FromVec(Vec<u8>),
     FromBytesMut(Vec<u8>),
     PutSlice(Vec<u8>),
-    Truncate(usize),
-    GetMutPtr,
-    Len,
-    IsEmpty,
-    Index(usize),
-    ConvertToBytes,
-    ConvertToVec,
+    Truncate(Vec<u8>, usize),
+    GetMutPtr(Vec<u8>),
+    Len(Vec<u8>),
+    IsEmpty(Vec<u8>),
+    Index(Vec<u8>, usize),
+    ConvertToBytes(Vec<u8>),
+    ConvertToVec(Vec<u8>),
 }
 
 fn fuzz(input: Vec<FuzzInput>) {
-    let mut buf: Option<StableBuf> = None;
-
     for op in input {
         match op {
             FuzzInput::FromVec(data) => {
-                let data = if data.len() > 100_000 {
-                    data[..100_000].to_vec()
-                } else {
-                    data
-                };
-
+                let mut buf: Option<StableBuf> = None;
                 let len = data.len();
                 buf = Some(StableBuf::from(data));
 
@@ -41,6 +36,7 @@ fn fuzz(input: Vec<FuzzInput>) {
             }
 
             FuzzInput::FromBytesMut(data) => {
+                let mut buf: Option<StableBuf> = None;
                 let data = if data.len() > 100_000 {
                     data[..100_000].to_vec()
                 } else {
@@ -58,6 +54,7 @@ fn fuzz(input: Vec<FuzzInput>) {
             }
 
             FuzzInput::PutSlice(data) => {
+                let mut buf: Option<StableBuf> = None;
                 if buf.is_none() {
                     buf = Some(StableBuf::from(Vec::new()));
                 }
@@ -76,71 +73,57 @@ fn fuzz(input: Vec<FuzzInput>) {
                 }
             }
 
-            FuzzInput::Truncate(new_len) => {
-                if let Some(ref mut b) = buf {
-                    b.truncate(new_len);
+            FuzzInput::Truncate(data, new_len) => {
+                let mut buf = StableBuf::from(data);
+                if new_len <= buf.len() {
+                    buf.truncate(new_len);
+                    assert_eq!(buf.len(), new_len);
                 }
             }
 
-            FuzzInput::GetMutPtr => {
-                if let Some(ref mut b) = buf {
-                    let ptr1 = b.as_mut_ptr();
-                    let ptr2 = b.as_mut_ptr();
+            FuzzInput::GetMutPtr(data) => {
+                let mut buf = StableBuf::from(data);
 
-                    assert_eq!(ptr1, ptr2);
+                let ptr1 = buf.as_mut_ptr();
+                let ptr2 = buf.as_mut_ptr();
 
-                    if !b.is_empty() {
-                        assert!(!ptr1.is_null());
-                    }
+                assert_eq!(ptr1, ptr2);
+
+                if !buf.is_empty() {
+                    assert!(!ptr1.is_null());
                 }
             }
 
-            FuzzInput::Len => {
-                if let Some(ref b) = buf {
-                    let len = b.len();
-                    assert_eq!(b.is_empty(), len == 0);
+            FuzzInput::Len(data) => {
+                let buf = StableBuf::from(data.clone());
+                assert_eq!(buf.len(), data.len());
+            }
 
-                    let as_ref: &[u8] = b.as_ref();
-                    assert_eq!(as_ref.len(), len);
+            FuzzInput::IsEmpty(data) => {
+                let buf = StableBuf::from(data.clone());
+                assert_eq!(buf.is_empty(), data.is_empty());
+            }
+
+            FuzzInput::Index(data, idx) => {
+                let buf = StableBuf::from(data);
+                if idx < buf.len() {
+                    let byte = buf[idx];
+
+                    let as_ref: &[u8] = buf.as_ref();
+                    assert_eq!(byte, as_ref[idx]);
                 }
             }
 
-            FuzzInput::IsEmpty => {
-                if let Some(ref b) = buf {
-                    let is_empty = b.is_empty();
-                    assert_eq!(is_empty, b.is_empty());
-                }
+            FuzzInput::ConvertToBytes(data) => {
+                let buf = StableBuf::from(data.clone());
+                let bytes: Bytes = buf.into();
+                assert_eq!(bytes.to_vec(), data);
             }
 
-            FuzzInput::Index(idx) => {
-                if let Some(ref b) = buf {
-                    if idx < b.len() {
-                        let byte = b[idx];
-
-                        let as_ref: &[u8] = b.as_ref();
-                        assert_eq!(byte, as_ref[idx]);
-                    }
-                }
-            }
-
-            FuzzInput::ConvertToBytes => {
-                if let Some(b) = buf.take() {
-                    let len = b.len();
-                    let bytes: Bytes = b.into();
-                    assert_eq!(bytes.len(), len);
-
-                    buf = Some(StableBuf::from(bytes.to_vec()));
-                }
-            }
-
-            FuzzInput::ConvertToVec => {
-                if let Some(b) = buf.take() {
-                    let len = b.len();
-                    let vec: Vec<u8> = b.into();
-                    assert_eq!(vec.len(), len);
-
-                    buf = Some(StableBuf::from(vec));
-                }
+            FuzzInput::ConvertToVec(data) => {
+                let buf = StableBuf::from(data.clone());
+                let vec: Vec<u8> = buf.into();
+                assert_eq!(vec, data);
             }
         }
     }
