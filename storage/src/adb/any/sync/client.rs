@@ -10,9 +10,9 @@ use crate::{
         },
         operation::Operation,
     },
-    index::Translator,
     journal::fixed::{Config as JConfig, Journal},
     mmr::{self, iterator::leaf_num_to_pos},
+    translator::Translator,
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{
@@ -450,7 +450,7 @@ pub(crate) mod tests {
             sync::sync,
             test::{apply_ops, create_test_db, create_test_ops},
         },
-        index,
+        translator,
     };
     use commonware_cryptography::{sha256::Digest, Digest as _, Sha256};
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
@@ -460,7 +460,7 @@ pub(crate) mod tests {
     use test_case::test_case;
 
     type TestHash = Sha256;
-    type TestTranslator = index::translator::EightCap;
+    type TestTranslator = translator::EightCap;
 
     const PAGE_SIZE: usize = 111;
     const PAGE_CACHE_SIZE: usize = 5;

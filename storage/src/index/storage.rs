@@ -1,4 +1,4 @@
-use crate::index::Translator;
+use crate::translator::Translator;
 use commonware_runtime::Metrics;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{

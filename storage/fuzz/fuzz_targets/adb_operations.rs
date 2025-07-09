@@ -5,8 +5,8 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::any::{Any, Config},
-    index::translator::EightCap,
     mmr::hasher::Standard,
+    translator::EightCap,
 };
 use commonware_utils::array::FixedBytes;
 use libfuzzer_sys::fuzz_target;
