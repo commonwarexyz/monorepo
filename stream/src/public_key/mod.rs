@@ -1,13 +1,11 @@
 //! Communicate with an authenticated peer over an encrypted connection.
 //!
-//! # Introduction
-//!
 //! This module provides a lightweight, self-contained transport layer for systems where peers
-//! already know one another's cryptographic identities. It offers mutual authentication and
-//! encrypted communication using a simplified handshake, eliminating the need for complex protocols
-//! like TLS or X.509 certificates. The implementation uses a fixed, non-negotiable cryptographic
-//! protocol to simplify implementation and reduce overhead, resulting in a minimal performance
-//! impact.
+//! already know one another's cryptographic identities (any [commonware_cryptography::Signer]).
+//! It offers mutual authentication and encrypted communication using a simplified handshake,
+//! eliminating the need for complex protocols like TLS or X.509 certificates. The implementation
+//! uses a fixed, non-negotiable cryptographic protocol to simplify implementation and reduce
+//! overhead, resulting in a minimal performance impact.
 //!
 //! # Design
 //!
@@ -21,10 +19,10 @@
 //! exchange messages in three rounds.
 //!
 //! The SYN-equivalent is a [handshake::Hello] message that contains:
-//! - The recipient's expected public key (prevents wrong-target attacks)
-//! - The sender's ephemeral public key (for Diffie-Hellman key exchange)
+//! - The listener's expected public key (prevents wrong-target attacks)
+//! - The dialer's ephemeral public key (for Diffie-Hellman key exchange)
 //! - The current timestamp (prevents replay attacks)
-//! - The sender's static public key and signature
+//! - The dialer's static public key and signature
 //!
 //! The ACK-equivalent is a [handshake::Confirmation] message that proves that each party can derive
 //! the correct shared secret.
