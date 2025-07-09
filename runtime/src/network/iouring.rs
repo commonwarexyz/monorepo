@@ -3,9 +3,10 @@
 //!
 //! ## Architecture
 //!
-//! Network operations are sent via MPSC channels to dedicated io_uring event loops running in separate
-//! threads. Operation results are returned via oneshot channels. This implementation uses two separate
-//! io_uring instances: one for send operations and one for receive operations.
+//! Network operations are sent via a [futures::channel::mpsc] channel to a dedicated io_uring event
+//! loop running in a separate thread. Operation results are returned via a [futures::channel::oneshot]
+//! channel. This implementation uses two separate io_uring instances: one for send operations and
+//! one for receive operations.
 //!
 //! ## Memory Safety
 //!

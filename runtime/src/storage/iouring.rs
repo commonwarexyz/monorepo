@@ -3,8 +3,8 @@
 //!
 //! ## Architecture
 //!
-//! I/O operations are sent via an MPSC channel to a dedicated io_uring event loop running in another
-//! thread. Operation results are returned via a oneshot channel.
+//! I/O operations are sent via a [futures::channel::mpsc] channel to a dedicated io_uring event loop
+//! running in another thread. Operation results are returned via a [futures::channel::oneshot] channel.
 //!
 //! ## Memory Safety
 //!
