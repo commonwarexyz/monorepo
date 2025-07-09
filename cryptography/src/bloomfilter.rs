@@ -31,41 +31,6 @@ impl BloomFilter {
         }
     }
 
-    /// Inserts an item into the [BloomFilter].
-    pub fn insert(&mut self, item: &[u8]) {
-        let hashes = self.hashes(item);
-        let bit_len = self.bits.len() as u128;
-        for hash in hashes {
-            let index = (hash % bit_len) as usize;
-            self.bits.set(index);
-        }
-    }
-
-    /// Checks if an item is possibly in the [BloomFilter].
-    ///
-    /// Returns `true` if the item is probably in the set, and `false` if it is definitely not.
-    pub fn contains(&self, item: &[u8]) -> bool {
-        let hashes = self.hashes(item);
-        let bit_len = self.bits.len() as u128;
-        for hash in hashes {
-            let index = (hash % bit_len) as usize;
-            if !self.bits.get(index).unwrap_or(false) {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Returns the number of bits in the [BloomFilter].
-    pub fn bits(&self) -> usize {
-        self.bits.len()
-    }
-
-    /// Returns the number of hash functions used in the [BloomFilter].
-    pub fn hashers(&self) -> u8 {
-        self.hashers
-    }
-
     /// Extract two 128-bit hash values from a 32-byte [Digest].
     fn extract_hashes(digest: &Digest) -> (u128, u128) {
         let mut h1_bytes = [0u8; 16];
@@ -90,6 +55,31 @@ impl BloomFilter {
 
         let hashers = self.hashers;
         (0..hashers).map(move |i| h1.wrapping_add(u128::from(i).wrapping_mul(h2)))
+    }
+
+    /// Inserts an item into the [BloomFilter].
+    pub fn insert(&mut self, item: &[u8]) {
+        let hashes = self.hashes(item);
+        let bit_len = self.bits.len() as u128;
+        for hash in hashes {
+            let index = (hash % bit_len) as usize;
+            self.bits.set(index);
+        }
+    }
+
+    /// Checks if an item is possibly in the [BloomFilter].
+    ///
+    /// Returns `true` if the item is probably in the set, and `false` if it is definitely not.
+    pub fn contains(&self, item: &[u8]) -> bool {
+        let hashes = self.hashes(item);
+        let bit_len = self.bits.len() as u128;
+        for hash in hashes {
+            let index = (hash % bit_len) as usize;
+            if !self.bits.get(index).unwrap_or(false) {
+                return false;
+            }
+        }
+        true
     }
 }
 
