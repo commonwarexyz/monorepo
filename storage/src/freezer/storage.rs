@@ -307,12 +307,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let buf = vec![0u8; Entry::FULL_SIZE];
         let read_buf = blob.read_at(buf, offset).await?;
 
-        let mut buf1 = &read_buf.as_ref()[0..Entry::SIZE];
-        let entry1 = Entry::read(&mut buf1)?;
-        let mut buf2 = &read_buf.as_ref()[Entry::SIZE..Entry::FULL_SIZE];
-        let entry2 = Entry::read(&mut buf2)?;
-
-        Ok((entry1, entry2))
+        Self::parse_entries(read_buf.as_ref())
     }
 
     /// Validate and clean invalid table entries for a given epoch.
@@ -345,10 +340,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             reader.read_exact(&mut entry_buf, Entry::FULL_SIZE).await?;
 
             // Parse entries
-            let mut buf1 = &entry_buf[0..Entry::SIZE];
-            let entry1 = Entry::read(&mut buf1)?;
-            let mut buf2 = &entry_buf[Entry::SIZE..Entry::FULL_SIZE];
-            let entry2 = Entry::read(&mut buf2)?;
+            let (entry1, entry2) = Self::parse_entries(&entry_buf)?;
 
             // Check first entry
             if !entry1.is_empty() {
@@ -778,6 +770,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         }
     }
 
+    /// Parse table entries from a buffer.
+    fn parse_entries(buf: &[u8]) -> Result<(Entry, Entry), Error> {
+        let mut buf1 = &buf[0..Entry::SIZE];
+        let entry1 = Entry::read(&mut buf1)?;
+        let mut buf2 = &buf[Entry::SIZE..Entry::FULL_SIZE];
+        let entry2 = Entry::read(&mut buf2)?;
+        Ok((entry1, entry2))
+    }
+
     /// Resize the table by doubling its size and re-sharding all entries.
     async fn resize(&mut self) -> Result<(), Error> {
         self.resizes.inc();
@@ -803,10 +804,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             reader.read_exact(&mut entry_buf, Entry::FULL_SIZE).await?;
 
             // Parse entries and get the valid head
-            let mut buf1 = &entry_buf[0..Entry::SIZE];
-            let entry1 = Entry::read(&mut buf1)?;
-            let mut buf2 = &entry_buf[Entry::SIZE..Entry::FULL_SIZE];
-            let entry2 = Entry::read(&mut buf2)?;
+            let (entry1, entry2) = Self::parse_entries(&entry_buf)?;
 
             // Get the previous value or default to (0, 0)
             let head = self.select_valid_entry(&entry1, &entry2);
