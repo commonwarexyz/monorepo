@@ -3,9 +3,9 @@ use commonware_runtime::benchmarks::{context, tokio};
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
-fn bench_freezer_put(c: &mut Criterion) {
+fn bench_put(c: &mut Criterion) {
     let runner = tokio::Runner::default();
-    for items in [10_000, 50_000, 100_000] {
+    for items in [10_000, 50_000, 100_000, 500_000] {
         let label = format!("{}/items={}", module_path!(), items);
         c.bench_function(&label, |b| {
             b.to_async(&runner).iter_custom(move |iters| async move {
@@ -29,5 +29,5 @@ fn bench_freezer_put(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_freezer_put
+    targets = bench_put
 }

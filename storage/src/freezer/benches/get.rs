@@ -40,11 +40,9 @@ pub async fn read_concurrent_keys(store: &FreezerType, keys: &[Key]) {
     black_box(try_join_all(futures).await.unwrap());
 }
 
-fn bench_freezer_get(c: &mut Criterion) {
-    // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
+fn bench_get(c: &mut Criterion) {
+    // Populate the freezer with random keys
     let cfg = Config::default();
-
-    // Create a shared on-disk store once so later setup is fast.
     let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
     let keys = builder.start(|ctx| async move {
         let mut store = init(ctx).await;
@@ -53,19 +51,18 @@ fn bench_freezer_get(c: &mut Criterion) {
         keys
     });
 
-    // Run the benchmarks.
+    // Run the benchmarks
     let runner = tokio::Runner::new(cfg.clone());
     for mode in ["serial", "concurrent"] {
         for reads in [1_000, 10_000, 50_000] {
             let label = format!("{}/mode={} reads={}", module_path!(), mode, reads);
-            let bench_keys = keys.clone();
             c.bench_function(&label, |b| {
                 b.to_async(&runner).iter_custom(|iters| {
-                    let bench_keys = bench_keys.clone();
+                    let keys = keys.clone();
                     async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
                         let store = init(ctx).await;
-                        let selected_keys = select_keys(reads, &bench_keys);
+                        let selected_keys = select_keys(reads, &keys);
                         let start = Instant::now();
                         for _ in 0..iters {
                             match mode {
@@ -81,7 +78,7 @@ fn bench_freezer_get(c: &mut Criterion) {
         }
     }
 
-    // Clean up shared artifacts.
+    // Clean up shared artifacts
     let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
     cleaner.start(|ctx| async move {
         let store = init(ctx).await;
@@ -92,5 +89,5 @@ fn bench_freezer_get(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_freezer_get
+    targets = bench_get
 }

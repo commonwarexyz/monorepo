@@ -7,10 +7,10 @@ use commonware_runtime::{
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
-fn bench_freezer_restart(c: &mut Criterion) {
-    // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
+fn bench_restart(c: &mut Criterion) {
     let cfg = Config::default();
     for items in [10_000, 50_000, 100_000, 500_000] {
+        // Populate the freezer with random keys
         let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
         builder.start(|ctx| async move {
             let mut store = init(ctx).await;
@@ -47,5 +47,5 @@ fn bench_freezer_restart(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_freezer_restart
+    targets = bench_restart
 }
