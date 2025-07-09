@@ -796,6 +796,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Create Write buffers for efficient batched writes
         // Use a buffer size that can hold multiple entries
+        unimplemented!("TODO: use config write buffer size");
         let old_buffered_table = Write::new(
             self.table.clone(),
             new_size as u64 * Entry::FULL_SIZE as u64,
