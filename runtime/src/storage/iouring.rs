@@ -1,3 +1,22 @@
+//! This module provides an io_uring-based implementation of the [crate::Storage] trait,
+//! offering fast, high throughput file operations on Linux systems.
+//!
+//! ## Architecture
+//!
+//! I/O operations are sent via an MPSC channel to a dedicated io_uring event loop running in another
+//! thread. Operation results are returned via a oneshot channel.
+//!
+//! ## Memory Safety
+//!
+//! We pass to the kernel, via io_uring, a pointer to the buffer being read from/written into.
+//! Therefore, we ensure that the memory location is valid for the duration of the operation.
+//! That is, it doesn't move or go out of scope until the operation completes.
+//!
+//! ## Linux Only
+//!
+//! This implementation is only available on Linux systems that support io_uring.
+//!
+
 use crate::{
     iouring::{self, should_retry},
     Error,
