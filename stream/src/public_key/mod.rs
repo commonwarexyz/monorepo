@@ -71,7 +71,8 @@
 //!
 //! ## Not Provided
 //!
-//! - **Anonymity**: Peer identities are not hidden from network observers.
+//! - **Anonymity**: Peer identities are not hidden during handshakes from network observers (both active
+//!   and passive).
 //! - **Padding**: Messages are encrypted as-is, allowing an attacker to perform traffic analysis.
 
 use chacha20poly1305::{
