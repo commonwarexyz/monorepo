@@ -12,8 +12,8 @@ use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::{future::Future, num::NonZeroU64};
 
-/// Result of a call to [Resolver::get_proof].
-pub struct GetProofResult<H: Hasher, K: Array, V: Array> {
+/// Result of a call to [Resolver::get_operations].
+pub struct GetOperationsResult<H: Hasher, K: Array, V: Array> {
     /// Proof that the operations are valid.
     pub proof: Proof<H::Digest>,
     /// The operations in the requested range.
@@ -26,14 +26,15 @@ pub struct GetProofResult<H: Hasher, K: Array, V: Array> {
 
 /// Trait for network communication with the sync server
 pub trait Resolver<H: Hasher, K: Array, V: Array> {
-    /// Request proof and operations starting from the given index into an [Any] database's
-    /// operation log. Returns at most `max_ops` operations.
-    // TODO allow for fetching historical proofs; https://github.com/commonwarexyz/monorepo/issues/1216
-    fn get_proof(
+    /// Get the operations starting at `start_loc` in the database, up to `max_ops` operations.
+    /// Returns the operations and a proof that they were present in the database when it had
+    /// `size` operations.
+    fn get_operations(
         &self,
+        size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<GetProofResult<H, K, V>, Error>>;
+    ) -> impl Future<Output = Result<GetOperationsResult<H, K, V>, Error>>;
 }
 
 impl<E, K, V, H, T> Resolver<H, K, V> for &Any<E, K, V, H, T>
@@ -44,15 +45,16 @@ where
     H: Hasher,
     T: Translator,
 {
-    async fn get_proof(
+    async fn get_operations(
         &self,
-        start_index: u64,
+        size: u64,
+        start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<GetProofResult<H, K, V>, Error> {
-        self.proof(start_index, max_ops.get())
+    ) -> Result<GetOperationsResult<H, K, V>, Error> {
+        self.historical_proof(size, start_loc, max_ops.get())
             .await
-            .map_err(Error::GetProofFailed)
-            .map(|(proof, operations)| GetProofResult {
+            .map_err(Error::Adb)
+            .map(|(proof, operations)| GetOperationsResult {
                 proof,
                 operations,
                 // Result of proof verification isn't used by this implementation.

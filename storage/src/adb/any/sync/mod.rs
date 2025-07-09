@@ -19,9 +19,6 @@ mod resolver;
 /// Synchronization errors
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// Database operation error
-    #[error("Database error: {0}")]
-    GetProofFailed(crate::adb::Error),
     /// Hash mismatch after sync
     #[error("Hash mismatch - expected {expected:?}, got {actual:?}")]
     HashMismatch {

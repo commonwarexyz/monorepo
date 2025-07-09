@@ -3,7 +3,7 @@ use crate::{
         self,
         any::{
             sync::{
-                resolver::{GetProofResult, Resolver},
+                resolver::{GetOperationsResult, Resolver},
                 Error,
             },
             SyncConfig,
@@ -252,13 +252,17 @@ where
                 );
 
                 // Get proof and operations from resolver
-                let GetProofResult {
+                let GetOperationsResult {
                     proof,
                     operations,
                     success_tx,
                 } = {
                     let _timer = metrics.fetch_duration.timer();
-                    config.resolver.get_proof(log_size, batch_size).await?
+                    let target_size = config.upper_bound_ops + 1;
+                    config
+                        .resolver
+                        .get_operations(target_size, log_size, batch_size)
+                        .await?
                 };
 
                 let operations_len = operations.len() as u64;
@@ -611,6 +615,62 @@ pub(crate) mod tests {
                 }
                 _ => panic!("Expected InvalidTarget error for invalid bounds"),
             }
+        });
+    }
+
+    /// Test that sync works when target database has operations beyond the requested range
+    /// of operations to sync.
+    #[test]
+    fn test_sync_subset_of_target_database() {
+        const TARGET_DB_OPS: usize = 1000;
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(TARGET_DB_OPS);
+            // Apply all but the last operation
+            let mut target_db =
+                apply_ops(target_db, target_ops[0..TARGET_DB_OPS - 1].to_vec()).await;
+            target_db.commit().await.unwrap();
+
+            let mut hasher = create_test_hasher();
+            // We will sync to this operation
+            let upper_bound_ops = target_db.op_count() - 1;
+            let target_hash = target_db.root(&mut hasher);
+
+            // Add another operation after the sync range
+            let final_op = &target_ops[TARGET_DB_OPS - 1];
+            let mut target_db = apply_ops(target_db, vec![final_op.clone()]).await; // TODO: this is wrong
+            target_db.commit().await.unwrap();
+
+            // Start of the sync range is after the oldest retained operation
+            let lower_bound_ops = target_db.oldest_retained_loc().unwrap() + 1;
+            let config = Config {
+                db_config: create_test_config(context.next_u64()),
+                fetch_batch_size: NZU64!(10),
+                target_hash,
+                lower_bound_ops,
+                upper_bound_ops,
+                context,
+                resolver: &target_db,
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+                _phantom: PhantomData,
+            };
+
+            let synced_db = sync(config).await.unwrap();
+
+            // Verify the synced database has the correct range of operations
+            assert_eq!(synced_db.oldest_retained_loc(), Some(lower_bound_ops));
+            assert_eq!(synced_db.op_count(), upper_bound_ops + 1);
+
+            // Verify the final hash matches our target
+            assert_eq!(synced_db.root(&mut hasher), target_hash);
+
+            // Verify the synced database doesn't have any operations beyond the sync range.
+            assert_eq!(
+                synced_db.get(final_op.to_key().unwrap()).await.unwrap(),
+                None
+            );
         });
     }
 }

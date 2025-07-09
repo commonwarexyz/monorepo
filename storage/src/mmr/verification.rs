@@ -1,5 +1,14 @@
 //! Defines the inclusion [Proof] structure, functions for generating them from any MMR implementing
 //! the [Storage] trait, and functions for verifying them against a root digest.
+//!
+//! ## Historical Proof Generation
+//!
+//! This module provides both current and historical proof generation capabilities:
+//! - [Proof::range_proof] generates proofs against the current MMR state
+//! - [Proof::historical_range_proof] generates proofs against historical MMR states
+//!
+//! Historical proofs are essential for sync operations where we need to prove elements
+//! against a past state of the MMR rather than its current state.
 
 use crate::mmr::{
     iterator::{leaf_num_to_pos, leaf_pos_to_num, PathIterator, PeakIterator},
@@ -324,9 +333,26 @@ impl<D: Digest> Proof<D> {
         start_element_pos: u64,
         end_element_pos: u64,
     ) -> Result<Proof<D>, Error> {
+        Self::historical_range_proof(mmr, mmr.size(), start_element_pos, end_element_pos).await
+    }
+
+    /// Analagous to range_proof but for a previous database state.
+    /// Specifically, the state when the MMR had `size` elements.
+    pub async fn historical_range_proof<S: Storage<D>>(
+        mmr: &S,
+        size: u64,
+        start_element_pos: u64,
+        end_element_pos: u64,
+    ) -> Result<Proof<D>, Error> {
+        if size > mmr.size() {
+            return Err(Error::HistoricalSizeTooLarge(size, mmr.size()));
+        }
+        if size <= start_element_pos {
+            return Err(Error::HistoricalSizeTooSmall(size, start_element_pos));
+        }
         let mut digests: Vec<D> = Vec::new();
         let positions =
-            Self::nodes_required_for_range_proof(mmr.size(), start_element_pos, end_element_pos);
+            Self::nodes_required_for_range_proof(size, start_element_pos, end_element_pos);
 
         let node_futures = positions.iter().map(|pos| mmr.get_node(*pos));
         let hash_results = try_join_all(node_futures).await?;
@@ -338,10 +364,7 @@ impl<D: Digest> Proof<D> {
             };
         }
 
-        Ok(Proof {
-            size: mmr.size(),
-            digests,
-        })
+        Ok(Proof { size, digests })
     }
 
     /// Extract the hashes of all nodes that should be pinned at the given pruning boundary
@@ -1012,6 +1035,193 @@ mod tests {
                     }
                 }
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_historical_range_proof_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Create an MMR with 5 elements
+            let mut mmr = Mmr::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
+            let mut elements = Vec::new();
+            let mut element_positions = Vec::new();
+            for i in 0..5 {
+                elements.push(test_digest(i));
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
+            }
+            let current_size = mmr.size();
+            let current_root = mmr.root(&mut hasher);
+
+            {
+                // Historical proof should match regular proof at current size
+                let historical_proof = Proof::historical_range_proof(
+                    &mmr,
+                    current_size,
+                    element_positions[0],
+                    element_positions[2],
+                )
+                .await
+                .unwrap();
+                let regular_proof = mmr
+                    .range_proof(element_positions[0], element_positions[2])
+                    .await
+                    .unwrap();
+
+                assert_eq!(historical_proof.size, current_size);
+                assert_eq!(historical_proof.digests, regular_proof.digests);
+                assert!(historical_proof.verify_range_inclusion(
+                    &mut hasher,
+                    &elements[0..3],
+                    element_positions[0],
+                    &current_root
+                ));
+            }
+
+            {
+                // Historical proof should match regular proof at historical size
+                let mut ref_mmr = Mmr::new();
+                for elt in elements.iter().take(3) {
+                    ref_mmr.add(&mut hasher, elt);
+                }
+                let ref_size = ref_mmr.size();
+                let ref_root = ref_mmr.root(&mut hasher);
+                let ref_proof = Proof::historical_range_proof(
+                    &mmr,
+                    ref_size,
+                    element_positions[0],
+                    element_positions[2],
+                )
+                .await
+                .unwrap();
+                let historical_proof = Proof::historical_range_proof(
+                    &mmr,
+                    ref_size,
+                    element_positions[0],
+                    element_positions[2],
+                )
+                .await
+                .unwrap();
+
+                assert_eq!(ref_proof.size, ref_size);
+                assert_eq!(ref_proof.digests, historical_proof.digests);
+                assert!(ref_proof.verify_range_inclusion(
+                    &mut hasher,
+                    &elements[0..3],
+                    element_positions[0],
+                    &ref_root
+                ));
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_historical_range_proof_large() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Simulate a sync scenario: server has 1000 operations, client syncs 600-799
+            let mut server_mmr = Mmr::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
+            let mut elements = Vec::new();
+            let mut element_positions = Vec::new();
+
+            // Add 1000 elements to server
+            for i in 0..1000 {
+                elements.push(test_digest((i % 256) as u8));
+                element_positions.push(server_mmr.add(&mut hasher, elements.last().unwrap()));
+            }
+
+            // Want operations 600-799
+            let start_loc = 600;
+            let end_loc = 799;
+
+            // Create historical MMR state as it would have been after end_loc elements
+            let mut ref_mmr = Mmr::new();
+            for elt in elements.iter().take(end_loc + 1) {
+                ref_mmr.add(&mut hasher, elt);
+            }
+            let ref_size = ref_mmr.size();
+            let ref_root = ref_mmr.root(&mut hasher);
+
+            // Generate proof at historical position
+            let historical_proof = Proof::historical_range_proof(
+                &server_mmr,
+                ref_size,
+                element_positions[start_loc],
+                element_positions[end_loc],
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(historical_proof.size, ref_size);
+
+            // Verify the sync proof
+            assert!(historical_proof.verify_range_inclusion(
+                &mut hasher,
+                &elements[start_loc..=end_loc],
+                element_positions[start_loc],
+                &ref_root // Compare to historical root
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_historical_range_proof_singleton() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut mmr = Mmr::new();
+            let mut single_hasher: Standard<Sha256> = Standard::new();
+            let element = test_digest(0);
+            mmr.add(&mut single_hasher, &element);
+            let single_historical_size = mmr.size();
+            let single_root = mmr.root(&mut single_hasher);
+
+            let single_element_proof =
+                Proof::historical_range_proof(&mmr, single_historical_size, 0, 0)
+                    .await
+                    .unwrap();
+
+            assert!(single_element_proof.verify_range_inclusion(
+                &mut single_hasher,
+                &[element],
+                0,
+                &single_root
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_historical_range_proof_invalid_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut mmr = Mmr::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
+            for i in 0..10 {
+                mmr.add(&mut hasher, &test_digest(i));
+            }
+            let mmr_size = mmr.size();
+
+            const BATCH_SIZE: u64 = 10;
+
+            // Historical size > MMR size is invalid
+            let result = Proof::historical_range_proof(&mmr, mmr_size+1, 0, BATCH_SIZE).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooLarge(given_size, actual_size)) if given_size == mmr_size+1 && actual_size == mmr_size));
+
+            // Historical size == start location is invalid
+            let result = Proof::historical_range_proof(&mmr, 0, 0, BATCH_SIZE).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 0 && start_loc == 0));
+            let result = Proof::historical_range_proof(&mmr, 1, 1, BATCH_SIZE).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 1 && start_loc == 1));
+            let result = Proof::historical_range_proof(&mmr, mmr_size, mmr_size, BATCH_SIZE).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == mmr_size && start_loc == mmr_size));
+
+
+            // Historical size < start location is invalid
+            let result = Proof::historical_range_proof(&mmr, 0, 1, BATCH_SIZE).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 0 && start_loc == 1));
+            let result = Proof::historical_range_proof(&mmr, mmr_size-1, mmr_size, BATCH_SIZE).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == mmr_size-1 && start_loc == mmr_size));
         });
     }
 }

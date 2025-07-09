@@ -603,17 +603,30 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         start_loc: u64,
         max_ops: u64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let mmr = &self.ops;
-        let start_pos = leaf_num_to_pos(start_loc);
-        let end_pos_last = mmr.last_leaf_pos().unwrap();
-        let end_pos_max = leaf_num_to_pos(start_loc + max_ops - 1);
-        let (end_pos, end_loc) = if end_pos_last < end_pos_max {
-            (end_pos_last, leaf_pos_to_num(end_pos_last).unwrap())
-        } else {
-            (end_pos_max, start_loc + max_ops - 1)
-        };
+        self.historical_proof(self.op_count(), start_loc, max_ops)
+            .await
+    }
 
-        let proof = mmr.range_proof(start_pos, end_pos).await?;
+    /// Analagous to proof but for a previous database state.
+    /// Specifically, the state when the MMR had `size` elements.
+    pub async fn historical_proof(
+        &self,
+        size: u64,
+        start_loc: u64,
+        max_ops: u64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+        let start_pos = leaf_num_to_pos(start_loc);
+        let end_loc = std::cmp::min(
+            size.saturating_sub(1),
+            start_loc.saturating_add(max_ops).saturating_sub(1),
+        );
+        let end_pos = leaf_num_to_pos(end_loc);
+        let mmr_size = leaf_num_to_pos(size);
+
+        let proof = self
+            .ops
+            .historical_range_proof(mmr_size, start_pos, end_pos)
+            .await?;
         let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
         let futures = (start_loc..=end_loc)
             .map(|i| self.log.read(i))
@@ -1705,6 +1718,334 @@ pub(super) mod test {
                 db.destroy().await.unwrap();
             }
             source_db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_any_db_historical_proof_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context.clone()).await;
+            let ops = create_test_ops(20);
+            db = apply_ops(db, ops.clone()).await;
+            db.commit().await.unwrap();
+            let mut hasher = Standard::<Sha256>::new();
+            let root_hash = db.root(&mut hasher);
+            let original_op_count = db.op_count();
+
+            // Historical proof should match "regular" proof when historical size == current database size
+            let (historical_proof, historical_ops) =
+                db.historical_proof(original_op_count, 5, 10).await.unwrap();
+            let (regular_proof, regular_ops) = db.proof(5, 10).await.unwrap();
+
+            assert_eq!(historical_proof.size, regular_proof.size);
+            assert_eq!(historical_proof.digests, regular_proof.digests);
+            assert_eq!(historical_ops, regular_ops);
+            assert_eq!(historical_ops, ops[5..15]);
+            assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
+                &mut hasher,
+                &historical_proof,
+                5,
+                &historical_ops,
+                &root_hash
+            ));
+
+            // Add more operations to the database
+            let more_ops = create_test_ops(5);
+            db = apply_ops(db, more_ops.clone()).await;
+            db.commit().await.unwrap();
+
+            // Historical proof should remain the same even though database has grown
+            let (historical_proof, historical_ops) =
+                db.historical_proof(original_op_count, 5, 10).await.unwrap();
+            assert_eq!(historical_proof.size, leaf_num_to_pos(original_op_count));
+            assert_eq!(historical_proof.size, regular_proof.size);
+            assert_eq!(historical_ops.len(), 10);
+            assert_eq!(historical_proof.digests, regular_proof.digests);
+            assert_eq!(historical_ops, regular_ops);
+            assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
+                &mut hasher,
+                &historical_proof,
+                5,
+                &historical_ops,
+                &root_hash
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_any_db_historical_proof_edge_cases() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context.clone()).await;
+            let ops = create_test_ops(50);
+            db = apply_ops(db, ops.clone()).await;
+            db.commit().await.unwrap();
+
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Test singleton database
+            let (single_proof, single_ops) = db.historical_proof(1, 0, 1).await.unwrap();
+            assert_eq!(single_proof.size, leaf_num_to_pos(1));
+            assert_eq!(single_ops.len(), 1);
+
+            // Create historical database with single operation
+            let mut single_db = create_test_db(context.clone()).await;
+            single_db = apply_ops(single_db, ops[0..1].to_vec()).await;
+            // Don't commit - this changes the root due to commit operations
+            single_db.sync().await.unwrap();
+            let single_root = single_db.root(&mut hasher);
+
+            assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
+                &mut hasher,
+                &single_proof,
+                0,
+                &single_ops,
+                &single_root
+            ));
+
+            // Test requesting more operations than available in historical position
+            let (_limited_proof, limited_ops) = db.historical_proof(10, 5, 20).await.unwrap();
+            assert_eq!(limited_ops.len(), 5); // Should be limited by historical position
+            assert_eq!(limited_ops, ops[5..10]);
+
+            // Test proof at minimum historical position
+            let (min_proof, min_ops) = db.historical_proof(3, 0, 3).await.unwrap();
+            assert_eq!(min_proof.size, leaf_num_to_pos(3));
+            assert_eq!(min_ops.len(), 3);
+            assert_eq!(min_ops, ops[0..3]);
+
+            single_db.destroy().await.unwrap();
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_any_db_historical_proof_different_historical_sizes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context.clone()).await;
+            let ops = create_test_ops(100);
+            db = apply_ops(db, ops.clone()).await;
+            db.commit().await.unwrap();
+
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Test historical proof generation for several historical states.
+            let start_loc = 20;
+            let max_ops = 10;
+            for end_loc in 31..50 {
+                let (historical_proof, historical_ops) = db
+                    .historical_proof(end_loc, start_loc, max_ops)
+                    .await
+                    .unwrap();
+
+                assert_eq!(historical_proof.size, leaf_num_to_pos(end_loc));
+
+                // Create  reference database at the given historical size
+                let mut ref_db = create_test_db(context.clone()).await;
+                ref_db = apply_ops(ref_db, ops[0..end_loc as usize].to_vec()).await;
+                // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
+                ref_db.sync().await.unwrap();
+
+                let (ref_proof, ref_ops) = ref_db.proof(start_loc, max_ops).await.unwrap();
+                assert_eq!(ref_proof.size, historical_proof.size);
+                assert_eq!(ref_ops, historical_ops);
+                assert_eq!(ref_proof.digests, historical_proof.digests);
+                let end_loc = std::cmp::min(start_loc + max_ops, end_loc);
+                assert_eq!(ref_ops, ops[start_loc as usize..end_loc as usize]);
+
+                // Verify proof against reference root
+                let ref_root = ref_db.root(&mut hasher);
+                assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
+                    &mut hasher,
+                    &historical_proof,
+                    start_loc,
+                    &historical_ops,
+                    &ref_root
+                ),);
+
+                ref_db.destroy().await.unwrap();
+            }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_any_db_historical_proof_size_too_large() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context.clone()).await;
+            let ops = create_test_ops(10);
+            db = apply_ops(db, ops).await;
+            db.commit().await.unwrap();
+            let op_count = db.op_count();
+
+            // Historical size > current database size is invalid
+            let result = db.historical_proof(op_count + 1, op_count, 5).await;
+            match result {
+                Err(Error::MmrError(crate::mmr::Error::HistoricalSizeTooLarge(
+                    requested,
+                    actual,
+                ))) => {
+                    assert_eq!(requested, leaf_num_to_pos(op_count + 1));
+                    assert_eq!(actual, leaf_num_to_pos(op_count));
+                }
+                _ => panic!("Expected HistoricalSizeTooLarge error"),
+            }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_any_db_historical_proof_size_too_small() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context.clone()).await;
+            let ops = create_test_ops(10);
+            db = apply_ops(db, ops).await;
+            db.commit().await.unwrap();
+            let op_count = db.op_count();
+
+            // Historical size == start location is invalid
+            let result = db.historical_proof(op_count, op_count, 5).await;
+            match result {
+                Err(Error::MmrError(crate::mmr::Error::HistoricalSizeTooSmall(
+                    size,
+                    start_loc,
+                ))) => {
+                    assert_eq!(size, leaf_num_to_pos(op_count));
+                    assert_eq!(start_loc, leaf_num_to_pos(op_count));
+                }
+                _ => panic!("Expected HistoricalSizeTooSmall error"),
+            }
+
+            // Historical size < start location is invalid
+            let result = db.historical_proof(op_count, op_count + 1, 5).await;
+            match result {
+                Err(Error::MmrError(crate::mmr::Error::HistoricalSizeTooSmall(
+                    size,
+                    start_loc,
+                ))) => {
+                    assert_eq!(size, leaf_num_to_pos(op_count));
+                    assert_eq!(start_loc, leaf_num_to_pos(op_count + 1));
+                }
+                _ => panic!("Expected HistoricalSizeTooSmall error"),
+            }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_any_db_historical_proof_invalid() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context.clone()).await;
+            let ops = create_test_ops(10);
+            db = apply_ops(db, ops).await;
+            db.commit().await.unwrap();
+
+            let (proof, ops) = db.historical_proof(5, 1, 10).await.unwrap();
+            assert_eq!(proof.size, leaf_num_to_pos(5));
+            assert_eq!(ops.len(), 4);
+
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Changing the proof digests should cause verification to fail
+            {
+                let mut proof = proof.clone();
+                proof.digests[0] = hash(b"invalid");
+                let root_hash = db.root(&mut hasher);
+                assert!(!Any::<Context, _, _, _, EightCap>::verify_proof(
+                    &mut hasher,
+                    &proof,
+                    0,
+                    &ops,
+                    &root_hash
+                ));
+            }
+            {
+                let mut proof = proof.clone();
+                proof.digests.push(hash(b"invalid"));
+                let root_hash = db.root(&mut hasher);
+                assert!(!Any::<Context, _, _, _, EightCap>::verify_proof(
+                    &mut hasher,
+                    &proof,
+                    0,
+                    &ops,
+                    &root_hash
+                ));
+            }
+
+            // Changing the ops should cause verification to fail
+            {
+                let mut ops = ops.clone();
+                ops[0] = Operation::Update(hash(b"key1"), hash(b"value1"));
+                let root_hash = db.root(&mut hasher);
+                assert!(!Any::<Context, _, _, _, EightCap>::verify_proof(
+                    &mut hasher,
+                    &proof,
+                    0,
+                    &ops,
+                    &root_hash
+                ));
+            }
+            {
+                let mut ops = ops.clone();
+                ops.push(Operation::Update(hash(b"key1"), hash(b"value1")));
+                let root_hash = db.root(&mut hasher);
+                assert!(!Any::<Context, _, _, _, EightCap>::verify_proof(
+                    &mut hasher,
+                    &proof,
+                    0,
+                    &ops,
+                    &root_hash
+                ));
+            }
+
+            // Changing the start location should cause verification to fail
+            {
+                let root_hash = db.root(&mut hasher);
+                assert!(!Any::<Context, _, _, _, EightCap>::verify_proof(
+                    &mut hasher,
+                    &proof,
+                    1,
+                    &ops,
+                    &root_hash
+                ));
+            }
+
+            // Changing the root hash should cause verification to fail
+            {
+                assert!(!Any::<Context, _, _, _, EightCap>::verify_proof(
+                    &mut hasher,
+                    &proof,
+                    0,
+                    &ops,
+                    &hash(b"invalid")
+                ));
+            }
+
+            // Changing the proof size should cause verification to fail
+            {
+                let mut proof = proof.clone();
+                proof.size = 100;
+                let root_hash = db.root(&mut hasher);
+                assert!(!Any::<Context, _, _, _, EightCap>::verify_proof(
+                    &mut hasher,
+                    &proof,
+                    0,
+                    &ops,
+                    &root_hash
+                ));
+            }
+
+            db.destroy().await.unwrap();
         });
     }
 }
