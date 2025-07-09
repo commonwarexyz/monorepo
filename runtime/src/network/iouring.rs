@@ -1,3 +1,27 @@
+//! This module provides an io_uring-based implementation of the [crate::Network] trait,
+//! offering fast, high-throughput network operations on Linux systems.
+//!
+//! ## Architecture
+//!
+//! Network operations are sent via a [futures::channel::mpsc] channel to a dedicated io_uring event
+//! loop running in a separate thread. Operation results are returned via a [futures::channel::oneshot]
+//! channel. This implementation uses two separate io_uring instances: one for send operations and
+//! one for receive operations.
+//!
+//! ## Memory Safety
+//!
+//! We pass to the kernel, via io_uring, a pointer to the buffer being read from/written into.
+//! Therefore, we ensure that the memory location is valid for the duration of the operation.
+//! That is, it doesn't move or go out of scope until the operation completes.
+//!
+//! ## Feature Flag
+//!
+//! This implementation is enabled by using the `iouring-network` feature.
+//!
+//! ## Linux Only
+//!
+//! This implementation is only available on Linux systems that support io_uring.
+
 use crate::iouring::{self, should_retry};
 use commonware_utils::StableBuf;
 use futures::{
