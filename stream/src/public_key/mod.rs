@@ -58,22 +58,21 @@
 //! - **Time Synchronization**: Peer clocks must be synchronized to within the `synchrony_bound`
 //!   to correctly validate timestamps.
 //!
-//! ## Properties
+//! ## Provided
 //!
 //! - **Mutual Authentication**: Both parties prove ownership of their static private keys through
 //!   signatures.
 //! - **Forward Secrecy**: Ephemeral encryption keys ensure that any compromise of long-term static keys
 //!   doesn't expose the contents of previous sessions.
-//! - **Replay Protection**: Confirmations are bound to the handshake transcript to prevent replay
-//!   attacks by confirming that the peer that sent the `Hello` message also had possession of the
-//!   ephemeral key.
-//! - **DoS Protection**: A configurable deadline is enforced for handshake completion to protect
-//!   against DoS attacks by malicious peers that create connections but abandon handshakes.
+//! - **Session Uniqueness**: Confirmations are bound to the complete handshake transcript (including
+//!   the randomly generated session key), preventing replay attacks and ensuring message integrity.
+//! - **Handshake Timeout**: A configurable deadline is enforced for handshake completion to protect
+//!   against malicious peers that create connections but abandon handshakes.
 //!
-//! ## Does Not Provide
+//! ## Not Provided
 //!
 //! - **Anonymity**: Peer identities are not hidden from network observers.
-//! - **Padding**: The protocol does not provide padding to prevent traffic analysis.
+//! - **Padding**: Messages are encrypted as-is, allowing an attacker to perform traffic analysis.
 
 use chacha20poly1305::{
     aead::{generic_array::typenum::Unsigned, AeadCore},
