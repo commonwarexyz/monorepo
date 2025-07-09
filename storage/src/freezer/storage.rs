@@ -713,16 +713,12 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         Ok(None)
     }
 
+    /// Get the value for a given [Identifier].
     pub async fn get<'a>(&'a self, identifier: Identifier<'a, K>) -> Result<Option<V>, Error> {
         match identifier {
             Identifier::Cursor(cursor) => self.get_cursor(cursor).await,
             Identifier::Key(key) => self.get_key(key).await,
         }
-    }
-
-    /// Check if a key exists in the freezer.
-    pub async fn has(&self, key: &K) -> Result<bool, Error> {
-        Ok(self.get(Identifier::Key(key)).await?.is_some())
     }
 
     /// Resize the table by doubling its size and re-sharding all entries.

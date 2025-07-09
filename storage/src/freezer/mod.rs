@@ -268,8 +268,11 @@ mod tests {
             let data = 42;
 
             // Check key doesn't exist
-            let has = freezer.has(&key).await.expect("Failed to check key");
-            assert!(!has);
+            let value = freezer
+                .get(Identifier::Key(&key))
+                .await
+                .expect("Failed to check key");
+            assert!(value.is_none());
 
             // Put the key-data pair
             freezer
@@ -277,22 +280,19 @@ mod tests {
                 .await
                 .expect("Failed to put data");
 
-            // Check key exists
-            let has = freezer.has(&key).await.expect("Failed to check key");
-            assert!(has);
-
             // Get the data back
-            let retrieved = freezer
+            let value = freezer
                 .get(Identifier::Key(&key))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
-            assert_eq!(retrieved, data);
+            assert_eq!(value, data);
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("gets_total 3"), "{}", buffer); // has calls get internally
+            assert!(buffer.contains("gets_total 2"), "{}", buffer);
             assert!(buffer.contains("puts_total 1"), "{}", buffer);
+            assert!(buffer.contains("useless_reads_total 0"), "{}", buffer);
 
             // Force a sync
             freezer.sync().await.expect("Failed to sync data");
@@ -408,6 +408,11 @@ mod tests {
                     .expect("Data not found");
                 assert_eq!(retrieved, *data);
             }
+
+            // Check metrics
+            let buffer = context.encode();
+            assert!(buffer.contains("gets_total 8"), "{}", buffer);
+            assert!(buffer.contains("useless_reads_total 5"), "{}", buffer);
         });
     }
 
@@ -570,40 +575,6 @@ mod tests {
                     assert_eq!(val, 4);
                 }
             }
-        });
-    }
-
-    #[test_traced]
-    fn test_get_nonexistent() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Initialize the freezer
-            let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                table_partition: "test_table".into(),
-                table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
-                table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
-                codec_config: (),
-            };
-            let freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize freezer");
-
-            // Attempt to get a key that doesn't exist
-            let key = test_key("nonexistent");
-            let retrieved = freezer
-                .get(Identifier::Key(&key))
-                .await
-                .expect("Failed to get data");
-            assert!(retrieved.is_none());
-
-            // Check has returns false
-            let has = freezer.has(&key).await.expect("Failed to check key");
-            assert!(!has);
         });
     }
 
@@ -979,9 +950,13 @@ mod tests {
                 assert_eq!(&retrieved, value);
             }
 
-            // Test has() on all keys plus some non-existent ones
+            // Test get() on all keys
             for (key, _) in &pairs {
-                assert!(freezer.has(key).await.expect("Failed to check key"));
+                assert!(freezer
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to check key")
+                    .is_some());
             }
 
             // Check some non-existent keys
@@ -989,7 +964,11 @@ mod tests {
                 let mut key = [0u8; 96];
                 context.fill_bytes(&mut key);
                 let key = FixedBytes::<96>::new(key);
-                let _ = freezer.has(&key).await;
+                assert!(freezer
+                    .get(Identifier::Key(&key))
+                    .await
+                    .expect("Failed to check key")
+                    .is_none());
             }
 
             // Close the freezer
