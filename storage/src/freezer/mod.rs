@@ -222,6 +222,9 @@ pub struct Config<C> {
     /// The size of the read buffer to use when scanning the table (e.g., during recovery or resize).
     pub table_read_buffer: usize,
 
+    /// The size of the write buffer to use when scanning the table (e.g., during resize).
+    pub table_write_buffer: usize,
+
     /// The codec configuration to use for the value stored in the freezer.
     pub codec_config: C,
 }
@@ -240,6 +243,7 @@ mod tests {
     const DEFAULT_TABLE_INITIAL_SIZE: u32 = 256;
     const DEFAULT_TABLE_RESIZE_FREQUENCY: u8 = 4;
     const DEFAULT_TABLE_READ_BUFFER: usize = 64 * 1024; // 64KB
+    const DEFAULT_TABLE_WRITE_BUFFER: usize = 64 * 1024; // 64KB
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -263,6 +267,7 @@ mod tests {
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -329,6 +334,7 @@ mod tests {
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -378,6 +384,7 @@ mod tests {
                 table_initial_size: 4, // Very small to force collisions
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -437,6 +444,7 @@ mod tests {
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
 
@@ -505,6 +513,7 @@ mod tests {
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
 
@@ -602,6 +611,7 @@ mod tests {
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             {
@@ -659,6 +669,7 @@ mod tests {
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let checkpoint = {
@@ -715,6 +726,7 @@ mod tests {
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
 
@@ -777,6 +789,7 @@ mod tests {
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
 
@@ -850,6 +863,7 @@ mod tests {
                 table_initial_size: 2, // Very small initial size to force multiple resizes
                 table_resize_frequency: 2, // Resize after 2 items per bucket
                 table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -918,6 +932,7 @@ mod tests {
                 table_initial_size: 8,     // Small table to force collisions
                 table_resize_frequency: 2, // Force resize frequently
                 table_read_buffer: DEFAULT_TABLE_READ_BUFFER,
+                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let mut freezer =

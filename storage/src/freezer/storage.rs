@@ -277,6 +277,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     table_initial_size: u32,
     table_resize_frequency: u8,
     table_read_buffer: usize,
+    table_write_buffer: usize,
 
     // Table blob that maps slots to journal chain heads
     table: E::Blob,
@@ -557,6 +558,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             table_initial_size: config.table_initial_size,
             table_resize_frequency: config.table_resize_frequency,
             table_read_buffer: config.table_read_buffer,
+            table_write_buffer: config.table_write_buffer,
             table,
             journal,
             journal_target_size: config.journal_target_size,
@@ -794,18 +796,17 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             .resize(new_size as u64 * Entry::FULL_SIZE as u64)
             .await?;
 
-        // Create Write buffers for efficient batched writes
-        // Use a buffer size that can hold multiple entries
-        unimplemented!("TODO: use config write buffer size");
+        // Create write buffers for efficient batched writes
+        let half_table_write_buffer = self.table_write_buffer / 2;
         let old_buffered_table = Write::new(
             self.table.clone(),
-            new_size as u64 * Entry::FULL_SIZE as u64,
-            1024 * 1024,
+            0, // start at beginning of table
+            half_table_write_buffer,
         );
         let new_buffered_table = Write::new(
             self.table.clone(),
-            new_size as u64 * Entry::FULL_SIZE as u64,
-            1024 * 1024,
+            old_size as u64 * Entry::FULL_SIZE as u64, // start at end of old table
+            half_table_write_buffer,
         );
 
         // Create a buffered reader for efficient scanning
