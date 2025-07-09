@@ -302,7 +302,7 @@ mod tests {
             let buffer = context.encode();
             assert!(buffer.contains("gets_total 2"), "{}", buffer);
             assert!(buffer.contains("puts_total 1"), "{}", buffer);
-            assert!(buffer.contains("useless_reads_total 0"), "{}", buffer);
+            assert!(buffer.contains("unnecessary_reads_total 0"), "{}", buffer);
 
             // Force a sync
             freezer.sync().await.expect("Failed to sync data");
@@ -426,7 +426,7 @@ mod tests {
             // Check metrics
             let buffer = context.encode();
             assert!(buffer.contains("gets_total 8"), "{}", buffer);
-            assert!(buffer.contains("useless_reads_total 5"), "{}", buffer);
+            assert!(buffer.contains("unnecessary_reads_total 5"), "{}", buffer);
         });
     }
 
