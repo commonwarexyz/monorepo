@@ -143,6 +143,8 @@
 //!         table_partition: "freezer_table".into(),
 //!         table_initial_size: 65536, // 64K buckets
 //!         table_resize_frequency: 4, // Force resize once 4 writes to the same entry occur
+//!         table_read_buffer: 64 * 1024, // 64KB read buffer
+//!         table_write_buffer: 64 * 1024, // 64KB write buffer
 //!         codec_config: (),
 //!     };
 //!     let mut freezer = Freezer::<_, FixedBytes<32>, i32>::init(context, cfg).await.unwrap();
