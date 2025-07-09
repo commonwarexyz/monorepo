@@ -2,8 +2,8 @@
 //!
 //! [Freezer] is a key-value store designed for permanent storage where data is written once and never
 //! modified. Unlike [crate::index::Index], this implementation exclusively uses disk-resident data
-//! structures to serve reads and extendible hashing to logarithmically bound read amplification as
-//! the size of data grows. Notably, this approach never requires data to be rewritten (i.e. compacted).
+//! structures to serve reads and extendible hashing to limit read amplification as the size of data
+//! grows. Notably, this approach never requires data to be rewritten (i.e. compacted).
 //!
 //! # Format
 //!
@@ -96,6 +96,8 @@
 //! New entries are prepended to the chain, becoming the new head. During lookup, the chain
 //! is traversed until a matching key is found. The `added` field in the table entry tracks
 //! insertions since the last resize, triggering table growth when it exceeds `table_resize_frequency`.
+//! Note, this approach ensures items added recently will be served with lower latency than items
+//! added earlier (under the presence of conflicts).
 //!
 //! # Extendible Hashing
 //!

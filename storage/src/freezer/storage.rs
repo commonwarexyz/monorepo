@@ -287,7 +287,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     current_section: u64,
     next_epoch: u64,
 
-    // Pending table updates to be written on sync (table_index -> (section, offset))
+    // Sections with pending table updates to be synced
     modified_sections: BTreeSet<u64>,
     should_resize: bool,
 
@@ -479,7 +479,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         };
         let mut journal = Journal::init(context.clone(), journal_config).await?;
 
-        // Open table blob (includes header)
+        // Open table blob
         let (table, table_len) = context
             .open(&config.table_partition, TABLE_BLOB_NAME)
             .await?;
@@ -663,7 +663,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         }
     }
 
-    /// Write a table entry to disk using atomic dual-entry writes.
+    /// Write a table entry to the appropriate slot based on epoch.
     async fn update_head<B: Blob>(
         table: &B,
         table_index: u32,
@@ -671,10 +671,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         entry2: &Entry,
         update: Entry,
     ) -> Result<(), Error> {
-        // Read current entries to determine which slot to update
+        // Calculate the base offset for this table index
         let table_offset = Self::table_offset(table_index);
 
-        // Determine where to start writing the new entry
+        // Determine which slot to write to based on the provided entries
         let start = Self::select_write_slot(entry1, entry2, update.epoch);
 
         // Write the new entry
@@ -767,7 +767,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             return Ok(None);
         };
 
-        // Follow the linked list chain, collecting values for matching keys
+        // Follow the linked list chain to find the first matching key
         loop {
             // Get the entry from the variable journal
             let entry = match self.journal.get(section, offset).await? {
@@ -829,18 +829,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let mut reader =
             buffer::Read::new(self.table.clone(), old_blob_size, self.table_read_buffer);
 
-        // For each bucket in the old table, copy its head to the new position
+        // For each bucket in the old table, initialize both old and new positions with the same head
         for i in 0..old_size {
             // Read the entries from the buffer
             let (entry1, entry2) = Self::read_buffer(&mut reader).await?;
 
-            // Get the previous value or default to (0, 0)
+            // Get the current head value or default to (0, 0)
             let head = self.select_valid_entry(&entry1, &entry2);
             let (section, offset) = head
                 .map(|(section, offset, _)| (section, offset))
                 .unwrap_or((0, 0));
 
-            // Write to old position
+            // Update old position with reset counter
             Self::update_head(
                 &old_buffered_table,
                 i,
@@ -850,7 +850,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             )
             .await?;
 
-            // Write to new position (i + old_size)
+            // Initialize new position (i + old_size) with the same head
             Self::update_head(
                 &new_buffered_table,
                 i + old_size,
