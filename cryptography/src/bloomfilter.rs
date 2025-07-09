@@ -107,7 +107,7 @@ impl Read for BloomFilter {
     ) -> Result<Self, CodecError> {
         let hashers = u8::read_cfg(buf, &())?;
         if !hashers_cfg.contains(&(hashers as usize)) {
-            return Err(CodecError::Invalid("bloomfilter", "invalid hashers"));
+            return Err(CodecError::Invalid("BloomFilter", "invalid hashers"));
         }
         let bits = BitVec::read_cfg(buf, bits_cfg)?;
         Ok(Self { hashers, bits })
@@ -216,7 +216,7 @@ mod tests {
         let decoded = BloomFilter::decode_cfg(encoded.clone(), &cfg);
         assert!(matches!(
             decoded,
-            Err(CodecError::Invalid("bloomfilter", "invalid hashers"))
+            Err(CodecError::Invalid("BloomFilter", "invalid hashers"))
         ));
 
         // Too large
@@ -224,7 +224,7 @@ mod tests {
         let decoded = BloomFilter::decode_cfg(encoded, &cfg);
         assert!(matches!(
             decoded,
-            Err(CodecError::Invalid("bloomfilter", "invalid hashers"))
+            Err(CodecError::Invalid("BloomFilter", "invalid hashers"))
         ));
     }
 
