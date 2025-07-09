@@ -746,7 +746,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         Ok(Cursor::new(self.current_section, offset))
     }
 
-    /// Get the value for a given cursor.
+    /// Get the value for a given [Cursor].
     async fn get_cursor(&self, cursor: Cursor) -> Result<Option<V>, Error> {
         let entry = self.journal.get(cursor.section(), cursor.offset()).await?;
         let Some(entry) = entry else {
@@ -795,6 +795,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 
     /// Get the value for a given [Identifier].
+    ///
+    /// If a [Cursor] is known for the required key, it
+    /// is much faster to use it than searching for a `key`.
     pub async fn get<'a>(&'a self, identifier: Identifier<'a, K>) -> Result<Option<V>, Error> {
         match identifier {
             Identifier::Cursor(cursor) => self.get_cursor(cursor).await,
