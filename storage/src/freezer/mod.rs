@@ -5,7 +5,7 @@
 //! structures to serve reads and extendible hashing to logarithmically bound read amplification as
 //! the size of data grows. Notably, this approach never requires data to be rewritten (i.e. compacted).
 //!
-//! # Architecture
+//! # Format
 //!
 //! The [Freezer] uses a two-level architecture: an extendible hash table (written in a single [commonware_runtime::Blob])
 //! that maps keys to locations and a [crate::journal::variable::Journal] that stores key-value data.
@@ -60,7 +60,7 @@
 //! +-------------------------------------+
 //! ```
 //!
-//! # Conflicts
+//! # Traversing Conflicts
 //!
 //! When multiple keys hash to the same table index, they form a linked list within the journal:
 //!
