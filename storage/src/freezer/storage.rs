@@ -10,11 +10,15 @@ use std::{cmp::Ordering, collections::BTreeSet, marker::PhantomData, ops::Deref}
 use tracing::debug;
 
 /// Cursor for an item in the [Freezer].
+///
+/// This can be used to directly access the data for a given
+/// key-value pair (rather than walking the journal chain).
 #[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 #[repr(transparent)]
 pub struct Cursor([u8; u64::SIZE + u32::SIZE]);
 
 impl Cursor {
+    /// Create a new [Cursor].
     fn new(section: u64, offset: u32) -> Self {
         let mut buf = [0u8; u64::SIZE + u32::SIZE];
         buf[..u64::SIZE].copy_from_slice(&section.to_be_bytes());
@@ -22,10 +26,12 @@ impl Cursor {
         Self(buf)
     }
 
+    /// Get the section of the cursor.
     fn section(&self) -> u64 {
         u64::from_be_bytes(self.0[..u64::SIZE].try_into().unwrap())
     }
 
+    /// Get the offset of the cursor.
     fn offset(&self) -> u32 {
         u32::from_be_bytes(self.0[u64::SIZE..].try_into().unwrap())
     }
@@ -87,11 +93,18 @@ impl std::fmt::Display for Cursor {
 }
 
 /// Checkpoint for [Freezer] progress.
+///
+/// This can be used to restore the [Freezer] to a consistent
+/// state after shutdown.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Copy, Default)]
 pub struct Checkpoint {
+    /// The epoch of the last committed operation.
     epoch: u64,
+    /// The section of the last committed operation.
     section: u64,
+    /// The size of the journal in the last committed section.
     size: u64,
+    /// The size of the table.
     table_size: u32,
 }
 
@@ -195,7 +208,6 @@ impl CodecWrite for Entry {
 
 impl Read for Entry {
     type Cfg = ();
-
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let epoch = u64::read(buf)?;
         let section = u64::read(buf)?;
@@ -213,7 +225,7 @@ impl Read for Entry {
     }
 }
 
-/// Record stored in the journal for linked list entries.
+/// A key-value pair stored in the [Journal].
 struct Record<K: Array, V: Codec> {
     key: K,
     value: V,
@@ -237,7 +249,6 @@ impl<K: Array, V: Codec> CodecWrite for Record<K, V> {
 
 impl<K: Array, V: Codec> Read for Record<K, V> {
     type Cfg = V::Cfg;
-
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let key = K::read(buf)?;
         let value = V::read_cfg(buf, cfg)?;
@@ -264,7 +275,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     table_initial_size: u32,
     table_resize_frequency: u8,
 
-    // Table blob that maps hash values to journal locations (journal_id, offset)
+    // Table blob that maps slots to journal chain heads
     table: E::Blob,
 
     // Variable journal for storing entries
@@ -275,15 +286,15 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     current_section: u64,
     next_epoch: u64,
 
+    // Pending table updates to be written on sync (table_index -> (section, offset))
+    modified_sections: BTreeSet<u64>,
+    should_resize: bool,
+
     // Metrics
     puts: Counter,
     gets: Counter,
     useless_reads: Counter,
     resizes: Counter,
-
-    // Pending table updates to be written on sync (table_index -> (section, offset))
-    modified_sections: BTreeSet<u64>,
-    should_resize: bool,
 
     // Phantom data to satisfy the compiler about generic types
     _phantom: PhantomData<(K, V)>,
@@ -495,31 +506,32 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Compute the table index for a given key using bit-based indexing.
     ///
-    /// This method uses a bit-based approach instead of modulo to ensure that
-    /// values can be correctly looked up as the table grows. When the table
-    /// doubles in size, each bucket splits into two: the original bucket and
-    /// a new bucket at position (original + old_size).
+    /// When the table doubles in size, each bucket splits into two: the original
+    /// bucket and a new bucket at position (original + old_size).
     ///
     /// For example, with initial size 4 (2^2):
     /// - Initially: use 2 bits, so buckets are 0, 1, 2, 3
     /// - After resize to 8: use 3 bits, bucket 0 splits into 0 and 4
     /// - After resize to 16: use 4 bits, bucket 0 splits into 0 and 8, etc.
     ///
-    /// This ensures that entries inserted before a resize can still be found
-    /// after the resize, as they will be in one of the two possible locations.
+    /// This function maps the hash to the correct bucket by extracting the
+    /// lower bits that are used to determine the bucket.
     fn table_index(&self, key: &K) -> u32 {
         let hash = crc32fast::hash(key.as_ref());
 
         // Calculate the depth (how many times the table has been resized)
+        //
         // depth = log2(table_size / table_initial_size)
         let depth = (self.table_size / self.table_initial_size).trailing_zeros();
 
         // Calculate the number of bits to use
+        //
         // initial_bits = log2(table_initial_size)
         let initial_bits = self.table_initial_size.trailing_zeros();
         let total_bits = initial_bits + depth;
 
         // Extract the lower 'total_bits' bits from the hash
+        //
         // This ensures that when the table doubles, entries at position X
         // will either stay at X or move to X + old_size
         let mask = (1u32 << total_bits) - 1;
