@@ -13,8 +13,8 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::fmt;
 
-mod client;
-mod resolver;
+pub mod client;
+pub mod resolver;
 
 /// Synchronization errors
 #[derive(Debug, thiserror::Error)]

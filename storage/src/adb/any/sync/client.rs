@@ -63,7 +63,7 @@ where
     /// Higher value will cause more memory usage during sync.
     pub apply_batch_size: usize,
 
-    _phantom: PhantomData<(K, V)>,
+    pub _phantom: PhantomData<(K, V)>,
 }
 
 /// Prometheus metrics for the sync client.
@@ -271,6 +271,11 @@ where
                 // or that we didn't get an empty proof. We should never get an empty proof
                 // because we will never request an empty proof (i.e. a proof over an empty database).
                 if operations_len > batch_size.get() || operations_len == 0 {
+                    debug!(
+                        operations_len,
+                        batch_size = batch_size.get(),
+                        "Received invalid batch size from resolver"
+                    );
                     metrics.invalid_batches_received.inc();
                     let _ = success_tx.send(false);
                     return Ok(Client::FetchData {
@@ -281,10 +286,7 @@ where
                     });
                 }
 
-                debug!(
-                    ops_len = operations_len,
-                    "Received operations from resolver"
-                );
+                debug!(operations_len, "Received operations from resolver");
 
                 // Verify the proof is valid over the given operations
                 let proof_valid = {

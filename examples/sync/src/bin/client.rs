@@ -1,0 +1,252 @@
+//! ADB sync client that syncs operations from a server.
+//!
+//! This client demonstrates how to use the ADB (Any Database) sync functionality
+//! to synchronize operations from a remote server. It fetches server metadata
+//! to determine sync parameters and then performs the actual sync operation.
+
+use clap::{Arg, Command};
+use commonware_cryptography::Hasher;
+use commonware_runtime::{tokio as tokio_runtime, Runner};
+use commonware_storage::{
+    adb::any::sync::{self, client::Config as SyncConfig},
+    mmr::hasher::Standard,
+};
+use commonware_sync::{create_adb_config, Database, NetworkResolver};
+use std::{marker::PhantomData, net::SocketAddr, num::NonZeroU64};
+use tracing::{error, info};
+
+/// Default server address.
+const DEFAULT_SERVER: &str = "127.0.0.1:8080";
+
+/// Client configuration.
+#[derive(Debug)]
+struct ClientConfig {
+    /// Server address to connect to.
+    server: SocketAddr,
+    /// Batch size for operations.
+    batch_size: u64,
+    /// Storage directory.
+    storage_dir: String,
+}
+
+/// Get server metadata to determine sync parameters.
+async fn get_server_metadata<E>(
+    resolver: &NetworkResolver<E>,
+) -> Result<(u64, <commonware_sync::Hasher as Hasher>::Digest, u64, u64), Box<dyn std::error::Error>>
+where
+    E: commonware_runtime::Network + Clone,
+{
+    info!("📡 Requesting server metadata...");
+
+    let metadata = resolver.get_server_metadata().await?;
+
+    info!(
+        database_size = metadata.database_size,
+        oldest_retained = metadata.oldest_retained_loc,
+        latest_op = metadata.latest_op_loc,
+        "📊 Server metadata received"
+    );
+
+    // Parse the target hash from the hex string
+    let target_hash = {
+        let hex_str = &metadata.target_hash;
+        if hex_str.len() != 64 {
+            return Err(format!(
+                "Invalid target hash length: expected 64 hex chars, got {}",
+                hex_str.len()
+            )
+            .into());
+        }
+
+        // Convert hex string to bytes
+        let mut bytes = [0u8; 32]; // SHA256 digest is 32 bytes
+        for i in 0..32 {
+            let hex_byte = &hex_str[i * 2..i * 2 + 2];
+            bytes[i] = u8::from_str_radix(hex_byte, 16)
+                .map_err(|e| format!("Invalid hex character in target hash: {}", e))?;
+        }
+
+        <commonware_sync::Hasher as Hasher>::Digest::from(bytes)
+    };
+
+    info!(target_hash = %metadata.target_hash, "🎯 Target hash");
+
+    Ok((
+        metadata.database_size,
+        target_hash,
+        metadata.oldest_retained_loc,
+        metadata.latest_op_loc,
+    ))
+}
+
+/// Perform a sync operation using the actual ADB sync functionality.
+async fn sync_once<E>(
+    context: E,
+    resolver: &NetworkResolver<E>,
+    config: &ClientConfig,
+) -> Result<Database<E>, Box<dyn std::error::Error>>
+where
+    E: commonware_runtime::Storage
+        + commonware_runtime::Clock
+        + commonware_runtime::Metrics
+        + commonware_runtime::Network,
+{
+    info!(server = %config.server, "🚀 Starting ADB sync from server");
+
+    // Get server metadata to determine sync parameters
+    let (server_size, target_hash, oldest_retained_loc, latest_op_loc) =
+        get_server_metadata(resolver).await?;
+
+    info!(
+        operations = server_size,
+        lower_bound = oldest_retained_loc,
+        upper_bound = latest_op_loc,
+        "📈 Sync parameters"
+    );
+
+    // Create database configuration
+    let db_id = commonware_sync::generate_db_id(&context);
+    let db_config = create_adb_config(&db_id);
+
+    info!(db_id = %db_id, "💾 Created local database");
+
+    // Create sync configuration with explicit type parameters
+    let sync_config = SyncConfig::<
+        E,
+        commonware_sync::Key,
+        commonware_sync::Value,
+        commonware_sync::Hasher,
+        commonware_sync::Translator,
+        NetworkResolver<E>,
+    > {
+        context: context.clone(),
+        db_config,
+        fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
+        target_hash,
+        lower_bound_ops: oldest_retained_loc,
+        upper_bound_ops: latest_op_loc,
+        resolver: resolver.clone(),
+        hasher: Standard::new(),
+        apply_batch_size: 1024,
+        _phantom: PhantomData,
+    };
+
+    info!(
+        batch_size = config.batch_size,
+        lower_bound = sync_config.lower_bound_ops,
+        upper_bound = sync_config.upper_bound_ops,
+        "⚙️  Sync configuration"
+    );
+
+    // Use the actual ADB sync functionality
+    info!("🔄 Beginning sync operation...");
+    let database = sync::sync(sync_config).await.map_err(|e| {
+        error!(error = %e, "❌ Sync failed");
+        Box::new(e) as Box<dyn std::error::Error>
+    })?;
+
+    // Get the root hash of the synced database
+    let mut hasher = Standard::new();
+    let root_hash = database.root(&mut hasher);
+    let root_hash_hex = root_hash
+        .as_ref()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+
+    info!(
+        database_ops = database.op_count(),
+        root_hash = %root_hash_hex,
+        "✅ Sync completed successfully"
+    );
+
+    Ok(database)
+}
+
+fn main() {
+    // Initialize tracing with a clean format
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_file(false)
+        .with_line_number(false)
+        .init();
+
+    // Parse command line arguments
+    let matches = Command::new("ADB Sync Client")
+        .version("1.0")
+        .about("Syncs ADB operations from a server using cryptographic proofs")
+        .arg(
+            Arg::new("server")
+                .short('s')
+                .long("server")
+                .value_name("ADDRESS")
+                .help("Server address to connect to")
+                .default_value(DEFAULT_SERVER),
+        )
+        .arg(
+            Arg::new("batch-size")
+                .short('b')
+                .long("batch-size")
+                .value_name("SIZE")
+                .help("Batch size for fetching operations")
+                .default_value("50"),
+        )
+        .arg(
+            Arg::new("storage-dir")
+                .short('d')
+                .long("storage-dir")
+                .value_name("PATH")
+                .help("Storage directory for local database")
+                .default_value("/tmp/adb_sync_client"),
+        )
+        .get_matches();
+
+    let config = ClientConfig {
+        server: matches
+            .get_one::<String>("server")
+            .unwrap()
+            .parse()
+            .unwrap_or_else(|e| {
+                eprintln!("❌ Invalid server address: {}", e);
+                std::process::exit(1);
+            }),
+        batch_size: matches
+            .get_one::<String>("batch-size")
+            .unwrap()
+            .parse()
+            .unwrap_or_else(|e| {
+                eprintln!("❌ Invalid batch size: {}", e);
+                std::process::exit(1);
+            }),
+        storage_dir: matches
+            .get_one::<String>("storage-dir")
+            .unwrap()
+            .to_string(),
+    };
+
+    info!("🎬 ADB Sync Client starting");
+    info!(
+        server = %config.server,
+        batch_size = config.batch_size,
+        storage_dir = %config.storage_dir,
+        "🔧 Configuration"
+    );
+
+    let executor = tokio_runtime::Runner::default();
+    executor.start(|context| async move {
+        // Create the network resolver with the runtime context
+        let resolver = NetworkResolver::new(config.server, context.clone());
+
+        // Perform the sync operation
+        match sync_once(context.clone(), &resolver, &config).await {
+            Ok(_database) => {
+                info!("🎉 Client completed successfully");
+            }
+            Err(e) => {
+                error!(error = %e, "❌ Sync failed");
+                std::process::exit(1);
+            }
+        }
+    });
+}

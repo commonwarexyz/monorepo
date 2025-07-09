@@ -15,6 +15,7 @@ members = [
     "examples/chat",
     "examples/flood",
     "examples/log",
+    "examples/sync",
     "examples/vrf",
 
     # Fuzz builds
