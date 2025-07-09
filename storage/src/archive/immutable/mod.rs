@@ -16,6 +16,9 @@ pub struct Config<C> {
     /// The number of items added to the table before it is resized.
     pub table_resize_frequency: u8,
 
+    /// The size of the read buffer to use when scanning the table (e.g., during recovery or resize).
+    pub table_read_buffer: usize,
+
     /// The partition to use for the archive's journal.
     pub journal_partition: String,
 

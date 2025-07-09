@@ -128,6 +128,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
                 table_partition: cfg.table_partition,
                 table_initial_size: cfg.table_initial_size,
                 table_resize_frequency: cfg.table_resize_frequency,
+                table_read_buffer: cfg.table_read_buffer,
                 codec_config: cfg.codec_config,
             },
             Some(checkpoint),

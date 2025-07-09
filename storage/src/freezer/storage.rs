@@ -2,7 +2,7 @@ use super::{Config, Error, Identifier};
 use crate::journal::variable::{Config as JournalConfig, Journal};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
-use commonware_runtime::{Blob, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::Read as BufferedRead, Blob, Clock, Metrics, Storage};
 use commonware_utils::Array;
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
@@ -273,6 +273,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     table_size: u32,
     table_initial_size: u32,
     table_resize_frequency: u8,
+    table_read_buffer: usize,
 
     // Table blob that maps slots to journal chain heads
     table: E::Blob,
@@ -324,15 +325,30 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         blob: &E::Blob,
         table_size: u32,
         max_valid_epoch: Option<u64>,
+        table_read_buffer: usize,
     ) -> Result<(bool, u64, u64), Error> {
-        // Iterate over all table entires and overwrite invalid ones
+        // Create a buffered reader for efficient scanning
+        let blob_size = table_size as u64 * Entry::FULL_SIZE as u64;
+        let mut reader = BufferedRead::new(blob.clone(), blob_size, table_read_buffer);
+
+        // Iterate over all table entries and overwrite invalid ones
         let mut modified = false;
         let mut max_epoch = 0u64;
         let mut max_section = 0u64;
         let zero_buf = vec![0u8; Entry::SIZE];
+
         for table_index in 0..table_size {
             let offset = table_index as u64 * Entry::FULL_SIZE as u64;
-            let (entry1, entry2) = Self::read_table(blob, table_index).await?;
+
+            // Read both entries from the buffer
+            let mut entry_buf = [0u8; Entry::FULL_SIZE];
+            reader.read_exact(&mut entry_buf, Entry::FULL_SIZE).await?;
+
+            // Parse entries
+            let mut buf1 = &entry_buf[0..Entry::SIZE];
+            let entry1 = Entry::read(&mut buf1)?;
+            let mut buf2 = &entry_buf[Entry::SIZE..Entry::FULL_SIZE];
+            let entry2 = Entry::read(&mut buf2)?;
 
             // Check first entry
             if !entry1.is_empty() {
@@ -481,9 +497,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 };
 
                 // Validate and clean invalid entries
-                let (table_modified, _, _) =
-                    Self::recover_table(&table, checkpoint.table_size, Some(checkpoint.epoch))
-                        .await?;
+                let (table_modified, _, _) = Self::recover_table(
+                    &table,
+                    checkpoint.table_size,
+                    Some(checkpoint.epoch),
+                    config.table_read_buffer,
+                )
+                .await?;
                 if table_modified {
                     modified = true;
                 }
@@ -501,7 +521,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 // Find max epoch/section and clean invalid entries in a single pass
                 let table_size = (table_len / Entry::FULL_SIZE as u64) as u32;
                 let (modified, max_epoch, max_section) =
-                    Self::recover_table(&table, table_size, None).await?;
+                    Self::recover_table(&table, table_size, None, config.table_read_buffer).await?;
 
                 // Sync table if needed
                 if modified {
@@ -541,6 +561,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             table_size: checkpoint.table_size,
             table_initial_size: config.table_initial_size,
             table_resize_frequency: config.table_resize_frequency,
+            table_read_buffer: config.table_read_buffer,
             table,
             journal,
             journal_target_size: config.journal_target_size,
@@ -769,11 +790,26 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             .resize(new_size as u64 * Entry::FULL_SIZE as u64)
             .await?;
 
+        // Create a buffered reader for efficient scanning
+        let old_blob_size = old_size as u64 * Entry::FULL_SIZE as u64;
+        let mut reader =
+            BufferedRead::new(self.table.clone(), old_blob_size, self.table_read_buffer);
+
         // For each bucket in the old table, copy its head to the new position
         let mut updates = Vec::with_capacity(old_size as usize * 2);
         for i in 0..old_size {
+            // Read the entries from the buffer
+            let mut entry_buf = [0u8; Entry::FULL_SIZE];
+            reader.read_exact(&mut entry_buf, Entry::FULL_SIZE).await?;
+
+            // Parse entries and get the valid head
+            let mut buf1 = &entry_buf[0..Entry::SIZE];
+            let entry1 = Entry::read(&mut buf1)?;
+            let mut buf2 = &entry_buf[Entry::SIZE..Entry::FULL_SIZE];
+            let entry2 = Entry::read(&mut buf2)?;
+
             // Get the previous value or default to (0, 0)
-            let head = self.get_head(i).await?;
+            let head = self.select_valid_entry(&entry1, &entry2);
             let (section, offset) = head
                 .map(|(section, offset, _)| (section, offset))
                 .unwrap_or((0, 0));
