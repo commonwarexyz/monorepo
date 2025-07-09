@@ -615,13 +615,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         start_loc: u64,
         max_ops: u64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        if size > self.op_count() {
-            return Err(Error::HistoricalSizeTooLarge(size, self.op_count()));
-        }
-        if size <= start_loc {
-            return Err(Error::HistoricalSizeTooSmall(size, start_loc));
-        }
-
         let start_pos = leaf_num_to_pos(start_loc);
         let end_loc = std::cmp::min(
             size.saturating_sub(1),
@@ -1889,16 +1882,17 @@ pub(super) mod test {
             let ops = create_test_ops(10);
             db = apply_ops(db, ops).await;
             db.commit().await.unwrap();
+            let op_count = db.op_count();
 
-            let current_op_count = db.op_count();
-
-            // Try to request proof for size larger than current
-            let result = db.historical_proof(current_op_count + 5, 0, 5).await;
-
+            // Historical size > current database size is invalid
+            let result = db.historical_proof(op_count + 1, op_count, 5).await;
             match result {
-                Err(Error::HistoricalSizeTooLarge(requested, actual)) => {
-                    assert_eq!(requested, current_op_count + 5);
-                    assert_eq!(actual, current_op_count);
+                Err(Error::MmrError(crate::mmr::Error::HistoricalSizeTooLarge(
+                    requested,
+                    actual,
+                ))) => {
+                    assert_eq!(requested, leaf_num_to_pos(op_count + 1));
+                    assert_eq!(actual, leaf_num_to_pos(op_count));
                 }
                 _ => panic!("Expected HistoricalSizeTooLarge error"),
             }
@@ -1915,14 +1909,30 @@ pub(super) mod test {
             let ops = create_test_ops(10);
             db = apply_ops(db, ops).await;
             db.commit().await.unwrap();
+            let op_count = db.op_count();
 
-            // Try to request proof where historical size is smaller than start location
-            let result = db.historical_proof(5, 10, 5).await;
-
+            // Historical size == start location is invalid
+            let result = db.historical_proof(op_count, op_count, 5).await;
             match result {
-                Err(Error::HistoricalSizeTooSmall(size, start_loc)) => {
-                    assert_eq!(size, 5);
-                    assert_eq!(start_loc, 10);
+                Err(Error::MmrError(crate::mmr::Error::HistoricalSizeTooSmall(
+                    size,
+                    start_loc,
+                ))) => {
+                    assert_eq!(size, leaf_num_to_pos(op_count));
+                    assert_eq!(start_loc, leaf_num_to_pos(op_count));
+                }
+                _ => panic!("Expected HistoricalSizeTooSmall error"),
+            }
+
+            // Historical size < start location is invalid
+            let result = db.historical_proof(op_count, op_count + 1, 5).await;
+            match result {
+                Err(Error::MmrError(crate::mmr::Error::HistoricalSizeTooSmall(
+                    size,
+                    start_loc,
+                ))) => {
+                    assert_eq!(size, leaf_num_to_pos(op_count));
+                    assert_eq!(start_loc, leaf_num_to_pos(op_count + 1));
                 }
                 _ => panic!("Expected HistoricalSizeTooSmall error"),
             }
