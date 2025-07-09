@@ -4,8 +4,8 @@
 //! ## Historical Proof Generation
 //!
 //! This module provides both current and historical proof generation capabilities:
-//! - [`Proof::range_proof`] generates proofs against the current MMR state
-//! - [`Proof::historical_range_proof`] generates proofs against historical MMR states
+//! - [Proof::range_proof] generates proofs against the current MMR state
+//! - [Proof::historical_range_proof] generates proofs against historical MMR states
 //!
 //! Historical proofs are essential for sync operations where we need to prove elements
 //! against a past state of the MMR rather than its current state.
