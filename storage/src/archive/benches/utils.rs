@@ -3,7 +3,7 @@
 use commonware_runtime::tokio::Context;
 use commonware_storage::{
     archive::{Archive, Config},
-    index::translator::TwoCap,
+    translator::TwoCap,
 };
 use commonware_utils::array::FixedBytes;
 use rand::{rngs::StdRng, RngCore, SeedableRng};

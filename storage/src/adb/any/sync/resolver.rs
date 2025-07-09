@@ -3,8 +3,8 @@ use crate::{
         any::{sync::Error, Any},
         operation::Operation,
     },
-    index::Translator,
     mmr::verification::Proof,
+    translator::Translator,
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
