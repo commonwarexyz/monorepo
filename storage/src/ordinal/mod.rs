@@ -134,8 +134,7 @@ mod tests {
     use super::*;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::array::FixedBytes;
-    use commonware_utils::BitVec;
+    use commonware_utils::{array::FixedBytes, BitVec};
     use rand::RngCore;
     use std::collections::BTreeMap;
 
