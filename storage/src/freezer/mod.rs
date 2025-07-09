@@ -1,9 +1,12 @@
-//! An immutable key-value store that minimizes memory usage and write amplification.
+//! An immutable key-value store optimized for minimal memory usage and write amplification.
 //!
 //! [Freezer] is a key-value store designed for permanent storage where data is written once and never
-//! modified. Unlike [crate::index::Index], this implementation exclusively uses disk-resident data
-//! structures to serve reads and extendible hashing to limit read amplification as the size of data
-//! grows. Notably, the [Freezer] never rewrites (i.e. compacts) inserted data.
+//! modified. Meant for resource-constrained environments, [Freezer] exclusively employs disk-resident
+//! data structures to serve queries and avoids ever rewriting (i.e. compacting) inserted data.
+//!
+//! As a byproduct of the mechanisms used to satisfy these constraints, [Freezer] consistently provides
+//! low latency access to recently added data (regardless of how much data has been stored) at the expense
+//! of a logarithmic increase in latency for old data (increasing with the number of items stored).
 //!
 //! # Format
 //!
@@ -96,12 +99,10 @@
 //! New entries are prepended to the chain, becoming the new head. During lookup, the chain
 //! is traversed until a matching key is found. The `added` field in the table entry tracks
 //! insertions since the last resize, triggering table growth when it exceeds `table_resize_frequency`.
-//! A byproduct of this design is recently added items are served with lower latency than older items
-//! (when table collisions occur).
 //!
 //! # Extendible Hashing
 //!
-//! The [Freezer] uses bit-based indexing to enable efficient table growth without rehashing existing entries:
+//! The [Freezer] uses bit-based indexing to grow the on-disk hash table without rehashing existing entries:
 //!
 //! ```text
 //! Initial state (table_size=4, using 2 bits of hash):
@@ -125,7 +126,9 @@
 //! 3. Future insertions will naturally distribute between the two buckets based on their hash
 //!
 //! This approach ensures that entries inserted before a resize remain discoverable after the resize,
-//! as the lookup algorithm checks the appropriate bucket based on the current table size.
+//! as the lookup algorithm checks the appropriate bucket based on the current table size. As more and more
+//! items are added (and resizes occur), the latency for fetching old data will increase logarithmically
+//! (with the number of items stored).
 //!
 //! # Example
 //!
