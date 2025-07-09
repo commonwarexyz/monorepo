@@ -16,6 +16,7 @@
 //! ## Linux Only
 //!
 //! This implementation is only available on Linux systems that support io_uring.
+//!
 
 use crate::iouring::{self, should_retry};
 use commonware_utils::StableBuf;
