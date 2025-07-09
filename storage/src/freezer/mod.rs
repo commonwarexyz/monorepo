@@ -1,8 +1,9 @@
-//! A persistent, immutable key-value store with efficient lookups.
+//! An immutable key-value store that minimizes memory usage and write amplification.
 //!
 //! [Freezer] is a key-value store designed for permanent storage where data is written once and never
-//! modified. Unlike in-memory stores, this implementation uses persistent on-disk structures to
-//! minimize memory usage while maintaining fast lookups through a hash table approach.
+//! modified. Unlike [crate::index::Index], this implementation exclusively uses disk-resident data
+//! structures to serve reads and extendible hashing to logarithmically bound read amplification as
+//! the size of data grows. Notably, this approach never requires data to be rewritten (i.e. compacted).
 //!
 //! # Example
 //!
