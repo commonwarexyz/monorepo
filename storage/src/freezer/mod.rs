@@ -5,6 +5,18 @@
 //! structures to serve reads and extendible hashing to logarithmically bound read amplification as
 //! the size of data grows. Notably, this approach never requires data to be rewritten (i.e. compacted).
 //!
+//! # Architecture
+//!
+//! <TODO>
+//!
+//! # Conflicts
+//!
+//! <TODO>
+//!
+//! # Extendible Hashing
+//!
+//! <TODO>
+//!
 //! # Example
 //!
 //! ```rust
