@@ -24,6 +24,16 @@ pub fn select_keys(count: usize, keys: &[Key]) -> Vec<Key> {
     selected_keys
 }
 
+/// Select recently added keys for benchmarking.
+pub fn select_recent_keys(count: usize, keys: &[Key]) -> Vec<Key> {
+    let start = if keys.len() > count {
+        keys.len() - count
+    } else {
+        0
+    };
+    keys[start..].to_vec()
+}
+
 /// Read keys serially from a freezer store.
 pub async fn read_serial_keys(store: &FreezerType, keys: &[Key]) {
     for key in keys {
@@ -53,28 +63,42 @@ fn bench_get(c: &mut Criterion) {
 
     // Run the benchmarks
     let runner = tokio::Runner::new(cfg.clone());
-    for mode in ["serial", "concurrent"] {
-        for reads in [1_000, 10_000, 50_000] {
-            let label = format!("{}/mode={} reads={}", module_path!(), mode, reads);
-            c.bench_function(&label, |b| {
-                b.to_async(&runner).iter_custom(|iters| {
-                    let keys = keys.clone();
-                    async move {
-                        let ctx = context::get::<commonware_runtime::tokio::Context>();
-                        let store = init(ctx).await;
-                        let selected_keys = select_keys(reads, &keys);
-                        let start = Instant::now();
-                        for _ in 0..iters {
-                            match mode {
-                                "serial" => read_serial_keys(&store, &selected_keys).await,
-                                "concurrent" => read_concurrent_keys(&store, &selected_keys).await,
+    for pattern in ["random", "recent"] {
+        for mode in ["serial", "concurrent"] {
+            for reads in [1_000, 10_000, 50_000] {
+                let label = format!(
+                    "{}/pattern={} mode={} reads={}",
+                    module_path!(),
+                    pattern,
+                    mode,
+                    reads
+                );
+                c.bench_function(&label, |b| {
+                    b.to_async(&runner).iter_custom(|iters| {
+                        let keys = keys.clone();
+                        async move {
+                            let ctx = context::get::<commonware_runtime::tokio::Context>();
+                            let store = init(ctx).await;
+                            let selected_keys = match pattern {
+                                "random" => select_keys(reads, &keys),
+                                "recent" => select_recent_keys(reads, &keys),
                                 _ => unreachable!(),
+                            };
+                            let start = Instant::now();
+                            for _ in 0..iters {
+                                match mode {
+                                    "serial" => read_serial_keys(&store, &selected_keys).await,
+                                    "concurrent" => {
+                                        read_concurrent_keys(&store, &selected_keys).await
+                                    }
+                                    _ => unreachable!(),
+                                }
                             }
+                            start.elapsed()
                         }
-                        start.elapsed()
-                    }
+                    });
                 });
-            });
+            }
         }
     }
 
