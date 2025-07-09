@@ -388,7 +388,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let mut modified = false;
         let mut max_epoch = 0u64;
         let mut max_section = 0u64;
-
         for table_index in 0..table_size {
             let offset = Self::table_offset(table_index);
 
@@ -405,7 +404,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 &mut max_section,
             )
             .await?;
-
             let entry2_modified = Self::validate_entry(
                 blob,
                 &entry2,
