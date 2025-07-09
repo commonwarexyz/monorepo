@@ -6,10 +6,16 @@ use commonware_codec::{
     codec::{Read, Write},
     config::RangeCfg,
     error::Error as CodecError,
-    EncodeSize,
+    EncodeSize, FixedSize,
 };
 use commonware_utils::BitVec;
 use std::num::{NonZeroU8, NonZeroUsize};
+
+/// The length of a half of a [Digest].
+const HALF_DIGEST_LEN: usize = 16;
+
+/// The length of a full [Digest].
+const FULL_DIGEST_LEN: usize = Digest::SIZE;
 
 /// A [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 ///
@@ -33,12 +39,12 @@ impl BloomFilter {
 
     /// Extract two 128-bit hash values from a 32-byte [Digest].
     fn extract_hashes(digest: &Digest) -> (u128, u128) {
-        let mut h1_bytes = [0u8; 16];
-        h1_bytes.copy_from_slice(&digest[0..16]);
+        let mut h1_bytes = [0u8; HALF_DIGEST_LEN];
+        h1_bytes.copy_from_slice(&digest[0..HALF_DIGEST_LEN]);
         let h1 = u128::from_be_bytes(h1_bytes);
 
-        let mut h2_bytes = [0u8; 16];
-        h2_bytes.copy_from_slice(&digest[16..32]);
+        let mut h2_bytes = [0u8; HALF_DIGEST_LEN];
+        h2_bytes.copy_from_slice(&digest[HALF_DIGEST_LEN..FULL_DIGEST_LEN]);
         let h2 = u128::from_be_bytes(h2_bytes);
 
         (h1, h2)
