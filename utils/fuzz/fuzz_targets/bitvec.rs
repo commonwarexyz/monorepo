@@ -4,6 +4,8 @@ use arbitrary::Arbitrary;
 use commonware_utils::BitVec;
 use libfuzzer_sys::fuzz_target;
 
+const MAX_SIZE: usize = 100_000;
+
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
     New,
@@ -36,13 +38,13 @@ fn fuzz(input: Vec<FuzzInput>) {
             }
 
             FuzzInput::WithCapacity(cap) => {
-                let bv = BitVec::with_capacity(cap.min(1_000_000));
+                let bv = BitVec::with_capacity(cap.min(MAX_SIZE));
                 assert!(bv.is_empty());
                 assert_eq!(bv.len(), 0);
             }
 
             FuzzInput::Zeroes(size) => {
-                let size = size.min(100_000);
+                let size = size.min(MAX_SIZE);
                 let v = BitVec::zeroes(size);
                 assert_eq!(v.len(), size);
                 assert_eq!(v.count_zeros(), size);
@@ -54,25 +56,19 @@ fn fuzz(input: Vec<FuzzInput>) {
             }
 
             FuzzInput::Ones(size) => {
-                let size = size.min(100_000);
+                let size = size.min(MAX_SIZE);
                 let v = BitVec::ones(size);
                 assert_eq!(v.len(), size);
                 assert_eq!(v.count_ones(), size);
                 assert_eq!(v.count_zeros(), 0);
 
-                for i in 0..size.min(1000) {
+                for i in 0..size {
                     assert_eq!(v.get(i), Some(true));
                 }
             }
 
             FuzzInput::FromBools(bools) => {
-                let bools = if bools.len() > 100_000 {
-                    &bools[..100_000]
-                } else {
-                    &bools
-                };
-
-                let v = BitVec::from_bools(bools);
+                let v = BitVec::from_bools(&bools);
                 assert_eq!(v.len(), bools.len());
 
                 for (i, &b) in bools.iter().enumerate() {
@@ -82,12 +78,10 @@ fn fuzz(input: Vec<FuzzInput>) {
 
             FuzzInput::Push(bools, value) => {
                 let mut v = BitVec::from_bools(&bools);
-                if v.len() < 100_000 {
-                    let old_len = v.len();
-                    v.push(value);
-                    assert_eq!(v.len(), old_len + 1);
-                    assert_eq!(v.get(old_len), Some(value));
-                }
+                let old_len = v.len();
+                v.push(value);
+                assert_eq!(v.len(), old_len + 1);
+                assert_eq!(v.get(old_len), Some(value));
             }
 
             FuzzInput::Pop(bools) => {
