@@ -14,7 +14,7 @@ use std::num::{NonZeroU8, NonZeroUsize};
 /// A [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 ///
 /// This implementation uses the Kirsch-Mitzenmacher optimization to derive `k` hash functions
-/// from two hash values, which are in turn derived from a single SHA-256 digest. This provides
+/// from two hash values, which are in turn derived from a single [Digest]. This provides
 /// efficient hashing for [BloomFilter::insert] and [BloomFilter::contains] operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BloomFilter {
