@@ -7,15 +7,90 @@
 //!
 //! # Architecture
 //!
-//! <TODO>
+//! The [Freezer] uses a two-level architecture: a dynamically-sized hash table that maps keys to journal
+//! locations and a journal that stores key-value data.
+//!
+//! ```text
+//! ┌───────────────────────────────────────────────────────────────────┐
+//! │                           Hash Table                              │
+//! │  ┌─────────┬─────────┬─────────┬─────────┬─────────┬─────────┐    │
+//! │  │ Entry 0 │ Entry 1 │ Entry 2 │ Entry 3 │ Entry 4 │   ...   │    │
+//! │  └────┬────┴────┬────┴────┬────┴────┬────┴────┬────┴─────────┘    │
+//! │       │         │         │         │         │                   │
+//! │  Each entry contains two slots for atomic updates:                │
+//! │  ┌───────────────┬───────────────┐                                │
+//! │  │    Slot 0     │    Slot 1     │                                │
+//! │  │ epoch|section │ epoch|section │                                │
+//! │  │ offset|added  │ offset|added  │                                │
+//! │  │     CRC32     │     CRC32     │                                │
+//! │  └───────┬───────┴───────┬───────┘                                │
+//! └──────────┼───────────────┼────────────────────────────────────────┘
+//!            │               │
+//!            ▼               ▼
+//! ┌───────────────────────────────────────────────────────────────────┐
+//! │                          Journal                                  │
+//! │  Section 0: [Entry 0][Entry 1][Entry 2]...                        │
+//! │  Section 1: [Entry 0][Entry 1]...                                 │
+//! │  Section N: [Entry 0]...                                          |
+//! │                                                                   │
+//! │  Each entry: [Key][Value][Next: Option<(section, offset)>]        │
+//! └───────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! The table uses dual-slot entries to provide atomic updates. Each slot contains an epoch
+//! number that monotonically increases with each sync operation. During reads, the slot with the
+//! higher epoch is selected (that is less than the last committed epoch), ensuring consistency even
+//! during unclean shutdown.
 //!
 //! # Conflicts
 //!
-//! <TODO>
+//! When multiple keys hash to the same table index, they form a linked list within the journal:
+//!
+//! ```text
+//! Table Index 42:
+//! ┌─────────────────┐
+//! │ section: 0      │
+//! │ offset: 1024    │──────┐
+//! └─────────────────┘      │
+//!                          ▼
+//! Journal:           ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+//! Section 0:         │ Key: "foo"   │     │ Key: "bar"   │     │ Key: "baz"   │
+//! Offset 1024:       │ Value: 42    │ ──▶ │ Value: 84    │ ──▶ │ Value: 126   │
+//!                    │ Next: (0,512)│     │ Next: (0,256)│     │ Next: None   │
+//!                    └──────────────┘     └──────────────┘     └──────────────┘
+//! ```
+//!
+//! New entries are prepended to the chain, becoming the new head. During lookup, the chain
+//! is traversed until a matching key is found. The `added` field in the table entry tracks
+//! insertions since the last resize, triggering table growth when it exceeds `table_resize_frequency`.
 //!
 //! # Extendible Hashing
 //!
-//! <TODO>
+//! The [Freezer] uses bit-based indexing to enable efficient table growth without rehashing existing entries:
+//!
+//! ```text
+//! Initial state (table_size=4, using 2 bits of hash):
+//! Hash: 0b...00 → Index 0
+//! Hash: 0b...01 → Index 1
+//! Hash: 0b...10 → Index 2
+//! Hash: 0b...11 → Index 3
+//!
+//! After resize (table_size=8, using 3 bits of hash):
+//! Hash: 0b...000 → Index 0 ─┐
+//! ...                       │
+//! Hash: 0b...100 → Index 4 ─┴─ Both map to old Index 0
+//! Hash: 0b...001 → Index 1 ─┐
+//! ...                       │
+//! Hash: 0b...101 → Index 5 ─┴─ Both map to old Index 1
+//! ```
+//!
+//! When the table doubles in size:
+//! 1. Each bucket at index `i` splits into two buckets: `i` and `i + old_size`
+//! 2. The existing chain head is copied to both locations with `added=0`
+//! 3. Future insertions will naturally distribute between the two buckets based on their hash
+//!
+//! This approach ensures that entries inserted before a resize remain discoverable after the resize,
+//! as the lookup algorithm checks the appropriate bucket based on the current table size.
 //!
 //! # Example
 //!
