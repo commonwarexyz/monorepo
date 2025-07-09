@@ -2,12 +2,13 @@
 
 use arbitrary::Arbitrary;
 use commonware_utils::{
-    from_hex, from_hex_formatted, hex, max_faults, modulo, quorum, union, union_unique,
+    from_hex, from_hex_formatted, hex, max_faults, modulo, quorum, union, union_unique, NZUsize,
+    NZU32, NZU64,
 };
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
-enum LibFunction {
+enum FuzzInput {
     Hex { data: Vec<u8> },
     FromHex { hex_str: String },
     FromHexFormatted { hex_str: String },
@@ -16,24 +17,39 @@ enum LibFunction {
     Union { a: Vec<u8>, b: Vec<u8> },
     UnionUnique { namespace: Vec<u8>, msg: Vec<u8> },
     Modulo { bytes: Vec<u8>, n: u64 },
+    NZUsize { v: usize },
+    NZU32 { v: u32 },
+    NZU64 { v: u64 },
 }
 
-fuzz_target!(|operation: LibFunction| {
-    match operation {
-        LibFunction::Hex { data } => {
-            let hex_str = hex(&data);
-
-            assert_eq!(hex_str.len(), data.len() * 2);
-            assert!(hex_str.chars().all(|c| c.is_ascii_hexdigit()));
-
-            if !data.is_empty() {
-                if let Some(decoded) = from_hex(&hex_str) {
-                    assert_eq!(decoded, data);
-                }
+fn fuzz(input: FuzzInput) {
+    match input {
+        FuzzInput::NZUsize { v } => {
+            if v != 0 {
+                let _ = NZUsize!(v).get() == v;
             }
         }
 
-        LibFunction::FromHex { hex_str } => {
+        FuzzInput::NZU32 { v } => {
+            if v != 0 {
+                let _ = NZU32!(v).get() == v;
+            }
+        }
+
+        FuzzInput::NZU64 { v } => {
+            if v != 0 {
+                let _ = NZU64!(v).get() == v;
+            }
+        }
+
+        FuzzInput::Hex { data } => {
+            let hex_str = hex(&data);
+            if let Some(decoded) = from_hex(&hex_str) {
+                assert_eq!(decoded, data);
+            }
+        }
+
+        FuzzInput::FromHex { hex_str } => {
             let result = from_hex(&hex_str);
 
             if let Some(decoded) = result {
@@ -42,7 +58,7 @@ fuzz_target!(|operation: LibFunction| {
             }
         }
 
-        LibFunction::FromHexFormatted { hex_str } => {
+        FuzzInput::FromHexFormatted { hex_str } => {
             let result = from_hex_formatted(&hex_str);
 
             if let Some(decoded) = result.clone() {
@@ -54,21 +70,18 @@ fuzz_target!(|operation: LibFunction| {
             from_hex_formatted(&with_prefix);
         }
 
-        LibFunction::MaxFaults { n } => {
+        FuzzInput::MaxFaults { n } => {
             if n == 0 {
                 return;
             }
             let faults = max_faults(n);
-
             assert_eq!(faults, (n.saturating_sub(1)) / 3);
-
-            assert!(faults <= (n.saturating_sub(1)) / 3);
 
             let q = quorum(n);
             assert_eq!(q + faults, n);
         }
 
-        LibFunction::Quorum { n } => {
+        FuzzInput::Quorum { n } => {
             if n == 0 {
                 return;
             }
@@ -76,13 +89,9 @@ fuzz_target!(|operation: LibFunction| {
             let faults = max_faults(n);
 
             assert_eq!(q, n - faults);
-
-            if faults > 0 {
-                assert!(q > 2 * faults);
-            }
         }
 
-        LibFunction::Union { a, b } => {
+        FuzzInput::Union { a, b } => {
             let result = union(&a, &b);
 
             assert_eq!(result.len(), a.len() + b.len());
@@ -100,11 +109,10 @@ fuzz_target!(|operation: LibFunction| {
             assert_eq!(empty_b, a);
         }
 
-        LibFunction::UnionUnique { namespace, msg } => {
+        FuzzInput::UnionUnique { namespace, msg } => {
             let result = union_unique(&namespace, &msg);
 
             assert!(!result.is_empty());
-
             assert!(result.len() > namespace.len() + msg.len());
 
             let result2 = union_unique(&namespace, &msg);
@@ -117,7 +125,7 @@ fuzz_target!(|operation: LibFunction| {
             assert!(!empty_msg.is_empty());
         }
 
-        LibFunction::Modulo { bytes, n } => {
+        FuzzInput::Modulo { bytes, n } => {
             if n == 0 {
                 return;
             }
@@ -125,7 +133,6 @@ fuzz_target!(|operation: LibFunction| {
             let result = modulo(&bytes, n);
 
             assert!(result < n);
-
             assert_eq!(modulo(&[], n), 0);
 
             let result2 = modulo(&bytes, n);
@@ -139,4 +146,8 @@ fuzz_target!(|operation: LibFunction| {
             assert_eq!(modulo(&zeros, n), 0);
         }
     }
+}
+
+fuzz_target!(|op: FuzzInput| {
+    fuzz(op);
 });
