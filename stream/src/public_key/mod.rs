@@ -62,8 +62,8 @@
 //!
 //! - **Mutual Authentication**: Both parties prove ownership of their static private keys through
 //!   signatures.
-//! - **Forward Secrecy**: Ephemeral keys ensure that any compromise of long-term static keys
-//!   doesn't affect other sessions.
+//! - **Forward Secrecy**: Ephemeral encryption keys ensure that any compromise of long-term static keys
+//!   doesn't expose the contents of previous sessions.
 //! - **Replay Protection**: Confirmations are bound to the handshake transcript to prevent replay
 //!   attacks by confirming that the peer that sent the `Hello` message also had possession of the
 //!   ephemeral key.
