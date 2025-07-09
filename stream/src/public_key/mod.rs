@@ -58,7 +58,7 @@
 //! - **Time Synchronization**: Peer clocks must be synchronized to within the `synchrony_bound`
 //!   to correctly validate timestamps.
 //!
-//! ## Guarantees
+//! ## Properties
 //!
 //! - **Mutual Authentication**: Both parties prove existence of their static private keys through
 //!   signatures.
