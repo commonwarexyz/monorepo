@@ -7,8 +7,8 @@
 //!
 //! # Architecture
 //!
-//! The [Freezer] uses a two-level architecture: a dynamically-sized hash table that maps keys to journal
-//! locations and a journal that stores key-value data.
+//! The [Freezer] uses a two-level architecture: an extendible hash table (written in a single [commonware_runtime::Blob])
+//! that maps keys to locations and a [crate::journal::variable::Journal] that stores key-value data.
 //!
 //! ```text
 //! ┌───────────────────────────────────────────────────────────────────┐
@@ -21,9 +21,9 @@
 //!         ▼         ▼         ▼         ▼         ▼         ▼
 //! ┌───────────────────────────────────────────────────────────────────┐
 //! │                             Journal                               │
-//! │  Section 0: [KV|NEXT][KV|NEXT][KV|NEXT]...                        │
-//! │  Section 1: [KV|NEXT][KV|NEXT]...                                 │
-//! │  Section N: [KV|NEXT]...                                          |
+//! │  Section 0: [Record 0][Record 1][Record 2]...                     │
+//! │  Section 1: [Record 10][Record 11][Record 12]...                  │
+//! │  Section N: [Record 100][Record 101][Record 102]...               │
 //! └───────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -41,6 +41,18 @@
 //! │  │ offset|added  │ offset|added  │  │
 //! │  │     CRC32     │     CRC32     │  │
 //! │  └───────────────┴───────────────┘  │
+//! └─────────────────────────────────────┘
+//! ```
+//!
+//! The journal is a sequence of variable size records containing key-value pairs and an optional pointer
+//! to the next record that mapped to the same table index (at some point in the past).
+//!
+//! ```text
+//! ┌─────────────────────────────────────┐
+//! │           Journal Record            │
+//! │ Key: "foo"                          │
+//! │ Value: 42                           │
+//! │ Next: Option<(section, offset)>     |
 //! └─────────────────────────────────────┘
 //! ```
 //!
