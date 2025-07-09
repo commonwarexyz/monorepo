@@ -60,7 +60,7 @@
 //!
 //! ## Properties
 //!
-//! - **Mutual Authentication**: Both parties prove existence of their static private keys through
+//! - **Mutual Authentication**: Both parties prove ownership of their static private keys through
 //!   signatures.
 //! - **Forward Secrecy**: Ephemeral keys ensure that any compromise of long-term static keys
 //!   doesn't affect other sessions.
