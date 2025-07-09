@@ -27,21 +27,24 @@
 //! +-----------------------------------------------------------------+
 //! ```
 //!
-//! The table uses dual-slot entries to provide atomic updates. Each slot contains an epoch
+//! The table uses two, fixed-size slots to provide atomic updates. Each slot contains an epoch
 //! number that monotonically increases with each sync operation. During reads, the slot with the
 //! higher epoch is selected (that is less than the last committed epoch), ensuring consistency even
 //! during unclean shutdown.
 //!
 //! ```text
 //! +-------------------------------------+
-//! |           Hash Table Entry          |
-//! |  +---------------+---------------+  |
-//! |  |    Slot 0     |    Slot 1     |  |
-//! |  | epoch|section | epoch|section |  |
-//! |  | offset|added  | offset|added  |  |
-//! |  |     CRC32     |     CRC32     |  |
-//! |  +---------------+---------------+  |
+//! |          Hash Table Entry           |
 //! +-------------------------------------+
+//! |     Slot 0      |      Slot 1       |
+//! +-----------------+-------------------+
+//! | epoch:    u16   | epoch:    u16     |
+//! | section:  u16   | section:  u16     |
+//! | offset:   u32   | offset:   u32     |
+//! | added:    u8    | added:    u8      |
+//! +-----------------+-------------------+
+//! | CRC32:    u32   | CRC32:    u32     |
+//! +-----------------+-------------------+
 //! ```
 //!
 //! The journal is a sequence of variable size records containing key-value pairs and an optional pointer
@@ -50,9 +53,10 @@
 //! ```text
 //! +-------------------------------------+
 //! |           Journal Record            |
-//! | Key: "foo"                          |
-//! | Value: 42                           |
-//! | Next: Option<(section, offset)>     |
+//! +-------------------------------------+
+//! | Key:   Array                        |
+//! | Value: Codec                        |
+//! | Next:  Option<(section, offset)>    |
 //! +-------------------------------------+
 //! ```
 //!
