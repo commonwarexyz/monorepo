@@ -3,7 +3,7 @@
 //! [Freezer] is a key-value store designed for permanent storage where data is written once and never
 //! modified. Unlike [crate::index::Index], this implementation exclusively uses disk-resident data
 //! structures to serve reads and extendible hashing to limit read amplification as the size of data
-//! grows. Notably, this approach never requires data to be rewritten (i.e. compacted).
+//! grows. Notably, the [Freezer] never rewrites (i.e. compacts) inserted data.
 //!
 //! # Format
 //!
@@ -27,10 +27,10 @@
 //! +-----------------------------------------------------------------+
 //! ```
 //!
-//! The table uses two, fixed-size slots to provide atomic updates. Each slot contains an epoch
-//! number that monotonically increases with each sync operation. During reads, the slot with the
-//! higher epoch is selected (that is less than the last committed epoch), ensuring consistency even
-//! during unclean shutdown.
+//! The table uses two fixed-size slots per entry to ensure consistency during updates. Each slot
+//! contains an epoch number that monotonically increases with each sync operation. During reads,
+//! the slot with the higher epoch is selected (provided it's not greater than the last committed
+//! epoch), ensuring consistency even if the system crashed during a write.
 //!
 //! ```text
 //! +-------------------------------------+
@@ -47,8 +47,8 @@
 //! +-----------------+-------------------+
 //! ```
 //!
-//! The journal is a sequence of variable size records containing key-value pairs and an optional pointer
-//! to the next record that mapped to the same table index (at some point in the past).
+//! The journal stores variable-sized records, each containing a key-value pair and an optional pointer
+//! to the next record in the collision chain (for keys that hash to the same table index).
 //!
 //! ```text
 //! +-------------------------------------+
@@ -96,8 +96,8 @@
 //! New entries are prepended to the chain, becoming the new head. During lookup, the chain
 //! is traversed until a matching key is found. The `added` field in the table entry tracks
 //! insertions since the last resize, triggering table growth when it exceeds `table_resize_frequency`.
-//! Note, this approach ensures items added recently will be served with lower latency than items
-//! added earlier (under the presence of conflicts).
+//! A byproduct of this design is recently added items are served with lower latency than older items
+//! (when table collisions occur).
 //!
 //! # Extendible Hashing
 //!
