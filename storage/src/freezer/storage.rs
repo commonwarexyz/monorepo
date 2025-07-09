@@ -610,7 +610,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         })
     }
 
-    /// Compute the table index for a given key using bit-based indexing.
+    /// Compute the table index for a given key.
     ///
     /// As the table doubles in size during a resize, each existing bucket splits into two:
     /// one at the original index and another at a new index (original index + previous table size).
@@ -620,8 +620,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     /// - After resizing to 8: uses 3 bits, bucket 0 splits into indices 0 and 4.
     /// - After resizing to 16: uses 4 bits, bucket 0 splits into indices 0 and 8, and so on.
     ///
-    /// This function determines the appropriate bucket by masking the key's hash based on
-    /// the current table size, ensuring entries are consistently mapped even after resizes.
+    /// To determine the appropriate bucket, we mask the key's hash based on the current table size.
+    /// This ensures entries are consistently mapped even after resizes.
     fn table_index(&self, key: &K) -> u32 {
         // Calculate the depth (how many times the table has been resized).
         //
