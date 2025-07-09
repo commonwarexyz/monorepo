@@ -74,6 +74,8 @@
 //! - **Anonymity**: Peer identities are not hidden during handshakes from network observers (both active
 //!   and passive).
 //! - **Padding**: Messages are encrypted as-is, allowing an attacker to perform traffic analysis.
+//! - **Future Secrecy**: If a peer's static private key is compromised, future sessions will be exposed.
+//! - **0-RTT**: The protocol does not support 0-RTT handshakes (resumed sessions).
 
 use chacha20poly1305::{
     aead::{generic_array::typenum::Unsigned, AeadCore},
