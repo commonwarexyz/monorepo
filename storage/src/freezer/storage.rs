@@ -623,24 +623,25 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     /// This function determines the appropriate bucket by masking the key's hash based on
     /// the current table size, ensuring entries are consistently mapped even after resizes.
     fn table_index(&self, key: &K) -> u32 {
-        let hash = crc32fast::hash(key.as_ref());
-
-        // Calculate the depth (how many times the table has been resized)
+        // Calculate the depth (how many times the table has been resized).
         //
-        // depth = log2(table_size / table_initial_size)
+        // `depth = log2(table_size / table_initial_size)`
         let depth = (self.table_size / self.table_initial_size).trailing_zeros();
 
-        // Calculate the number of bits to use
+        // Calculate the number of bits to use.
         //
-        // initial_bits = log2(table_initial_size)
+        // `initial_bits = log2(table_initial_size)`
         let initial_bits = self.table_initial_size.trailing_zeros();
         let total_bits = initial_bits + depth;
 
-        // Extract the lower 'total_bits' bits from the hash
+        // Extract the lower `total_bits` bits from the hash.
         //
-        // This ensures that when the table doubles, entries at position X
-        // will either stay at X or move to X + old_size
-        let mask = (1u32 << total_bits) - 1;
+        // This ensures that when the table doubles, entries at position `X`
+        // will either stay at `X` or move to `X + old_size`.
+        let mask = (1 << total_bits) - 1;
+
+        // Calculate the table index.
+        let hash = crc32fast::hash(key.as_ref());
         hash & mask
     }
 
