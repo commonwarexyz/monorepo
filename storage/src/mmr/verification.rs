@@ -1200,12 +1200,26 @@ mod tests {
             for i in 0..10 {
                 mmr.add(&mut hasher, &test_digest(i));
             }
-            let size = mmr.size();
-            let result = Proof::historical_range_proof(&mmr, size + 1, 1, 2).await;
-            assert!(matches!(result, Err(Error::HistoricalSizeTooLarge(s, actual)) if s == size + 1 && actual == size));
+            let mmr_size = mmr.size();
 
-            let result = Proof::historical_range_proof(&mmr, 0, 1, 2).await;
-            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(s, actual)) if s == 0 && actual == 1));
+            // Historical size > MMR size is invalid
+            let result = Proof::historical_range_proof(&mmr, mmr_size+1, 0, 10).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooLarge(given_size, actual_size)) if given_size == mmr_size+1 && actual_size == mmr_size));
+
+            // Historical size == start location is invalid
+            let result = Proof::historical_range_proof(&mmr, 0, 0, 10).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 0 && start_loc == 0));
+            let result = Proof::historical_range_proof(&mmr, 1, 1, 10).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 1 && start_loc == 1));
+            let result = Proof::historical_range_proof(&mmr, mmr_size, mmr_size, 10).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == mmr_size && start_loc == mmr_size));
+
+
+            // Historical size < start location is invalid
+            let result = Proof::historical_range_proof(&mmr, 0, 1, 10).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 0 && start_loc == 1));
+            let result = Proof::historical_range_proof(&mmr, mmr_size-1, mmr_size, 10).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == mmr_size-1 && start_loc == mmr_size));
         });
     }
 }
