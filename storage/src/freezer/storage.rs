@@ -334,8 +334,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         Self::parse_entries(&buf)
     }
 
-    /// Validate a single table entry and update tracking.
-    async fn validate_entry(
+    /// Recover a single table entry and update tracking.
+    async fn recover_entry(
         blob: &E::Blob,
         entry: &Entry,
         entry_offset: u64,
@@ -395,7 +395,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             let (entry1, entry2) = Self::read_buffer(&mut reader).await?;
 
             // Check both entries
-            let entry1_modified = Self::validate_entry(
+            let entry1_modified = Self::recover_entry(
                 blob,
                 &entry1,
                 offset,
@@ -404,7 +404,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 &mut max_section,
             )
             .await?;
-            let entry2_modified = Self::validate_entry(
+            let entry2_modified = Self::recover_entry(
                 blob,
                 &entry2,
                 offset + Entry::SIZE as u64,
@@ -418,14 +418,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         }
 
         Ok((modified, max_epoch, max_section))
-    }
-
-    /// Initialize table with given size and sync.
-    async fn init_table(blob: &E::Blob, table_size: u32) -> Result<(), Error> {
-        let table_len = Self::table_offset(table_size);
-        blob.resize(table_len).await?;
-        blob.sync().await?;
-        Ok(())
     }
 
     /// Determine the write slot for a table entry based on current entries and epoch.
@@ -452,13 +444,21 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         }
     }
 
+    /// Initialize table with given size and sync.
+    async fn init_table(blob: &E::Blob, table_size: u32) -> Result<(), Error> {
+        let table_len = Self::table_offset(table_size);
+        blob.resize(table_len).await?;
+        blob.sync().await?;
+        Ok(())
+    }
+
     /// Initialize a new [Freezer] instance.
     pub async fn init(context: E, config: Config<V::Cfg>) -> Result<Self, Error> {
         Self::init_with_checkpoint(context, config, None).await
     }
 
     /// Initialize a new [Freezer] instance with a [Checkpoint].
-    // TODO(#1228): Hide this complexity from the caller.
+    // TODO(#1227): Hide this complexity from the caller.
     pub async fn init_with_checkpoint(
         context: E,
         config: Config<V::Cfg>,
@@ -612,16 +612,16 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Compute the table index for a given key using bit-based indexing.
     ///
-    /// When the table doubles in size, each bucket splits into two: the original
-    /// bucket and a new bucket at position (original + old_size).
+    /// As the table doubles in size during a resize, each existing bucket splits into two:
+    /// one at the original index and another at a new index (original index + previous table size).
     ///
-    /// For example, with initial size 4 (2^2):
-    /// - Initially: use 2 bits, so buckets are 0, 1, 2, 3
-    /// - After resize to 8: use 3 bits, bucket 0 splits into 0 and 4
-    /// - After resize to 16: use 4 bits, bucket 0 splits into 0 and 8, etc.
+    /// For example, with an initial table size of 4 (2^2):
+    /// - Initially: uses 2 bits of the hash, mapping to buckets 0, 1, 2, 3.
+    /// - After resizing to 8: uses 3 bits, bucket 0 splits into indices 0 and 4.
+    /// - After resizing to 16: uses 4 bits, bucket 0 splits into indices 0 and 8, and so on.
     ///
-    /// This function maps the hash to the correct bucket by extracting the
-    /// lower bits that are used to determine the bucket.
+    /// This function determines the appropriate bucket by masking the key's hash based on
+    /// the current table size, ensuring entries are consistently mapped even after resizes.
     fn table_index(&self, key: &K) -> u32 {
         let hash = crc32fast::hash(key.as_ref());
 
