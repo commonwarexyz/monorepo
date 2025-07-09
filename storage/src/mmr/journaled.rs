@@ -1227,66 +1227,48 @@ mod tests {
     fn test_journaled_mmr_historical_range_proof_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Create MMR with 10 elements
             let mut hasher = Standard::<Sha256>::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
                 .unwrap();
-
-            // Add elements
             let mut elements = Vec::new();
             let mut positions = Vec::new();
             for i in 0..10 {
                 elements.push(test_digest(i));
                 positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
             }
+            let original_size = mmr.size();
 
-            let current_size = mmr.size();
-
-            // Test proof at current position
-            let current_proof = mmr
-                .historical_range_proof(current_size, positions[2], positions[5])
-                .await
-                .unwrap();
-            assert_eq!(current_proof.size, current_size);
-
-            // Test proof at historical position
-            // Create reference MMR for historical verification to get correct size
-            let mut ref_mmr = Mmr::init(
-                context.clone(),
-                &mut hasher,
-                Config {
-                    journal_partition: "ref_journal".into(),
-                    metadata_partition: "ref_metadata".into(),
-                    items_per_blob: 7,
-                    write_buffer: 1024,
-                    pool: None,
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                },
-            )
-            .await
-            .unwrap();
-
-            for elt in elements.iter().take(8) {
-                ref_mmr.add(&mut hasher, elt).await.unwrap();
-            }
-            let historical_size = ref_mmr.size();
-            let historical_root = ref_mmr.root(&mut hasher);
-
+            // Historical proof should match "regular" proof when historical size == current database size
             let historical_proof = mmr
-                .historical_range_proof(historical_size, positions[2], positions[5])
+                .historical_range_proof(original_size, positions[2], positions[5])
                 .await
                 .unwrap();
-            assert_eq!(historical_proof.size, historical_size);
-
-            // Verify historical proof
+            assert_eq!(historical_proof.size, original_size);
+            let root = mmr.root(&mut hasher);
             assert!(historical_proof.verify_range_inclusion(
                 &mut hasher,
                 &elements[2..=5],
                 positions[2],
-                &historical_root
+                &root
             ));
+            let regular_proof = mmr.range_proof(positions[2], positions[5]).await.unwrap();
+            assert_eq!(regular_proof.size, historical_proof.size);
+            assert_eq!(regular_proof.digests, historical_proof.digests);
 
-            ref_mmr.destroy().await.unwrap();
+            // Add more elements to the MMR
+            for i in 10..20 {
+                elements.push(test_digest(i));
+                positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
+            }
+            let new_historical_proof = mmr
+                .historical_range_proof(original_size, positions[2], positions[5])
+                .await
+                .unwrap();
+            assert_eq!(new_historical_proof.size, historical_proof.size);
+            assert_eq!(new_historical_proof.digests, historical_proof.digests);
+
             mmr.destroy().await.unwrap();
         });
     }

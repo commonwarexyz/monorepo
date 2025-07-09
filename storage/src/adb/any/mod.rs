@@ -1733,7 +1733,7 @@ pub(super) mod test {
             let root_hash = db.root(&mut hasher);
             let original_op_count = db.op_count();
 
-            // Test proof at current position (should match regular proof)
+            // Historical proof should match "regular" proof when historical size == current database size
             let (historical_proof, historical_ops) =
                 db.historical_proof(original_op_count, 5, 10).await.unwrap();
             let (regular_proof, regular_ops) = db.proof(5, 10).await.unwrap();
@@ -1755,12 +1755,12 @@ pub(super) mod test {
             db = apply_ops(db, more_ops.clone()).await;
             db.commit().await.unwrap();
 
-            // Generate a historical proof for the old operations
+            // Historical proof should remain the same even though database has grown
             let (historical_proof, historical_ops) =
                 db.historical_proof(original_op_count, 5, 10).await.unwrap();
             assert_eq!(historical_proof.size, leaf_num_to_pos(original_op_count));
-            assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.size, regular_proof.size);
+            assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
             assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
@@ -1836,17 +1836,17 @@ pub(super) mod test {
             // Test historical proof generation for several historical states.
             let start_loc = 20;
             let max_ops = 10;
-            for historical_end in 31..50 {
+            for end_loc in 31..50 {
                 let (historical_proof, historical_ops) = db
-                    .historical_proof(historical_end, start_loc, max_ops)
+                    .historical_proof(end_loc, start_loc, max_ops)
                     .await
                     .unwrap();
 
-                assert_eq!(historical_proof.size, leaf_num_to_pos(historical_end));
+                assert_eq!(historical_proof.size, leaf_num_to_pos(end_loc));
 
-                // Create corresponding reference database at the given historical end
+                // Create  reference database at the given historical size
                 let mut ref_db = create_test_db(context.clone()).await;
-                ref_db = apply_ops(ref_db, ops[0..historical_end as usize].to_vec()).await;
+                ref_db = apply_ops(ref_db, ops[0..end_loc as usize].to_vec()).await;
                 // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
                 ref_db.sync().await.unwrap();
 
@@ -1854,7 +1854,7 @@ pub(super) mod test {
                 assert_eq!(ref_proof.size, historical_proof.size);
                 assert_eq!(ref_ops, historical_ops);
                 assert_eq!(ref_proof.digests, historical_proof.digests);
-                let end_loc = std::cmp::min(start_loc + max_ops, historical_end);
+                let end_loc = std::cmp::min(start_loc + max_ops, end_loc);
                 assert_eq!(ref_ops, ops[start_loc as usize..end_loc as usize]);
 
                 // Verify proof against reference root
