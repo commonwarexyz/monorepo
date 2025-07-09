@@ -10,7 +10,7 @@ use commonware_utils::{hex, Array, BitVec};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::{
-    collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap},
+    collections::{btree_map::Entry, BTreeMap, BTreeSet},
     marker::PhantomData,
     mem::take,
 };
@@ -92,7 +92,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
     pub async fn init_with_bits(
         context: E,
         config: Config,
-        bits: Option<HashMap<u64, &Option<BitVec>>>,
+        bits: Option<BTreeMap<u64, &Option<BitVec>>>,
     ) -> Result<Self, Error> {
         // Scan for all blobs in the partition
         let mut blobs = BTreeMap::new();
