@@ -5,8 +5,6 @@ use bytes::{Bytes, BytesMut};
 use commonware_utils::StableBuf;
 use libfuzzer_sys::fuzz_target;
 
-const MAX_SIZE: usize = 100_000;
-
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
     FromVec(Vec<u8>),
@@ -25,32 +23,15 @@ fn fuzz(input: Vec<FuzzInput>) {
     for op in input {
         match op {
             FuzzInput::FromVec(data) => {
-                let mut buf: Option<StableBuf> = None;
                 let len = data.len();
-                buf = Some(StableBuf::from(data));
-
-                if let Some(ref b) = buf {
-                    assert_eq!(b.len(), len);
-                    assert_eq!(b.is_empty(), len == 0);
-                }
+                let buf = StableBuf::from(data);
+                assert_eq!(buf.len(), len);
             }
 
             FuzzInput::FromBytesMut(data) => {
-                let mut buf: Option<StableBuf> = None;
-                let data = if data.len() > 100_000 {
-                    data[..100_000].to_vec()
-                } else {
-                    data
-                };
-
                 let len = data.len();
-                let bytes_mut = BytesMut::from(data.as_slice());
-                buf = Some(StableBuf::from(bytes_mut));
-
-                if let Some(ref b) = buf {
-                    assert_eq!(b.len(), len);
-                    assert_eq!(b.is_empty(), len == 0);
-                }
+                let buf = BytesMut::from(data.as_slice());
+                assert_eq!(buf.len(), len);
             }
 
             FuzzInput::PutSlice(data) => {
@@ -95,13 +76,15 @@ fn fuzz(input: Vec<FuzzInput>) {
             }
 
             FuzzInput::Len(data) => {
-                let buf = StableBuf::from(data.clone());
-                assert_eq!(buf.len(), data.len());
+                let len = data.len();
+                let buf = StableBuf::from(data);
+                assert_eq!(buf.len(), len);
             }
 
             FuzzInput::IsEmpty(data) => {
-                let buf = StableBuf::from(data.clone());
-                assert_eq!(buf.is_empty(), data.is_empty());
+                let is_empty = data.is_empty();
+                let buf = StableBuf::from(data);
+                assert_eq!(buf.is_empty(), is_empty);
             }
 
             FuzzInput::Index(data, idx) => {
