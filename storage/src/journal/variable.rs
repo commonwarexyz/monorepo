@@ -637,18 +637,19 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 std::ops::Bound::Excluded(section),
                 std::ops::Bound::Unbounded,
             ))
-            .map(|(&s, _)| s)
+            .map(|(&section, _)| section)
             .collect();
         for index in &trailing {
-            if let Some(blob) = self.blobs.remove(index) {
-                // Remove the underlying blob from storage.
-                blob.close().await?;
-                self.context
-                    .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
-                    .await?;
-                debug!(section = index, "removed section");
-                self.tracked.dec();
-            }
+            // Remove the underlying blob from storage.
+            let blob = self.blobs.remove(index).unwrap();
+
+            // Destroy the blob
+            blob.close().await?;
+            self.context
+                .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
+                .await?;
+            debug!(section = index, "removed section");
+            self.tracked.dec();
         }
 
         // If the section exists, truncate it to the given offset
