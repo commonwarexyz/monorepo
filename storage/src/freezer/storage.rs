@@ -9,7 +9,7 @@ use prometheus_client::metrics::counter::Counter;
 use std::{cmp::Ordering, collections::BTreeSet, marker::PhantomData, ops::Deref};
 use tracing::debug;
 
-/// Cursor for an item in the [Freezer].
+/// Location of an item in the [Freezer].
 ///
 /// This can be used to directly access the data for a given
 /// key-value pair (rather than walking the journal chain).
@@ -92,7 +92,7 @@ impl std::fmt::Display for Cursor {
     }
 }
 
-/// Checkpoint for [Freezer] progress.
+/// Marker of [Freezer] progress.
 ///
 /// This can be used to restore the [Freezer] to a consistent
 /// state after shutdown.
