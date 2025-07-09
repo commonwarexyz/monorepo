@@ -12,8 +12,8 @@ enum FuzzInput {
     TestPrefixed { prefix: u8, value: u64 },
 }
 
-fn fuzz(op: FuzzInput) {
-    match op {
+fn fuzz(input: FuzzInput) {
+    match input {
         FuzzInput::TestFixedBytes { data } => match data.len() {
             1 => test_fixed_bytes::<1>(&data),
             2 => test_fixed_bytes::<2>(&data),
@@ -100,6 +100,6 @@ fn test_fixed_bytes<const N: usize>(data: &[u8]) {
     }
 }
 
-fuzz_target!(|op: FuzzInput| {
-    fuzz(op);
+fuzz_target!(|input: FuzzInput| {
+    fuzz(input);
 });

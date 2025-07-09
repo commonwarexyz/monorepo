@@ -12,7 +12,7 @@ struct Item(u32);
 struct Priority(u32);
 
 #[derive(Arbitrary, Debug)]
-enum PrioritySetOp {
+enum FuzzInput {
     Put { item: Item, priority: Priority },
     Get { item: Item },
     Remove { item: Item },
@@ -25,13 +25,13 @@ enum PrioritySetOp {
     Clear,
 }
 
-fn fuzz(ops: Vec<PrioritySetOp>) {
+fn fuzz(input: Vec<FuzzInput>) {
     let mut set: PrioritySet<Item, Priority> = PrioritySet::new();
     let mut expected_items: HashSet<Item> = HashSet::new();
 
-    for op in ops {
+    for op in input {
         match op {
-            PrioritySetOp::Put { item, priority } => {
+            FuzzInput::Put { item, priority } => {
                 set.put(item.clone(), priority);
                 expected_items.insert(item.clone());
 
@@ -39,7 +39,7 @@ fn fuzz(ops: Vec<PrioritySetOp>) {
                 assert!(set.contains(&item));
             }
 
-            PrioritySetOp::Get { item } => {
+            FuzzInput::Get { item } => {
                 let result = set.get(&item);
                 if expected_items.contains(&item) {
                     assert!(result.is_some());
@@ -48,7 +48,7 @@ fn fuzz(ops: Vec<PrioritySetOp>) {
                 }
             }
 
-            PrioritySetOp::Remove { item } => {
+            FuzzInput::Remove { item } => {
                 let removed = set.remove(&item);
                 if expected_items.remove(&item) {
                     assert!(removed);
@@ -59,7 +59,7 @@ fn fuzz(ops: Vec<PrioritySetOp>) {
                 }
             }
 
-            PrioritySetOp::Reconcile { keep, default } => {
+            FuzzInput::Reconcile { keep, default } => {
                 let keep = if keep.len() > 4 {
                     &keep[..4]
                 } else {
@@ -82,12 +82,12 @@ fn fuzz(ops: Vec<PrioritySetOp>) {
                 assert_eq!(collected.len(), expected_items.len());
             }
 
-            PrioritySetOp::Contains { item } => {
+            FuzzInput::Contains { item } => {
                 let result = set.contains(&item);
                 assert_eq!(result, expected_items.contains(&item));
             }
 
-            PrioritySetOp::Peek => {
+            FuzzInput::Peek => {
                 let peeked = set.peek();
                 if expected_items.is_empty() {
                     assert!(peeked.is_none());
@@ -100,7 +100,7 @@ fn fuzz(ops: Vec<PrioritySetOp>) {
                 }
             }
 
-            PrioritySetOp::Pop => {
+            FuzzInput::Pop => {
                 let popped = set.pop();
                 if expected_items.is_empty() {
                     assert!(popped.is_none());
@@ -113,15 +113,15 @@ fn fuzz(ops: Vec<PrioritySetOp>) {
                 }
             }
 
-            PrioritySetOp::Len => {
+            FuzzInput::Len => {
                 assert_eq!(set.len(), expected_items.len());
             }
 
-            PrioritySetOp::IsEmpty => {
+            FuzzInput::IsEmpty => {
                 assert_eq!(set.is_empty(), expected_items.is_empty());
             }
 
-            PrioritySetOp::Clear => {
+            FuzzInput::Clear => {
                 expected_items.clear();
                 while set.pop().is_some() {}
                 assert!(set.is_empty());
@@ -158,6 +158,6 @@ fn fuzz(ops: Vec<PrioritySetOp>) {
     assert_eq!(update_set.len(), 1);
 }
 
-fuzz_target!(|ops: Vec<PrioritySetOp>| {
-    fuzz(ops);
+fuzz_target!(|input: Vec<FuzzInput>| {
+    fuzz(input);
 });

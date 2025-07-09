@@ -6,7 +6,7 @@ use commonware_utils::StableBuf;
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
-enum StableBufOp {
+enum FuzzInput {
     FromVec(Vec<u8>),
     FromBytesMut(Vec<u8>),
     PutSlice(Vec<u8>),
@@ -19,12 +19,12 @@ enum StableBufOp {
     ConvertToVec,
 }
 
-fn fuzz(ops: Vec<StableBufOp>) {
+fn fuzz(input: Vec<FuzzInput>) {
     let mut buf: Option<StableBuf> = None;
 
-    for op in ops {
+    for op in input {
         match op {
-            StableBufOp::FromVec(data) => {
+            FuzzInput::FromVec(data) => {
                 let data = if data.len() > 100_000 {
                     data[..100_000].to_vec()
                 } else {
@@ -40,7 +40,7 @@ fn fuzz(ops: Vec<StableBufOp>) {
                 }
             }
 
-            StableBufOp::FromBytesMut(data) => {
+            FuzzInput::FromBytesMut(data) => {
                 let data = if data.len() > 100_000 {
                     data[..100_000].to_vec()
                 } else {
@@ -57,7 +57,7 @@ fn fuzz(ops: Vec<StableBufOp>) {
                 }
             }
 
-            StableBufOp::PutSlice(data) => {
+            FuzzInput::PutSlice(data) => {
                 if buf.is_none() {
                     buf = Some(StableBuf::from(Vec::new()));
                 }
@@ -76,13 +76,13 @@ fn fuzz(ops: Vec<StableBufOp>) {
                 }
             }
 
-            StableBufOp::Truncate(new_len) => {
+            FuzzInput::Truncate(new_len) => {
                 if let Some(ref mut b) = buf {
                     b.truncate(new_len);
                 }
             }
 
-            StableBufOp::GetMutPtr => {
+            FuzzInput::GetMutPtr => {
                 if let Some(ref mut b) = buf {
                     let ptr1 = b.as_mut_ptr();
                     let ptr2 = b.as_mut_ptr();
@@ -95,7 +95,7 @@ fn fuzz(ops: Vec<StableBufOp>) {
                 }
             }
 
-            StableBufOp::Len => {
+            FuzzInput::Len => {
                 if let Some(ref b) = buf {
                     let len = b.len();
                     assert_eq!(b.is_empty(), len == 0);
@@ -105,14 +105,14 @@ fn fuzz(ops: Vec<StableBufOp>) {
                 }
             }
 
-            StableBufOp::IsEmpty => {
+            FuzzInput::IsEmpty => {
                 if let Some(ref b) = buf {
                     let is_empty = b.is_empty();
                     assert_eq!(is_empty, b.is_empty());
                 }
             }
 
-            StableBufOp::Index(idx) => {
+            FuzzInput::Index(idx) => {
                 if let Some(ref b) = buf {
                     if idx < b.len() {
                         let byte = b[idx];
@@ -123,7 +123,7 @@ fn fuzz(ops: Vec<StableBufOp>) {
                 }
             }
 
-            StableBufOp::ConvertToBytes => {
+            FuzzInput::ConvertToBytes => {
                 if let Some(b) = buf.take() {
                     let len = b.len();
                     let bytes: Bytes = b.into();
@@ -133,7 +133,7 @@ fn fuzz(ops: Vec<StableBufOp>) {
                 }
             }
 
-            StableBufOp::ConvertToVec => {
+            FuzzInput::ConvertToVec => {
                 if let Some(b) = buf.take() {
                     let len = b.len();
                     let vec: Vec<u8> = b.into();
@@ -146,6 +146,6 @@ fn fuzz(ops: Vec<StableBufOp>) {
     }
 }
 
-fuzz_target!(|ops: Vec<StableBufOp>| {
-    fuzz(ops);
+fuzz_target!(|input: Vec<FuzzInput>| {
+    fuzz(input);
 });

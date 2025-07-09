@@ -5,7 +5,7 @@ use commonware_utils::BitVec;
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
-enum BitVecOperation {
+enum FuzzInput {
     New,
     WithCapacity(usize),
     Zeroes(usize),
@@ -26,22 +26,22 @@ enum BitVecOperation {
     Invert(Vec<bool>),
 }
 
-fn fuzz(ops: Vec<BitVecOperation>) {
-    for op in ops {
+fn fuzz(input: Vec<FuzzInput>) {
+    for op in input {
         match op {
-            BitVecOperation::New => {
+            FuzzInput::New => {
                 let v = BitVec::new();
                 assert!(v.is_empty());
                 assert_eq!(v.len(), 0);
             }
 
-            BitVecOperation::WithCapacity(cap) => {
+            FuzzInput::WithCapacity(cap) => {
                 let bv = BitVec::with_capacity(cap.min(1_000_000));
                 assert!(bv.is_empty());
                 assert_eq!(bv.len(), 0);
             }
 
-            BitVecOperation::Zeroes(size) => {
+            FuzzInput::Zeroes(size) => {
                 let size = size.min(100_000);
                 let v = BitVec::zeroes(size);
                 assert_eq!(v.len(), size);
@@ -53,7 +53,7 @@ fn fuzz(ops: Vec<BitVecOperation>) {
                 }
             }
 
-            BitVecOperation::Ones(size) => {
+            FuzzInput::Ones(size) => {
                 let size = size.min(100_000);
                 let v = BitVec::ones(size);
                 assert_eq!(v.len(), size);
@@ -65,7 +65,7 @@ fn fuzz(ops: Vec<BitVecOperation>) {
                 }
             }
 
-            BitVecOperation::FromBools(bools) => {
+            FuzzInput::FromBools(bools) => {
                 let bools = if bools.len() > 100_000 {
                     &bools[..100_000]
                 } else {
@@ -80,7 +80,7 @@ fn fuzz(ops: Vec<BitVecOperation>) {
                 }
             }
 
-            BitVecOperation::Push(bools, value) => {
+            FuzzInput::Push(bools, value) => {
                 let mut v = BitVec::from_bools(&bools);
                 if v.len() < 100_000 {
                     let old_len = v.len();
@@ -90,7 +90,7 @@ fn fuzz(ops: Vec<BitVecOperation>) {
                 }
             }
 
-            BitVecOperation::Pop(bools) => {
+            FuzzInput::Pop(bools) => {
                 let mut v = BitVec::from_bools(&bools);
                 let old_len = v.len();
                 let popped = v.pop();
@@ -104,7 +104,7 @@ fn fuzz(ops: Vec<BitVecOperation>) {
                 }
             }
 
-            BitVecOperation::Get(bools, index) => {
+            FuzzInput::Get(bools, index) => {
                 let v = BitVec::from_bools(&bools);
                 let result = v.get(index);
                 if index < v.len() {
@@ -114,7 +114,7 @@ fn fuzz(ops: Vec<BitVecOperation>) {
                 }
             }
 
-            BitVecOperation::Set(bools, index) => {
+            FuzzInput::Set(bools, index) => {
                 let mut v = BitVec::from_bools(&bools);
                 if index < v.len() {
                     v.set(index);
@@ -122,7 +122,7 @@ fn fuzz(ops: Vec<BitVecOperation>) {
                 }
             }
 
-            BitVecOperation::Clear(bools, index) => {
+            FuzzInput::Clear(bools, index) => {
                 let mut v = BitVec::from_bools(&bools);
                 if index < v.len() {
                     v.clear(index);
@@ -130,7 +130,7 @@ fn fuzz(ops: Vec<BitVecOperation>) {
                 }
             }
 
-            BitVecOperation::Toggle(bools, index) => {
+            FuzzInput::Toggle(bools, index) => {
                 let mut v = BitVec::from_bools(&bools);
                 if index < v.len() {
                     let old_value = v.get(index).unwrap();
@@ -139,7 +139,7 @@ fn fuzz(ops: Vec<BitVecOperation>) {
                 }
             }
 
-            BitVecOperation::SetTo(bools, index, value) => {
+            FuzzInput::SetTo(bools, index, value) => {
                 let mut v = BitVec::from_bools(&bools);
                 if index < v.len() {
                     v.set_to(index, value);
@@ -147,21 +147,21 @@ fn fuzz(ops: Vec<BitVecOperation>) {
                 }
             }
 
-            BitVecOperation::ClearAll(bools) => {
+            FuzzInput::ClearAll(bools) => {
                 let mut v = BitVec::from_bools(&bools);
                 v.clear_all();
                 assert_eq!(v.count_ones(), 0);
                 assert_eq!(v.count_zeros(), v.len());
             }
 
-            BitVecOperation::SetAll(bools) => {
+            FuzzInput::SetAll(bools) => {
                 let mut v = BitVec::from_bools(&bools);
                 v.set_all();
                 assert_eq!(v.count_zeros(), 0);
                 assert_eq!(v.count_ones(), v.len());
             }
 
-            BitVecOperation::And(bools1, bools2) => {
+            FuzzInput::And(bools1, bools2) => {
                 if bools1.len() != bools2.len() {
                     return;
                 }
@@ -173,7 +173,7 @@ fn fuzz(ops: Vec<BitVecOperation>) {
                 assert_eq!(v1.len(), old_len);
             }
 
-            BitVecOperation::Or(bools1, bools2) => {
+            FuzzInput::Or(bools1, bools2) => {
                 if bools1.len() != bools2.len() {
                     return;
                 }
@@ -185,7 +185,7 @@ fn fuzz(ops: Vec<BitVecOperation>) {
                 assert_eq!(v1.len(), old_len);
             }
 
-            BitVecOperation::Xor(bools1, bools2) => {
+            FuzzInput::Xor(bools1, bools2) => {
                 if bools1.len() != bools2.len() {
                     return;
                 }
@@ -197,7 +197,7 @@ fn fuzz(ops: Vec<BitVecOperation>) {
                 assert_eq!(v1.len(), old_len);
             }
 
-            BitVecOperation::Invert(bools) => {
+            FuzzInput::Invert(bools) => {
                 let mut v = BitVec::from_bools(&bools);
                 let old_ones = v.count_ones();
                 let old_zeros = v.count_zeros();
@@ -210,6 +210,6 @@ fn fuzz(ops: Vec<BitVecOperation>) {
     }
 }
 
-fuzz_target!(|ops: Vec<BitVecOperation>| {
-    fuzz(ops);
+fuzz_target!(|input: Vec<FuzzInput>| {
+    fuzz(input);
 });
