@@ -45,10 +45,10 @@ struct FuzzInput {
 
 fn fuzz(input: FuzzInput) {
     let mut rng = StdRng::seed_from_u64(input.rng_seed);
-    
+
     let mut ed25519_batch = Ed25519Batch::new();
     let mut bls12381_batch = BlsBatch::new();
-    
+
     let mut expected_ed25519_result = true;
     let mut expected_bls12381_result = true;
 
@@ -62,16 +62,12 @@ fn fuzz(input: FuzzInput) {
                 let private_key = ed25519::PrivateKey::from_seed(private_key_seed);
                 let public_key = private_key.public_key();
                 let signature = private_key.sign(namespace.as_deref(), &message);
-                
+
                 // Verify individual signature is valid
                 assert!(public_key.verify(namespace.as_deref(), &message, &signature));
-                
-                let added = ed25519_batch.add(
-                    namespace.as_deref(),
-                    &message,
-                    &public_key,
-                    &signature,
-                );
+
+                let added =
+                    ed25519_batch.add(namespace.as_deref(), &message, &public_key, &signature);
                 assert!(added, "Valid signature should be added to batch");
             }
 
@@ -83,16 +79,12 @@ fn fuzz(input: FuzzInput) {
                 let private_key = bls12381::PrivateKey::from_seed(private_key_seed);
                 let public_key = private_key.public_key();
                 let signature = private_key.sign(namespace.as_deref(), &message);
-                
+
                 // Verify individual signature is valid
                 assert!(public_key.verify(namespace.as_deref(), &message, &signature));
-                
-                let added = bls12381_batch.add(
-                    namespace.as_deref(),
-                    &message,
-                    &public_key,
-                    &signature,
-                );
+
+                let added =
+                    bls12381_batch.add(namespace.as_deref(), &message, &public_key, &signature);
                 assert!(added, "Valid signature should be added to batch");
             }
 
@@ -107,12 +99,12 @@ fn fuzz(input: FuzzInput) {
                 let wrong_private_key = ed25519::PrivateKey::from_seed(wrong_private_key_seed);
                 let wrong_public_key = wrong_private_key.public_key();
                 let signature = private_key.sign(namespace.as_deref(), &message);
-                
+
                 // Only add if keys are different (invalid signature)
                 if private_key_seed != wrong_private_key_seed {
                     // Verify individual signature is invalid
                     assert!(!wrong_public_key.verify(namespace.as_deref(), &message, &signature));
-                    
+
                     let added = ed25519_batch.add(
                         namespace.as_deref(),
                         &message,
@@ -136,12 +128,12 @@ fn fuzz(input: FuzzInput) {
                 let wrong_private_key = bls12381::PrivateKey::from_seed(wrong_private_key_seed);
                 let wrong_public_key = wrong_private_key.public_key();
                 let signature = private_key.sign(namespace.as_deref(), &message);
-                
+
                 // Only add if keys are different (invalid signature)
                 if private_key_seed != wrong_private_key_seed {
                     // Verify individual signature is invalid
                     assert!(!wrong_public_key.verify(namespace.as_deref(), &message, &signature));
-                    
+
                     let added = bls12381_batch.add(
                         namespace.as_deref(),
                         &message,
@@ -160,7 +152,7 @@ fn fuzz(input: FuzzInput) {
                     result, expected_ed25519_result,
                     "Ed25519 batch verification result mismatch: expected {expected_ed25519_result}, got {result}",
                 );
-                
+
                 // Reset batch and expectation after verification
                 ed25519_batch = Ed25519Batch::new();
                 expected_ed25519_result = true;
@@ -172,7 +164,7 @@ fn fuzz(input: FuzzInput) {
                     result, expected_bls12381_result,
                     "BLS12-381 batch verification result mismatch: expected {expected_bls12381_result}, got {result}",
                 );
-                
+
                 // Reset batch and expectation after verification
                 bls12381_batch = BlsBatch::new();
                 expected_bls12381_result = true;
