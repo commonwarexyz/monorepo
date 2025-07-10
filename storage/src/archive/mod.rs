@@ -582,6 +582,7 @@ mod tests {
         mut context: Context,
         creator: F,
         compression: Option<u8>,
+        num: usize,
     ) where
         A: Archive<Key = FixedBytes<64>, Value = i32>,
         F: Fn(Context, Option<u8>) -> Fut,
@@ -591,7 +592,7 @@ mod tests {
         let mut keys = BTreeMap::new();
         {
             let mut archive = creator(context.clone(), compression).await;
-            while keys.len() < 1000 {
+            while keys.len() < num {
                 let index = keys.len() as u64;
                 let mut key = [0u8; 64];
                 context.fill(&mut key);
@@ -667,7 +668,7 @@ mod tests {
         }
     }
 
-    fn test_many_keys_determinism<F, Fut, A>(creator: F, compression: Option<u8>)
+    fn test_many_keys_determinism<F, Fut, A>(creator: F, compression: Option<u8>, num: usize)
     where
         A: Archive<Key = FixedBytes<64>, Value = i32>,
         F: Fn(Context, Option<u8>) -> Fut + Copy + Send + 'static,
@@ -675,12 +676,12 @@ mod tests {
     {
         let executor = deterministic::Runner::default();
         let state1 = executor.start(|context| async move {
-            test_many_keys_impl(context.clone(), creator, compression).await;
+            test_many_keys_impl(context.clone(), creator, compression, num).await;
             context.auditor().state()
         });
         let executor = deterministic::Runner::default();
         let state2 = executor.start(|context| async move {
-            test_many_keys_impl(context.clone(), creator, compression).await;
+            test_many_keys_impl(context.clone(), creator, compression, num).await;
             context.auditor().state()
         });
         assert_eq!(state1, state2);
@@ -688,21 +689,33 @@ mod tests {
 
     #[test_traced]
     fn test_many_keys_prunable_no_compression() {
-        test_many_keys_determinism(create_prunable, None);
+        test_many_keys_determinism(create_prunable, None, 1_000);
     }
 
     #[test_traced]
     fn test_many_keys_prunable_compression() {
-        test_many_keys_determinism(create_prunable, Some(3));
+        test_many_keys_determinism(create_prunable, Some(3), 1_000);
     }
 
     #[test_traced]
     fn test_many_keys_immutable_no_compression() {
-        test_many_keys_determinism(create_immutable, None);
+        test_many_keys_determinism(create_immutable, None, 1_000);
     }
 
     #[test_traced]
     fn test_many_keys_immutable_compression() {
-        test_many_keys_determinism(create_immutable, Some(3));
+        test_many_keys_determinism(create_immutable, Some(3), 1_000);
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_many_keys_prunable_large() {
+        test_many_keys_determinism(create_prunable, None, 100_000);
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_many_keys_immutable_large() {
+        test_many_keys_determinism(create_immutable, None, 100_000);
     }
 }
