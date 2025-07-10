@@ -2,13 +2,11 @@ use super::{
     config::Config,
     ingress::{Mailbox, Message},
 };
-use crate::{
-    collection::{Endpoint, Originator},
-    Receiver, Recipients, Sender,
-};
+use crate::p2p::{Endpoint, Originator};
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{Committable, Digest, Digestible, PublicKey};
 use commonware_macros::select;
+use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},

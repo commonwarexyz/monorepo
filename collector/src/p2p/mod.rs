@@ -3,8 +3,8 @@
 //! The originator's [Collector] is used to distribute and collect responses.
 //! The endpoint's [Collector] is used to receive and respond to requests.
 
-use crate::Recipients;
 use commonware_cryptography::{Committable, Digest, Digestible, PublicKey};
+use commonware_p2p::Recipients;
 use futures::channel::oneshot;
 use std::{collections::HashMap, fmt::Debug, future::Future};
 

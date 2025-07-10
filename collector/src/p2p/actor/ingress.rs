@@ -1,5 +1,6 @@
-use crate::{collection::Collector, Recipients};
+use crate::p2p::Collector;
 use commonware_cryptography::{Committable, Digest, Digestible, PublicKey};
+use commonware_p2p::Recipients;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,

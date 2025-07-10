@@ -1,4 +1,4 @@
-use crate::collection::{Endpoint, Originator};
+use crate::p2p::{Endpoint, Originator};
 use commonware_cryptography::Digest;
 use std::marker::PhantomData;
 
