@@ -2,7 +2,7 @@
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_runtime::{tokio as tokio_runtime, Listener, Network, Runner};
+use commonware_runtime::{tokio as tokio_runtime, Listener, Network, Runner, Spawner as _};
 use commonware_storage::mmr::hasher::Standard;
 use commonware_sync::{
     crate_version, create_adb_config, create_test_operations, generate_db_id, read_message,
@@ -433,7 +433,7 @@ fn main() {
             match listener.accept().await {
                 Ok((client_addr, sink, stream)) => {
                     let state = state.clone();
-                    tokio::spawn(async move {
+                    context.clone().spawn(move|_|async move {
                         if let Err(e) =
                             handle_client(state.clone(), sink, stream, client_addr).await
                         {
