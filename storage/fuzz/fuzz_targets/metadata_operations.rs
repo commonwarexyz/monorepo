@@ -5,6 +5,7 @@ use commonware_runtime::{deterministic, Runner};
 use commonware_storage::metadata::{Config, Metadata};
 use commonware_utils::array::U64;
 use libfuzzer_sys::fuzz_target;
+use std::collections::BTreeMap;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum MetadataOperation {
@@ -17,10 +18,8 @@ enum MetadataOperation {
     Destroy,
     Keys { prefix: Option<Vec<u8>> },
     RemovePrefix { prefix: Vec<u8> },
-    // Add operations that test edge cases
     PutLargeValue { key: u64 },
     PutEmptyValue { key: u64 },
-    MultipleSyncs,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -28,96 +27,101 @@ struct FuzzInput {
     operations: Vec<MetadataOperation>,
 }
 
+fn bytes_u64(k: u64) -> [u8; 8] {
+    k.to_be_bytes()
+}
+
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        // Initialize metadata store
         let cfg = Config {
             partition: "metadata_operations_fuzz_test".to_string(),
             codec_config: ((0..).into(), ()),
         };
-        let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
+        let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
             .await
             .unwrap();
+
+        let mut model: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
 
         for op in input.operations.iter() {
             match op {
                 MetadataOperation::Put { key, value } => {
-                    let array_key = U64::new(*key);
-                    metadata.put(array_key, value.to_vec());
+                    metadata.put(U64::new(*key), value.clone());
+                    model.insert(*key, value.clone());
                 }
-
                 MetadataOperation::Get { key } => {
-                    let array_key = U64::new(*key);
-                    metadata.get(&array_key);
+                    let a = metadata.get(&U64::new(*key));
+                    let b = model.get(key).cloned();
+                    assert_eq!(a, b.as_ref());
                 }
-
                 MetadataOperation::Remove { key } => {
-                    let array_key = U64::new(*key);
-                    metadata.remove(&array_key);
+                    let a = metadata.remove(&U64::new(*key));
+                    let b = model.remove(key);
+                    assert_eq!(a, b);
                 }
-
-                MetadataOperation::Keys { prefix } => {
-                    let _ = metadata.keys(prefix.as_deref());
-                }
-
-                MetadataOperation::RemovePrefix { prefix } => {
-                    metadata.remove_prefix(prefix);
-                }
-
                 MetadataOperation::Clear => {
                     metadata.clear();
+                    model.clear();
                 }
-
                 MetadataOperation::Sync => {
-                    if metadata.sync().await.is_err() {
-                        panic!("Sync failed");
-                    }
+                    metadata.sync().await.unwrap();
                 }
-
                 MetadataOperation::Close => {
-                    if metadata.close().await.is_err() {
-                        panic!("close failed");
-                    }
+                    metadata.close().await.unwrap();
                     return;
                 }
-
                 MetadataOperation::Destroy => {
-                    if metadata.destroy().await.is_err() {
-                        panic!("destroy failed");
-                    }
+                    metadata.destroy().await.unwrap();
                     return;
                 }
-
+                MetadataOperation::Keys { prefix } => {
+                    let mut a: Vec<u64> = metadata
+                        .keys(prefix.as_deref())
+                        .map(|k| u64::from_be_bytes(k.as_ref().try_into().unwrap()))
+                        .collect();
+                    let mut b: Vec<u64> = model
+                        .iter()
+                        .filter(|(k, _)| {
+                            if let Some(p) = prefix {
+                                bytes_u64(**k).starts_with(p)
+                            } else {
+                                true
+                            }
+                        })
+                        .map(|(k, _)| *k)
+                        .collect();
+                    a.sort();
+                    b.sort();
+                    assert_eq!(a, b);
+                }
+                MetadataOperation::RemovePrefix { prefix } => {
+                    metadata.remove_prefix(prefix);
+                    model.retain(|k, _| !bytes_u64(*k).starts_with(prefix));
+                }
                 MetadataOperation::PutLargeValue { key } => {
-                    // Test with large values to find memory/size bugs
-                    let array_key = U64::new(*key);
-                    let large_value = vec![0u8; 100_000]; // 100KB
-                    metadata.put(array_key, large_value);
+                    let v = vec![0u8; 100_000];
+                    metadata.put(U64::new(*key), v.clone());
+                    model.insert(*key, v);
                 }
-
                 MetadataOperation::PutEmptyValue { key } => {
-                    // Test with empty values to find edge case bugs
-                    let array_key = U64::new(*key);
-                    metadata.put(array_key, Vec::new());
-                }
-
-                MetadataOperation::MultipleSyncs => {
-                    for i in 0..3 {
-                        if metadata.sync().await.is_err() {
-                            panic!("MultipleSync failed at iteration {i}");
-                        }
-                    }
+                    metadata.put(U64::new(*key), Vec::new());
+                    model.insert(*key, Vec::new());
                 }
             }
         }
 
-        // Clean up if metadata still exists - panic on cleanup errors
+        let mut a: Vec<u64> = metadata
+            .keys(None)
+            .map(|k| u64::from_be_bytes(k.as_ref().try_into().unwrap()))
+            .collect();
+        let mut b: Vec<u64> = model.keys().copied().collect();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
 
-        if metadata.destroy().await.is_err() {
-            panic!("final destroy failed");
-        }
+        metadata.destroy().await.unwrap();
     });
 }
 
