@@ -818,6 +818,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Start the resize
         self.resize_progress = Some(0);
+        debug!(old = old_size, new = new_size, "table resize started");
 
         Ok(())
     }
@@ -861,11 +862,14 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
             // Write the entries
             if slot_offset == 0 {
-                writes[entry_offset..].copy_from_slice(&reset_entry.encode());
-                writes[entry_offset + Entry::SIZE..].copy_from_slice(&entry2.encode());
+                writes[entry_offset..entry_offset + Entry::SIZE]
+                    .copy_from_slice(&reset_entry.encode());
+                writes[entry_offset + Entry::SIZE..entry_offset + Entry::FULL_SIZE]
+                    .copy_from_slice(&entry2.encode());
             } else {
                 writes[entry_offset..entry_offset + slot_offset].copy_from_slice(&entry1.encode());
-                writes[entry_offset + slot_offset..].copy_from_slice(&reset_entry.encode());
+                writes[entry_offset + slot_offset..entry_offset + Entry::FULL_SIZE]
+                    .copy_from_slice(&reset_entry.encode());
             }
         }
 
