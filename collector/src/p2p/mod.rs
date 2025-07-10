@@ -6,7 +6,7 @@
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use futures::channel::oneshot;
-use std::{collections::HashMap, fmt::Debug, future::Future};
+use std::{fmt::Debug, future::Future};
 
 pub mod actor;
 
@@ -20,41 +20,29 @@ pub trait Originator: Clone + Send + 'static {
         + 'static;
     type PublicKey: PublicKey;
 
+    /// Registers a request for collection.
+    ///
+    /// Once `minimum` responses have been collected, the [Originator] will be notified.
+    fn register(
+        &mut self,
+        commitment: <Self::Request as Committable>::Commitment,
+        minimum: usize,
+    ) -> impl Future<Output = ()> + Send;
+
     /// Sends a `request` to a set of `recipients`, returning the list of recipients that were
     /// successfully sent to.
     ///
     /// Once a quorum of responses have been collected, the [Originator] will be notified.
     fn send(
         &mut self,
-        request: Self::Request,
         recipients: Recipients<Self::PublicKey>,
+        request: Self::Request,
     ) -> impl Future<Output = Vec<Self::PublicKey>> + Send;
-
-    /// Peek at the collected responses for a given `digest`.
-    ///
-    /// Returns [None] if the request is not being collected.
-    fn peek(
-        &mut self,
-        commitment: <Self::Request as Committable>::Commitment,
-    ) -> impl Future<Output = Option<HashMap<Self::PublicKey, Self::Response>>> + Send;
 
     /// Cancels a request by `digest`, dropping all existing and future responses.
     fn cancel(
         &mut self,
         commitment: <Self::Request as Committable>::Commitment,
-    ) -> impl Future<Output = ()> + Send;
-}
-
-/// Interface for the application that originates requests.
-pub trait Monitor: Clone + Send + 'static {
-    type Response: Committable + Digestible + Debug + Send + 'static;
-    type PublicKey: PublicKey;
-
-    /// Called once a quorum of `responses` have been collected for a request.
-    fn collected(
-        &mut self,
-        commitment: <Self::Response as Committable>::Commitment,
-        responses: HashMap<Self::PublicKey, Self::Response>,
     ) -> impl Future<Output = ()> + Send;
 }
 
@@ -76,5 +64,18 @@ pub trait Handler: Clone + Send + 'static {
         origin: Self::PublicKey,
         request: Self::Request,
         responder: oneshot::Sender<Self::Response>,
+    ) -> impl Future<Output = ()> + Send;
+}
+
+/// Interface for the application that originates requests.
+pub trait Monitor: Clone + Send + 'static {
+    type Response: Committable + Digestible + Debug + Send + 'static;
+    type PublicKey: PublicKey;
+
+    /// Called for each response once `minimum` responses have been collected for a commitment.
+    fn collected(
+        &mut self,
+        origin: Self::PublicKey,
+        response: Self::Response,
     ) -> impl Future<Output = ()> + Send;
 }
