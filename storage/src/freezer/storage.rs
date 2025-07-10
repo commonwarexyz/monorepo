@@ -290,7 +290,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Sections with pending table updates to be synced
     modified_sections: BTreeSet<u64>,
     should_resize: bool,
-    resize_progress: Option<(u32, u32, u64)>,
+    resize_progress: Option<(u32, u32)>,
 
     // Metrics
     puts: Counter,
@@ -791,8 +791,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 
     /// Resize the table by doubling its size and split each bucket into two.
-    async fn resize(&mut self) -> Result<(), Error> {
-        let start = self.context.current();
+    async fn start_resize(&mut self) -> Result<(), Error> {
         self.resizes.inc();
 
         // Double the table size
@@ -800,6 +799,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let new_size = old_size.checked_mul(2).expect("table size overflow");
         self.table.resize(Self::table_offset(new_size)).await?;
 
+        // Start the resize
+        self.resize_progress = Some((old_size, 0));
+
+        Ok(())
+    }
+
+    async fn advance_resize(&mut self) -> Result<(), Error> {
         // Create write buffers for efficient batched writes
         let old_buffered_table = buffer::Write::new(
             self.table.clone(),
@@ -867,9 +873,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         );
 
         Ok(())
-    }
-
-    async fn advance_resize(&mut self) -> Result<(), Error> {
         // If done, update table size and mark resized
         self.table_size = new_size;
         self.should_resize = false;
@@ -901,10 +904,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Start a resize (if needed)
         if self.should_resize && self.resize_progress.is_none() {
-            self.resize().await?;
+            self.start_resize().await?;
         }
 
-        // Continue a resize if already ongoing
+        // Continue a resize (if ongoing)
         if self.resize_progress.is_some() {
             self.advance_resize().await?;
         }
