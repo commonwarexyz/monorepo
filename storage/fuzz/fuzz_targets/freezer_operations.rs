@@ -36,12 +36,12 @@ fn fuzz(input: FuzzInput) {
             journal_partition: "fuzz_journal".into(),
             journal_compression: None,
             journal_write_buffer: 1024 * 1024,
-            journal_target_size: 100 * 1024 * 1024,
+            journal_target_size: 10 * 1024 * 1024,
             table_partition: "fuzz_table".into(),
-            table_initial_size: 65_536,
+            table_initial_size: 256,
             table_resize_frequency: 4,
-            table_read_buffer: 1024 * 1024,
-            table_write_buffer: 1024 * 1024,
+            table_resize_chunk_size: 128,
+            table_replay_buffer: 64 * 1024,
             codec_config: (),
         };
         let mut freezer = Freezer::<_, FixedBytes<32>, i32>::init(context.clone(), cfg.clone())
