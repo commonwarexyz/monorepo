@@ -3,7 +3,7 @@
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_runtime::{
-    tokio as tokio_runtime, Listener, Metrics as _, Network, Runner, Spawner as _,
+    tokio as tokio_runtime, Listener, Metrics as _, Network, Runner, RwLock, Spawner as _,
 };
 use commonware_storage::mmr::hasher::Standard;
 use commonware_stream::utils::codec::{recv_frame, send_frame};
@@ -19,7 +19,6 @@ use std::{
         Arc,
     },
 };
-use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 const MAX_BATCH_SIZE: u64 = 100;
@@ -46,7 +45,7 @@ where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
     /// The database wrapped in async mutex.
-    database: Arc<Mutex<Database<E>>>,
+    database: Arc<RwLock<Database<E>>>,
     /// Request counter for metrics.
     request_counter: AtomicU64,
     /// Error counter for metrics.
@@ -59,7 +58,7 @@ where
 {
     fn new(database: Database<E>) -> Self {
         Self {
-            database: Arc::new(Mutex::new(database)),
+            database: Arc::new(RwLock::new(database)),
             request_counter: AtomicU64::new(0),
             error_counter: AtomicU64::new(0),
         }
@@ -116,7 +115,7 @@ where
     request.validate()?;
     state.inc_requests();
 
-    let database = state.database.lock().await;
+    let database = state.database.read().await;
 
     // Get the current database state
     let oldest_retained_loc = database.oldest_retained_loc().unwrap_or(0);
@@ -150,7 +149,7 @@ where
     request.validate()?;
     state.inc_requests();
 
-    let database = state.database.lock().await;
+    let database = state.database.read().await;
 
     // Check if we have enough operations
     let db_size = database.op_count();

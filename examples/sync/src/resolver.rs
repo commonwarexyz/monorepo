@@ -6,6 +6,7 @@ use crate::{
     MAX_MESSAGE_SIZE,
 };
 use commonware_codec::{DecodeExt, Encode, Read};
+use commonware_runtime::RwLock;
 use commonware_storage::{
     adb::any::sync::{
         resolver::{GetOperationsResult, Resolver},
@@ -22,7 +23,6 @@ use std::{
     sync::{atomic::AtomicU64, Arc},
 };
 use thiserror::Error;
-use tokio::sync::Mutex;
 use tracing::{error, info};
 
 const MAX_DIGESTS: usize = 10_000;
@@ -46,7 +46,7 @@ where
     /// Server address.
     server_addr: SocketAddr,
     /// Persistent connection (wrapped in mutex for async access).
-    connection: Arc<Mutex<Option<Connection<E>>>>,
+    connection: Arc<RwLock<Option<Connection<E>>>>,
     /// Request ID counter.
     request_id_counter: AtomicU64,
 }
@@ -59,7 +59,7 @@ where
     pub fn new(server_addr: SocketAddr, context: E) -> Self {
         Self {
             server_addr,
-            connection: Arc::new(Mutex::new(None)),
+            connection: Arc::new(RwLock::new(None)),
             context,
             request_id_counter: AtomicU64::new(0),
         }
@@ -67,7 +67,7 @@ where
 
     /// Connect to the server if not already connected.
     async fn get_connection(&self) -> Result<(), ResolverError> {
-        let mut connection_guard = self.connection.lock().await;
+        let mut connection_guard = self.connection.write().await;
 
         // Check if we already have a connection
         if connection_guard.is_some() {
@@ -99,7 +99,7 @@ where
         // Ensure we have a connection
         self.get_connection().await?;
 
-        let mut connection_guard = self.connection.lock().await;
+        let mut connection_guard = self.connection.write().await;
         let connection = connection_guard
             .as_mut()
             .ok_or_else(|| ResolverError::ConnectionError("No connection available".to_string()))?;
