@@ -24,6 +24,7 @@ commonware-runtime = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-utils = { workspace = true }
 commonware-cryptography = { workspace = true }
+commonware-stream = { workspace = true }
 
 tokio = {workspace = true }
 bytes = { workspace = true }

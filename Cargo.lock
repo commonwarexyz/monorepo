@@ -1330,6 +1330,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-runtime",
  "commonware-storage",
+ "commonware-stream",
  "commonware-utils",
  "futures",
  "prometheus-client",

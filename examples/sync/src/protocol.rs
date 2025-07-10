@@ -12,7 +12,6 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt as _, Write};
 use commonware_cryptography::sha256::Digest;
-use commonware_runtime::{Sink, Stream};
 use std::num::NonZeroU64;
 use thiserror::Error;
 
@@ -21,98 +20,6 @@ pub const PROTOCOL_VERSION: u8 = 0;
 
 /// Maximum message size in bytes (10MB).
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
-
-/// Read a length-prefixed message from a stream.
-///
-/// This function reads a 4-byte big-endian length prefix followed by the message data.
-/// The message length is validated to prevent DoS attacks.
-pub async fn read_message<S: Stream>(stream: &mut S) -> Result<Vec<u8>, NetworkError> {
-    // Read the 4-byte length prefix
-    let length_buf = vec![0u8; 4];
-    let length_data = stream
-        .recv(length_buf)
-        .await
-        .map_err(|e| NetworkError::ReadFailed(e.to_string()))?;
-
-    if length_data.len() != 4 {
-        return Err(NetworkError::InvalidLengthPrefix);
-    }
-
-    // Convert bytes to u32 (network byte order)
-    let message_length = u32::from_be_bytes([
-        length_data.as_ref()[0],
-        length_data.as_ref()[1],
-        length_data.as_ref()[2],
-        length_data.as_ref()[3],
-    ]) as usize;
-
-    // Validate message length (prevent DoS)
-    if message_length == 0 || message_length > MAX_MESSAGE_SIZE {
-        return Err(NetworkError::InvalidMessageLength(message_length));
-    }
-
-    // Read the actual message
-    let message_buf = vec![0u8; message_length];
-    let message_data = stream
-        .recv(message_buf)
-        .await
-        .map_err(|e| NetworkError::ReadFailed(e.to_string()))?;
-
-    if message_data.len() != message_length {
-        return Err(NetworkError::MessageLengthMismatch {
-            expected: message_length,
-            actual: message_data.len(),
-        });
-    }
-
-    Ok(message_data.as_ref().to_vec())
-}
-
-/// Send a length-prefixed message to a sink.
-///
-/// This function sends a 4-byte big-endian length prefix followed by the message data.
-pub async fn send_message<S: Sink>(sink: &mut S, message: &[u8]) -> Result<(), NetworkError> {
-    // Validate message length
-    if message.len() > MAX_MESSAGE_SIZE {
-        return Err(NetworkError::MessageTooLarge(message.len()));
-    }
-
-    // Send 4-byte length prefix
-    let length = message.len() as u32;
-    let length_bytes = length.to_be_bytes();
-    sink.send(length_bytes.to_vec())
-        .await
-        .map_err(|e| NetworkError::WriteFailed(e.to_string()))?;
-
-    // Send the actual message
-    sink.send(message.to_vec())
-        .await
-        .map_err(|e| NetworkError::WriteFailed(e.to_string()))?;
-
-    Ok(())
-}
-
-/// Errors that can occur during message framing operations.
-#[derive(Debug, Error)]
-pub enum NetworkError {
-    #[error("Failed to read from stream: {0}")]
-    ReadFailed(String),
-
-    #[error("Failed to write to sink: {0}")]
-    WriteFailed(String),
-
-    #[error("Invalid length prefix")]
-    InvalidLengthPrefix,
-
-    #[error("Invalid message length: {0} (max: {MAX_MESSAGE_SIZE})")]
-    InvalidMessageLength(usize),
-
-    #[error("Message too large: {0} bytes (max: {MAX_MESSAGE_SIZE})")]
-    MessageTooLarge(usize),
-
-    #[error("Message length mismatch: expected {expected}, got {actual}")]
-    MessageLengthMismatch { expected: usize, actual: usize },
-}
 
 /// Network protocol messages for ADB sync.
 #[derive(Debug, Clone)]

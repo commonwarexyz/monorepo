@@ -6,11 +6,11 @@ use commonware_runtime::{
     tokio as tokio_runtime, Listener, Metrics as _, Network, Runner, Spawner as _,
 };
 use commonware_storage::mmr::hasher::Standard;
+use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    crate_version, create_adb_config, create_test_operations, generate_db_id, read_message,
-    send_message, Database, ErrorResponse, GetOperationsRequest, GetOperationsResponse,
-    GetServerMetadataRequest, GetServerMetadataResponse, Message, NetworkError, Operation,
-    ProtocolError,
+    crate_version, create_adb_config, create_test_operations, generate_db_id, Database,
+    ErrorResponse, GetOperationsRequest, GetOperationsResponse, GetServerMetadataRequest,
+    GetServerMetadataResponse, Message, Operation, ProtocolError, MAX_MESSAGE_SIZE,
 };
 use std::{
     net::{Ipv4Addr, SocketAddr},
@@ -220,14 +220,10 @@ where
 
     loop {
         // Read length-prefixed message
-        let message_data = match read_message(&mut stream).await {
+        let message_data = match recv_frame(&mut stream, MAX_MESSAGE_SIZE).await {
             Ok(data) => data,
-            Err(NetworkError::ReadFailed(_)) => {
-                info!(client_addr = %client_addr, "Client disconnected");
-                break;
-            }
             Err(e) => {
-                error!(client_addr = %client_addr, error = %e, "❌ Connection error");
+                info!(client_addr = %client_addr, error = %e, "Recv failed (likely because client disconnected)");
                 state.inc_errors();
                 break;
             }
@@ -278,8 +274,8 @@ where
 
         // Send the response with length prefix
         let response_data = response.encode().to_vec();
-        if let Err(e) = send_message(&mut sink, &response_data).await {
-            error!(client_addr = %client_addr, error = %e, "❌ Failed to send response");
+        if let Err(e) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
+            info!(client_addr = %client_addr, error = %e, "Send failed (likely because client disconnected)");
             state.inc_errors();
             break;
         }

@@ -2,8 +2,8 @@
 //! to fetch operations and proofs.
 
 use crate::{
-    read_message, send_message, GetOperationsRequest, GetServerMetadataRequest,
-    GetServerMetadataResponse, Message,
+    GetOperationsRequest, GetServerMetadataRequest, GetServerMetadataResponse, Message,
+    MAX_MESSAGE_SIZE,
 };
 use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_storage::{
@@ -13,6 +13,7 @@ use commonware_storage::{
     },
     mmr::verification::Proof,
 };
+use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::{
@@ -106,12 +107,12 @@ where
         // Serialize and send the request
         let request_data = request.encode().to_vec();
 
-        send_message(&mut connection.sink, &request_data)
+        send_frame(&mut connection.sink, &request_data, MAX_MESSAGE_SIZE)
             .await
             .map_err(|e| ResolverError::ConnectionError(e.to_string()))?;
 
         // Read the response
-        let response_data = read_message(&mut connection.stream)
+        let response_data = recv_frame(&mut connection.stream, MAX_MESSAGE_SIZE)
             .await
             .map_err(|e| ResolverError::ConnectionError(e.to_string()))?;
 
