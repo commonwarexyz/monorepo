@@ -41,6 +41,7 @@ commonware-utils = { version = "0.0.54", path = "utils" }
 thiserror = "2.0.12"
 bytes = "1.7.1"
 sha2 = "0.10.8"
+blake3 = "1.8.2"
 rand = "0.8.5"
 rand_distr = "0.4.3"
 futures = "0.3.31"
