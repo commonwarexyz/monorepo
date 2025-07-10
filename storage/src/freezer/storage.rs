@@ -271,7 +271,6 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Table configuration
     table_partition: String,
     table_size: u32,
-    table_initial_size: u32,
     table_resize_frequency: u8,
     table_read_buffer: usize,
     table_write_buffer: usize,
@@ -591,7 +590,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             context,
             table_partition: config.table_partition,
             table_size: checkpoint.table_size,
-            table_initial_size: config.table_initial_size,
             table_resize_frequency: config.table_resize_frequency,
             table_read_buffer: config.table_read_buffer,
             table_write_buffer: config.table_write_buffer,
@@ -620,29 +618,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     /// - After resizing to 8: uses 3 bits, bucket 0 splits into indices 0 and 4.
     /// - After resizing to 16: uses 4 bits, bucket 0 splits into indices 0 and 8, and so on.
     ///
-    /// To determine the appropriate bucket, we mask the key's hash based on the current table size.
-    /// This ensures entries are consistently mapped even after resizes.
+    /// To determine the appropriate bucket, we AND the key's hash with the current table size.
     fn table_index(&self, key: &K) -> u32 {
-        // Calculate the depth (how many times the table has been resized).
-        //
-        // `depth = log2(table_size / table_initial_size)`
-        let depth = (self.table_size / self.table_initial_size).trailing_zeros();
-
-        // Calculate the number of bits to use.
-        //
-        // `initial_bits = log2(table_initial_size)`
-        let initial_bits = self.table_initial_size.trailing_zeros();
-        let total_bits = initial_bits + depth;
-
-        // Extract the lower `total_bits` bits from the hash.
-        //
-        // This ensures that when the table doubles, entries at position `X`
-        // will either stay at `X` or move to `X + old_size`.
-        let mask = (1 << total_bits) - 1;
-
-        // Calculate the table index.
         let hash = crc32fast::hash(key.as_ref());
-        hash & mask
+        hash & (self.table_size - 1)
     }
 
     /// Choose the newer valid entry between two table slots.
