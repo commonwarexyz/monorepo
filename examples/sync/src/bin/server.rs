@@ -31,6 +31,8 @@ struct ServerConfig {
     initial_ops: usize,
     /// Storage directory.
     storage_dir: String,
+    /// Seed for generating test operations.
+    seed: u64,
 }
 
 /// Server state containing the database and metrics.
@@ -318,6 +320,14 @@ fn main() {
                 .help("Storage directory for database")
                 .default_value("/tmp/adb_sync_server"),
         )
+        .arg(
+            Arg::new("seed")
+                .short('s')
+                .long("seed")
+                .value_name("SEED")
+                .help("Seed for generating test operations")
+                .default_value("1337"),
+        )
         .get_matches();
 
     let config = ServerConfig {
@@ -341,6 +351,14 @@ fn main() {
             .get_one::<String>("storage-dir")
             .unwrap()
             .to_string(),
+        seed: matches
+            .get_one::<String>("seed")
+            .unwrap()
+            .parse()
+            .unwrap_or_else(|e| {
+                eprintln!("❌ Invalid seed: {e}");
+                std::process::exit(1);
+            }),
     };
 
     info!("ADB Sync Server starting");
@@ -368,7 +386,7 @@ fn main() {
         };
 
         // Create and add initial operations
-        let initial_ops = create_test_operations(config.initial_ops, 12345);
+        let initial_ops = create_test_operations(config.initial_ops, config.seed);
         info!(operations_len = initial_ops.len(), "Creating initial operations");
 
         if let Err(e) = add_operations(&mut database, initial_ops).await {

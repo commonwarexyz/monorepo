@@ -30,13 +30,14 @@ cargo test
 cargo run --bin server
 
 # Start server with custom settings
-cargo run --bin server -- --port 8080 --initial-ops 50 --storage-dir /tmp/my_server
+cargo run --bin server -- --port 8080 --initial-ops 50 --storage-dir /tmp/my_server --seed 1337
 ```
 
 Server options:
 - `-p, --port <PORT>`: Port to listen on (default: 8080)
 - `-i, --initial-ops <COUNT>`: Number of initial operations to create (default: 100)
 - `-d, --storage-dir <PATH>`: Storage directory (default: /tmp/adb_sync_server)
+- `-s, --seed <SEED>`: Seed for generating test operations (default: 1337)
 
 ### Running the Client
 
