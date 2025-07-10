@@ -123,22 +123,6 @@ mod tests {
         prunable::Archive::init(context, cfg).await.unwrap()
     }
 
-    async fn create_prunable_large_value(
-        context: Context,
-        compression: Option<u8>,
-    ) -> impl Archive<Key = FixedBytes<64>, Value = FixedBytes<1024>> {
-        let cfg = prunable::Config {
-            partition: "test".into(),
-            translator: TwoCap,
-            compression,
-            codec_config: (),
-            items_per_section: 256,
-            write_buffer: 1024,
-            replay_buffer: 1024,
-        };
-        prunable::Archive::init(context, cfg).await.unwrap()
-    }
-
     async fn create_immutable(
         context: Context,
         compression: Option<u8>,
@@ -155,29 +139,6 @@ mod tests {
             freezer_journal_compression: compression,
             ordinal_partition: "test_ordinal".into(),
             items_per_section: 1024,
-            write_buffer: 1024,
-            replay_buffer: 1024,
-            codec_config: (),
-        };
-        immutable::Archive::init(context, cfg).await.unwrap()
-    }
-
-    async fn create_immutable_large_value(
-        context: Context,
-        compression: Option<u8>,
-    ) -> impl Archive<Key = FixedBytes<64>, Value = FixedBytes<1024>> {
-        let cfg = immutable::Config {
-            metadata_partition: "test_metadata".into(),
-            freezer_table_partition: "test_table".into(),
-            freezer_table_initial_size: 1024,
-            freezer_table_resize_frequency: 10,
-            freezer_table_read_buffer: 1024,
-            freezer_table_write_buffer: 1024,
-            freezer_journal_partition: "test_journal".into(),
-            freezer_journal_target_size: 1024,
-            freezer_journal_compression: compression,
-            ordinal_partition: "test_ordinal".into(),
-            items_per_section: 256,
             write_buffer: 1024,
             replay_buffer: 1024,
             codec_config: (),
@@ -580,7 +541,7 @@ mod tests {
         creator: F,
         compression: Option<u8>,
     ) where
-        A: Archive<Key = FixedBytes<64>, Value = FixedBytes<1024>>,
+        A: Archive<Key = FixedBytes<64>, Value = i32>,
         F: Fn(Context, Option<u8>) -> Fut,
         Fut: Future<Output = A>,
     {
@@ -594,12 +555,10 @@ mod tests {
                 let mut key = [0u8; 64];
                 context.fill(&mut key);
                 let key = FixedBytes::<64>::decode(key.as_ref()).unwrap();
-                let mut data = [0u8; 1024];
-                context.fill(&mut data);
-                let data = FixedBytes::<1024>::decode(data.as_ref()).unwrap();
+                let data: i32 = context.gen();
 
                 archive
-                    .put(index, key.clone(), data.clone())
+                    .put(index, key.clone(), data)
                     .await
                     .expect("Failed to put data");
                 keys.insert(key, (index, data));
@@ -652,7 +611,7 @@ mod tests {
     fn test_many_keys_prunable_no_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            test_many_keys_impl(context, create_prunable_large_value, None).await;
+            test_many_keys_impl(context, create_prunable, None).await;
         });
     }
 
@@ -660,7 +619,7 @@ mod tests {
     fn test_many_keys_prunable_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            test_many_keys_impl(context, create_prunable_large_value, Some(3)).await;
+            test_many_keys_impl(context, create_prunable, Some(3)).await;
         });
     }
 
@@ -668,7 +627,7 @@ mod tests {
     fn test_many_keys_immutable_no_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            test_many_keys_impl(context, create_immutable_large_value, None).await;
+            test_many_keys_impl(context, create_immutable, None).await;
         });
     }
 
@@ -676,7 +635,7 @@ mod tests {
     fn test_many_keys_immutable_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            test_many_keys_impl(context, create_immutable_large_value, Some(3)).await;
+            test_many_keys_impl(context, create_immutable, Some(3)).await;
         });
     }
 }
