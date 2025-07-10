@@ -17,7 +17,7 @@ use std::num::NonZeroU64;
 use thiserror::Error;
 
 /// Protocol version identifier.
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 0;
 
 /// Maximum message size in bytes (10MB).
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;

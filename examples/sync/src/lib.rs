@@ -1,4 +1,4 @@
-//! ADB sync example library.
+//! [Any](commonware_storage::adb::any::Any) database sync example library.
 //!
 //! This library demonstrates ADB (Any Database) synchronization between clients and servers.
 //! It includes network protocols, database configuration, and utilities for creating test data.

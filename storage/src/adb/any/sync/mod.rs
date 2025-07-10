@@ -59,7 +59,6 @@ pub enum Error {
 //
 // TODO(#1213) Handle existing state: https://github.com/commonwarexyz/monorepo/issues/1213
 // TODO(#1214) Parallelize operation fetching: https://github.com/commonwarexyz/monorepo/issues/1214
-// TODO(#1215) Add example: https://github.com/commonwarexyz/monorepo/issues/1215
 pub async fn sync<E, K, V, H, T, R>(
     config: Config<E, K, V, H, T, R>,
 ) -> Result<Any<E, K, V, H, T>, Error>

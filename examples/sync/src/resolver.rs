@@ -24,6 +24,8 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
+const MAX_DIGESTS: usize = 10_000;
+
 /// Connection state for persistent networking.
 struct Connection<E>
 where
@@ -185,15 +187,14 @@ where
         // Deserialize the proof
         let proof = {
             let mut buf = &response.proof_bytes[..];
-            let max_digests = 10_000; // Allow up to 10,000 digests
-            Proof::read_cfg(&mut buf, &max_digests).map_err(|e| SyncError::Resolver(Box::new(e)))?
+            Proof::read_cfg(&mut buf, &MAX_DIGESTS).map_err(|e| SyncError::Resolver(Box::new(e)))?
         };
 
         // Deserialize the operations
         let operations = {
             let mut buf = &response.operations_bytes[..];
             use commonware_codec::RangeCfg;
-            let range_cfg = RangeCfg::from(0..=10_000); // Allow up to 10,000 operations
+            let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
             Vec::<commonware_storage::adb::operation::Operation<K, V>>::read_cfg(
                 &mut buf,
                 &(range_cfg, ()),

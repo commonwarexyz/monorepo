@@ -19,6 +19,8 @@ use std::{
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
+const MAX_BATCH_SIZE: u64 = 100;
+
 /// Server configuration.
 #[derive(Debug)]
 struct ServerConfig {
@@ -155,7 +157,7 @@ where
 
     // Calculate how many operations to return
     let max_ops = std::cmp::min(request.max_ops.get(), db_size - request.start_loc);
-    let max_ops = std::cmp::min(max_ops, 100); // Limit to 100 operations per request
+    let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
 
     info!(
         max_ops,
@@ -340,7 +342,7 @@ fn main() {
             .to_string(),
     };
 
-    info!("🎬 ADB Sync Server starting");
+    info!("▶️ ADB Sync Server starting");
     info!(
         port = config.port,
         initial_ops = config.initial_ops,
