@@ -88,11 +88,11 @@ mod tests {
 
         // Ensure we generate values both below and above the average time.
         let (mut below, mut above) = (false, false);
+        let avg = time + jitter;
         for _ in 0..100 {
             let new_time = time.add_jittered(&mut rng, jitter);
 
             // Record values higher or lower than the average
-            let avg = time + jitter;
             below |= new_time < avg;
             above |= new_time > avg;
 

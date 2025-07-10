@@ -146,6 +146,7 @@ mod tests {
             freezer_table_partition: "test_table".into(),
             freezer_table_initial_size: 64,
             freezer_table_resize_frequency: 2,
+            freezer_table_resize_chunk_size: 32,
             freezer_journal_partition: "test_journal".into(),
             freezer_journal_target_size: 1024 * 1024,
             freezer_journal_compression: compression,

@@ -55,6 +55,7 @@ impl Archive {
                     freezer_table_partition: "archive_bench_table".into(),
                     freezer_table_initial_size: 131_072,
                     freezer_table_resize_frequency: 4,
+                    freezer_table_resize_chunk_size: 1024,
                     freezer_journal_partition: "archive_bench_journal".into(),
                     freezer_journal_target_size: 1024 * 1024 * 10, // 10MB
                     freezer_journal_compression: compression,

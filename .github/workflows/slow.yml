@@ -80,7 +80,7 @@ jobs:
     timeout-minutes: 180
     strategy:
       matrix:
-        fuzz_dir: [codec/fuzz, cryptography/fuzz, storage/fuzz, stream/fuzz]
+        fuzz_dir: [codec/fuzz, cryptography/fuzz, storage/fuzz, stream/fuzz, utils/fuzz]
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
