@@ -817,14 +817,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 
     /// Write a pair of entries to a buffer, replacing one slot with the new entry.
-    fn rewrite_entries(
-        buf: &mut Vec<u8>,
-        entry1: &Entry,
-        entry2: &Entry,
-        new_entry: &Entry,
-        epoch: u64,
-    ) {
-        if Self::select_write_slot(entry1, entry2, epoch) == 0 {
+    fn rewrite_entries(buf: &mut Vec<u8>, entry1: &Entry, entry2: &Entry, new_entry: &Entry) {
+        if Self::select_write_slot(entry1, entry2, new_entry.epoch) == 0 {
             buf.extend_from_slice(&new_entry.encode());
             buf.extend_from_slice(&entry2.encode());
         } else {
@@ -870,7 +864,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
             // Rewrite the entries
             let reset_entry = Entry::new(self.next_epoch, section, offset, 0);
-            Self::rewrite_entries(&mut writes, &entry1, &entry2, &reset_entry, self.next_epoch);
+            Self::rewrite_entries(&mut writes, &entry1, &entry2, &reset_entry);
         }
 
         // Put the writes into the table
