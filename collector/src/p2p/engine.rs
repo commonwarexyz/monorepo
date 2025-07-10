@@ -6,7 +6,7 @@ use crate::p2p::{Handler, Monitor};
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
-use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_p2p::{utils::codec::wrap, Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::futures::Pool;
 use futures::{
@@ -18,14 +18,15 @@ use std::collections::{HashMap, HashSet};
 use tracing::{debug, error, warn};
 
 /// Engine that will disperse messages and collect responses.
-pub struct Engine<
+pub struct Engine<E, Rq, Rs, P, M, H>
+where
     E: Clock + Spawner,
     Rq: Committable + Digestible + Codec,
     Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest> + Codec,
     P: PublicKey,
     M: Monitor<Response = Rs, PublicKey = P>,
     H: Handler<Request = Rq, Response = Rs, PublicKey = P>,
-> {
+{
     // Configuration
     context: E,
     priority_request: bool,
@@ -47,15 +48,18 @@ pub struct Engine<
     responses: Counter,
 }
 
-impl<
-        E: Clock + Spawner + Metrics,
-        Rq: Committable + Digestible + Codec,
-        Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest> + Codec,
-        P: PublicKey,
-        M: Monitor<Response = Rs, PublicKey = P>,
-        H: Handler<Request = Rq, Response = Rs, PublicKey = P>,
-    > Engine<E, Rq, Rs, P, M, H>
+impl<E, Rq, Rs, P, M, H> Engine<E, Rq, Rs, P, M, H>
+where
+    E: Clock + Spawner + Metrics,
+    Rq: Committable + Digestible + Codec,
+    Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest> + Codec,
+    P: PublicKey,
+    M: Monitor<Response = Rs, PublicKey = P>,
+    H: Handler<Request = Rq, Response = Rs, PublicKey = P>,
 {
+    /// Creates a new engine with the given configuration.
+    ///
+    /// Returns a tuple of the engine and the mailbox for sending messages.
     pub fn new(context: E, cfg: Config<M, H, Rq::Cfg, Rs::Cfg>) -> (Self, Mailbox<P, Rq>) {
         // Create mailbox
         let (tx, rx) = mpsc::channel(cfg.mailbox_size);
@@ -92,19 +96,27 @@ impl<
         )
     }
 
+    /// Starts the engine with the given network channels.
+    ///
+    /// Returns a handle that can be used to wait for the engine to complete.
     pub fn start(
         mut self,
-        request_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        response_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(request_network, response_network))
+        self.context.spawn_ref()(self.run(requests, responses))
     }
 
     async fn run(
         mut self,
-        (mut req_tx, mut req_rx): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        (mut res_tx, mut res_rx): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
+        // Wrap channels
+        let (mut req_tx, mut req_rx) = wrap(self.request_codec, requests.0, requests.1);
+        let (mut res_tx, mut res_rx) = wrap(self.response_codec, responses.0, responses.1);
+
+        // Create futures pool
         let mut processed: Pool<Result<(P, Rs), oneshot::Canceled>> = Pool::default();
         loop {
             select! {
@@ -119,12 +131,16 @@ impl<
                                 self.outstanding.set(self.tracked.len() as i64);
 
                                 // Send the request to recipients
-                                match req_tx.send(recipients, request.encode().into(), self.priority_request).await {
+                                match req_tx.send(
+                                    recipients,
+                                    request,
+                                    self.priority_request
+                                ).await {
                                     Ok(recipients) => {
                                         let _ = responder.send(recipients);
                                     }
                                     Err(err) => {
-                                        error!(?err, "failed to send request");
+                                        error!(?err, ?commitment, "failed to send message");
                                     }
                                 }
                             },
@@ -145,8 +161,11 @@ impl<
                     self.responses.inc();
 
                     // Send the response
-                    let reply = reply.encode();
-                    let _ = res_tx.send(Recipients::One(peer), reply.into(), self.priority_response).await;
+                    let _ = res_tx.send(
+                        Recipients::One(peer),
+                        reply,
+                        self.priority_response
+                    ).await;
                 },
 
                 // Request from an originator
@@ -161,9 +180,7 @@ impl<
                             break;
                         }
                     };
-
-                    // Decode the message
-                    let msg = match Rq::decode_cfg(msg, &self.request_codec) {
+                    let msg = match msg {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
@@ -189,9 +206,7 @@ impl<
                             break;
                         }
                     };
-
-                    // Decode the message
-                    let response = match Rs::decode_cfg(msg, &self.response_codec) {
+                    let msg = match msg {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
@@ -200,7 +215,7 @@ impl<
                     };
 
                     // Handle the response
-                    let commitment = response.commitment();
+                    let commitment = msg.commitment();
                     let Some(responses) = self.tracked.get_mut(&commitment) else {
                         debug!(?commitment, ?peer, "response for unknown commitment");
                         continue;
@@ -211,7 +226,7 @@ impl<
                     }
 
                     // Send the response to the monitor
-                    self.monitor.collected(peer, response, responses.len()).await;
+                    self.monitor.collected(peer, msg, responses.len()).await;
                 },
             }
         }
