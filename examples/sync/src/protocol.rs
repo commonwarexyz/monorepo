@@ -7,7 +7,6 @@
 //! The protocol supports:
 //! - Getting server metadata (database size, target hash, operation bounds)
 //! - Fetching operations with cryptographic proofs
-//! - Connection health checking (ping/pong)
 //! - Comprehensive error handling
 
 use serde::{Deserialize, Serialize};
@@ -33,10 +32,6 @@ pub enum Message {
     GetServerMetadataResponse(GetServerMetadataResponse),
     /// Error response.
     Error(ErrorResponse),
-    /// Ping message for connection health.
-    Ping,
-    /// Pong response to ping.
-    Pong,
 }
 
 // ========== Request/Response Types ==========

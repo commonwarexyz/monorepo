@@ -209,7 +209,7 @@ fn main() {
 
     let config = ClientConfig {
         server: matches
-            .get_one::<String>("server")
+            .get_one::<String>("server-address")
             .unwrap()
             .parse()
             .unwrap_or_else(|e| {

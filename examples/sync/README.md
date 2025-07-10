@@ -75,14 +75,14 @@ Server options:
 cargo run --bin client
 
 # Connect with custom settings
-cargo run --bin client -- --server 127.0.0.1:8080 --batch-size 25
+cargo run --bin client -- --server-address 127.0.0.1:8080 --batch-size 25
 
 # Run with repeated syncing
 cargo run --bin client -- --repeat --repeat-interval 5
 ```
 
 Client options:
-- `-s, --server <ADDRESS>`: Server address to connect to (default: 127.0.0.1:8080)
+- `-s, --server-address <ADDRESS>`: Server address to connect to (default: 127.0.0.1:8080)
 - `-b, --batch-size <SIZE>`: Batch size for operations (default: 50)
 - `-r, --repeat`: Repeat syncing
 - `--repeat-interval <SECONDS>`: Repeat interval in seconds (default: 10)
@@ -110,8 +110,8 @@ Client options:
 
 ### Current Status
 
-- ✅ Server: Handles TCP connections and serves operations (basic implementation)
-- ✅ Client: Connects to server and simulates sync operations
+- ✅ Server: Creates database, inserts data, serves operations to clients so they can sync.
+- ✅ Client: Connects to server and syncs to server state
 - ✅ NetworkResolver: Network communication infrastructure
 - ✅ Protocol: Message definitions and serialization
 - ✅ Tests: Unit tests for core functionality
@@ -123,7 +123,6 @@ The protocol uses JSON over TCP for communication. Messages include:
 - `GetOperationsRequest`: Request operations from server
 - `GetOperationsResponse`: Response with operations and proofs
 - `Error`: Error responses
-- `Ping`/`Pong`: Connection health checks
 
 ### Sync Process
 

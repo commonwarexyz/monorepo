@@ -21,7 +21,7 @@ use std::{
     },
 };
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 /// Server configuration.
 #[derive(Debug)]
@@ -319,10 +319,6 @@ where
                         Message::Error(e.into())
                     }
                 }
-            }
-            Message::Ping => {
-                debug!(client_addr = %client_addr, "🏓 Ping");
-                Message::Pong
             }
             _ => {
                 warn!(client_addr = %client_addr, "❌ Unexpected message type");
