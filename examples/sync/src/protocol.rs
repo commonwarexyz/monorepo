@@ -179,8 +179,6 @@ pub struct GetServerMetadataResponse {
     pub version: u8,
     /// Request ID that this response corresponds to.
     pub request_id: u64,
-    /// Current database size (operation count).
-    pub database_size: u64,
     /// Target hash of the database (hex string).
     pub target_hash: String,
     /// Oldest retained operation location.
@@ -408,7 +406,6 @@ impl Write for GetServerMetadataResponse {
     fn write(&self, buf: &mut impl BufMut) {
         self.version.write(buf);
         self.request_id.write(buf);
-        self.database_size.write(buf);
         let target_hash_bytes = self.target_hash.as_bytes();
         target_hash_bytes.to_vec().write(buf);
         self.oldest_retained_loc.write(buf);
@@ -420,7 +417,6 @@ impl EncodeSize for GetServerMetadataResponse {
     fn encode_size(&self) -> usize {
         self.version.encode_size()
             + self.request_id.encode_size()
-            + self.database_size.encode_size()
             + self.target_hash.as_bytes().to_vec().encode_size()
             + self.oldest_retained_loc.encode_size()
             + self.latest_op_loc.encode_size()
@@ -433,7 +429,6 @@ impl Read for GetServerMetadataResponse {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let version = u8::read(buf)?;
         let request_id = u64::read(buf)?;
-        let database_size = u64::read(buf)?;
         // Read string as Vec<u8> and convert to String
         // Target hash should be exactly 64 characters (SHA256 hex)
         let target_hash_bytes = Vec::<u8>::read_range(buf, 0..=64)?;
@@ -445,7 +440,6 @@ impl Read for GetServerMetadataResponse {
         Ok(Self {
             version,
             request_id,
-            database_size,
             target_hash,
             oldest_retained_loc,
             latest_op_loc,
@@ -622,7 +616,6 @@ impl GetServerMetadataResponse {
     /// Create a new [GetServerMetadataResponse].
     pub fn new(
         request_id: u64,
-        database_size: u64,
         target_hash: String,
         oldest_retained_loc: u64,
         latest_op_loc: u64,
@@ -630,7 +623,6 @@ impl GetServerMetadataResponse {
         Self {
             version: PROTOCOL_VERSION,
             request_id,
-            database_size,
             target_hash,
             oldest_retained_loc,
             latest_op_loc,

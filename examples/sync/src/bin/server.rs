@@ -109,9 +109,8 @@ where
     let database = state.database.lock().await;
 
     // Get the current database state
-    let database_size = database.op_count();
     let oldest_retained_loc = database.oldest_retained_loc().unwrap_or(0);
-    let latest_op_loc = database_size.saturating_sub(1);
+    let latest_op_loc = database.op_count().saturating_sub(1);
 
     // Get the target hash
     let target_hash = {
@@ -128,7 +127,6 @@ where
 
     let response = GetServerMetadataResponse::new(
         request.request_id,
-        database_size,
         target_hash,
         oldest_retained_loc,
         latest_op_loc,

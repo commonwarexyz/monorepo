@@ -16,7 +16,6 @@ use tracing::{error, info};
 /// Default server address.
 const DEFAULT_SERVER: &str = "127.0.0.1:8080";
 
-/// Client configuration.
 #[derive(Debug)]
 struct ClientConfig {
     /// Server address to connect to.
@@ -29,7 +28,6 @@ struct ClientConfig {
 
 #[derive(Debug)]
 struct ServerMetadata {
-    database_size: u64,
     target_hash: Digest,
     oldest_retained_loc: u64,
     latest_op_loc: u64,
@@ -69,7 +67,6 @@ where
     };
 
     let metadata = ServerMetadata {
-        database_size: metadata.database_size,
         target_hash,
         oldest_retained_loc: metadata.oldest_retained_loc,
         latest_op_loc: metadata.latest_op_loc,
@@ -94,14 +91,12 @@ where
 
     // Get server metadata to determine sync parameters
     let ServerMetadata {
-        database_size,
         target_hash,
         oldest_retained_loc,
         latest_op_loc,
     } = get_server_metadata(&resolver).await?;
 
     info!(
-        database_size,
         lower_bound = oldest_retained_loc,
         upper_bound = latest_op_loc,
         "📈 Sync parameters"
