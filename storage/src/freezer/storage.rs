@@ -6,7 +6,7 @@ use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
 use commonware_utils::Array;
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
-use std::{cmp::Ordering, collections::BTreeSet, marker::PhantomData, ops::Deref};
+use std::{cmp::{max, Ordering}, collections::BTreeSet, marker::PhantomData, ops::Deref};
 use tracing::debug;
 
 /// Location of an item in the [Freezer].
@@ -290,7 +290,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Sections with pending table updates to be synced
     modified_sections: BTreeSet<u64>,
     should_resize: bool,
-    resize_progress: Option<(u32, u32)>,
+    resize_progress: Option<u32>,
 
     // Metrics
     puts: Counter,
@@ -800,12 +800,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         self.table.resize(Self::table_offset(new_size)).await?;
 
         // Start the resize
-        self.resize_progress = Some((old_size, 0));
+        self.resize_progress = Some(0);
 
         Ok(())
     }
 
+    /// Continue a resize operation.
     async fn advance_resize(&mut self) -> Result<(), Error> {
+        // Read the old section
+        let current = self.resize_progress.unwrap();
+        let max = max(current + self.table_resize_chunk_size, self.table_size * 2);
+
+
         // Create write buffers for efficient batched writes
         let old_buffered_table = buffer::Write::new(
             self.table.clone(),
