@@ -9,7 +9,7 @@ use commonware_storage::{
     adb::any::sync::{self, client::Config as SyncConfig},
     mmr::hasher::Standard,
 };
-use commonware_sync::{create_adb_config, Database, NetworkResolver};
+use commonware_sync::{crate_version, create_adb_config, Database, NetworkResolver};
 use std::{marker::PhantomData, net::SocketAddr, num::NonZeroU64};
 use tracing::{error, info};
 
@@ -153,7 +153,7 @@ fn main() {
 
     // Parse command line arguments
     let matches = Command::new("ADB Sync Client")
-        .version("1.0")
+        .version(crate_version())
         .about("Syncs ADB operations from a server using cryptographic proofs")
         .arg(
             Arg::new("server")

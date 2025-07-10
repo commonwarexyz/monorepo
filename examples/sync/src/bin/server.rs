@@ -5,9 +5,10 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_runtime::{tokio as tokio_runtime, Listener, Network, Runner};
 use commonware_storage::mmr::hasher::Standard;
 use commonware_sync::{
-    create_adb_config, create_test_operations, generate_db_id, read_message, send_message,
-    Database, ErrorResponse, GetOperationsRequest, GetOperationsResponse, GetServerMetadataRequest,
-    GetServerMetadataResponse, Message, NetworkError, Operation, ProtocolError,
+    crate_version, create_adb_config, create_test_operations, generate_db_id, read_message,
+    send_message, Database, ErrorResponse, GetOperationsRequest, GetOperationsResponse,
+    GetServerMetadataRequest, GetServerMetadataResponse, Message, NetworkError, Operation,
+    ProtocolError,
 };
 use std::{
     net::SocketAddr,
@@ -291,7 +292,7 @@ fn main() {
 
     // Parse command line arguments
     let matches = Command::new("ADB Sync Server")
-        .version("1.0")
+        .version(crate_version())
         .about("Serves ADB operations and proofs to sync clients")
         .arg(
             Arg::new("port")

@@ -35,6 +35,11 @@ pub type Operation = commonware_storage::adb::operation::Operation<Key, Value>;
 /// Translator type for the database.
 pub type Translator = commonware_storage::translator::EightCap;
 
+/// Returns the version of the crate.
+pub fn crate_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 /// Create a database configuration with appropriate partitioning.
 pub fn create_adb_config(db_id: &str) -> Config<Translator> {
     Config {
