@@ -7,6 +7,9 @@ pub use engine::Engine;
 mod ingress;
 pub use ingress::{Mailbox, Message};
 
+#[cfg(test)]
+mod mocks;
+
 /// Configuration for an [Engine].
 #[derive(Clone)]
 pub struct Config<M: Monitor, H: Handler, RqC, RsC> {
@@ -31,9 +34,6 @@ pub struct Config<M: Monitor, H: Handler, RqC, RsC> {
     /// The [commonware_codec::Codec] configuration for responses.
     pub response_codec: RsC,
 }
-
-#[cfg(test)]
-pub mod mocks;
 
 #[cfg(test)]
 mod tests {
