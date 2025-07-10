@@ -422,7 +422,7 @@ impl Read for GetServerMetadataResponse {
         let request_id = u64::read(buf)?;
         // Read string as Vec<u8> and convert to String
         // Target hash should be exactly 64 characters (SHA256 hex)
-        let target_hash_bytes = Vec::<u8>::read_range(buf, 0..=64)?;
+        let target_hash_bytes = Vec::<u8>::read_range(buf, 64..=64)?;
         let target_hash = String::from_utf8(target_hash_bytes).map_err(|_| {
             CodecError::Invalid("GetServerMetadataResponse", "invalid UTF-8 in target_hash")
         })?;
