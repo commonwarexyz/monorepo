@@ -4,17 +4,24 @@
 
 use clap::{Arg, Command};
 use commonware_cryptography::sha256::Digest;
-use commonware_runtime::{tokio as tokio_runtime, Runner};
+use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
 use commonware_storage::{
     adb::any::sync::{self, client::Config as SyncConfig},
     mmr::hasher::Standard,
 };
 use commonware_sync::{crate_version, create_adb_config, Database, NetworkResolver};
-use std::{marker::PhantomData, net::SocketAddr, num::NonZeroU64};
+use std::{
+    marker::PhantomData,
+    net::{Ipv4Addr, SocketAddr},
+    num::NonZeroU64,
+};
 use tracing::{error, info};
 
 /// Default server address.
 const DEFAULT_SERVER: &str = "127.0.0.1:8080";
+
+/// Port on binary where metrics are exposed
+const CLIENT_METRICS_PORT: u16 = 9090;
 
 #[derive(Debug)]
 struct ClientConfig {
@@ -143,14 +150,6 @@ where
 }
 
 fn main() {
-    // Initialize tracing with a clean format
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_thread_ids(false)
-        .with_file(false)
-        .with_line_number(false)
-        .init();
-
     // Parse command line arguments
     let matches = Command::new("ADB Sync Client")
         .version(crate_version())
@@ -212,8 +211,20 @@ fn main() {
         "Configuration"
     );
 
-    let executor = tokio_runtime::Runner::default();
+    let executor_config =
+        tokio_runtime::Config::default().with_storage_directory(config.storage_dir.clone());
+    let executor = tokio_runtime::Runner::new(executor_config);
     executor.start(|context| async move {
+        tokio_runtime::telemetry::init(
+            context.with_label("telemetry"),
+            tokio_runtime::telemetry::Logging {
+                level: tracing::Level::INFO,
+                json: false,
+            },
+            Some(SocketAddr::from((Ipv4Addr::LOCALHOST, CLIENT_METRICS_PORT))),
+            None,
+        );
+
         // Create the network resolver with the runtime context
         let resolver = NetworkResolver::new(config.server, context.clone());
 

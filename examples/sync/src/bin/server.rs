@@ -2,7 +2,9 @@
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_runtime::{tokio as tokio_runtime, Listener, Network, Runner, Spawner as _};
+use commonware_runtime::{
+    tokio as tokio_runtime, Listener, Metrics as _, Network, Runner, Spawner as _,
+};
 use commonware_storage::mmr::hasher::Standard;
 use commonware_sync::{
     crate_version, create_adb_config, create_test_operations, generate_db_id, read_message,
@@ -21,6 +23,9 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 const MAX_BATCH_SIZE: u64 = 100;
+
+/// Port on binary where metrics are exposed
+pub const SERVER_METRICS_PORT: u16 = 9091;
 
 /// Server configuration.
 #[derive(Debug)]
@@ -284,14 +289,6 @@ where
 }
 
 fn main() {
-    // Initialize tracing with a clean format
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_thread_ids(false)
-        .with_file(false)
-        .with_line_number(false)
-        .init();
-
     // Parse command line arguments
     let matches = Command::new("ADB Sync Server")
         .version(crate_version())
@@ -361,23 +358,35 @@ fn main() {
             }),
     };
 
-    info!("ADB Sync Server starting");
     info!(
         port = config.port,
         initial_ops = config.initial_ops,
         storage_dir = %config.storage_dir,
+        seed = %config.seed,
         "Configuration"
     );
 
-    let executor = tokio_runtime::Runner::default();
+    let executor_config =
+        tokio_runtime::Config::default().with_storage_directory(config.storage_dir.clone());
+    let executor = tokio_runtime::Runner::new(executor_config);
     executor.start(|context| async move {
+        tokio_runtime::telemetry::init(
+            context.with_label("telemetry"),
+            tokio_runtime::telemetry::Logging {
+                level: tracing::Level::INFO,
+                json: false,
+            },
+            Some(SocketAddr::from((Ipv4Addr::LOCALHOST, SERVER_METRICS_PORT))),
+            None,
+        );
+
         // Create and initialize database
         let db_id = generate_db_id(&context);
         let db_config = create_adb_config(&db_id);
 
         info!(db_id = %db_id, "Initializing database");
 
-        let mut database = match Database::init(context.clone(), db_config).await {
+        let mut database = match Database::init(context.with_label("database"), db_config).await {
             Ok(db) => db,
             Err(e) => {
                 error!(error = %e, "❌ Failed to initialize database");
