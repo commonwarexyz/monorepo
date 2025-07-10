@@ -539,9 +539,10 @@ mod tests {
                     MonitorEvent::Collected {
                         handler,
                         response,
-                        count: _,
+                        count,
                     } => {
                         assert_eq!(handler, peers[1]);
+                        assert_eq!(count, 1);
                         match response.id {
                             10 => {
                                 assert_eq!(response.result, 20);
