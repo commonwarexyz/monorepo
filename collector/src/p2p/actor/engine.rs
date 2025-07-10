@@ -2,7 +2,7 @@ use super::{
     config::Config,
     ingress::{Mailbox, Message},
 };
-use crate::p2p::{Endpoint, Originator};
+use crate::p2p::{Handler, Monitor};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
@@ -24,8 +24,8 @@ pub struct Engine<
         + DecodeExt<()>
         + Encode,
     P: PublicKey,
-    O: Originator<Response = Rs, PublicKey = P>,
-    Z: Endpoint<Request = Rq, Response = Rs, PublicKey = P>,
+    M: Monitor<Response = Rs, PublicKey = P>,
+    H: Handler<Request = Rq, Response = Rs, PublicKey = P>,
 > {
     // Configuration
     context: E,
@@ -34,12 +34,12 @@ pub struct Engine<
     priority_response: bool,
 
     // Message passing
-    originator: O,
-    endpoint: Z,
+    monitor: M,
+    handler: H,
     mailbox: mpsc::Receiver<Message<P, Rq, Rs>>,
 
     // State
-    responses: HashMap<Rq::Commitment, HashMap<O::PublicKey, Rs>>,
+    responses: HashMap<Rq::Commitment, HashMap<P, Rs>>,
 }
 
 impl<
@@ -50,11 +50,11 @@ impl<
             + DecodeExt<()>
             + Encode,
         P: PublicKey,
-        O: Originator<Response = Rs, PublicKey = P>,
-        Z: Endpoint<Request = Rq, Response = Rs, PublicKey = P>,
-    > Engine<E, Rq, Rs, P, O, Z>
+        M: Monitor<Response = Rs, PublicKey = P>,
+        H: Handler<Request = Rq, Response = Rs, PublicKey = P>,
+    > Engine<E, Rq, Rs, P, M, H>
 {
-    pub fn new(context: E, cfg: Config<O, Z>) -> (Self, Mailbox<P, Rq, Rs>) {
+    pub fn new(context: E, cfg: Config<M, H>) -> (Self, Mailbox<P, Rq, Rs>) {
         let (tx, rx) = mpsc::channel(cfg.mailbox_size);
         let mailbox: Mailbox<P, Rq, Rs> = Mailbox::new(tx);
         (
@@ -63,8 +63,8 @@ impl<
                 quorum: cfg.quorum,
                 priority_request: cfg.priority_request,
                 priority_response: cfg.priority_response,
-                originator: cfg.originator,
-                endpoint: cfg.endpoint,
+                monitor: cfg.monitor,
+                handler: cfg.handler,
                 mailbox: rx,
                 responses: HashMap::new(),
             },
@@ -74,28 +74,16 @@ impl<
 
     pub fn start(
         mut self,
-        request_network: (
-            impl Sender<PublicKey = O::PublicKey>,
-            impl Receiver<PublicKey = O::PublicKey>,
-        ),
-        response_network: (
-            impl Sender<PublicKey = O::PublicKey>,
-            impl Receiver<PublicKey = O::PublicKey>,
-        ),
+        request_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        response_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(request_network, response_network))
     }
 
     async fn run(
         mut self,
-        request_network: (
-            impl Sender<PublicKey = O::PublicKey>,
-            impl Receiver<PublicKey = O::PublicKey>,
-        ),
-        response_network: (
-            impl Sender<PublicKey = O::PublicKey>,
-            impl Receiver<PublicKey = O::PublicKey>,
-        ),
+        request_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        response_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
         let (mut req_tx, mut req_rx) = request_network;
         let (mut res_tx, mut res_rx) = response_network;
@@ -163,7 +151,7 @@ impl<
                             .responses
                             .remove(&commitment)
                             .expect("commitment not found");
-                        self.originator
+                        self.monitor
                             .collected(commitment, responses)
                             .await;
                     }
@@ -191,7 +179,7 @@ impl<
 
                     // Handle the request
                     let (tx, rx) = oneshot::channel();
-                    self.endpoint.process(peer.clone(), msg, tx).await;
+                    self.handler.process(peer.clone(), msg, tx).await;
 
                     // Send the response
                     match rx.await {

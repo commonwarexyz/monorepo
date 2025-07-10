@@ -11,7 +11,7 @@ use std::{collections::HashMap, fmt::Debug, future::Future};
 pub mod actor;
 
 /// Interface for actor that will disperse requests and collect responses.
-pub trait Collector: Clone + Send + 'static {
+pub trait Originator: Clone + Send + 'static {
     type Request: Committable + Digestible + Debug + Send + 'static;
     type Response: Committable<Commitment = <Self::Request as Committable>::Commitment>
         + Digestible<Digest = <Self::Request as Digestible>::Digest>
@@ -46,7 +46,7 @@ pub trait Collector: Clone + Send + 'static {
 }
 
 /// Interface for the application that originates requests.
-pub trait Originator: Clone + Send + 'static {
+pub trait Monitor: Clone + Send + 'static {
     type Response: Committable + Digestible + Debug + Send + 'static;
     type PublicKey: PublicKey;
 
@@ -59,7 +59,7 @@ pub trait Originator: Clone + Send + 'static {
 }
 
 /// Interface for the application that receives requests from an origin and sends responses.
-pub trait Endpoint: Clone + Send + 'static {
+pub trait Handler: Clone + Send + 'static {
     type Request: Committable + Digestible + Debug + Send + 'static;
     type Response: Committable<Commitment = <Self::Request as Committable>::Commitment>
         + Digestible<Digest = <Self::Request as Digestible>::Digest>

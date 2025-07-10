@@ -1,4 +1,4 @@
-use crate::p2p::Collector;
+use crate::p2p::Originator;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use futures::{
@@ -50,7 +50,7 @@ impl<
         P: PublicKey,
         Rq: Committable + Digestible + Debug,
         Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest> + Debug,
-    > Collector for Mailbox<P, Rq, Rs>
+    > Originator for Mailbox<P, Rq, Rs>
 {
     type Request = Rq;
     type Response = Rs;
