@@ -11,6 +11,7 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt as _, Write};
+use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{Sink, Stream};
 use std::num::NonZeroU64;
 use thiserror::Error;
@@ -172,8 +173,8 @@ pub struct GetServerMetadataResponse {
     pub version: u8,
     /// Request ID that this response corresponds to.
     pub request_id: u64,
-    /// Target hash of the database (hex string).
-    pub target_hash: String,
+    /// Target hash of the database.
+    pub target_hash: Digest,
     /// Oldest retained operation location.
     pub oldest_retained_loc: u64,
     /// Latest operation location.
@@ -397,8 +398,7 @@ impl Write for GetServerMetadataResponse {
     fn write(&self, buf: &mut impl BufMut) {
         self.version.write(buf);
         self.request_id.write(buf);
-        let target_hash_bytes = self.target_hash.as_bytes();
-        target_hash_bytes.to_vec().write(buf);
+        self.target_hash.write(buf);
         self.oldest_retained_loc.write(buf);
         self.latest_op_loc.write(buf);
     }
@@ -408,7 +408,7 @@ impl EncodeSize for GetServerMetadataResponse {
     fn encode_size(&self) -> usize {
         self.version.encode_size()
             + self.request_id.encode_size()
-            + self.target_hash.as_bytes().to_vec().encode_size()
+            + self.target_hash.encode_size()
             + self.oldest_retained_loc.encode_size()
             + self.latest_op_loc.encode_size()
     }
@@ -420,12 +420,7 @@ impl Read for GetServerMetadataResponse {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let version = u8::read(buf)?;
         let request_id = u64::read(buf)?;
-        // Read string as Vec<u8> and convert to String
-        // Target hash should be exactly 64 characters (SHA256 hex)
-        let target_hash_bytes = Vec::<u8>::read_range(buf, 64..=64)?;
-        let target_hash = String::from_utf8(target_hash_bytes).map_err(|_| {
-            CodecError::Invalid("GetServerMetadataResponse", "invalid UTF-8 in target_hash")
-        })?;
+        let target_hash = Digest::read(buf)?;
         let oldest_retained_loc = u64::read(buf)?;
         let latest_op_loc = u64::read(buf)?;
         Ok(Self {
@@ -607,7 +602,7 @@ impl GetServerMetadataResponse {
     /// Create a new [GetServerMetadataResponse].
     pub fn new(
         request_id: u64,
-        target_hash: String,
+        target_hash: Digest,
         oldest_retained_loc: u64,
         latest_op_loc: u64,
     ) -> Self {

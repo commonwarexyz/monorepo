@@ -43,31 +43,8 @@ where
     info!("📡 Requesting server metadata...");
 
     let metadata = resolver.get_server_metadata().await?;
-
-    // Parse the target hash from the hex string
-    let target_hash = {
-        let hex_str = &metadata.target_hash;
-        if hex_str.len() != 64 {
-            return Err(format!(
-                "Invalid target hash length: expected 64 hex chars, got {}",
-                hex_str.len()
-            )
-            .into());
-        }
-
-        // Convert hex string to bytes
-        let mut bytes = [0u8; 32]; // SHA256 digest is 32 bytes
-        for i in 0..32 {
-            let hex_byte = &hex_str[i * 2..i * 2 + 2];
-            bytes[i] = u8::from_str_radix(hex_byte, 16)
-                .map_err(|e| format!("Invalid hex character in target hash: {e}"))?;
-        }
-
-        Digest::from(bytes)
-    };
-
     let metadata = ServerMetadata {
-        target_hash,
+        target_hash: metadata.target_hash,
         oldest_retained_loc: metadata.oldest_retained_loc,
         latest_op_loc: metadata.latest_op_loc,
     };

@@ -112,15 +112,9 @@ where
     let oldest_retained_loc = database.oldest_retained_loc().unwrap_or(0);
     let latest_op_loc = database.op_count().saturating_sub(1);
 
-    // Get the target hash
     let target_hash = {
         let mut hasher = Standard::new();
-        let root_hash = database.root(&mut hasher);
-        root_hash
-            .as_ref()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
+        database.root(&mut hasher)
     };
 
     drop(database);
