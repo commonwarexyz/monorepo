@@ -113,8 +113,6 @@ pub enum NetworkError {
     MessageLengthMismatch { expected: usize, actual: usize },
 }
 
-// ========== Protocol Types ==========
-
 /// Network protocol messages for ADB sync.
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -194,8 +192,6 @@ pub struct ErrorResponse {
     /// Human-readable error message.
     pub message: String,
 }
-
-// ========== Error Types ==========
 
 /// Error codes for protocol errors.
 #[derive(Debug, Clone)]
