@@ -41,7 +41,7 @@ pub enum Message {
 pub struct GetOperationsRequest {
     /// Protocol version.
     pub version: u8,
-    /// Size of the database at the time of the request.
+    /// Size of the database at the root we are syncing to.
     pub size: u64,
     /// Starting location for the operations.
     pub start_loc: u64,
@@ -62,8 +62,6 @@ pub struct GetOperationsResponse {
     pub proof_bytes: Vec<u8>,
     /// Serialized operations in the requested range.
     pub operations_bytes: Vec<u8>,
-    /// Whether this is the final response for the request.
-    pub is_final: bool,
 }
 
 /// Request for server metadata.
@@ -222,18 +220,12 @@ impl GetOperationsRequest {
 
 impl GetOperationsResponse {
     /// Create a new GetOperationsResponse.
-    pub fn new(
-        request_id: u64,
-        proof_bytes: Vec<u8>,
-        operations_bytes: Vec<u8>,
-        is_final: bool,
-    ) -> Self {
+    pub fn new(request_id: u64, proof_bytes: Vec<u8>, operations_bytes: Vec<u8>) -> Self {
         Self {
             version: PROTOCOL_VERSION,
             request_id,
             proof_bytes,
             operations_bytes,
-            is_final,
         }
     }
 }

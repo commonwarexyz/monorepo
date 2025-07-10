@@ -198,12 +198,7 @@ where
         "📤 Sending operations with proof"
     );
 
-    let response = GetOperationsResponse::new(
-        request.request_id,
-        proof_bytes,
-        operations_bytes,
-        true, // For simplicity, always mark as final
-    );
+    let response = GetOperationsResponse::new(request.request_id, proof_bytes, operations_bytes);
 
     Ok(response)
 }
