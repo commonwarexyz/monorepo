@@ -1,4 +1,4 @@
-//! Collect responses to requests.
+//! Collect responses to [Committable] requests.
 
 pub mod p2p;
 

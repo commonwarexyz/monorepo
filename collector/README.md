@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/commonware-collector.svg)](https://crates.io/crates/commonware-collector)
 [![Docs.rs](https://docs.rs/commonware-collector/badge.svg)](https://docs.rs/commonware-collector)
 
-TBA
+Collect responses to committable requests.
 
 ## Status
 

@@ -1,3 +1,5 @@
+//! Implementation of the [crate::Originator], [crate::Handler], and [crate::Monitor] traits for [commonware_p2p].
+
 use crate::{Handler, Monitor};
 
 mod engine;
@@ -20,12 +22,12 @@ pub struct Config<M: Monitor, H: Handler, RqC, RsC> {
     /// Whether or not to send requests with priority over other network messages.
     pub priority_request: bool,
 
-    /// The codec for requests.
+    /// The [commonware_codec::Codec] configuration for requests.
     pub request_codec: RqC,
 
     /// Whether or not to send responses with priority over other network messages.
     pub priority_response: bool,
 
-    /// The codec for responses.
+    /// The [commonware_codec::Codec] configuration for responses.
     pub response_codec: RsC,
 }
