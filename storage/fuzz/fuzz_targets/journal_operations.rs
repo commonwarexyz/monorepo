@@ -137,7 +137,6 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Replay { buffer, start_pos } => {
-                    //let start_pos = start_pos % (journal_size + 1);
                     match journal.replay(*buffer, *start_pos).await {
                         Ok(stream) => {
                             pin_mut!(stream);
