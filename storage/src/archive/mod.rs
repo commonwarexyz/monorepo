@@ -366,55 +366,100 @@ mod tests {
         });
     }
 
-    async fn test_ranges_impl(mut archive: impl Archive<Key = FixedBytes<64>, Value = i32>) {
-        // Insert multiple keys across different indices
-        let keys = vec![
-            (1u64, test_key("key1-blah"), 1),
-            (10u64, test_key("key2-blah"), 2),
-            (11u64, test_key("key3-blah"), 3),
-            (14u64, test_key("key3-bleh"), 3),
-        ];
-        for (index, key, data) in &keys {
-            archive
-                .put(*index, key.clone(), *data)
-                .await
-                .expect("Failed to put data");
+    async fn test_ranges_impl<A, F, Fut>(mut context: Context, creator: F, compression: Option<u8>)
+    where
+        A: Archive<Key = FixedBytes<64>, Value = i32>,
+        F: Fn(Context, Option<u8>) -> Fut,
+        Fut: Future<Output = A>,
+    {
+        let mut keys = BTreeMap::new();
+        {
+            let mut archive = creator(context.clone(), compression).await;
+
+            // Insert 100 keys with gaps
+            let mut last_index = 0u64;
+            while keys.len() < 100 {
+                let gap: u64 = context.gen_range(1..=10);
+                let index = last_index + gap;
+                last_index = index;
+
+                let mut key_bytes = [0u8; 64];
+                context.fill(&mut key_bytes);
+                let key = FixedBytes::<64>::decode(key_bytes.as_ref()).unwrap();
+                let data: i32 = context.gen();
+
+                if keys.contains_key(&index) {
+                    continue;
+                }
+                keys.insert(index, (key.clone(), data));
+
+                archive
+                    .put(index, key, data)
+                    .await
+                    .expect("Failed to put data");
+            }
+
+            archive.close().await.expect("Failed to close archive");
         }
 
-        // Check ranges
-        let (current_end, start_next) = archive.next_gap(0);
-        assert!(current_end.is_none());
-        assert_eq!(start_next.unwrap(), 1);
+        {
+            let archive = creator(context, compression).await;
+            let sorted_indices: Vec<u64> = keys.keys().cloned().collect();
 
-        let (current_end, start_next) = archive.next_gap(1);
-        assert_eq!(current_end.unwrap(), 1);
-        assert_eq!(start_next.unwrap(), 10);
+            // Check gap before the first element
+            let (current_end, start_next) = archive.next_gap(0);
+            assert!(current_end.is_none());
+            assert_eq!(start_next, Some(sorted_indices[0]));
 
-        let (current_end, start_next) = archive.next_gap(10);
-        assert_eq!(current_end.unwrap(), 11);
-        assert_eq!(start_next.unwrap(), 14);
+            // Check gaps between elements
+            let mut i = 0;
+            while i < sorted_indices.len() {
+                let current_index = sorted_indices[i];
 
-        let (current_end, start_next) = archive.next_gap(11);
-        assert_eq!(current_end.unwrap(), 11);
-        assert_eq!(start_next.unwrap(), 14);
+                // Find the end of the current contiguous block
+                let mut j = i;
+                while j + 1 < sorted_indices.len() && sorted_indices[j + 1] == sorted_indices[j] + 1
+                {
+                    j += 1;
+                }
+                let block_end_index = sorted_indices[j];
+                let next_actual_index = if j + 1 < sorted_indices.len() {
+                    Some(sorted_indices[j + 1])
+                } else {
+                    None
+                };
 
-        let (current_end, start_next) = archive.next_gap(12);
-        assert!(current_end.is_none());
-        assert_eq!(start_next.unwrap(), 14);
+                let (current_end, start_next) = archive.next_gap(current_index);
+                assert_eq!(current_end, Some(block_end_index));
+                assert_eq!(start_next, next_actual_index);
 
-        let (current_end, start_next) = archive.next_gap(14);
-        assert_eq!(current_end.unwrap(), 14);
-        assert!(start_next.is_none());
+                // If there's a gap, check an index within the gap
+                if let Some(next_index) = next_actual_index {
+                    if next_index > block_end_index + 1 {
+                        let in_gap_index = block_end_index + 1;
+                        let (current_end, start_next) = archive.next_gap(in_gap_index);
+                        assert!(current_end.is_none());
+                        assert_eq!(start_next, Some(next_index));
+                    }
+                }
+                i = j + 1;
+            }
 
-        archive.close().await.expect("Failed to close archive");
+            // Check the last element
+            let last_index = *sorted_indices.last().unwrap();
+            let (current_end, start_next) = archive.next_gap(last_index);
+            assert!(current_end.is_some());
+            assert!(start_next.is_none());
+
+            archive.close().await.expect("Failed to close archive");
+        }
     }
 
     #[test_traced]
     fn test_ranges_prunable_no_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let archive = create_prunable(context, None).await;
-            test_ranges_impl(archive).await;
+            test_ranges_impl(context, create_prunable, None).await;
         });
     }
 
@@ -422,8 +467,7 @@ mod tests {
     fn test_ranges_prunable_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let archive = create_prunable(context, Some(3)).await;
-            test_ranges_impl(archive).await;
+            test_ranges_impl(context, create_prunable, Some(3)).await;
         });
     }
 
@@ -431,8 +475,7 @@ mod tests {
     fn test_ranges_immutable_no_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let archive = create_immutable(context, None).await;
-            test_ranges_impl(archive).await;
+            test_ranges_impl(context, create_immutable, None).await;
         });
     }
 
@@ -440,8 +483,7 @@ mod tests {
     fn test_ranges_immutable_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let archive = create_immutable(context, Some(3)).await;
-            test_ranges_impl(archive).await;
+            test_ranges_impl(context, create_immutable, Some(3)).await;
         });
     }
 
@@ -563,6 +605,25 @@ mod tests {
                     .expect("Failed to put data");
                 keys.insert(key, (index, data));
             }
+
+            // Ensure all keys can be retrieved
+            for (key, (index, data)) in &keys {
+                let retrieved = archive
+                    .get(Identifier::Index(*index))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+                let retrieved = archive
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+            }
+
+            // Sync the archive
+            archive.sync().await.expect("Failed to sync archive");
 
             // Ensure all keys can be retrieved
             for (key, (index, data)) in &keys {
