@@ -1,0 +1,50 @@
+[package]
+name = "commonware-utils-fuzz"
+version = "0.0.1"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+libfuzzer-sys = { workspace = true }
+commonware-utils = { path = ".." }
+commonware-codec = { workspace = true }
+bytes = { workspace = true }
+
+[[bin]]
+name = "lib_functions"
+path = "fuzz_targets/lib_functions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "array"
+path = "fuzz_targets/array.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bitvec"
+path = "fuzz_targets/bitvec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "priority_set"
+path = "fuzz_targets/priority_set.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stable_buf"
+path = "fuzz_targets/stable_buf.rs"
+test = false
+doc = false
+bench = false

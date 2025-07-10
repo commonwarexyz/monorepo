@@ -43,7 +43,7 @@ pub struct Config {
     pub write_buffer: usize,
 
     /// Optional thread pool to use for parallelizing batch operations.
-    pub pool: Option<ThreadPool>,
+    pub thread_pool: Option<ThreadPool>,
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
@@ -126,7 +126,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                     nodes: vec![],
                     pruned_to_pos: 0,
                     pinned_nodes: vec![],
-                    pool: cfg.pool,
+                    pool: cfg.thread_pool,
                 }),
                 journal,
                 journal_size,
@@ -192,7 +192,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             nodes: vec![],
             pruned_to_pos: journal_size,
             pinned_nodes,
-            pool: cfg.pool,
+            pool: cfg.thread_pool,
         });
 
         // Compute the additional pinned nodes needed to prove all journal elements at the current
@@ -258,7 +258,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 nodes: vec![],
                 pruned_to_pos: cfg.pruned_to_pos,
                 pinned_nodes: cfg.pinned_nodes,
-                pool: cfg.config.pool,
+                pool: cfg.config.thread_pool,
             }),
             journal,
             journal_size: cfg.pruned_to_pos,
@@ -400,7 +400,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             nodes: vec![],
             pruned_to_pos: new_size,
             pinned_nodes,
-            pool: self.mem_mmr.pool.take(),
+            pool: self.mem_mmr.thread_pool.take(),
         });
 
         Ok(())
@@ -660,7 +660,7 @@ mod tests {
             metadata_partition: "metadata_partition".into(),
             items_per_blob: 7,
             write_buffer: 1024,
-            pool: None,
+            thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -941,7 +941,7 @@ mod tests {
                 metadata_partition: "unpruned_metadata_partition".into(),
                 items_per_blob: 7,
                 write_buffer: 1024,
-                pool: None,
+                thread_pool: None,
                 buffer_pool: cfg_pruned.buffer_pool.clone(),
             };
             let mut mmr = Mmr::init(context.clone(), &mut hasher, cfg_unpruned)
@@ -1140,7 +1140,7 @@ mod tests {
                     metadata_partition: "pruned_metadata_partition".into(),
                     items_per_blob: 7,
                     write_buffer: 1024,
-                    pool: None,
+                    thread_pool: None,
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
                 pruned_to_pos: PRUNED_TO_POS,
@@ -1197,7 +1197,7 @@ mod tests {
                     metadata_partition: "pruned_metadata_partition".into(),
                     items_per_blob: 7,
                     write_buffer: 1024,
-                    pool: None,
+                    thread_pool: None,
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
                 pruned_to_pos: source_mmr_size,
@@ -1296,7 +1296,7 @@ mod tests {
                     metadata_partition: "ref_metadata_pruned".into(),
                     items_per_blob: 7,
                     write_buffer: 1024,
-                    pool: None,
+                    thread_pool: None,
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
@@ -1348,7 +1348,7 @@ mod tests {
                     metadata_partition: "server_metadata".into(),
                     items_per_blob: 7,
                     write_buffer: 1024,
-                    pool: None,
+                    thread_pool: None,
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
@@ -1374,7 +1374,7 @@ mod tests {
                     metadata_partition: "client_metadata".into(),
                     items_per_blob: 7,
                     write_buffer: 1024,
-                    pool: None,
+                    thread_pool: None,
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
