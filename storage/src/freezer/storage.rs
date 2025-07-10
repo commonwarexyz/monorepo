@@ -273,8 +273,6 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     table_size: u32,
     table_resize_frequency: u8,
     table_resize_chunk_size: u32,
-    table_replay_buffer: usize,
-    table_write_buffer: usize,
 
     // Table blob that maps slots to journal chain heads
     table: E::Blob,
@@ -595,8 +593,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             table_size: checkpoint.table_size,
             table_resize_frequency: config.table_resize_frequency,
             table_resize_chunk_size: config.table_resize_chunk_size,
-            table_replay_buffer: config.table_replay_buffer,
-            table_write_buffer: config.table_write_buffer,
             table,
             journal,
             journal_target_size: config.journal_target_size,

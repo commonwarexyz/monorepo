@@ -77,6 +77,9 @@ pub struct Config<C> {
     /// The number of items added to the freezer table before it is resized.
     pub freezer_table_resize_frequency: u8,
 
+    /// The number of items to move during each resize operation (many may be required to complete a resize).
+    pub freezer_table_resize_chunk_size: u32,
+
     /// The partition to use for the archive's freezer journal.
     pub freezer_journal_partition: String,
 

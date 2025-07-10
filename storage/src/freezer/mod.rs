@@ -232,9 +232,6 @@ pub struct Config<C> {
     /// The size of the read buffer to use when scanning the table (e.g., during recovery or resize).
     pub table_replay_buffer: usize,
 
-    /// The size of the write buffer to use when scanning the table (e.g., during resize).
-    pub table_write_buffer: usize,
-
     /// The codec configuration to use for the value stored in the freezer.
     pub codec_config: C,
 }
@@ -254,7 +251,6 @@ mod tests {
     const DEFAULT_TABLE_RESIZE_FREQUENCY: u8 = 4;
     const DEFAULT_TABLE_RESIZE_CHUNK_SIZE: u32 = 128; // force multiple chunks
     const DEFAULT_TABLE_REPLAY_BUFFER: usize = 64 * 1024; // 64KB
-    const DEFAULT_TABLE_WRITE_BUFFER: usize = 64 * 1024; // 64KB
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -279,7 +275,6 @@ mod tests {
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -347,7 +342,6 @@ mod tests {
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -398,7 +392,6 @@ mod tests {
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -459,7 +452,6 @@ mod tests {
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
 
@@ -529,7 +521,6 @@ mod tests {
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
 
@@ -628,7 +619,6 @@ mod tests {
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             {
@@ -687,7 +677,6 @@ mod tests {
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let checkpoint = {
@@ -745,7 +734,6 @@ mod tests {
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
 
@@ -809,7 +797,6 @@ mod tests {
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
 
@@ -884,7 +871,6 @@ mod tests {
                 table_resize_frequency: 2, // Resize after 2 items per bucket
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -954,7 +940,6 @@ mod tests {
                 table_resize_frequency: 2, // Force resize frequently
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let mut freezer =

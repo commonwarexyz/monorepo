@@ -23,9 +23,6 @@ const TABLE_RESIZE_CHUNK_SIZE: u32 = 1024;
 /// Size of the replay buffer when scanning the table.
 const TABLE_REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
-/// Size of the write buffer when scanning the table.
-const TABLE_WRITE_BUFFER: usize = 1024 * 1024; // 1MB
-
 /// Partition for [Freezer] journal benchmarks.
 pub const JOURNAL_PARTITION: &str = "freezer_bench_journal";
 
@@ -51,7 +48,6 @@ pub async fn init(ctx: Context) -> FreezerType {
         table_resize_frequency: TABLE_RESIZE_FREQUENCY,
         table_resize_chunk_size: TABLE_RESIZE_CHUNK_SIZE,
         table_replay_buffer: TABLE_REPLAY_BUFFER,
-        table_write_buffer: TABLE_WRITE_BUFFER,
         codec_config: (),
     };
     Freezer::init(ctx, cfg).await.unwrap()
