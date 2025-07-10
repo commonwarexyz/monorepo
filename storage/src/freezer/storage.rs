@@ -869,6 +869,23 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         Ok(())
     }
 
+    async fn advance_resize(&mut self) -> Result<(), Error> {
+        // If done, update table size and mark resized
+        self.table_size = new_size;
+        self.should_resize = false;
+        self.resize_progress = None;
+        debug!(
+            old = old_size,
+            new = new_size,
+            elapsed = ?self
+                .context
+                .current()
+                .duration_since(start)
+                .unwrap_or_default(),
+            "table resized"
+        );
+    }
+
     /// Sync all pending data in [Freezer].
     ///
     /// If the table needs to be resized, it will occur during [Freezer::sync] (rather than unexpectedly
@@ -882,10 +899,17 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         try_join_all(updates).await?;
         self.modified_sections.clear();
 
-        // Sync updated table entries
-        if self.should_resize {
+        // Start a resize (if needed)
+        if self.should_resize && self.resize_progress.is_none() {
             self.resize().await?;
         }
+
+        // Continue a resize if already ongoing
+        if self.resize_progress.is_some() {
+            self.advance_resize().await?;
+        }
+
+        // Sync updated table entries
         self.table.sync().await?;
         let stored_epoch = self.next_epoch;
         self.next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
