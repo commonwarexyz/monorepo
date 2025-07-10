@@ -1,3 +1,7 @@
+//! An immutable key-value store for ordered data.
+//!
+//!
+
 mod storage;
 pub use storage::Archive;
 

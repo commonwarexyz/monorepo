@@ -1,4 +1,4 @@
-//! A write-once key-value store where each key is associated with a unique index.
+//! A write-once key-value store for ordered data.
 //!
 //! [Archive] is a key-value store designed for workloads where all data is written only once and is
 //! uniquely associated with both an `index` and a `key`.
