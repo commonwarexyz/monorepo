@@ -68,7 +68,7 @@ pub struct Config<T: Translator> {
     pub translator: T,
 
     /// An optional thread pool to use for parallelizing batch operations.
-    pub pool: Option<ThreadPool>,
+    pub thread_pool: Option<ThreadPool>,
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
@@ -170,7 +170,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 log_items_per_blob: cfg.log_items_per_blob,
                 log_write_buffer: cfg.log_write_buffer,
                 translator: cfg.translator,
-                pool: cfg.pool,
+                thread_pool: cfg.thread_pool,
                 buffer_pool: cfg.buffer_pool,
             },
             &mut hasher,
@@ -210,7 +210,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 metadata_partition: cfg.db_config.mmr_metadata_partition,
                 items_per_blob: cfg.db_config.mmr_items_per_blob,
                 write_buffer: cfg.db_config.mmr_write_buffer,
-                pool: cfg.db_config.pool.clone(),
+                thread_pool: cfg.db_config.thread_pool.clone(),
                 buffer_pool: cfg.db_config.buffer_pool,
             },
             pruned_to_pos: leaf_num_to_pos(cfg.pruned_to_loc),
@@ -274,7 +274,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 metadata_partition: cfg.mmr_metadata_partition,
                 items_per_blob: cfg.mmr_items_per_blob,
                 write_buffer: cfg.mmr_write_buffer,
-                pool: cfg.pool,
+                thread_pool: cfg.thread_pool,
                 buffer_pool: cfg.buffer_pool.clone(),
             },
         )
@@ -861,7 +861,7 @@ pub(super) mod test {
             log_items_per_blob: 7,
             log_write_buffer: 1024,
             translator: TwoCap,
-            pool: None,
+            thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -886,7 +886,7 @@ pub(super) mod test {
             log_items_per_blob: 1024,
             log_write_buffer: 64,
             translator: EightCap,
-            pool: None,
+            thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }

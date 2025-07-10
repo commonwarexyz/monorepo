@@ -51,7 +51,7 @@ fn fuzz(data: FuzzInput) {
             log_items_per_blob: 500000,
             log_write_buffer: 1024,
             translator: EightCap,
-            pool: None,
+            thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
 

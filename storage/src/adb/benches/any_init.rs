@@ -43,7 +43,7 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: 1024,
         translator: EightCap,
-        pool: Some(pool),
+        thread_pool: Some(pool),
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
