@@ -13,25 +13,31 @@ use prometheus_client::metrics::counter::Counter;
 use std::collections::BTreeMap;
 use tracing::debug;
 
-const CHECKPOINT_PREFIX: u8 = 0;
-const INDICES_PREFIX: u8 = 1;
+/// Prefix for [Freezer] records.
+const FREEZER_PREFIX: u8 = 0;
 
+/// Prefix for [Ordinal] records.
+const ORDINAL_PREFIX: u8 = 1;
+
+/// Item stored in [Metadata] to ensure [Freezer] and [Ordinal] remain consistent.
 enum Record {
-    Checkpoint(Checkpoint),
-    Indices(Option<BitVec>),
+    Freezer(Checkpoint),
+    Ordinal(Option<BitVec>),
 }
 
 impl Record {
-    fn checkpoint(&self) -> &Checkpoint {
+    /// Get the [Freezer] [Checkpoint] from the [Record].
+    fn freezer(&self) -> &Checkpoint {
         match self {
-            Self::Checkpoint(checkpoint) => checkpoint,
+            Self::Freezer(checkpoint) => checkpoint,
             _ => panic!("incorrect record"),
         }
     }
 
-    fn indices(&self) -> &Option<BitVec> {
+    /// Get the [Ordinal] [BitVec] from the [Record].
+    fn ordinal(&self) -> &Option<BitVec> {
         match self {
-            Self::Indices(indices) => indices,
+            Self::Ordinal(indices) => indices,
             _ => panic!("incorrect record"),
         }
     }
@@ -40,11 +46,11 @@ impl Record {
 impl Write for Record {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Self::Checkpoint(checkpoint) => {
+            Self::Freezer(checkpoint) => {
                 buf.put_u8(0);
                 checkpoint.write(buf);
             }
-            Self::Indices(indices) => {
+            Self::Ordinal(indices) => {
                 buf.put_u8(1);
                 indices.write(buf);
             }
@@ -54,12 +60,11 @@ impl Write for Record {
 
 impl Read for Record {
     type Cfg = ();
-
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let tag = buf.get_u8();
         match tag {
-            0 => Ok(Self::Checkpoint(Checkpoint::read(buf)?)),
-            1 => Ok(Self::Indices(Option::<BitVec>::read_cfg(
+            0 => Ok(Self::Freezer(Checkpoint::read(buf)?)),
+            1 => Ok(Self::Ordinal(Option::<BitVec>::read_cfg(
                 buf,
                 &(0..=usize::MAX).into(),
             )?)),
@@ -71,17 +76,24 @@ impl Read for Record {
 impl EncodeSize for Record {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::Checkpoint(_) => Checkpoint::SIZE,
-            Self::Indices(indices) => indices.encode_size(),
+            Self::Freezer(_) => Checkpoint::SIZE,
+            Self::Ordinal(indices) => indices.encode_size(),
         }
     }
 }
 
+/// An immutable key-value store for ordered data with a minimal memory footprint.
 pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
+    /// Number of items per section.
     items_per_section: u64,
 
+    /// Metadata for the archive.
     metadata: Metadata<E, U64, Record>,
+
+    /// Freezer for the archive.
     freezer: Freezer<E, K, V>,
+
+    /// Ordinal for the archive.
     ordinal: Ordinal<E, Cursor>,
 
     // Metrics
@@ -91,6 +103,7 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 }
 
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
+    /// Initialize a new [Archive] with the given [Config].
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metadata
         let mut metadata = Metadata::<E, U64, Record>::init(
@@ -103,15 +116,12 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         .await?;
 
         // Get checkpoint
-        let checkpoint_key = U64::new(CHECKPOINT_PREFIX, 0);
-        let checkpoint = match metadata.get(&checkpoint_key) {
-            Some(checkpoint) => *checkpoint.checkpoint(),
+        let freezer_key = U64::new(FREEZER_PREFIX, 0);
+        let checkpoint = match metadata.get(&freezer_key) {
+            Some(freezer) => *freezer.freezer(),
             None => {
-                metadata.put(
-                    checkpoint_key.clone(),
-                    Record::Checkpoint(Checkpoint::default()),
-                );
-                *metadata.get(&checkpoint_key).unwrap().checkpoint()
+                metadata.put(freezer_key.clone(), Record::Freezer(Checkpoint::default()));
+                *metadata.get(&freezer_key).unwrap().freezer()
             }
         };
 
@@ -137,15 +147,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         .await?;
 
         // Collect sections
-        let sections = metadata.keys(Some(&[INDICES_PREFIX])).collect::<Vec<_>>();
+        let sections = metadata.keys(Some(&[ORDINAL_PREFIX])).collect::<Vec<_>>();
         let mut section_bits = BTreeMap::new();
         for section in sections {
             // Get record
-            let indices = metadata.get(section).unwrap().indices();
+            let bits = metadata.get(section).unwrap().ordinal();
 
-            // Get indices
+            // Get section
             let section = section.to_u64();
-            section_bits.insert(section, indices);
+            section_bits.insert(section, bits);
         }
 
         // Initialize ordinal
@@ -182,6 +192,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         })
     }
 
+    /// Get the value for the given index.
     async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
         // Get ordinal
         let Some(cursor) = self.ordinal.get(index).await? else {
@@ -198,6 +209,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         Ok(result)
     }
 
+    /// Get the value for the given key.
     async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
         // Get table entry
         let result = self.freezer.get(freezer::Identifier::Key(key)).await?;
@@ -206,13 +218,14 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         Ok(result)
     }
 
+    /// Initialize the section.
     async fn initialize_section(&mut self, section: u64) {
         // Create active bit vector
-        let indices = BitVec::zeroes(self.items_per_section as usize);
+        let bits = BitVec::zeroes(self.items_per_section as usize);
 
         // Store record
-        let key = U64::new(INDICES_PREFIX, section);
-        self.metadata.put(key, Record::Indices(Some(indices)));
+        let key = U64::new(ORDINAL_PREFIX, section);
+        self.metadata.put(key, Record::Ordinal(Some(bits)));
         debug!(section, "initialized section");
     }
 }
@@ -231,21 +244,21 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
 
         // Initialize section if it doesn't exist
         let section = index / self.items_per_section;
-        let k = U64::new(INDICES_PREFIX, section);
-        if self.metadata.get(&k).is_none() {
+        let ordinal_key = U64::new(ORDINAL_PREFIX, section);
+        if self.metadata.get(&ordinal_key).is_none() {
             self.initialize_section(section).await;
         }
-        let record = self.metadata.get_mut(&k).unwrap();
+        let record = self.metadata.get_mut(&ordinal_key).unwrap();
 
         // Update active bits
-        let done = if let Record::Indices(Some(record)) = record {
-            record.set((index % self.items_per_section) as usize);
-            record.count_ones() == self.items_per_section as usize
+        let done = if let Record::Ordinal(Some(bits)) = record {
+            bits.set((index % self.items_per_section) as usize);
+            bits.count_ones() == self.items_per_section as usize
         } else {
             false
         };
         if done {
-            *record = Record::Indices(None);
+            *record = Record::Ordinal(None);
         }
 
         // Put in table
@@ -284,9 +297,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         ordinal_result?;
 
         // Update checkpoint
-        let checkpoint_key = U64::new(CHECKPOINT_PREFIX, 0);
-        self.metadata
-            .put(checkpoint_key.clone(), Record::Checkpoint(checkpoint));
+        let freezer_key = U64::new(FREEZER_PREFIX, 0);
+        self.metadata.put(freezer_key, Record::Freezer(checkpoint));
 
         // Sync metadata once underlying are synced
         self.metadata.sync().await?;
@@ -306,9 +318,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         let checkpoint = self.freezer.close().await?;
 
         // Update checkpoint
-        let checkpoint_key = U64::new(CHECKPOINT_PREFIX, 0);
-        self.metadata
-            .put(checkpoint_key.clone(), Record::Checkpoint(checkpoint));
+        let freezer_key = U64::new(FREEZER_PREFIX, 0);
+        self.metadata.put(freezer_key, Record::Freezer(checkpoint));
 
         // Close metadata
         self.metadata.close().await?;
