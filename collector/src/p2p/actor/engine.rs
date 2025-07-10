@@ -3,8 +3,8 @@ use super::{
     ingress::{Mailbox, Message},
 };
 use crate::p2p::{Endpoint, Originator};
-use commonware_codec::{Decode, DecodeExt, Encode};
-use commonware_cryptography::{Committable, Digest, Digestible, PublicKey};
+use commonware_codec::{DecodeExt, Encode};
+use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
@@ -18,12 +18,14 @@ use tracing::{error, warn};
 /// Engine that will disperse messages and collect responses.
 pub struct Engine<
     E: Clock + Spawner,
-    D: Digest,
-    Req: Committable + Digestible<Digest = D> + Decode,
-    Res: Digestible<Digest = D> + Encode + Decode,
+    Rq: Committable + Digestible + DecodeExt<()> + Encode,
+    Rs: Committable<Commitment = Rq::Commitment>
+        + Digestible<Digest = Rq::Digest>
+        + DecodeExt<()>
+        + Encode,
     P: PublicKey,
-    O: Originator<D, PublicKey = P, Response = Res>,
-    Z: Endpoint<D, PublicKey = P, Request = Req, Response = Res>,
+    O: Originator<Response = Rs, PublicKey = P>,
+    Z: Endpoint<Request = Rq, Response = Rs, PublicKey = P>,
 > {
     // Configuration
     context: E,
@@ -34,25 +36,27 @@ pub struct Engine<
     // Message passing
     originator: O,
     endpoint: Z,
-    mailbox: mpsc::Receiver<Message<D, P, Req, Res>>,
+    mailbox: mpsc::Receiver<Message<P, Rq, Rs>>,
 
     // State
-    responses: HashMap<D, HashMap<O::PublicKey, Res>>,
+    responses: HashMap<Rq::Commitment, HashMap<O::PublicKey, Rs>>,
 }
 
 impl<
         E: Clock + Spawner,
-        D: Digest,
-        Req: Committable + Digestible<Digest = D> + Encode + DecodeExt<()>,
-        Res: Digestible<Digest = D> + Encode + DecodeExt<()>,
+        Rq: Committable + Digestible + DecodeExt<()> + Encode,
+        Rs: Committable<Commitment = Rq::Commitment>
+            + Digestible<Digest = Rq::Digest>
+            + DecodeExt<()>
+            + Encode,
         P: PublicKey,
-        O: Originator<D, PublicKey = P, Response = Res>,
-        Z: Endpoint<D, PublicKey = P, Request = Req, Response = Res>,
-    > Engine<E, D, Req, Res, P, O, Z>
+        O: Originator<Response = Rs, PublicKey = P>,
+        Z: Endpoint<Request = Rq, Response = Rs, PublicKey = P>,
+    > Engine<E, Rq, Rs, P, O, Z>
 {
-    pub fn new(context: E, cfg: Config<D, O, Z>) -> (Self, Mailbox<D, P, Req, Res>) {
+    pub fn new(context: E, cfg: Config<O, Z>) -> (Self, Mailbox<P, Rq, Rs>) {
         let (tx, rx) = mpsc::channel(cfg.mailbox_size);
-        let mailbox: Mailbox<D, P, Req, Res> = Mailbox::new(tx);
+        let mailbox: Mailbox<P, Rq, Rs> = Mailbox::new(tx);
         (
             Self {
                 context,
@@ -107,22 +111,22 @@ impl<
                                 match req_tx.send(recipients, msg.into(), self.priority_request).await {
                                     Ok(recipients) => {
                                         let _ = responder.send(recipients);
-                                        self.responses.insert(request.digest(), HashMap::new());
+                                        self.responses.insert(request.commitment(), HashMap::new());
                                     }
                                     Err(err) => {
                                         error!(?err, "failed to send request");
                                     }
                                 }
                             },
-                            Message::Peek { digest, sender } => {
+                            Message::Peek { commitment, sender } => {
                                 // Either send back the responses, or drop the sender to indicate
                                 // that responses for the digest are not being awaited
-                                if let Some(responses) = self.responses.get(&digest).cloned() {
+                                if let Some(responses) = self.responses.get(&commitment).cloned() {
                                     let _ = sender.send(responses);
                                 }
                             },
-                            Message::Cancel { digest } => {
-                                self.responses.remove(&digest);
+                            Message::Cancel { commitment } => {
+                                self.responses.remove(&commitment);
                             }
                         }
                     }
@@ -140,7 +144,7 @@ impl<
                     };
 
                     // Decode the message
-                    let response = match Res::decode(msg.clone()) {
+                    let response = match Rs::decode(msg.clone()) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
@@ -149,18 +153,18 @@ impl<
                     };
 
                     // Handle the response
-                    let digest = response.digest();
-                    let entry = self.responses.entry(digest).or_default();
+                    let commitment = response.commitment();
+                    let entry = self.responses.entry(commitment).or_default();
                     entry.insert(peer, response);
 
                     // Check if we have enough responses
                     if entry.len() >= self.quorum {
                         let responses = self
                             .responses
-                            .remove(&digest)
-                            .expect("digest not found");
+                            .remove(&commitment)
+                            .expect("commitment not found");
                         self.originator
-                            .collected(digest, responses)
+                            .collected(commitment, responses)
                             .await;
                     }
                 },
@@ -177,7 +181,7 @@ impl<
                     };
 
                     // Decode the message
-                    let msg = match Req::decode(msg) {
+                    let msg = match Rq::decode(msg) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");

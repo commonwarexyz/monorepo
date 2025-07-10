@@ -1,5 +1,5 @@
 use crate::p2p::Collector;
-use commonware_cryptography::{Committable, Digest, Digestible, PublicKey};
+use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use futures::{
     channel::{mpsc, oneshot},
@@ -8,59 +8,55 @@ use futures::{
 use std::{collections::HashMap, fmt::Debug};
 
 pub enum Message<
-    D: Digest,
     P: PublicKey,
-    Req: Committable + Digestible<Digest = D>,
-    Res: Digestible<Digest = D>,
+    Rq: Committable + Digestible,
+    Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest>,
 > {
     Send {
-        request: Req,
+        request: Rq,
         recipients: Recipients<P>,
         responder: oneshot::Sender<Vec<P>>,
     },
     Peek {
-        digest: D,
-        sender: oneshot::Sender<HashMap<P, Res>>,
+        commitment: Rq::Commitment,
+        sender: oneshot::Sender<HashMap<P, Rs>>,
     },
     Cancel {
-        digest: D,
+        commitment: Rq::Commitment,
     },
 }
 
 #[derive(Clone)]
 pub struct Mailbox<
-    D: Digest,
     P: PublicKey,
-    Req: Committable + Digestible<Digest = D>,
-    Res: Digestible<Digest = D>,
+    Rq: Committable + Digestible,
+    Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest>,
 > {
-    sender: mpsc::Sender<Message<D, P, Req, Res>>,
+    sender: mpsc::Sender<Message<P, Rq, Rs>>,
 }
 
 impl<
-        D: Digest,
         P: PublicKey,
-        Req: Committable + Digestible<Digest = D>,
-        Res: Digestible<Digest = D>,
-    > Mailbox<D, P, Req, Res>
+        Rq: Committable + Digestible,
+        Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest>,
+    > Mailbox<P, Rq, Rs>
 {
-    pub fn new(sender: mpsc::Sender<Message<D, P, Req, Res>>) -> Self {
+    pub fn new(sender: mpsc::Sender<Message<P, Rq, Rs>>) -> Self {
         Self { sender }
     }
 }
 
 impl<
-        D: Digest,
         P: PublicKey,
-        Req: Committable + Digestible<Digest = D> + Debug,
-        Res: Digestible<Digest = D> + Debug,
-    > Collector<D> for Mailbox<D, P, Req, Res>
+        Rq: Committable + Digestible + Debug,
+        Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest> + Debug,
+    > Collector for Mailbox<P, Rq, Rs>
 {
-    type Request = Req;
-    type Response = Res;
+    type Request = Rq;
+    type Response = Rs;
     type PublicKey = P;
 
-    async fn send(&mut self, request: Req, recipients: Recipients<P>) -> Vec<P> {
+    async fn send(&mut self, request: Rq, recipients: Recipients<P>) -> Vec<P> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .sender
@@ -73,13 +69,19 @@ impl<
         rx.await.unwrap()
     }
 
-    async fn peek(&mut self, digest: D) -> Option<HashMap<P, Res>> {
+    async fn peek(&mut self, commitment: Rq::Commitment) -> Option<HashMap<P, Rs>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.sender.send(Message::Peek { digest, sender: tx }).await;
+        let _ = self
+            .sender
+            .send(Message::Peek {
+                commitment,
+                sender: tx,
+            })
+            .await;
         rx.await.ok()
     }
 
-    async fn cancel(&mut self, digest: D) {
-        let _ = self.sender.send(Message::Cancel { digest }).await;
+    async fn cancel(&mut self, commitment: Rq::Commitment) {
+        let _ = self.sender.send(Message::Cancel { commitment }).await;
     }
 }

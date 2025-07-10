@@ -3,7 +3,7 @@
 //! The originator's [Collector] is used to distribute and collect responses.
 //! The endpoint's [Collector] is used to receive and respond to requests.
 
-use commonware_cryptography::{Committable, Digest, Digestible, PublicKey};
+use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use futures::channel::oneshot;
 use std::{collections::HashMap, fmt::Debug, future::Future};
@@ -11,9 +11,13 @@ use std::{collections::HashMap, fmt::Debug, future::Future};
 pub mod actor;
 
 /// Interface for actor that will disperse requests and collect responses.
-pub trait Collector<D: Digest>: Clone + Send + 'static {
-    type Request: Committable + Digestible<Digest = D> + Debug + Send + 'static;
-    type Response: Digestible<Digest = D> + Debug + Send + 'static;
+pub trait Collector: Clone + Send + 'static {
+    type Request: Committable + Digestible + Debug + Send + 'static;
+    type Response: Committable<Commitment = <Self::Request as Committable>::Commitment>
+        + Digestible<Digest = <Self::Request as Digestible>::Digest>
+        + Debug
+        + Send
+        + 'static;
     type PublicKey: PublicKey;
 
     /// Sends a `request` to a set of `recipients`, returning the list of recipients that were
@@ -31,30 +35,37 @@ pub trait Collector<D: Digest>: Clone + Send + 'static {
     /// Returns [None] if the request is not being collected.
     fn peek(
         &mut self,
-        digest: D,
+        commitment: <Self::Request as Committable>::Commitment,
     ) -> impl Future<Output = Option<HashMap<Self::PublicKey, Self::Response>>> + Send;
 
     /// Cancels a request by `digest`, dropping all existing and future responses.
-    fn cancel(&mut self, digest: D) -> impl Future<Output = ()> + Send;
+    fn cancel(
+        &mut self,
+        commitment: <Self::Request as Committable>::Commitment,
+    ) -> impl Future<Output = ()> + Send;
 }
 
 /// Interface for the application that originates requests.
-pub trait Originator<D: Digest>: Clone + Send + 'static {
+pub trait Originator: Clone + Send + 'static {
+    type Response: Committable + Digestible + Debug + Send + 'static;
     type PublicKey: PublicKey;
-    type Response: Digestible<Digest = D> + Debug + Send + 'static;
 
     /// Called once a quorum of `responses` have been collected for a request.
     fn collected(
         &mut self,
-        id: D,
+        commitment: <Self::Response as Committable>::Commitment,
         responses: HashMap<Self::PublicKey, Self::Response>,
     ) -> impl Future<Output = ()> + Send;
 }
 
 /// Interface for the application that receives requests from an origin and sends responses.
-pub trait Endpoint<D: Digest>: Clone + Send + 'static {
-    type Request: Committable + Digestible<Digest = D> + Debug + Send + 'static;
-    type Response: Digestible<Digest = D> + Debug + Send + 'static;
+pub trait Endpoint: Clone + Send + 'static {
+    type Request: Committable + Digestible + Debug + Send + 'static;
+    type Response: Committable<Commitment = <Self::Request as Committable>::Commitment>
+        + Digestible<Digest = <Self::Request as Digestible>::Digest>
+        + Debug
+        + Send
+        + 'static;
     type PublicKey: PublicKey;
 
     /// Processes a `request` from `origin` and (optionally) sends a response.
