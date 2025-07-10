@@ -137,18 +137,6 @@ pub enum ProtocolError {
 
     #[error("Network error: {0}")]
     NetworkError(String),
-
-    #[error("Serialization error: {0}")]
-    SerializationError(#[from] CodecError),
-
-    #[error("Request timeout")]
-    Timeout,
-
-    #[error("Server overloaded")]
-    Overloaded,
-
-    #[error("Internal error: {0}")]
-    InternalError(String),
 }
 
 impl Write for Message {
@@ -455,13 +443,6 @@ impl From<ProtocolError> for ErrorResponse {
             ProtocolError::InvalidRequest { message } => (ErrorCode::InvalidRequest, message),
             ProtocolError::DatabaseError(e) => (ErrorCode::DatabaseError, e.to_string()),
             ProtocolError::NetworkError(e) => (ErrorCode::NetworkError, e),
-            ProtocolError::SerializationError(e) => (
-                ErrorCode::InternalError,
-                format!("Serialization error: {e}"),
-            ),
-            ProtocolError::Timeout => (ErrorCode::Timeout, "Request timeout".to_string()),
-            ProtocolError::Overloaded => (ErrorCode::Overloaded, "Server overloaded".to_string()),
-            ProtocolError::InternalError(e) => (ErrorCode::InternalError, e),
         };
 
         ErrorResponse {
