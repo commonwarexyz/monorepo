@@ -12,7 +12,7 @@ use futures::{
     channel::{mpsc, oneshot},
     StreamExt,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{error, warn};
 
 /// Engine that will disperse messages and collect responses.
@@ -37,7 +37,7 @@ pub struct Engine<
     mailbox: mpsc::Receiver<Message<P, Rq>>,
 
     // State
-    responses: HashMap<Rq::Commitment, HashMap<P, Rs>>,
+    responses: HashMap<Rq::Commitment, HashSet<P>>,
 }
 
 impl<
@@ -78,24 +78,25 @@ impl<
 
     async fn run(
         mut self,
-        request_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        response_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        (mut req_tx, mut req_rx): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        (mut res_tx, mut res_rx): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        let (mut req_tx, mut req_rx) = request_network;
-        let (mut res_tx, mut res_rx) = response_network;
-        let mut mailbox = self.mailbox.fuse();
+        let pool = Pool::new(self.context.spawner(), 10);
         loop {
             select! {
                 // Command from the mailbox
-                command = mailbox.next() => {
+                command = self.mailbox.next() => {
                     if let Some(command) = command {
                         match command {
                             Message::Send { request, recipients, responder } => {
-                                let msg = request.commitment().encode();
-                                match req_tx.send(recipients, msg.into(), self.priority_request).await {
+                                // Track commitment (if not already tracked)
+                                let commitment = request.commitment();
+                                self.responses.entry(commitment).or_default();
+
+                                // Send the request to recipients
+                                match req_tx.send(recipients, request.encode().into(), self.priority_request).await {
                                     Ok(recipients) => {
                                         let _ = responder.send(recipients);
-                                        self.responses.insert(request.commitment(), HashMap::new());
                                     }
                                     Err(err) => {
                                         error!(?err, "failed to send request");
@@ -107,32 +108,6 @@ impl<
                             }
                         }
                     }
-                },
-
-                // Response from an endpoint
-                response = res_rx.recv() => {
-                    // Error handling
-                    let (peer, msg) = match response {
-                        Ok(r) => r,
-                        Err(err) => {
-                            error!(?err, "response receiver failed");
-                            break;
-                        }
-                    };
-
-                    // Decode the message
-                    let response = match Rs::decode_cfg(msg, &self.response_codec) {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            warn!(?err, ?peer, "failed to decode message");
-                            continue;
-                        }
-                    };
-
-                    // Handle the response
-                    let commitment = response.commitment();
-                    let entry = self.responses.entry(commitment).or_default();
-                    entry.insert(peer, response);
                 },
 
                 // Request from an originator
@@ -169,7 +144,39 @@ impl<
                             error!(?err, ?peer, "failed to send response");
                         }
                     }
-                }
+                },
+
+                // Response from an endpoint
+                response = res_rx.recv() => {
+                    // Error handling
+                    let (peer, msg) = match response {
+                        Ok(r) => r,
+                        Err(err) => {
+                            error!(?err, "response receiver failed");
+                            break;
+                        }
+                    };
+
+                    // Decode the message
+                    let response = match Rs::decode_cfg(msg, &self.response_codec) {
+                        Ok(msg) => msg,
+                        Err(err) => {
+                            warn!(?err, ?peer, "failed to decode message");
+                            continue;
+                        }
+                    };
+
+                    // Handle the response
+                    let commitment = response.commitment();
+                    let Some(responses) = self.responses.get_mut(&commitment) else {
+                        warn!(?commitment, ?peer, "response for unknown commitment");
+                        continue;
+                    };
+                    responses.insert(peer.clone());
+
+                    // Send the response to the monitor
+                    self.monitor.collected(peer, response, responses.len()).await;
+                },
             }
         }
     }

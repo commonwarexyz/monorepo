@@ -1,7 +1,6 @@
 use crate::{Handler, Monitor};
 
 mod engine;
-use commonware_codec::codec;
 pub use engine::Engine;
 mod ingress;
 pub use ingress::{Mailbox, Message};
