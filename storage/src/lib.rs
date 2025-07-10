@@ -8,9 +8,11 @@
 pub mod adb;
 pub mod archive;
 pub mod bmt;
+pub mod freezer;
 pub mod index;
 pub mod journal;
 pub mod metadata;
 pub mod mmr;
 pub mod ordinal;
 pub mod rmap;
+pub mod translator;

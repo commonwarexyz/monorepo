@@ -38,7 +38,7 @@ pub async fn read_concurrent_indices(store: &Ordinal, indices: &[u64]) {
     black_box(try_join_all(futures).await.unwrap());
 }
 
-fn bench_ordinal_get(c: &mut Criterion) {
+fn bench_get(c: &mut Criterion) {
     // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
     let cfg = Config::default();
 
@@ -87,5 +87,5 @@ fn bench_ordinal_get(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_ordinal_get
+    targets = bench_get
 }

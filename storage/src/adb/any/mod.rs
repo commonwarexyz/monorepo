@@ -9,7 +9,7 @@
 
 use crate::{
     adb::{operation::Operation, Error},
-    index::{Index, Translator},
+    index::Index,
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
         bitmap::Bitmap,
@@ -18,6 +18,7 @@ use crate::{
         journaled::{Config as MmrConfig, Mmr},
         verification::Proof,
     },
+    translator::Translator,
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Digest, Hasher as CHasher};
@@ -829,8 +830,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 pub(super) mod test {
     use super::*;
     use crate::{
-        index::translator::{EightCap, TwoCap},
         mmr::{hasher::Standard, mem::Mmr as MemMmr},
+        translator::{EightCap, TwoCap},
     };
     use commonware_codec::{DecodeExt, FixedSize};
     use commonware_cryptography::{hash, sha256::Digest, Digest as _, Hasher as CHasher, Sha256};

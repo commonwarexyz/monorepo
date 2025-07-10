@@ -6,7 +6,7 @@ use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
 };
-use commonware_utils::{hex, Array};
+use commonware_utils::{hex, Array, BitVec};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::{
@@ -84,6 +84,22 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
 impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
     /// Initialize a new [Ordinal] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
+        Self::init_with_bits(context, config, None).await
+    }
+
+    /// Initialize a new [Ordinal] instance with a collection of [BitVec]s (indicating which
+    /// records should be considered available).
+    ///
+    /// If a section is not provided in the [BTreeMap], all records in that section are considered
+    /// unavailable. If a [BitVec] is provided for a section, all records in that section are
+    /// considered available if and only if the [BitVec] is set for the record. If a section is provided
+    /// but no [BitVec] is populated, all records in that section are considered available.
+    // TODO(#1227): Hide this complexity from the caller.
+    pub async fn init_with_bits(
+        context: E,
+        config: Config,
+        bits: Option<BTreeMap<u64, &Option<BitVec>>>,
+    ) -> Result<Self, Error> {
         // Scan for all blobs in the partition
         let mut blobs = BTreeMap::new();
         let stored_blobs = match context.scan(&config.partition).await {
@@ -128,6 +144,14 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         let mut items = 0;
         let mut intervals = RMap::new();
         for (section, blob) in &blobs {
+            // Skip if bits are provided and the section is not in the bits
+            if let Some(bits) = &bits {
+                if !bits.contains_key(section) {
+                    warn!(section, "skipping section without bits");
+                    continue;
+                }
+            }
+
             // Initialize read buffer
             let size = blob.size().await;
             let mut replay_blob = ReadBuffer::new(blob.clone(), size, config.replay_buffer);
@@ -137,6 +161,23 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
             while offset < size {
                 // Calculate index for this record
                 let index = section * config.items_per_blob + (offset / Record::<V>::SIZE as u64);
+
+                // If bits are provided, skip if not set
+                let mut must_exist = false;
+                if let Some(bits) = &bits {
+                    // If bits are provided, check if the record exists
+                    let bits = bits.get(section).unwrap();
+                    if let Some(bits) = bits {
+                        let bit_index = offset as usize / Record::<V>::SIZE;
+                        if !bits.get(bit_index).expect("invalid index") {
+                            offset += Record::<V>::SIZE as u64;
+                            continue;
+                        }
+                    }
+
+                    // If bit section exists but it is empty, we must have all records
+                    must_exist = true;
+                }
 
                 // Attempt to read record at offset
                 replay_blob.seek_to(offset)?;
@@ -154,8 +195,11 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
                     continue;
                 }
 
-                // If record is invalid, it may either be empty or corrupted. We don't
-                // store enough information to determine which (and thus don't log).
+                // If record is invalid, it may either be empty or corrupted. We only care
+                // which is which if the provided bits indicate that the record must exist.
+                if must_exist {
+                    return Err(Error::MissingRecord(index));
+                }
             }
         }
         debug!(

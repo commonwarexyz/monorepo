@@ -6,7 +6,7 @@ use crate::{
         },
         Any,
     },
-    index::Translator,
+    translator::Translator,
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};

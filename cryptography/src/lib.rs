@@ -13,6 +13,8 @@ pub mod bls12381;
 pub mod ed25519;
 pub mod sha256;
 pub use sha256::{hash, CoreSha256, Sha256};
+mod bloomfilter;
+pub use bloomfilter::BloomFilter;
 pub mod secp256r1;
 
 /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
