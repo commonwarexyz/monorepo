@@ -7,14 +7,15 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Handle, Spawner};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::futures::Pool;
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt,
 };
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{HashMap, HashSet};
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 /// Engine that will disperse messages and collect responses.
 pub struct Engine<
@@ -38,11 +39,16 @@ pub struct Engine<
     mailbox: mpsc::Receiver<Message<P, Rq>>,
 
     // State
-    responses: HashMap<Rq::Commitment, HashSet<P>>,
+    tracked: HashMap<Rq::Commitment, HashSet<P>>,
+
+    // Metrics
+    outstanding: Gauge,
+    requests: Counter,
+    responses: Counter,
 }
 
 impl<
-        E: Clock + Spawner,
+        E: Clock + Spawner + Metrics,
         Rq: Committable + Digestible + Codec,
         Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest> + Codec,
         P: PublicKey,
@@ -51,8 +57,22 @@ impl<
     > Engine<E, Rq, Rs, P, M, H>
 {
     pub fn new(context: E, cfg: Config<M, H, Rq::Cfg, Rs::Cfg>) -> (Self, Mailbox<P, Rq>) {
+        // Create mailbox
         let (tx, rx) = mpsc::channel(cfg.mailbox_size);
         let mailbox: Mailbox<P, Rq> = Mailbox::new(tx);
+
+        // Create metrics
+        let outstanding = Gauge::default();
+        let requests = Counter::default();
+        let responses = Counter::default();
+        context.register(
+            "outstanding",
+            "outstanding commitments",
+            outstanding.clone(),
+        );
+        context.register("requests", "processed requests", requests.clone());
+        context.register("responses", "sent responses", responses.clone());
+
         (
             Self {
                 context,
@@ -63,7 +83,10 @@ impl<
                 monitor: cfg.monitor,
                 handler: cfg.handler,
                 mailbox: rx,
-                responses: HashMap::new(),
+                tracked: HashMap::new(),
+                outstanding,
+                requests,
+                responses,
             },
             mailbox,
         )
@@ -92,7 +115,8 @@ impl<
                             Message::Send { request, recipients, responder } => {
                                 // Track commitment (if not already tracked)
                                 let commitment = request.commitment();
-                                self.responses.entry(commitment).or_default();
+                                self.tracked.entry(commitment).or_default();
+                                self.outstanding.set(self.tracked.len() as i64);
 
                                 // Send the request to recipients
                                 match req_tx.send(recipients, request.encode().into(), self.priority_request).await {
@@ -105,7 +129,8 @@ impl<
                                 }
                             },
                             Message::Cancel { commitment } => {
-                                self.responses.remove(&commitment);
+                                self.tracked.remove(&commitment);
+                                self.outstanding.set(self.tracked.len() as i64);
                             }
                         }
                     }
@@ -117,6 +142,7 @@ impl<
                     let Ok((peer, reply)) = ready else {
                         continue;
                     };
+                    self.responses.inc();
 
                     // Send the response
                     let reply = reply.encode();
@@ -125,6 +151,8 @@ impl<
 
                 // Request from an originator
                 message = req_rx.recv() => {
+                    self.requests.inc();
+
                     // Error handling
                     let (peer, msg) = match message {
                         Ok(r) => r,
@@ -173,11 +201,14 @@ impl<
 
                     // Handle the response
                     let commitment = response.commitment();
-                    let Some(responses) = self.responses.get_mut(&commitment) else {
-                        warn!(?commitment, ?peer, "response for unknown commitment");
+                    let Some(responses) = self.tracked.get_mut(&commitment) else {
+                        debug!(?commitment, ?peer, "response for unknown commitment");
                         continue;
                     };
-                    responses.insert(peer.clone());
+                    if !responses.insert(peer.clone()) {
+                        debug!(?commitment, ?peer, "duplicate response");
+                        continue;
+                    }
 
                     // Send the response to the monitor
                     self.monitor.collected(peer, response, responses.len()).await;
