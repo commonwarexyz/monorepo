@@ -5,7 +5,7 @@
 //! to determine sync parameters and then performs the actual sync operation.
 
 use clap::{Arg, Command};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{tokio as tokio_runtime, Runner};
 use commonware_storage::{
     adb::any::sync::{self, client::Config as SyncConfig},
@@ -23,29 +23,30 @@ const DEFAULT_SERVER: &str = "127.0.0.1:8080";
 struct ClientConfig {
     /// Server address to connect to.
     server: SocketAddr,
-    /// Batch size for operations.
+    /// Batch size for fetching operations.
     batch_size: u64,
     /// Storage directory.
     storage_dir: String,
 }
 
+#[derive(Debug)]
+struct ServerMetadata {
+    database_size: u64,
+    target_hash: Digest,
+    oldest_retained_loc: u64,
+    latest_op_loc: u64,
+}
+
 /// Get server metadata to determine sync parameters.
 async fn get_server_metadata<E>(
     resolver: &NetworkResolver<E>,
-) -> Result<(u64, <commonware_sync::Hasher as Hasher>::Digest, u64, u64), Box<dyn std::error::Error>>
+) -> Result<ServerMetadata, Box<dyn std::error::Error>>
 where
     E: commonware_runtime::Network + Clone,
 {
     info!("📡 Requesting server metadata...");
 
     let metadata = resolver.get_server_metadata().await?;
-
-    info!(
-        database_size = metadata.database_size,
-        oldest_retained = metadata.oldest_retained_loc,
-        latest_op = metadata.latest_op_loc,
-        "📊 Server metadata received"
-    );
 
     // Parse the target hash from the hex string
     let target_hash = {
@@ -63,20 +64,20 @@ where
         for i in 0..32 {
             let hex_byte = &hex_str[i * 2..i * 2 + 2];
             bytes[i] = u8::from_str_radix(hex_byte, 16)
-                .map_err(|e| format!("Invalid hex character in target hash: {}", e))?;
+                .map_err(|e| format!("Invalid hex character in target hash: {e}"))?;
         }
 
-        <commonware_sync::Hasher as Hasher>::Digest::from(bytes)
+        Digest::from(bytes)
     };
 
-    info!(target_hash = %metadata.target_hash, "🎯 Target hash");
-
-    Ok((
-        metadata.database_size,
+    let metadata = ServerMetadata {
+        database_size: metadata.database_size,
         target_hash,
-        metadata.oldest_retained_loc,
-        metadata.latest_op_loc,
-    ))
+        oldest_retained_loc: metadata.oldest_retained_loc,
+        latest_op_loc: metadata.latest_op_loc,
+    };
+    info!(?metadata, "📊 Received server metadata");
+    Ok(metadata)
 }
 
 /// Perform a sync operation using the actual ADB sync functionality.
@@ -94,11 +95,15 @@ where
     info!(server = %config.server, "🚀 Starting ADB sync from server");
 
     // Get server metadata to determine sync parameters
-    let (server_size, target_hash, oldest_retained_loc, latest_op_loc) =
-        get_server_metadata(resolver).await?;
+    let ServerMetadata {
+        database_size,
+        target_hash,
+        oldest_retained_loc,
+        latest_op_loc,
+    } = get_server_metadata(resolver).await?;
 
     info!(
-        operations = server_size,
+        database_size,
         lower_bound = oldest_retained_loc,
         upper_bound = latest_op_loc,
         "📈 Sync parameters"
@@ -151,7 +156,7 @@ where
     let root_hash_hex = root_hash
         .as_ref()
         .iter()
-        .map(|b| format!("{:02x}", b))
+        .map(|b| format!("{b:02x}"))
         .collect::<String>();
 
     info!(
@@ -208,7 +213,7 @@ fn main() {
             .unwrap()
             .parse()
             .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid server address: {}", e);
+                eprintln!("❌ Invalid server address: {e}");
                 std::process::exit(1);
             }),
         batch_size: matches
@@ -216,7 +221,7 @@ fn main() {
             .unwrap()
             .parse()
             .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid batch size: {}", e);
+                eprintln!("❌ Invalid batch size: {e}");
                 std::process::exit(1);
             }),
         storage_dir: matches

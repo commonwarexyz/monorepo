@@ -124,7 +124,7 @@ where
         root_hash
             .as_ref()
             .iter()
-            .map(|b| format!("{:02x}", b))
+            .map(|b| format!("{b:02x}"))
             .collect::<String>()
     };
 
@@ -159,7 +159,7 @@ where
     if request.start_loc >= db_size {
         return Err(ProtocolError::InvalidRequest {
             message: format!(
-                "start_loc {} >= database size {}",
+                "start_loc >= database size ({}) >= ({})",
                 request.start_loc, db_size
             ),
         });
@@ -392,7 +392,7 @@ fn main() {
             .unwrap()
             .parse()
             .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid port: {}", e);
+                eprintln!("❌ Invalid port: {e}");
                 std::process::exit(1);
             }),
         initial_ops: matches
@@ -400,7 +400,7 @@ fn main() {
             .unwrap()
             .parse()
             .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid initial operations count: {}", e);
+                eprintln!("❌ Invalid initial operations count: {e}");
                 std::process::exit(1);
             }),
         storage_dir: matches
@@ -454,7 +454,7 @@ fn main() {
         let root_hash_hex = root_hash
             .as_ref()
             .iter()
-            .map(|b| format!("{:02x}", b))
+            .map(|b| format!("{b:02x}"))
             .collect::<String>();
 
         info!(

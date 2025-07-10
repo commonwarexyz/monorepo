@@ -164,14 +164,14 @@ impl From<ProtocolError> for ErrorResponse {
         let (error_code, message) = match error {
             ProtocolError::UnsupportedVersion { version } => (
                 ErrorCode::UnsupportedVersion,
-                format!("Unsupported version: {}", version),
+                format!("Unsupported version: {version}"),
             ),
             ProtocolError::InvalidRequest { message } => (ErrorCode::InvalidRequest, message),
             ProtocolError::DatabaseError(e) => (ErrorCode::DatabaseError, e.to_string()),
             ProtocolError::NetworkError(e) => (ErrorCode::NetworkError, e),
             ProtocolError::SerializationError(e) => (
                 ErrorCode::InternalError,
-                format!("Serialization error: {}", e),
+                format!("Serialization error: {e}"),
             ),
             ProtocolError::Timeout => (ErrorCode::Timeout, "Request timeout".to_string()),
             ProtocolError::Overloaded => (ErrorCode::Overloaded, "Server overloaded".to_string()),
@@ -211,7 +211,7 @@ impl GetOperationsRequest {
 
         if self.start_loc >= self.size {
             return Err(ProtocolError::InvalidRequest {
-                message: format!("start_loc ({}) >= size ({})", self.start_loc, self.size),
+                message: format!("start_loc >= size ({}) >= ({})", self.start_loc, self.size),
             });
         }
 

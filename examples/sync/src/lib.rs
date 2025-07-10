@@ -40,11 +40,11 @@ pub type Translator = commonware_storage::index::translator::EightCap;
 /// Create a database configuration with appropriate partitioning.
 pub fn create_adb_config(db_id: &str) -> Config<Translator> {
     Config {
-        mmr_journal_partition: format!("mmr_journal_{}", db_id),
-        mmr_metadata_partition: format!("mmr_metadata_{}", db_id),
+        mmr_journal_partition: format!("mmr_journal_{db_id}"),
+        mmr_metadata_partition: format!("mmr_metadata_{db_id}"),
         mmr_items_per_blob: 1024,
         mmr_write_buffer: 64,
-        log_journal_partition: format!("log_journal_{}", db_id),
+        log_journal_partition: format!("log_journal_{db_id}"),
         log_items_per_blob: 1024,
         log_write_buffer: 64,
         translator: Translator::default(),
@@ -63,7 +63,7 @@ where
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    format!("db_{}", timestamp)
+    format!("db_{timestamp}")
 }
 
 /// Create deterministic test operations for demonstration purposes.
@@ -110,7 +110,6 @@ mod tests {
     use super::*;
     use commonware_runtime::deterministic;
     use commonware_runtime::{tokio as tokio_runtime, Runner};
-    use tracing::info;
 
     #[test]
     fn test_create_test_operations() {
@@ -155,9 +154,8 @@ mod tests {
                     Operation::Deleted(key) => {
                         database.delete(key).await.unwrap();
                     }
-                    Operation::Commit(loc) => {
+                    Operation::Commit(_) => {
                         database.commit().await.unwrap();
-                        info!("Committed at location {}", loc);
                     }
                 }
             }
@@ -207,10 +205,6 @@ mod tests {
 
             // Verify the database has operations
             assert!(database.op_count() > 0);
-            info!(
-                "End-to-end test passed with {} operations",
-                database.op_count()
-            );
         });
     }
 }

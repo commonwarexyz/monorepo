@@ -17,7 +17,7 @@ use futures::channel::oneshot;
 use std::{net::SocketAddr, num::NonZeroU64, sync::Arc};
 use thiserror::Error;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 /// Maximum response size to prevent memory exhaustion.
 const MAX_RESPONSE_SIZE: usize = 100 * 1024 * 1024; // 100MB
@@ -75,7 +75,7 @@ where
             .context
             .dial(self.server_addr)
             .await
-            .map_err(|e| ResolverError::ConnectionError(format!("Failed to connect: {}", e)))?;
+            .map_err(|e| ResolverError::ConnectionError(format!("Failed to connect: {e}")))?;
 
         *connection_guard = Some(Connection { sink, stream });
         info!(server_addr = %self.server_addr, "✅ Connected");
@@ -96,7 +96,7 @@ where
         let length_data = stream
             .recv(length_buf)
             .await
-            .map_err(|e| ResolverError::ConnectionError(format!("Failed to read length: {}", e)))?;
+            .map_err(|e| ResolverError::ConnectionError(format!("Failed to read length: {e}")))?;
 
         if length_data.len() != 4 {
             return Err(ResolverError::ConnectionError(
@@ -115,16 +115,16 @@ where
         // Validate message length
         if message_length == 0 || message_length > MAX_RESPONSE_SIZE {
             return Err(ResolverError::ConnectionError(format!(
-                "Invalid message length: {}",
-                message_length
+                "Invalid message length: {message_length}"
             )));
         }
 
         // Read the actual message
         let message_buf = vec![0u8; message_length];
-        let message_data = stream.recv(message_buf).await.map_err(|e| {
-            ResolverError::ConnectionError(format!("Failed to read message: {}", e))
-        })?;
+        let message_data = stream
+            .recv(message_buf)
+            .await
+            .map_err(|e| ResolverError::ConnectionError(format!("Failed to read message: {e}")))?;
 
         if message_data.len() != message_length {
             return Err(ResolverError::ConnectionError(
@@ -142,12 +142,12 @@ where
         let length_bytes = length.to_be_bytes();
         sink.send(length_bytes.to_vec())
             .await
-            .map_err(|e| ResolverError::ConnectionError(format!("Failed to send length: {}", e)))?;
+            .map_err(|e| ResolverError::ConnectionError(format!("Failed to send length: {e}")))?;
 
         // Send the actual message
-        sink.send(message.to_vec()).await.map_err(|e| {
-            ResolverError::ConnectionError(format!("Failed to send message: {}", e))
-        })?;
+        sink.send(message.to_vec())
+            .await
+            .map_err(|e| ResolverError::ConnectionError(format!("Failed to send message: {e}")))?;
 
         Ok(())
     }
@@ -182,8 +182,6 @@ where
     pub async fn get_server_metadata(&self) -> Result<GetServerMetadataResponse, ResolverError> {
         let request_id = self.generate_request_id();
         let request = GetServerMetadataRequest::new(request_id);
-
-        debug!(request_id, "📡 Sending metadata request");
 
         match self
             .send_request(Message::GetServerMetadataRequest(request))
