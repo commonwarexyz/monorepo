@@ -68,7 +68,7 @@ where
     V: Array,
     H: Hasher,
     T: Translator,
-    R: Resolver<H, K, V>,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
     Client::new(config).await?.sync().await
 }

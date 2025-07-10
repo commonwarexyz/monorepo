@@ -15,7 +15,6 @@ use commonware_storage::{
     mmr::verification::Proof,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::{
     net::SocketAddr,
@@ -151,19 +150,20 @@ where
     }
 }
 
-impl<E, H, K, V> Resolver<H, K, V> for NetworkResolver<E>
+impl<E> Resolver for NetworkResolver<E>
 where
-    E: commonware_runtime::Network + Clone,
-    H: commonware_cryptography::Hasher,
-    K: Array,
-    V: Array,
+    E: commonware_runtime::Network,
 {
+    type Digest = <crate::Hasher as commonware_cryptography::Hasher>::Digest;
+    type Key = crate::Key;
+    type Value = crate::Value;
+
     async fn get_operations(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<GetOperationsResult<H, K, V>, SyncError> {
+    ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, SyncError> {
         let request_id = self.generate_request_id();
         let request = GetOperationsRequest {
             version: crate::PROTOCOL_VERSION,
@@ -205,7 +205,7 @@ where
             let mut buf = &response.operations_bytes[..];
             use commonware_codec::RangeCfg;
             let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
-            Vec::<commonware_storage::adb::operation::Operation<K, V>>::read_cfg(
+            Vec::<commonware_storage::adb::operation::Operation<Self::Key, Self::Value>>::read_cfg(
                 &mut buf,
                 &(range_cfg, ()),
             )

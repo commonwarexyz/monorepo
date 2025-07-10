@@ -11,7 +11,6 @@ use commonware_storage::{
 };
 use commonware_sync::{crate_version, create_adb_config, Database, NetworkResolver};
 use std::{
-    marker::PhantomData,
     net::{Ipv4Addr, SocketAddr},
     num::NonZeroU64,
 };
@@ -107,7 +106,6 @@ where
         resolver,
         hasher: Standard::new(),
         apply_batch_size: 1024,
-        _phantom: PhantomData,
     };
 
     info!(
