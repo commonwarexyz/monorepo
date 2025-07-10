@@ -1,5 +1,6 @@
 use super::utils::{append_random, init};
 use commonware_runtime::benchmarks::{context, tokio};
+use commonware_storage::archive::Archive as _;
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 

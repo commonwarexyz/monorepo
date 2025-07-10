@@ -6,7 +6,7 @@ use commonware_runtime::{
     tokio::Config,
     Runner,
 };
-use commonware_storage::archive::Identifier;
+use commonware_storage::archive::{Archive as _, Identifier};
 use criterion::{black_box, criterion_group, Criterion};
 use futures::future::try_join_all;
 use rand::{rngs::StdRng, Rng, SeedableRng};

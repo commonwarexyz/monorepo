@@ -4,6 +4,7 @@ use commonware_runtime::{
     tokio::Config,
     Runner,
 };
+use commonware_storage::archive::Archive as _;
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 

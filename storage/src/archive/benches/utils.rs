@@ -2,7 +2,10 @@
 
 use commonware_runtime::tokio::Context;
 use commonware_storage::{
-    archive::{Archive, Config},
+    archive::{
+        prunable::{Archive, Config},
+        Archive as _,
+    },
     translator::TwoCap,
 };
 use commonware_utils::array::FixedBytes;
@@ -11,16 +14,14 @@ use rand::{rngs::StdRng, RngCore, SeedableRng};
 /// Partition used across all archive benchmarks.
 pub const PARTITION: &str = "archive_bench_partition";
 
-/// Number of buffered writes before a forced sync.
-const PENDING_WRITES: usize = 1_000;
-
-/// Number of bytes that can be buffered in a section before being written to disk.
+/// Number of bytes that can be buffered in a section before being written to a
+/// [commonware_runtime::Blob].
 const WRITE_BUFFER: usize = 1024;
 
-/// Section-mask that yields reasonably small blobs for local testing.
-const SECTION_MASK: u64 = 0xffff_ffff_ffff_ff00u64;
+/// Number of items per section (the granularity of pruning).
+const ITEMS_PER_SECTION: u64 = 1_024;
 
-/// Number of bytes to buffer when replaying.
+/// Number of bytes to buffer when replaying a [commonware_runtime::Blob].
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
 /// Fixed-length key and value types.
@@ -39,8 +40,7 @@ pub async fn init(ctx: Context, compression: Option<u8>) -> ArchiveType {
         translator: TwoCap,
         compression,
         codec_config: (),
-        section_mask: SECTION_MASK,
-        pending_writes: PENDING_WRITES,
+        items_per_section: ITEMS_PER_SECTION,
         write_buffer: WRITE_BUFFER,
         replay_buffer: REPLAY_BUFFER,
     };
