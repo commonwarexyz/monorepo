@@ -39,10 +39,8 @@
 //!     let cfg = Config {
 //!         metadata_partition: "metadata".into(),
 //!         freezer_table_partition: "table".into(),
-//!         freezer_table_initial_size: 1024,
-//!         freezer_table_resize_frequency: 10,
-//!         freezer_table_read_buffer: 1024,
-//!         freezer_table_write_buffer: 1024,
+//!         freezer_table_initial_size: 65_536,
+//!         freezer_table_resize_frequency: 4,
 //!         freezer_journal_partition: "journal".into(),
 //!         freezer_journal_target_size: 1024,
 //!         freezer_journal_compression: Some(3),
@@ -78,12 +76,6 @@ pub struct Config<C> {
 
     /// The number of items added to the freezer table before it is resized.
     pub freezer_table_resize_frequency: u8,
-
-    /// The size of the read buffer to use when scanning the freezer table (e.g., during recovery or resize).
-    pub freezer_table_read_buffer: usize,
-
-    /// The size of the write buffer to use when scanning the freezer table (e.g., during resize).
-    pub freezer_table_write_buffer: usize,
 
     /// The partition to use for the archive's freezer journal.
     pub freezer_journal_partition: String,

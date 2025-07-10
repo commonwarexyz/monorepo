@@ -272,7 +272,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     table_partition: String,
     table_size: u32,
     table_resize_frequency: u8,
-    table_read_buffer: usize,
+    table_replay_buffer: usize,
     table_write_buffer: usize,
 
     // Table blob that maps slots to journal chain heads
@@ -377,11 +377,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         blob: &E::Blob,
         table_size: u32,
         max_valid_epoch: Option<u64>,
-        table_read_buffer: usize,
+        table_replay_buffer: usize,
     ) -> Result<(bool, u64, u64), Error> {
         // Create a buffered reader for efficient scanning
         let blob_size = Self::table_offset(table_size);
-        let mut reader = buffer::Read::new(blob.clone(), blob_size, table_read_buffer);
+        let mut reader = buffer::Read::new(blob.clone(), blob_size, table_replay_buffer);
 
         // Iterate over all table entries and overwrite invalid ones
         let mut modified = false;
@@ -532,7 +532,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                     &table,
                     checkpoint.table_size,
                     Some(checkpoint.epoch),
-                    config.table_read_buffer,
+                    config.table_replay_buffer,
                 )
                 .await?;
                 if table_modified {
@@ -552,7 +552,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 // Find max epoch/section and clean invalid entries in a single pass
                 let table_size = (table_len / Entry::FULL_SIZE as u64) as u32;
                 let (modified, max_epoch, max_section) =
-                    Self::recover_table(&table, table_size, None, config.table_read_buffer).await?;
+                    Self::recover_table(&table, table_size, None, config.table_replay_buffer)
+                        .await?;
 
                 // Sync table if needed
                 if modified {
@@ -591,7 +592,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             table_partition: config.table_partition,
             table_size: checkpoint.table_size,
             table_resize_frequency: config.table_resize_frequency,
-            table_read_buffer: config.table_read_buffer,
+            table_replay_buffer: config.table_replay_buffer,
             table_write_buffer: config.table_write_buffer,
             table,
             journal,
@@ -810,7 +811,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Create a buffered reader for efficient scanning
         let old_blob_size = Self::table_offset(old_size);
         let mut reader =
-            buffer::Read::new(self.table.clone(), old_blob_size, self.table_read_buffer);
+            buffer::Read::new(self.table.clone(), old_blob_size, self.table_replay_buffer);
 
         // For each bucket in the old table, initialize both old and new positions with the same head
         for i in 0..old_size {
