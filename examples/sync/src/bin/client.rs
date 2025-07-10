@@ -1,7 +1,5 @@
-//! ADB sync client that syncs operations from a server.
-//!
-//! This client demonstrates how to use the ADB (Any Database) sync functionality
-//! to synchronize operations from a remote server. It fetches server metadata
+//! This client demonstrates how to use the ADB sync functionality
+//! to synchronize to the server's state. It fetches server metadata
 //! to determine sync parameters and then performs the actual sync operation.
 
 use clap::{Arg, Command};
@@ -81,9 +79,9 @@ where
 }
 
 /// Perform a sync operation using the actual ADB sync functionality.
-async fn sync_once<E>(
+async fn sync<E>(
     context: E,
-    resolver: &NetworkResolver<E>,
+    resolver: NetworkResolver<E>,
     config: &ClientConfig,
 ) -> Result<Database<E>, Box<dyn std::error::Error>>
 where
@@ -100,7 +98,7 @@ where
         target_hash,
         oldest_retained_loc,
         latest_op_loc,
-    } = get_server_metadata(resolver).await?;
+    } = get_server_metadata(&resolver).await?;
 
     info!(
         database_size,
@@ -112,10 +110,9 @@ where
     // Create database configuration
     let db_id = commonware_sync::generate_db_id(&context);
     let db_config = create_adb_config(&db_id);
-
     info!(db_id = %db_id, "💾 Created local database");
 
-    // Create sync configuration with explicit type parameters
+    // Create sync configuration
     let sync_config = SyncConfig::<
         E,
         commonware_sync::Key,
@@ -130,7 +127,7 @@ where
         target_hash,
         lower_bound_ops: oldest_retained_loc,
         upper_bound_ops: latest_op_loc,
-        resolver: resolver.clone(),
+        resolver,
         hasher: Standard::new(),
         apply_batch_size: 1024,
         _phantom: PhantomData,
@@ -143,7 +140,7 @@ where
         "⚙️  Sync configuration"
     );
 
-    // Use the actual ADB sync functionality
+    // Do the sync.
     info!("🔄 Beginning sync operation...");
     let database = sync::sync(sync_config).await.map_err(|e| {
         error!(error = %e, "❌ Sync failed");
@@ -158,6 +155,11 @@ where
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
+
+    // Verify the hash matches the  target hash.
+    if root_hash != target_hash {
+        return Err(format!("Synced database root hash does not match target hash: {root_hash:?} != {target_hash:?}").into());
+    }
 
     info!(
         database_ops = database.op_count(),
@@ -244,8 +246,10 @@ fn main() {
         let resolver = NetworkResolver::new(config.server, context.clone());
 
         // Perform the sync operation
-        match sync_once(context.clone(), &resolver, &config).await {
+        match sync(context.clone(), resolver, &config).await {
             Ok(_database) => {
+                // _database is now synced to the server's state.
+                // We don't use it in this example, but at this point it's ready to be used.
                 info!("🎉 Client completed successfully");
             }
             Err(e) => {

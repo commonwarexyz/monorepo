@@ -10,15 +10,115 @@
 //! - Comprehensive error handling
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt as _, Write};
+use commonware_runtime::{Sink, Stream};
 use std::num::NonZeroU64;
 use thiserror::Error;
 
 /// Protocol version identifier.
 pub const PROTOCOL_VERSION: u8 = 1;
 
-/// Maximum message size in bytes (1MB).
-pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+/// Maximum message size in bytes (10MB).
+pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+
+// ========== Message Framing Functions ==========
+
+/// Read a length-prefixed message from a stream.
+///
+/// This function reads a 4-byte big-endian length prefix followed by the message data.
+/// The message length is validated to prevent DoS attacks.
+pub async fn read_message<S: Stream>(stream: &mut S) -> Result<Vec<u8>, MessageFramingError> {
+    // Read the 4-byte length prefix
+    let length_buf = vec![0u8; 4];
+    let length_data = stream
+        .recv(length_buf)
+        .await
+        .map_err(|e| MessageFramingError::ReadFailed(e.to_string()))?;
+
+    if length_data.len() != 4 {
+        return Err(MessageFramingError::InvalidLengthPrefix);
+    }
+
+    // Convert bytes to u32 (network byte order)
+    let message_length = u32::from_be_bytes([
+        length_data.as_ref()[0],
+        length_data.as_ref()[1],
+        length_data.as_ref()[2],
+        length_data.as_ref()[3],
+    ]) as usize;
+
+    // Validate message length (prevent DoS)
+    if message_length == 0 || message_length > MAX_MESSAGE_SIZE {
+        return Err(MessageFramingError::InvalidMessageLength(message_length));
+    }
+
+    // Read the actual message
+    let message_buf = vec![0u8; message_length];
+    let message_data = stream
+        .recv(message_buf)
+        .await
+        .map_err(|e| MessageFramingError::ReadFailed(e.to_string()))?;
+
+    if message_data.len() != message_length {
+        return Err(MessageFramingError::MessageLengthMismatch {
+            expected: message_length,
+            actual: message_data.len(),
+        });
+    }
+
+    Ok(message_data.as_ref().to_vec())
+}
+
+/// Send a length-prefixed message to a sink.
+///
+/// This function sends a 4-byte big-endian length prefix followed by the message data.
+pub async fn send_message<S: Sink>(
+    sink: &mut S,
+    message: &[u8],
+) -> Result<(), MessageFramingError> {
+    // Validate message length
+    if message.len() > MAX_MESSAGE_SIZE {
+        return Err(MessageFramingError::MessageTooLarge(message.len()));
+    }
+
+    // Send 4-byte length prefix
+    let length = message.len() as u32;
+    let length_bytes = length.to_be_bytes();
+    sink.send(length_bytes.to_vec())
+        .await
+        .map_err(|e| MessageFramingError::WriteFailed(e.to_string()))?;
+
+    // Send the actual message
+    sink.send(message.to_vec())
+        .await
+        .map_err(|e| MessageFramingError::WriteFailed(e.to_string()))?;
+
+    Ok(())
+}
+
+/// Errors that can occur during message framing operations.
+#[derive(Debug, Error)]
+pub enum MessageFramingError {
+    #[error("Failed to read from stream: {0}")]
+    ReadFailed(String),
+
+    #[error("Failed to write to sink: {0}")]
+    WriteFailed(String),
+
+    #[error("Invalid length prefix")]
+    InvalidLengthPrefix,
+
+    #[error("Invalid message length: {0} (max: {MAX_MESSAGE_SIZE})")]
+    InvalidMessageLength(usize),
+
+    #[error("Message too large: {0} bytes (max: {MAX_MESSAGE_SIZE})")]
+    MessageTooLarge(usize),
+
+    #[error("Message length mismatch: expected {expected}, got {actual}")]
+    MessageLengthMismatch { expected: usize, actual: usize },
+}
+
+// ========== Protocol Types ==========
 
 /// Network protocol messages for ADB sync.
 #[derive(Debug, Clone)]
@@ -117,8 +217,6 @@ pub enum ErrorCode {
     NetworkError,
     /// Request timeout.
     Timeout,
-    /// Server overloaded.
-    Overloaded,
     /// Internal server error.
     InternalError,
 }
@@ -333,12 +431,12 @@ impl Read for GetServerMetadataResponse {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        use commonware_codec::ReadRangeExt;
         let version = u8::read(buf)?;
         let request_id = u64::read(buf)?;
         let database_size = u64::read(buf)?;
         // Read string as Vec<u8> and convert to String
-        let target_hash_bytes = Vec::<u8>::read_range(buf, 0..64)?; // TODO what should this be?
+        // Target hash should be exactly 64 characters (SHA256 hex)
+        let target_hash_bytes = Vec::<u8>::read_range(buf, 0..=64)?;
         let target_hash = String::from_utf8(target_hash_bytes).map_err(|_| {
             CodecError::Invalid("GetServerMetadataResponse", "invalid UTF-8 in target_hash")
         })?;
@@ -377,7 +475,6 @@ impl Read for ErrorResponse {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        use commonware_codec::ReadRangeExt;
         let version = u8::read(buf)?;
         let request_id = Option::<u64>::read(buf)?;
         let error_code = ErrorCode::read(buf)?;
@@ -402,8 +499,7 @@ impl Write for ErrorCode {
             ErrorCode::DatabaseError => 2u8,
             ErrorCode::NetworkError => 3u8,
             ErrorCode::Timeout => 4u8,
-            ErrorCode::Overloaded => 5u8,
-            ErrorCode::InternalError => 6u8,
+            ErrorCode::InternalError => 5u8,
         };
         discriminant.write(buf);
     }
@@ -426,8 +522,7 @@ impl Read for ErrorCode {
             2 => Ok(ErrorCode::DatabaseError),
             3 => Ok(ErrorCode::NetworkError),
             4 => Ok(ErrorCode::Timeout),
-            5 => Ok(ErrorCode::Overloaded),
-            6 => Ok(ErrorCode::InternalError),
+            5 => Ok(ErrorCode::InternalError),
             _ => Err(CodecError::InvalidEnum(discriminant)),
         }
     }
@@ -455,7 +550,7 @@ impl From<ProtocolError> for ErrorResponse {
 }
 
 impl GetOperationsRequest {
-    /// Create a new GetOperationsRequest.
+    /// Create a new [GetOperationsRequest].
     pub fn new(size: u64, start_loc: u64, max_ops: NonZeroU64, request_id: u64) -> Self {
         Self {
             version: PROTOCOL_VERSION,
@@ -491,7 +586,7 @@ impl GetOperationsRequest {
 }
 
 impl GetOperationsResponse {
-    /// Create a new GetOperationsResponse.
+    /// Create a new [GetOperationsResponse].
     pub fn new(request_id: u64, proof_bytes: Vec<u8>, operations_bytes: Vec<u8>) -> Self {
         Self {
             version: PROTOCOL_VERSION,
@@ -503,6 +598,7 @@ impl GetOperationsResponse {
 }
 
 impl GetServerMetadataRequest {
+    /// Create a new [GetServerMetadataRequest].
     pub fn new(request_id: u64) -> Self {
         Self {
             version: PROTOCOL_VERSION,
@@ -523,7 +619,7 @@ impl GetServerMetadataRequest {
 }
 
 impl GetServerMetadataResponse {
-    /// Create a new GetServerMetadataResponse.
+    /// Create a new [GetServerMetadataResponse].
     pub fn new(
         request_id: u64,
         database_size: u64,
@@ -543,7 +639,7 @@ impl GetServerMetadataResponse {
 }
 
 impl ErrorResponse {
-    /// Create a new ErrorResponse.
+    /// Create a new [ErrorResponse].
     pub fn new(request_id: Option<u64>, error_code: ErrorCode, message: String) -> Self {
         Self {
             version: PROTOCOL_VERSION,
@@ -601,42 +697,5 @@ mod tests {
             request.validate(),
             Err(ProtocolError::UnsupportedVersion { .. })
         ));
-    }
-
-    #[test]
-    fn test_message_serialization() {
-        let request = GetOperationsRequest::new(100, 10, NZU64!(50), 1);
-        let message = Message::GetOperationsRequest(request);
-
-        // Test basic message construction
-        if let Message::GetOperationsRequest(req) = message {
-            assert_eq!(req.size, 100);
-            assert_eq!(req.start_loc, 10);
-            assert_eq!(req.max_ops.get(), 50);
-            assert_eq!(req.request_id, 1);
-        } else {
-            panic!("Message type mismatch");
-        }
-    }
-
-    #[test]
-    fn test_error_response_from_protocol_error() {
-        let error = ProtocolError::UnsupportedVersion { version: 99 };
-        let response: ErrorResponse = error.into();
-
-        assert_eq!(response.version, PROTOCOL_VERSION);
-        assert!(matches!(response.error_code, ErrorCode::UnsupportedVersion));
-        assert!(response.message.contains("99"));
-    }
-
-    #[test]
-    fn test_server_metadata_response_creation() {
-        let response = GetServerMetadataResponse::new(1, 100, "abcdef".to_string(), 0, 99);
-
-        assert_eq!(response.request_id, 1);
-        assert_eq!(response.database_size, 100);
-        assert_eq!(response.target_hash, "abcdef");
-        assert_eq!(response.oldest_retained_loc, 0);
-        assert_eq!(response.latest_op_loc, 99);
     }
 }

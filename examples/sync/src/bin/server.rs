@@ -1,17 +1,13 @@
 //! ADB sync server that serves operations and proofs to clients.
-//!
-//! This server demonstrates how to serve ADB (Any Database) operations with
-//! cryptographic proofs to sync clients. It maintains an in-memory database
-//! with test operations and serves them via a TCP protocol.
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_runtime::{tokio as tokio_runtime, Listener, Network, Runner, Sink, Stream};
+use commonware_runtime::{tokio as tokio_runtime, Listener, Network, Runner};
 use commonware_storage::mmr::hasher::Standard;
 use commonware_sync::{
-    create_adb_config, create_test_operations, generate_db_id, Database, ErrorResponse,
-    GetOperationsRequest, GetOperationsResponse, GetServerMetadataRequest,
-    GetServerMetadataResponse, Message, Operation, ProtocolError,
+    create_adb_config, create_test_operations, generate_db_id, read_message, send_message,
+    Database, ErrorResponse, GetOperationsRequest, GetOperationsResponse, GetServerMetadataRequest,
+    GetServerMetadataResponse, Message, MessageFramingError, Operation, ProtocolError,
 };
 use std::{
     net::SocketAddr,
@@ -99,7 +95,7 @@ where
     Ok(())
 }
 
-/// Handle a GetServerMetadataRequest and return server state information.
+/// Handle a [GetServerMetadataRequest] and return server state information.
 async fn handle_get_server_metadata_request<E>(
     state: &ServerState<E>,
     request: GetServerMetadataRequest,
@@ -198,59 +194,11 @@ where
         "📤 Sending operations with proof"
     );
 
-    let response = GetOperationsResponse::new(request.request_id, proof_bytes, operations_bytes);
-
-    Ok(response)
-}
-
-/// Read a length-prefixed message from a stream.
-async fn read_message<S: Stream>(stream: &mut S) -> Result<Vec<u8>, commonware_runtime::Error> {
-    // Read the 4-byte length prefix
-    let length_buf = vec![0u8; 4];
-    let length_data = stream.recv(length_buf).await?;
-
-    if length_data.len() != 4 {
-        return Err(commonware_runtime::Error::ReadFailed);
-    }
-
-    // Convert bytes to u32 (network byte order)
-    let message_length = u32::from_be_bytes([
-        length_data.as_ref()[0],
-        length_data.as_ref()[1],
-        length_data.as_ref()[2],
-        length_data.as_ref()[3],
-    ]) as usize;
-
-    // Validate message length (prevent DoS)
-    if message_length == 0 || message_length > 10 * 1024 * 1024 {
-        return Err(commonware_runtime::Error::ReadFailed);
-    }
-
-    // Read the actual message
-    let message_buf = vec![0u8; message_length];
-    let message_data = stream.recv(message_buf).await?;
-
-    if message_data.len() != message_length {
-        return Err(commonware_runtime::Error::ReadFailed);
-    }
-
-    Ok(message_data.as_ref().to_vec())
-}
-
-/// Send a length-prefixed message to a sink.
-async fn send_message<S: Sink>(
-    sink: &mut S,
-    message: &[u8],
-) -> Result<(), commonware_runtime::Error> {
-    // Send 4-byte length prefix
-    let length = message.len() as u32;
-    let length_bytes = length.to_be_bytes();
-    sink.send(length_bytes.to_vec()).await?;
-
-    // Send the actual message
-    sink.send(message.to_vec()).await?;
-
-    Ok(())
+    Ok(GetOperationsResponse::new(
+        request.request_id,
+        proof_bytes,
+        operations_bytes,
+    ))
 }
 
 /// Handle a client connection using commonware-runtime networking with message framing.
@@ -272,7 +220,7 @@ where
         // Read length-prefixed message
         let message_data = match read_message(&mut stream).await {
             Ok(data) => data,
-            Err(commonware_runtime::Error::ReadFailed) => {
+            Err(MessageFramingError::ReadFailed(_)) => {
                 info!(client_addr = %client_addr, "👋 Client disconnected");
                 break;
             }
@@ -454,10 +402,7 @@ fn main() {
             "✅ Database ready"
         );
 
-        // Create server state
-        let state = Arc::new(ServerState::new(database));
-
-        // Start the server
+        // Create listener to accept connections
         let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
         let mut listener = match context.bind(addr).await {
             Ok(listener) => listener,
@@ -469,12 +414,12 @@ fn main() {
 
         info!(addr = %addr, "🚀 Server listening");
 
-        // Accept connections
+        // Handle each client connection in a separate task.
+        let state = Arc::new(ServerState::new(database));
         loop {
             match listener.accept().await {
                 Ok((client_addr, sink, stream)) => {
                     let state = state.clone();
-
                     tokio::spawn(async move {
                         if let Err(e) =
                             handle_client(state.clone(), sink, stream, client_addr).await
