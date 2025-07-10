@@ -810,6 +810,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Read the old section
         let current = self.resize_progress.unwrap();
         let max = max(current + self.table_resize_chunk_size, self.table_size * 2);
+        let buf = vec![0; max as usize * Entry::FULL_SIZE as usize];
+        let buf = self.table.read_at(Self::table_offset(current), buf).await?;
 
 
         // Create write buffers for efficient batched writes
