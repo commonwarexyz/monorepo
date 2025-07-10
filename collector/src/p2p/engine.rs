@@ -131,7 +131,11 @@ where
                                 self.outstanding.set(self.tracked.len() as i64);
 
                                 // Send the request to recipients
-                                match req_tx.send(recipients, request, self.priority_request).await {
+                                match req_tx.send(
+                                    recipients,
+                                    request,
+                                    self.priority_request
+                                ).await {
                                     Ok(recipients) => {
                                         let _ = responder.send(recipients);
                                     }
@@ -157,7 +161,11 @@ where
                     self.responses.inc();
 
                     // Send the response
-                    let _ = res_tx.send(Recipients::One(peer), reply, self.priority_response).await;
+                    let _ = res_tx.send(
+                        Recipients::One(peer),
+                        reply,
+                        self.priority_response
+                    ).await;
                 },
 
                 // Request from an originator

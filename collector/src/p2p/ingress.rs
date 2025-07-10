@@ -33,7 +33,6 @@ impl<P: PublicKey, R: Committable + Digestible> Mailbox<P, R> {
 
 impl<P: PublicKey, R: Committable + Digestible> Originator for Mailbox<P, R> {
     type Request = R;
-    type Response = R;
     type PublicKey = P;
 
     async fn send(&mut self, recipients: Recipients<P>, request: R) -> Vec<P> {
