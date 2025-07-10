@@ -58,11 +58,6 @@ impl Handler {
     pub fn set_response(&mut self, request_id: u64, response: Response) {
         self.responses.insert(request_id, response);
     }
-
-    /// Remove a configured response
-    pub fn remove_response(&mut self, request_id: &u64) -> Option<Response> {
-        self.responses.remove(request_id)
-    }
 }
 
 impl crate::Handler for Handler {
