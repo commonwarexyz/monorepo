@@ -1,0 +1,329 @@
+#![no_main]
+
+use arbitrary::Arbitrary;
+use commonware_runtime::{deterministic, Runner};
+use commonware_storage::ordinal::{Config, Ordinal};
+use commonware_utils::array::FixedBytes;
+use libfuzzer_sys::fuzz_target;
+use std::collections::HashMap;
+
+#[derive(Arbitrary, Debug, Clone)]
+enum OrdinalOperation {
+    Put {
+        index: u64,
+        value: Vec<u8>,
+    },
+    Get {
+        index: u64,
+    },
+    Has {
+        index: u64,
+    },
+    NextGap {
+        index: u64,
+    },
+    Sync,
+    Prune {
+        min: u64,
+    },
+    Close,
+    Destroy,
+    // Edge case operations
+    PutSparse {
+        indices: Vec<u64>,
+    },
+    PutLargeBatch {
+        start: u64,
+        count: u8,
+    },
+    ReopenAfterOperations,
+    PruneAndPutInPrunedRange {
+        prune_min: u64,
+        put_indices: Vec<u64>,
+    },
+}
+
+#[derive(Arbitrary, Debug)]
+struct FuzzInput {
+    items_per_blob: u16,
+    operations: Vec<OrdinalOperation>,
+}
+
+fn fuzz(input: FuzzInput) {
+    let runner = deterministic::Runner::default();
+
+    runner.start(|context| async move {
+        // Use constrained items_per_blob to ensure reasonable blob sizes
+        let items_per_blob = ((input.items_per_blob % 1000) + 10) as u64;
+
+        let cfg = Config {
+            partition: "ordinal_operations_fuzz_test".to_string(),
+            items_per_blob,
+            write_buffer: 4096,
+            replay_buffer: 64 * 1024,
+        };
+
+        let mut store =
+            match Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone()).await {
+                Ok(o) => Some(o),
+                Err(_) => panic!("Unable to init ordinal"),
+            };
+
+        // Track expected state for verification
+        let mut expected_data: HashMap<u64, FixedBytes<32>> = HashMap::new();
+        let mut synced_data: HashMap<u64, FixedBytes<32>> = HashMap::new();
+
+        for op in input.operations.iter() {
+            match op {
+                OrdinalOperation::Put { index, value } => {
+                    if let Some(ordinal) = store.as_mut() {
+                        let mut fixed_value = [0u8; 32];
+                        let len = value.len().min(32);
+                        fixed_value[..len].copy_from_slice(&value[..len]);
+                        let value = FixedBytes::new(fixed_value);
+
+                        if ordinal.put(*index, value.clone()).await.is_ok() {
+                            expected_data.insert(*index, value);
+                        } else {
+                            panic!("failed to put value into store");
+                        }
+                    }
+                }
+
+                OrdinalOperation::Get { index } => {
+                    if let Some(ordinal) = store.as_ref() {
+                        match ordinal.get(*index).await {
+                            Ok(Some(value)) => {
+                                // Verify the value matches our expected state
+                                if let Some(expected) = expected_data.get(index) {
+                                    assert_eq!(
+                                        &value, expected,
+                                        "Get returned unexpected value at index {index}",
+                                    );
+                                } else {
+                                    panic!(
+                                        "Get returned value for index {index} that wasn't put",
+                                    );
+                                }
+                            }
+                            Ok(None) => {
+                                // Verify we don't expect this value
+                                assert!(
+                                    !expected_data.contains_key(index),
+                                    "Get returned None for index {index} that should exist",
+                                );
+                            }
+                            Err(e) => {
+                                panic!("Failed to get ordinal at index {index}: {e:?}");
+                            }
+                        }
+                    }
+                }
+
+                OrdinalOperation::Has { index } => {
+                    if let Some(ordinal) = store.as_ref() {
+                        let has = ordinal.has(*index);
+                        let expected = expected_data.contains_key(index);
+                        assert_eq!(
+                            has, expected,
+                            "Has returned {has} for index {index}, expected {expected}",
+                        );
+                    }
+                }
+
+                OrdinalOperation::NextGap { index } => {
+                    if let Some(ordinal) = store.as_ref() {
+                        let (current_end, next_start) = ordinal.next_gap(*index);
+
+                        // Basic validation of gap results
+                        if let Some(end) = current_end {
+                            assert!(ordinal.has(end), "current_end {end} should exist");
+                            if end < u64::MAX {
+                                assert!(
+                                    !ordinal.has(end + 1),
+                                    "Gap should exist after current_end {end}",
+                                );
+                            }
+                        }
+
+                        if let Some(start) = next_start {
+                            assert!(ordinal.has(start), "next_start {start} should exist");
+                            if start > 0 {
+                                assert!(
+                                    !ordinal.has(start - 1),
+                                    "Gap should exist before next_start {start}",
+                                );
+                            }
+                        }
+                    }
+                }
+
+                OrdinalOperation::Sync => {
+                    if let Some(ordinal) = store.as_mut() {
+                        if ordinal.sync().await.is_ok() {
+                            // After sync, all expected data should be persisted
+                            synced_data = expected_data.clone();
+                        }
+                    }
+                }
+
+                OrdinalOperation::Prune { min } => {
+                    if let Some(ordinal) = store.as_mut() {
+                        let min_blob = *min / items_per_blob;
+                        if ordinal.prune(*min).await.is_ok() {
+                            // Remove all data in pruned blobs from expected state
+                            expected_data.retain(|&index, _| index / items_per_blob >= min_blob);
+                            synced_data.retain(|&index, _| index / items_per_blob >= min_blob);
+                        }
+                    }
+                }
+
+                OrdinalOperation::Close => {
+                    if let Some(o) = store.take() {
+                        o.close().await.expect("failed to close store");
+                        return;
+                    }
+                }
+
+                OrdinalOperation::Destroy => {
+                    if let Some(o) = store.take() {
+                        o.destroy().await.expect("failed to destroy store");
+                        return;
+                    }
+                }
+
+                OrdinalOperation::PutSparse { indices } => {
+                    if let Some(ordinal) = store.as_mut() {
+                        // Put values at sparse indices to test gap handling
+                        for (i, &index) in indices.iter().take(10).enumerate() {
+                            let mut value = [0u8; 32];
+                            value[0] = i as u8;
+                            let value = FixedBytes::new(value);
+
+                            let constrained_index = index % 10000; // Limit index range
+                            if ordinal.put(constrained_index, value.clone()).await.is_ok() {
+                                expected_data.insert(constrained_index, value);
+                            }
+                        }
+
+                        // Sync after batch operation to test persistence
+                        if !indices.is_empty() && ordinal.sync().await.is_ok() {
+                            synced_data = expected_data.clone();
+                        }
+                    }
+                }
+
+                OrdinalOperation::PutLargeBatch { start, count } => {
+                    if let Some(ordinal) = store.as_mut() {
+                        // Put many consecutive values to test blob handling
+                        let count = (*count % 50) as u64; // Limit to reasonable batch size
+                        let start = *start % 5000; // Limit start range
+
+                        for i in 0..count {
+                            let index = start + i;
+                            let mut value = [0u8; 32];
+                            value[0] = (i % 256) as u8;
+                            let value = FixedBytes::new(value);
+
+                            if ordinal.put(index, value.clone()).await.is_ok() {
+                                expected_data.insert(index, value);
+                            }
+                        }
+
+                        // Sync after large batch to test buffer flushing
+                        if count > 0 && ordinal.sync().await.is_ok() {
+                            synced_data = expected_data.clone();
+                        }
+                    }
+                }
+
+                OrdinalOperation::ReopenAfterOperations => {
+                    if let Some(o) = store.take() {
+                        // Close the current ordinal (which includes a sync)
+                        o.close().await.expect("failed to close store before reopen failed");
+
+                        // Note: close() calls sync() internally, so update synced_data
+                        synced_data = expected_data.clone();
+
+                        // Reopen and verify synced data persisted
+                        match Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone()).await
+                        {
+                            Ok(new_ordinal) => {
+                                // Verify all synced data is still accessible
+                                for (&index, expected_value) in synced_data.iter() {
+                                    match new_ordinal.get(index).await {
+                                        Ok(Some(value)) => {
+                                            assert_eq!(
+                                                &value, expected_value,
+                                                "Value at index {index} doesn't match after reopen",
+                                            );
+                                        }
+                                        Ok(None) => {
+                                            panic!(
+                                                "Synced value at index {index} missing after reopen",
+                                            );
+                                        }
+                                        Err(e) => {
+                                            panic!("Synced value at index {index} doesn't match after reopen: {e:?}");
+                                        }
+                                    }
+                                }
+
+                                // Continue with the new ordinal
+                                store = Some(new_ordinal);
+                                // Expected data remains the same after reopen
+                            }
+                            Err(e) => {
+                                panic!("Failed to reopen ordinal: {e:?}");
+                            }
+                        }
+                    }
+                }
+
+                OrdinalOperation::PruneAndPutInPrunedRange {
+                    prune_min,
+                    put_indices,
+                } => {
+                    if let Some(ordinal) = store.as_mut() {
+                        let min_blob = *prune_min / items_per_blob;
+
+                        // First prune
+                        if ordinal.prune(*prune_min).await.is_ok() {
+                            // Remove all data in pruned blobs from expected state
+                            expected_data.retain(|&index, _| index / items_per_blob >= min_blob);
+                            synced_data.retain(|&index, _| index / items_per_blob >= min_blob);
+                        }
+
+                        // Then try to put in pruned range and verify it works correctly
+                        for (i, &index) in put_indices.iter().take(5).enumerate() {
+                            let constrained_index = index % 10000;
+                            let mut value = [0u8; 32];
+                            value[0] = i as u8;
+                            value[1] = 0xFF; // Mark as post-prune value
+                            let value = FixedBytes::new(value);
+
+                            // This should recreate the blob if it was pruned
+                            if ordinal.put(constrained_index, value.clone()).await.is_ok() {
+                                expected_data.insert(constrained_index, value);
+                            }
+                        }
+
+                        // Sync to ensure post-prune data is persisted
+                        if ordinal.sync().await.is_ok() {
+                            synced_data = expected_data.clone();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clean up if ordinal still exists
+        if let Some(o) = store.take() {
+            o.destroy().await.expect("failed to destroy store");
+        }
+    });
+}
+
+fuzz_target!(|input: FuzzInput| {
+    fuzz(input);
+});
