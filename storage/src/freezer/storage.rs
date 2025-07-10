@@ -933,6 +933,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Close the [Freezer] and return a [Checkpoint] for recovery.
     pub async fn close(mut self) -> Result<Checkpoint, Error> {
+        // If we're mid-resize, complete it
+        while self.resize_progress.is_some() {
+            self.advance_resize().await?;
+        }
+
         // Sync any pending updates before closing
         let checkpoint = self.sync().await?;
 
