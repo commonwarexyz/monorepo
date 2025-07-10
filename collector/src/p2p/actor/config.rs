@@ -10,5 +10,6 @@ pub struct Config<D: Digest, O: Originator<D>, E: Endpoint<D>> {
     pub quorum: usize,
     pub priority_request: bool,
     pub priority_response: bool,
-    pub _digest: PhantomData<D>,
+
+    _phantom: PhantomData<D>,
 }
