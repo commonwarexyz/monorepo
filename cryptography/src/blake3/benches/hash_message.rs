@@ -4,10 +4,7 @@ use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 fn benchmark_hash_message(c: &mut Criterion) {
     let mut sampler = StdRng::seed_from_u64(0);
-
-    // [256 B, 4 KiB, 64 KiB, 256 KiB, 512 MiB, 1 MiB, 16 MiB]
     let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
-
     for message_length in cases.into_iter() {
         let mut msg = vec![0u8; message_length];
         sampler.fill_bytes(msg.as_mut_slice());

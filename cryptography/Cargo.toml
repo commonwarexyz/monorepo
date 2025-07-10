@@ -37,7 +37,6 @@ bench = false
 crate-type = ["rlib", "cdylib"]
 
 [features]
-default = ["parallel-blake3"]
 portable = ["blst/portable"]
 parallel-blake3 = ["blake3/rayon"]
 

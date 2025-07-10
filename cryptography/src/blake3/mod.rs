@@ -1,6 +1,6 @@
-//! BLAKE3 implementation of the [`Hasher`] trait.
+//! BLAKE3 implementation of the [Hasher] trait.
 //!
-//! This implementation uses the [`blake3`] crate to generate BLAKE3 digests.
+//! This implementation uses the [blake3] crate to generate BLAKE3 digests.
 //!
 //! # Example
 //! ```rust
@@ -32,12 +32,12 @@ use std::{
 };
 use zeroize::Zeroize;
 
-/// Re-export [`blake3::Hasher`] as `CoreBlake3` for external use if needed.
+/// Re-export [blake3::Hasher] as `CoreBlake3` for external use if needed.
 pub type CoreBlake3 = blake3::Hasher;
 
 const DIGEST_LENGTH: usize = blake3::OUT_LEN;
 
-/// Generate a BLAKE3 [`Digest`] from a message.
+/// Generate a BLAKE3 [Digest] from a message.
 pub fn hash(message: &[u8]) -> Digest {
     let mut hasher = Blake3::new();
     hasher.update(message);
@@ -76,8 +76,11 @@ impl Hasher for Blake3 {
 
         #[cfg(feature = "parallel-blake3")]
         {
+            // 128 KiB
+            const PARALLEL_THRESHOLD: usize = 2usize.pow(17);
+
             // Heuristic defined @ https://docs.rs/blake3/latest/blake3/struct.Hasher.html#method.update_rayon
-            if message.len() >= 2usize.pow(17) {
+            if message.len() >= PARALLEL_THRESHOLD {
                 self.hasher.update_rayon(message);
             } else {
                 self.hasher.update(message);

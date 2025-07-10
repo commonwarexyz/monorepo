@@ -14,6 +14,7 @@ pub mod ed25519;
 pub mod sha256;
 pub use sha256::{hash, CoreSha256, Sha256};
 pub mod blake3;
+pub use blake3::{Blake3, CoreBlake3};
 mod bloomfilter;
 pub use bloomfilter::BloomFilter;
 pub mod secp256r1;
