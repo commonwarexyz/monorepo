@@ -1,9 +1,9 @@
 use super::{
-    config::Config,
     ingress::{Mailbox, Message},
+    Config,
 };
 use crate::p2p::{Handler, Monitor};
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::{Codec, DecodeExt, Encode};
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -18,25 +18,23 @@ use tracing::{error, warn};
 /// Engine that will disperse messages and collect responses.
 pub struct Engine<
     E: Clock + Spawner,
-    Rq: Committable + Digestible + DecodeExt<()> + Encode,
-    Rs: Committable<Commitment = Rq::Commitment>
-        + Digestible<Digest = Rq::Digest>
-        + DecodeExt<()>
-        + Encode,
+    Rq: Committable + Digestible + Codec,
+    Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest> + Codec,
     P: PublicKey,
     M: Monitor<Response = Rs, PublicKey = P>,
     H: Handler<Request = Rq, Response = Rs, PublicKey = P>,
 > {
     // Configuration
     context: E,
-    quorum: usize,
     priority_request: bool,
+    request_codec: Rq::Cfg,
     priority_response: bool,
+    response_codec: Rs::Cfg,
 
     // Message passing
     monitor: M,
     handler: H,
-    mailbox: mpsc::Receiver<Message<P, Rq, Rs>>,
+    mailbox: mpsc::Receiver<Message<P, Rq>>,
 
     // State
     responses: HashMap<Rq::Commitment, HashMap<P, Rs>>,
@@ -44,25 +42,23 @@ pub struct Engine<
 
 impl<
         E: Clock + Spawner,
-        Rq: Committable + Digestible + DecodeExt<()> + Encode,
-        Rs: Committable<Commitment = Rq::Commitment>
-            + Digestible<Digest = Rq::Digest>
-            + DecodeExt<()>
-            + Encode,
+        Rq: Committable + Digestible + Codec,
+        Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest> + Codec,
         P: PublicKey,
         M: Monitor<Response = Rs, PublicKey = P>,
         H: Handler<Request = Rq, Response = Rs, PublicKey = P>,
     > Engine<E, Rq, Rs, P, M, H>
 {
-    pub fn new(context: E, cfg: Config<M, H>) -> (Self, Mailbox<P, Rq, Rs>) {
+    pub fn new(context: E, cfg: Config<M, H, Rq::Cfg, Rs::Cfg>) -> (Self, Mailbox<P, Rq>) {
         let (tx, rx) = mpsc::channel(cfg.mailbox_size);
-        let mailbox: Mailbox<P, Rq, Rs> = Mailbox::new(tx);
+        let mailbox: Mailbox<P, Rq> = Mailbox::new(tx);
         (
             Self {
                 context,
-                quorum: cfg.quorum,
                 priority_request: cfg.priority_request,
+                request_codec: cfg.request_codec,
                 priority_response: cfg.priority_response,
+                response_codec: cfg.response_codec,
                 monitor: cfg.monitor,
                 handler: cfg.handler,
                 mailbox: rx,
@@ -106,13 +102,6 @@ impl<
                                     }
                                 }
                             },
-                            Message::Peek { commitment, sender } => {
-                                // Either send back the responses, or drop the sender to indicate
-                                // that responses for the digest are not being awaited
-                                if let Some(responses) = self.responses.get(&commitment).cloned() {
-                                    let _ = sender.send(responses);
-                                }
-                            },
                             Message::Cancel { commitment } => {
                                 self.responses.remove(&commitment);
                             }
@@ -132,7 +121,7 @@ impl<
                     };
 
                     // Decode the message
-                    let response = match Rs::decode(msg.clone()) {
+                    let response = match Rs::decode_cfg(msg, &self.response_codec) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
@@ -144,17 +133,6 @@ impl<
                     let commitment = response.commitment();
                     let entry = self.responses.entry(commitment).or_default();
                     entry.insert(peer, response);
-
-                    // Check if we have enough responses
-                    if entry.len() >= self.quorum {
-                        let responses = self
-                            .responses
-                            .remove(&commitment)
-                            .expect("commitment not found");
-                        self.monitor
-                            .collected(commitment, responses)
-                            .await;
-                    }
                 },
 
                 // Request from an originator
@@ -169,7 +147,7 @@ impl<
                     };
 
                     // Decode the message
-                    let msg = match Rq::decode(msg) {
+                    let msg = match Rq::decode_cfg(msg, &self.request_codec) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(?err, ?peer, "failed to decode message");
