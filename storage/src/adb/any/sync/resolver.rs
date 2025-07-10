@@ -25,19 +25,25 @@ pub struct GetOperationsResult<D: Digest, K: Array, V: Array> {
 }
 
 /// Trait for network communication with the sync server
-pub trait Resolver<D: Digest, K: Array, V: Array> {
+pub trait Resolver {
+    type Digest: Digest;
+    type Key: Array;
+    type Value: Array;
+
+    /// The digest type of the resolver.
     /// Get the operations starting at `start_loc` in the database, up to `max_ops` operations.
     /// Returns the operations and a proof that they were present in the database when it had
     /// `size` operations.
+    #[allow(clippy::type_complexity)]
     fn get_operations(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<GetOperationsResult<D, K, V>, Error>>;
+    ) -> impl Future<Output = Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error>>;
 }
 
-impl<E, K, V, H, T> Resolver<H::Digest, K, V> for &Any<E, K, V, H, T>
+impl<E, K, V, H, T> Resolver for &Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -45,12 +51,16 @@ where
     H: Hasher,
     T: Translator,
 {
+    type Digest = H::Digest;
+    type Key = K;
+    type Value = V;
+
     async fn get_operations(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<GetOperationsResult<H::Digest, K, V>, Error> {
+    ) -> Result<GetOperationsResult<H::Digest, Self::Key, Self::Value>, Error> {
         self.historical_proof(size, start_loc, max_ops.get())
             .await
             .map_err(Error::Adb)
