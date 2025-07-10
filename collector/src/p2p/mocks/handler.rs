@@ -95,10 +95,9 @@ impl crate::Handler for Handler {
         if let Some(response) = self.responses.get(&request_id) {
             let _ = responder.send(response.clone());
         } else if self.respond_by_default {
-            // Send default response with matching ID
             let _ = responder.send(Response {
                 id: request_id,
-                result: b"default response".to_vec(),
+                result: request.data.wrapping_mul(2),
             });
         }
         // Otherwise, drop the responder to indicate no response

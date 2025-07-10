@@ -8,6 +8,3 @@ pub use monitor::{Event as MonitorEvent, Monitor as MockMonitor};
 
 mod request;
 pub use request::{Request, Response};
-
-mod key;
-pub use key::MockPublicKey;

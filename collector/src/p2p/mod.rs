@@ -39,13 +39,16 @@ pub mod mocks;
 mod tests {
     use super::{
         mocks::{
-            HandlerEvent, MockHandler as Handler, MockMonitor as Monitor,
-            MockPublicKey as PublicKey, MonitorEvent, Request, Response,
+            HandlerEvent, MockHandler as Handler, MockMonitor as Monitor, MonitorEvent, Request,
+            Response,
         },
         Config, Engine, Mailbox,
     };
     use crate::Originator;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt, Signer};
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        Committable, PrivateKeyExt, Signer,
+    };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{Link, Network, Oracle, Receiver, Sender},
@@ -74,7 +77,10 @@ mod tests {
         Oracle<PublicKey>,
         Vec<PrivateKey>,
         Vec<PublicKey>,
-        Vec<(Sender<PublicKey>, Receiver<PublicKey>)>,
+        Vec<(
+            (Sender<PublicKey>, Receiver<PublicKey>),
+            (Sender<PublicKey>, Receiver<PublicKey>),
+        )>,
     ) {
         let (network, mut oracle) = Network::new(
             context.with_label("network"),
@@ -92,8 +98,9 @@ mod tests {
 
         let mut connections = Vec::new();
         for peer in &peers {
-            let (sender, receiver) = oracle.register(peer.clone(), 0).await.unwrap();
-            connections.push((sender, receiver));
+            let (sender1, receiver1) = oracle.register(peer.clone(), 0).await.unwrap();
+            let (sender2, receiver2) = oracle.register(peer.clone(), 1).await.unwrap();
+            connections.push(((sender1, receiver1), (sender2, receiver2)));
         }
 
         (oracle, schemes, peers, connections)
@@ -116,6 +123,7 @@ mod tests {
             .unwrap();
     }
 
+    #[allow(clippy::type_complexity)]
     async fn setup_and_spawn_engine(
         context: &deterministic::Context,
         signer: impl Signer<PublicKey = PublicKey>,
@@ -160,14 +168,16 @@ mod tests {
             let (handler2, mut handler_out2) = Handler::new(true);
 
             // Create two separate connections for each engine
-            let req_conn1 = (connections[0].0.clone(), connections[0].1.clone());
-            let res_conn1 = (connections[0].0.clone(), connections[0].1.clone());
-            let req_conn2 = (connections[1].0.clone(), connections[1].1.clone());
-            let res_conn2 = (connections[1].0.clone(), connections[1].1.clone());
+            let req_1 = connections.remove(0);
+            let req_conn1 = (req_1.0 .0, req_1.0 .1);
+            let res_conn1 = (req_1.1 .0, req_1.1 .1);
+            let req_2 = connections.remove(0);
+            let req_conn2 = (req_2.0 .0, req_2.0 .1);
+            let res_conn2 = (req_2.1 .0, req_2.1 .1);
 
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
-                schemes[0].clone(),
+                schemes.remove(0),
                 (req_conn1, res_conn1),
                 mon1,
                 Handler::dummy(),
@@ -176,7 +186,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
-                schemes[1].clone(),
+                schemes.remove(0),
                 (req_conn2, res_conn2),
                 Monitor::dummy(),
                 handler2,
@@ -184,10 +194,7 @@ mod tests {
             .await;
 
             // Send request from peer 1 to peer 2
-            let request = Request {
-                id: 1,
-                data: b"hello world".to_vec(),
-            };
+            let request = Request { id: 1, data: 1 };
             let recipients = mailbox1
                 .send(Recipients::One(peers[1].clone()), request.clone())
                 .await;
@@ -217,7 +224,7 @@ mod tests {
                 } => {
                     assert_eq!(handler, peers[1]);
                     assert_eq!(response.id, 1);
-                    assert_eq!(response.result, b"default response");
+                    assert_eq!(response.result, 2);
                     assert_eq!(count, 1);
                 }
             }
@@ -231,33 +238,31 @@ mod tests {
     fn test_cancel_request() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (_oracle, mut schemes, peers, mut connections) =
+            let (_oracle, mut schemes, _, mut connections) =
                 setup_network_and_peers(&context, &[1]).await;
 
             let (mon1, mut mon_out1) = Monitor::new();
 
-            let req_conn1 = (connections[0].0.clone(), connections[0].1.clone());
-            let res_conn1 = (connections[0].0.clone(), connections[0].1.clone());
+            let req_1 = connections.remove(0);
+            let req_conn1 = (req_1.0 .0, req_1.0 .1);
+            let res_conn1 = (req_1.1 .0, req_1.1 .1);
 
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
-                schemes[0].clone(),
+                schemes.remove(0),
                 (req_conn1, res_conn1),
                 mon1,
                 Handler::dummy(),
             )
             .await;
 
-            let request = Request {
-                id: 2,
-                data: b"canceled request".to_vec(),
-            };
+            let request = Request { id: 2, data: 2 };
             let commitment = request.commitment();
 
             // Send to non-existent peer (will be pending)
             let recipients = mailbox1
                 .send(
-                    Recipients::One(PublicKey::from(PrivateKey::from_seed(99).public_key())),
+                    Recipients::One(PrivateKey::from_seed(99).public_key()),
                     request,
                 )
                 .await;
@@ -296,11 +301,12 @@ mod tests {
             let (handler3, _) = Handler::new(true);
 
             // Setup peer 1 (originator)
-            let req_conn1 = (connections[0].0.clone(), connections[0].1.clone());
-            let res_conn1 = (connections[0].0.clone(), connections[0].1.clone());
+            let req_1 = connections.remove(0);
+            let req_conn1 = (req_1.0 .0, req_1.0 .1);
+            let res_conn1 = (req_1.1 .0, req_1.1 .1);
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
-                schemes[0].clone(),
+                schemes.remove(0),
                 (req_conn1, res_conn1),
                 mon1,
                 Handler::dummy(),
@@ -308,11 +314,12 @@ mod tests {
             .await;
 
             // Setup peer 2 (handler)
-            let req_conn2 = (connections[1].0.clone(), connections[1].1.clone());
-            let res_conn2 = (connections[1].0.clone(), connections[1].1.clone());
+            let req_2 = connections.remove(0);
+            let req_conn2 = (req_2.0 .0, req_2.0 .1);
+            let res_conn2 = (req_2.1 .0, req_2.1 .1);
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
-                schemes[1].clone(),
+                schemes.remove(0),
                 (req_conn2, res_conn2),
                 Monitor::dummy(),
                 handler2,
@@ -320,11 +327,12 @@ mod tests {
             .await;
 
             // Setup peer 3 (handler)
-            let req_conn3 = (connections[2].0.clone(), connections[2].1.clone());
-            let res_conn3 = (connections[2].0.clone(), connections[2].1.clone());
+            let req_3 = connections.remove(0);
+            let req_conn3 = (req_3.0 .0, req_3.0 .1);
+            let res_conn3 = (req_3.1 .0, req_3.1 .1);
             let _mailbox3 = setup_and_spawn_engine(
                 &context,
-                schemes[2].clone(),
+                schemes.remove(0),
                 (req_conn3, res_conn3),
                 Monitor::dummy(),
                 handler3,
@@ -332,10 +340,7 @@ mod tests {
             .await;
 
             // Broadcast request
-            let request = Request {
-                id: 3,
-                data: b"broadcast".to_vec(),
-            };
+            let request = Request { id: 3, data: 3 };
             let recipients = mailbox1.send(Recipients::All, request.clone()).await;
             assert_eq!(recipients.len(), 2);
             assert!(recipients.contains(&peers[1]));
@@ -355,7 +360,7 @@ mod tests {
                         count,
                     } => {
                         assert_eq!(response.id, 3);
-                        assert_eq!(response.result, b"default response");
+                        assert_eq!(response.result, 6);
                         responses_collected += 1;
                         assert_eq!(count, responses_collected);
 
@@ -387,14 +392,16 @@ mod tests {
             let (mon1, mut mon_out1) = Monitor::new();
             let (handler2, mut handler_out2) = Handler::new(false); // Won't respond
 
-            let req_conn1 = (connections[0].0.clone(), connections[0].1.clone());
-            let res_conn1 = (connections[0].0.clone(), connections[0].1.clone());
-            let req_conn2 = (connections[1].0.clone(), connections[1].1.clone());
-            let res_conn2 = (connections[1].0.clone(), connections[1].1.clone());
+            let req_1 = connections.remove(0);
+            let req_conn1 = (req_1.0 .0, req_1.0 .1);
+            let res_conn1 = (req_1.1 .0, req_1.1 .1);
+            let req_2 = connections.remove(0);
+            let req_conn2 = (req_2.0 .0, req_2.0 .1);
+            let res_conn2 = (req_2.1 .0, req_2.1 .1);
 
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
-                schemes[0].clone(),
+                schemes.remove(0),
                 (req_conn1, res_conn1),
                 mon1,
                 Handler::dummy(),
@@ -403,7 +410,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
-                schemes[1].clone(),
+                schemes.remove(0),
                 (req_conn2, res_conn2),
                 Monitor::dummy(),
                 handler2,
@@ -411,10 +418,7 @@ mod tests {
             .await;
 
             // Send request
-            let request = Request {
-                id: 4,
-                data: b"no response expected".to_vec(),
-            };
+            let request = Request { id: 4, data: 4 };
             let recipients = mailbox1
                 .send(Recipients::One(peers[1].clone()), request.clone())
                 .await;
@@ -462,14 +466,16 @@ mod tests {
             let (mon1, mut mon_out1) = Monitor::new();
             let (handler2, _) = Handler::new(true);
 
-            let req_conn1 = (connections[0].0.clone(), connections[0].1.clone());
-            let res_conn1 = (connections[0].0.clone(), connections[0].1.clone());
-            let req_conn2 = (connections[1].0.clone(), connections[1].1.clone());
-            let res_conn2 = (connections[1].0.clone(), connections[1].1.clone());
+            let req_1 = connections.remove(0);
+            let req_conn1 = (req_1.0 .0, req_1.0 .1);
+            let res_conn1 = (req_1.1 .0, req_1.1 .1);
+            let req_2 = connections.remove(0);
+            let req_conn2 = (req_2.0 .0, req_2.0 .1);
+            let res_conn2 = (req_2.1 .0, req_2.1 .1);
 
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
-                schemes[0].clone(),
+                schemes.remove(0),
                 (req_conn1, res_conn1),
                 mon1,
                 Handler::dummy(),
@@ -478,7 +484,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
-                schemes[1].clone(),
+                schemes.remove(0),
                 (req_conn2, res_conn2),
                 Monitor::dummy(),
                 handler2,
@@ -486,10 +492,7 @@ mod tests {
             .await;
 
             // Send the same request multiple times
-            let request = Request {
-                id: 5,
-                data: b"test duplicate".to_vec(),
-            };
+            let request = Request { id: 5, data: 5 };
 
             for _ in 0..3 {
                 let recipients = mailbox1
@@ -540,29 +543,19 @@ mod tests {
             let (mut handler2, _) = Handler::new(false);
 
             // Configure different responses for different requests
-            handler2.set_response(
-                10,
-                Response {
-                    id: 10,
-                    result: b"response for 10".to_vec(),
-                },
-            );
-            handler2.set_response(
-                20,
-                Response {
-                    id: 20,
-                    result: b"response for 20".to_vec(),
-                },
-            );
+            handler2.set_response(10, Response { id: 10, result: 20 });
+            handler2.set_response(20, Response { id: 20, result: 40 });
 
-            let req_conn1 = (connections[0].0.clone(), connections[0].1.clone());
-            let res_conn1 = (connections[0].0.clone(), connections[0].1.clone());
-            let req_conn2 = (connections[1].0.clone(), connections[1].1.clone());
-            let res_conn2 = (connections[1].0.clone(), connections[1].1.clone());
+            let req_1 = connections.remove(0);
+            let req_conn1 = (req_1.0 .0, req_1.0 .1);
+            let res_conn1 = (req_1.1 .0, req_1.1 .1);
+            let req_2 = connections.remove(0);
+            let req_conn2 = (req_2.0 .0, req_2.0 .1);
+            let res_conn2 = (req_2.1 .0, req_2.1 .1);
 
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
-                schemes[0].clone(),
+                schemes.remove(0),
                 (req_conn1, res_conn1),
                 mon1,
                 Handler::dummy(),
@@ -571,7 +564,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
-                schemes[1].clone(),
+                schemes.remove(0),
                 (req_conn2, res_conn2),
                 Monitor::dummy(),
                 handler2,
@@ -579,14 +572,8 @@ mod tests {
             .await;
 
             // Send multiple concurrent requests
-            let request1 = Request {
-                id: 10,
-                data: b"first".to_vec(),
-            };
-            let request2 = Request {
-                id: 20,
-                data: b"second".to_vec(),
-            };
+            let request1 = Request { id: 10, data: 10 };
+            let request2 = Request { id: 20, data: 20 };
 
             mailbox1
                 .send(Recipients::One(peers[1].clone()), request1)
@@ -610,11 +597,11 @@ mod tests {
                         assert_eq!(handler, peers[1]);
                         match response.id {
                             10 => {
-                                assert_eq!(response.result, b"response for 10");
+                                assert_eq!(response.result, 20);
                                 response10_received = true;
                             }
                             20 => {
-                                assert_eq!(response.result, b"response for 20");
+                                assert_eq!(response.result, 40);
                                 response20_received = true;
                             }
                             _ => panic!("Unexpected response ID"),
@@ -645,16 +632,19 @@ mod tests {
             let (handler2, _) = Handler::new(true);
             let (handler3, _) = Handler::new(true);
 
-            let req_conn1 = (connections[0].0.clone(), connections[0].1.clone());
-            let res_conn1 = (connections[0].0.clone(), connections[0].1.clone());
-            let req_conn2 = (connections[1].0.clone(), connections[1].1.clone());
-            let res_conn2 = (connections[1].0.clone(), connections[1].1.clone());
-            let req_conn3 = (connections[2].0.clone(), connections[2].1.clone());
-            let res_conn3 = (connections[2].0.clone(), connections[2].1.clone());
+            let req_1 = connections.remove(0);
+            let req_conn1 = (req_1.0 .0, req_1.0 .1);
+            let res_conn1 = (req_1.1 .0, req_1.1 .1);
+            let req_2 = connections.remove(0);
+            let req_conn2 = (req_2.0 .0, req_2.0 .1);
+            let res_conn2 = (req_2.1 .0, req_2.1 .1);
+            let req_3 = connections.remove(0);
+            let req_conn3 = (req_3.0 .0, req_3.0 .1);
+            let res_conn3 = (req_3.1 .0, req_3.1 .1);
 
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
-                schemes[0].clone(),
+                schemes.remove(0),
                 (req_conn1, res_conn1),
                 mon1,
                 Handler::dummy(),
@@ -663,7 +653,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
-                schemes[1].clone(),
+                schemes.remove(0),
                 (req_conn2, res_conn2),
                 Monitor::dummy(),
                 handler2,
@@ -672,7 +662,7 @@ mod tests {
 
             let _mailbox3 = setup_and_spawn_engine(
                 &context,
-                schemes[2].clone(),
+                schemes.remove(0),
                 (req_conn3, res_conn3),
                 Monitor::dummy(),
                 handler3,
@@ -683,8 +673,8 @@ mod tests {
             let mut total_responses = 0;
             for i in 0..5 {
                 let request = Request {
-                    id: 100 + i,
-                    data: format!("unreliable test {}", i).into_bytes(),
+                    id: 100 + i as u64,
+                    data: 100 + i as u32,
                 };
 
                 mailbox1.send(Recipients::All, request).await;
@@ -737,14 +727,16 @@ mod tests {
             let (mon1, mut mon_out1) = Monitor::new();
             let (handler2, _) = Handler::new(true);
 
-            let req_conn1 = (connections[0].0.clone(), connections[0].1.clone());
-            let res_conn1 = (connections[0].0.clone(), connections[0].1.clone());
-            let req_conn2 = (connections[1].0.clone(), connections[1].1.clone());
-            let res_conn2 = (connections[1].0.clone(), connections[1].1.clone());
+            let req_1 = connections.remove(0);
+            let req_conn1 = (req_1.0 .0, req_1.0 .1);
+            let res_conn1 = (req_1.1 .0, req_1.1 .1);
+            let req_2 = connections.remove(0);
+            let req_conn2 = (req_2.0 .0, req_2.0 .1);
+            let res_conn2 = (req_2.1 .0, req_2.1 .1);
 
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
-                schemes[0].clone(),
+                schemes.remove(0),
                 (req_conn1, res_conn1),
                 mon1,
                 Handler::dummy(),
@@ -753,7 +745,7 @@ mod tests {
 
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
-                schemes[1].clone(),
+                schemes.remove(0),
                 (req_conn2, res_conn2),
                 Monitor::dummy(),
                 handler2,
@@ -761,10 +753,7 @@ mod tests {
             .await;
 
             // Send request
-            let request = Request {
-                id: 30,
-                data: b"will be canceled".to_vec(),
-            };
+            let request = Request { id: 30, data: 30 };
             let commitment = request.commitment();
 
             mailbox1
