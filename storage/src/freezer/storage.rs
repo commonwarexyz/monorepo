@@ -6,12 +6,7 @@ use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
 use commonware_utils::Array;
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
-use std::{
-    cmp::{max, Ordering},
-    collections::BTreeSet,
-    marker::PhantomData,
-    ops::Deref,
-};
+use std::{cmp::Ordering, collections::BTreeSet, marker::PhantomData, ops::Deref};
 use tracing::debug;
 
 /// Location of an item in the [Freezer].
@@ -740,7 +735,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         if let Some(resize_progress) = self.resize_progress {
             if table_index < resize_progress {
                 // This bucket has been processed, so we need to update the new position
-                let new_table_index = table_index + self.table_size;
+                let new_table_index = self.table_size + table_index;
                 let (new_entry1, new_entry2) =
                     Self::read_table(&self.table, new_table_index).await?;
                 Self::update_head(
@@ -833,25 +828,22 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Continue a resize operation.
     async fn advance_resize(&mut self) -> Result<(), Error> {
-        let Some(current_index) = self.resize_progress else {
-            return Ok(());
-        };
-
+        // Compute the range to update
+        let current_index = self.resize_progress.unwrap();
         let old_size = self.table_size;
         let chunk_end = (current_index + self.table_resize_chunk_size).min(old_size);
         let chunk_size = chunk_end - current_index;
 
-        // Read the entire chunk at once
+        // Read the entire chunk
         let chunk_bytes = chunk_size as usize * Entry::FULL_SIZE;
         let read_offset = Self::table_offset(current_index);
         let read_buf = vec![0u8; chunk_bytes];
-        let read_buf = self.table.read_at(read_buf, read_offset).await?;
+        let read_buf: Vec<u8> = self.table.read_at(read_buf, read_offset).await?.into();
 
         // Process each entry in the chunk
-        let mut old_writes = Vec::with_capacity(chunk_size as usize);
-        let mut new_writes = Vec::with_capacity(chunk_size as usize);
-
+        let mut writes = vec![0u8; chunk_bytes];
         for i in 0..chunk_size {
+            // Get the entry
             let entry_offset = i as usize * Entry::FULL_SIZE;
             let entry_end = entry_offset + Entry::FULL_SIZE;
             let entry_buf = &read_buf[entry_offset..entry_end];
@@ -865,29 +857,27 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 .map(|(s, o, _)| (s, o))
                 .unwrap_or((0, 0));
 
-            // Create reset entry with added=0
+            // Create new entry with added=0
             let reset_entry = Entry::new(self.next_epoch, section, offset, 0);
 
             // Determine which slot to write to
             let slot_offset = Self::select_write_slot(&entry1, &entry2, self.next_epoch);
 
-            // Prepare writes for old position
-            let old_write_offset = Self::table_offset(current_index + i) + slot_offset as u64;
-            old_writes.push((old_write_offset, reset_entry.encode()));
-
-            // Prepare writes for new position
-            let new_write_offset =
-                Self::table_offset(old_size + current_index + i) + slot_offset as u64;
-            new_writes.push((new_write_offset, reset_entry.encode()));
+            // Write the entries
+            if slot_offset == 0 {
+                writes[entry_offset..].copy_from_slice(&reset_entry.encode());
+                writes[entry_offset + Entry::SIZE..].copy_from_slice(&entry2.encode());
+            } else {
+                writes[entry_offset..entry_offset + slot_offset].copy_from_slice(&entry1.encode());
+                writes[entry_offset + slot_offset..].copy_from_slice(&reset_entry.encode());
+            }
         }
 
-        // Execute all writes
-        for (offset, data) in old_writes {
-            self.table.write_at(data, offset).await?;
-        }
-        for (offset, data) in new_writes {
-            self.table.write_at(data, offset).await?;
-        }
+        // Put the writes into the table
+        let old_write = self.table.write_at(writes.clone(), read_offset);
+        let new_offset = (old_size as usize * Entry::FULL_SIZE) as u64 + read_offset;
+        let new_write = self.table.write_at(writes, new_offset);
+        try_join(old_write, new_write).await?;
 
         // Update progress
         if chunk_end >= old_size {
@@ -903,6 +893,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         } else {
             // More chunks to process
             self.resize_progress = Some(chunk_end);
+            debug!(current = current_index, chunk_end, "table resize progress");
         }
 
         Ok(())
