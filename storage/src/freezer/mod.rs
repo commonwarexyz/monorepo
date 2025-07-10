@@ -130,6 +130,10 @@
 //! items are added (and resizes occur), the latency for fetching old data will increase logarithmically
 //! (with the number of items stored).
 //!
+//! To prevent a "stall" during a single resize, the table is resized incrementally across multiple sync calls.
+//! Each sync will process up to `table_resize_chunk_size` entries until the resize is complete. If there is
+//! an ongoing resize when closing the [Freezer], the resize will be completed before closing.
+//!
 //! # Example
 //!
 //! ```rust
@@ -146,10 +150,10 @@
 //!         journal_write_buffer: 1024 * 1024, // 1MB
 //!         journal_target_size: 100 * 1024 * 1024, // 100MB
 //!         table_partition: "freezer_table".into(),
-//!         table_initial_size: 65_536,
+//!         table_initial_size: 65_536, // ~3MB initial table size
 //!         table_resize_frequency: 4, // Force resize once 4 writes to the same entry occur
+//!         table_resize_chunk_size: 16_384, // ~1MB of table entries rewritten per sync
 //!         table_replay_buffer: 1024 * 1024, // 1MB
-//!         table_write_buffer: 1024 * 1024, // 1MB
 //!         codec_config: (),
 //!     };
 //!     let mut freezer = Freezer::<_, FixedBytes<32>, i32>::init(context, cfg).await.unwrap();
