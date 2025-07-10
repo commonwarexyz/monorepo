@@ -6,7 +6,12 @@ use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
 use commonware_utils::Array;
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
-use std::{cmp::{max, Ordering}, collections::BTreeSet, marker::PhantomData, ops::Deref};
+use std::{
+    cmp::{max, Ordering},
+    collections::BTreeSet,
+    marker::PhantomData,
+    ops::Deref,
+};
 use tracing::debug;
 
 /// Location of an item in the [Freezer].
@@ -719,14 +724,35 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         }
 
         self.modified_sections.insert(self.current_section);
+        let new_entry = Entry::new(self.next_epoch, self.current_section, offset, added);
+
+        // Update the old position
         Self::update_head(
             &self.table,
             table_index,
             &entry1,
             &entry2,
-            Entry::new(self.next_epoch, self.current_section, offset, added),
+            new_entry.clone(),
         )
         .await?;
+
+        // If we're mid-resize and this bucket has already been processed, update the new position too
+        if let Some(resize_progress) = self.resize_progress {
+            if table_index < resize_progress {
+                // This bucket has been processed, so we need to update the new position
+                let new_table_index = table_index + self.table_size;
+                let (new_entry1, new_entry2) =
+                    Self::read_table(&self.table, new_table_index).await?;
+                Self::update_head(
+                    &self.table,
+                    new_table_index,
+                    &new_entry1,
+                    &new_entry2,
+                    new_entry,
+                )
+                .await?;
+            }
+        }
 
         Ok(Cursor::new(self.current_section, offset))
     }
@@ -807,98 +833,79 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Continue a resize operation.
     async fn advance_resize(&mut self) -> Result<(), Error> {
-        // Read the old section
-        let current = self.resize_progress.unwrap();
-        let max = max(current + self.table_resize_chunk_size, self.table_size * 2);
-        let buf = vec![0; max as usize * Entry::FULL_SIZE as usize];
-        let buf = self.table.read_at(Self::table_offset(current), buf).await?;
+        let Some(current_index) = self.resize_progress else {
+            return Ok(());
+        };
 
-        // Update all entires to have added = 0
+        let old_size = self.table_size;
+        let chunk_end = (current_index + self.table_resize_chunk_size).min(old_size);
+        let chunk_size = chunk_end - current_index;
 
-        // Store in existing table and new table with self.next_epoch
+        // Read the entire chunk at once
+        let chunk_bytes = chunk_size as usize * Entry::FULL_SIZE;
+        let read_offset = Self::table_offset(current_index);
+        let read_buf = vec![0u8; chunk_bytes];
+        let read_buf = self.table.read_at(read_buf, read_offset).await?;
 
+        // Process each entry in the chunk
+        let mut old_writes = Vec::with_capacity(chunk_size as usize);
+        let mut new_writes = Vec::with_capacity(chunk_size as usize);
 
-        // Create write buffers for efficient batched writes
-        let old_buffered_table = buffer::Write::new(
-            self.table.clone(),
-            0, // start at beginning of table
-            self.table_write_buffer,
-        );
-        let new_buffered_table = buffer::Write::new(
-            self.table.clone(),
-            Self::table_offset(old_size), // start at end of old table
-            self.table_write_buffer,
-        );
+        for i in 0..chunk_size {
+            let entry_offset = i as usize * Entry::FULL_SIZE;
+            let entry_end = entry_offset + Entry::FULL_SIZE;
+            let entry_buf = &read_buf[entry_offset..entry_end];
 
-        // Create a buffered reader for efficient scanning
-        let old_blob_size = Self::table_offset(old_size);
-        let mut reader =
-            buffer::Read::new(self.table.clone(), old_blob_size, self.table_replay_buffer);
+            // Parse the two slots
+            let (entry1, entry2) = Self::parse_entries(entry_buf)?;
 
-        // For each bucket in the old table, initialize both old and new positions with the same head
-        for i in 0..old_size {
-            // Read the entries from the buffer
-            let (entry1, entry2) = Self::read_buffer(&mut reader).await?;
-
-            // Get the current head value or default to (0, 0)
-            let head = self.select_valid_entry(&entry1, &entry2);
-            let (section, offset) = head
-                .map(|(section, offset, _)| (section, offset))
+            // Get the current head (re-read to capture any recent inserts)
+            let (section, offset) = self
+                .select_valid_entry(&entry1, &entry2)
+                .map(|(s, o, _)| (s, o))
                 .unwrap_or((0, 0));
 
-            // Update old position with reset counter
-            Self::update_head(
-                &old_buffered_table,
-                i,
-                &entry1,
-                &entry2,
-                Entry::new(self.next_epoch, section, offset, 0),
-            )
-            .await?;
+            // Create reset entry with added=0
+            let reset_entry = Entry::new(self.next_epoch, section, offset, 0);
 
-            // Initialize new position (i + old_size) with the same head
-            Self::update_head(
-                &new_buffered_table,
-                i + old_size,
-                &entry1,
-                &entry2,
-                Entry::new(self.next_epoch, section, offset, 0),
-            )
-            .await?;
+            // Determine which slot to write to
+            let slot_offset = Self::select_write_slot(&entry1, &entry2, self.next_epoch);
+
+            // Prepare writes for old position
+            let old_write_offset = Self::table_offset(current_index + i) + slot_offset as u64;
+            old_writes.push((old_write_offset, reset_entry.encode()));
+
+            // Prepare writes for new position
+            let new_write_offset =
+                Self::table_offset(old_size + current_index + i) + slot_offset as u64;
+            new_writes.push((new_write_offset, reset_entry.encode()));
         }
 
-        // Sync the buffered writes to the underlying blob
-        try_join(old_buffered_table.sync(), new_buffered_table.sync()).await?;
+        // Execute all writes
+        for (offset, data) in old_writes {
+            self.table.write_at(data, offset).await?;
+        }
+        for (offset, data) in new_writes {
+            self.table.write_at(data, offset).await?;
+        }
 
-        // Update the table size
-        self.table_size = new_size;
-        self.should_resize = false;
-        debug!(
-            old = old_size,
-            new = new_size,
-            elapsed = ?self
-                .context
-                .current()
-                .duration_since(start)
-                .unwrap_or_default(),
-            "table resized"
-        );
+        // Update progress
+        if chunk_end >= old_size {
+            // Resize complete
+            self.table_size = old_size * 2;
+            self.resize_progress = None;
+            self.should_resize = false;
+            debug!(
+                old = old_size,
+                new = self.table_size,
+                "table resize completed"
+            );
+        } else {
+            // More chunks to process
+            self.resize_progress = Some(chunk_end);
+        }
 
         Ok(())
-        // If done, update table size and mark resized
-        self.table_size = new_size;
-        self.should_resize = false;
-        self.resize_progress = None;
-        debug!(
-            old = old_size,
-            new = new_size,
-            elapsed = ?self
-                .context
-                .current()
-                .duration_since(start)
-                .unwrap_or_default(),
-            "table resized"
-        );
     }
 
     /// Sync all pending data in [Freezer].

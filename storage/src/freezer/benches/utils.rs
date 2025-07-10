@@ -17,6 +17,9 @@ const TABLE_INITIAL_SIZE: u32 = 65_536;
 /// Number of items added to a table entry before resize.
 const TABLE_RESIZE_FREQUENCY: u8 = 4;
 
+/// Number of items to process per chunk during resize.
+const TABLE_RESIZE_CHUNK_SIZE: u32 = 1024;
+
 /// Size of the replay buffer when scanning the table.
 const TABLE_REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
@@ -46,6 +49,7 @@ pub async fn init(ctx: Context) -> FreezerType {
         table_partition: TABLE_PARTITION.into(),
         table_initial_size: TABLE_INITIAL_SIZE,
         table_resize_frequency: TABLE_RESIZE_FREQUENCY,
+        table_resize_chunk_size: TABLE_RESIZE_CHUNK_SIZE,
         table_replay_buffer: TABLE_REPLAY_BUFFER,
         table_write_buffer: TABLE_WRITE_BUFFER,
         codec_config: (),
