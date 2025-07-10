@@ -95,6 +95,11 @@ Both the server and client expose Prometheus metrics:
 - Server metrics: `http://localhost:9091/metrics` (configurable with `--metrics-port`)
 - Client metrics: `http://localhost:9090/metrics` (configurable with `--metrics-port`)
 
+To fetch server metrics (using default port):
+```bash
+curl http://localhost:9091/metrics
+```
+
 ## Sync Process
 
 1. Server starts, populates database, listening for connections
