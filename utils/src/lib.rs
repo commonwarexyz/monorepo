@@ -32,7 +32,7 @@ pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
 
     (0..hex.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
         .collect()
 }
 
@@ -224,6 +224,15 @@ mod tests {
         let h = "    \n\n0x\r\n01
                             02\t03\n";
         assert_eq!(from_hex_formatted(h).unwrap(), b.to_vec());
+    }
+
+    #[test]
+    fn test_from_hex_utf8_char_boundaries() {
+        const MISALIGNMENT_CASE: &str = "쀘\n";
+
+        // Ensure that `from_hex` can handle misaligned UTF-8 character boundaries.
+        let b = from_hex(MISALIGNMENT_CASE);
+        assert!(b.is_none());
     }
 
     #[test]
