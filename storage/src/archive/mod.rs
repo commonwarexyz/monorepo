@@ -123,6 +123,22 @@ mod tests {
         prunable::Archive::init(context, cfg).await.unwrap()
     }
 
+    async fn create_prunable_large_value(
+        context: Context,
+        compression: Option<u8>,
+    ) -> impl Archive<Key = FixedBytes<64>, Value = FixedBytes<1024>> {
+        let cfg = prunable::Config {
+            partition: "test".into(),
+            translator: TwoCap,
+            compression,
+            codec_config: (),
+            items_per_section: 256,
+            write_buffer: 1024,
+            replay_buffer: 1024,
+        };
+        prunable::Archive::init(context, cfg).await.unwrap()
+    }
+
     async fn create_immutable(
         context: Context,
         compression: Option<u8>,
@@ -144,22 +160,6 @@ mod tests {
             codec_config: (),
         };
         immutable::Archive::init(context, cfg).await.unwrap()
-    }
-
-    async fn create_prunable_large_value(
-        context: Context,
-        compression: Option<u8>,
-    ) -> impl Archive<Key = FixedBytes<64>, Value = FixedBytes<1024>> {
-        let cfg = prunable::Config {
-            partition: "test".into(),
-            translator: TwoCap,
-            compression,
-            codec_config: (),
-            items_per_section: 256,
-            write_buffer: 1024,
-            replay_buffer: 1024,
-        };
-        prunable::Archive::init(context, cfg).await.unwrap()
     }
 
     async fn create_immutable_large_value(
@@ -314,7 +314,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_duplicate_key_prunable() {
+    fn test_duplicate_key_prunable_no_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let archive = create_prunable(context, None).await;
@@ -323,10 +323,28 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_duplicate_key_immutable() {
+    fn test_duplicate_key_prunable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_prunable(context, Some(3)).await;
+            test_duplicate_key_impl(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_duplicate_key_immutable_no_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let archive = create_immutable(context, None).await;
+            test_duplicate_key_impl(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_duplicate_key_immutable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_immutable(context, Some(3)).await;
             test_duplicate_key_impl(archive).await;
         });
     }
@@ -352,7 +370,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_get_nonexistent_prunable() {
+    fn test_get_nonexistent_prunable_no_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let archive = create_prunable(context, None).await;
@@ -361,10 +379,28 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_get_nonexistent_immutable() {
+    fn test_get_nonexistent_prunable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_prunable(context, Some(3)).await;
+            test_get_nonexistent_impl(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_get_nonexistent_immutable_no_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let archive = create_immutable(context, None).await;
+            test_get_nonexistent_impl(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_get_nonexistent_immutable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_immutable(context, Some(3)).await;
             test_get_nonexistent_impl(archive).await;
         });
     }
@@ -413,7 +449,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_ranges_prunable() {
+    fn test_ranges_prunable_no_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let archive = create_prunable(context, None).await;
@@ -422,7 +458,16 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_ranges_immutable() {
+    fn test_ranges_prunable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_prunable(context, Some(3)).await;
+            test_ranges_impl(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_ranges_immutable_no_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let archive = create_immutable(context, None).await;
@@ -431,256 +476,207 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_persistence_prunable() {
+    fn test_ranges_immutable_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Create and populate archive
-            {
-                let mut archive = create_prunable(context.clone(), None).await;
-
-                // Insert multiple keys
-                let keys = vec![
-                    (1u64, test_key("key1"), 1),
-                    (2u64, test_key("key2"), 2),
-                    (3u64, test_key("key3"), 3),
-                ];
-
-                for (index, key, data) in &keys {
-                    archive
-                        .put(*index, key.clone(), *data)
-                        .await
-                        .expect("Failed to put data");
-                }
-
-                // Close the archive
-                archive.close().await.expect("Failed to close archive");
-            }
-
-            // Reopen and verify data
-            {
-                let archive = create_prunable(context, None).await;
-
-                // Verify all keys are still present
-                let keys = vec![
-                    (1u64, test_key("key1"), 1),
-                    (2u64, test_key("key2"), 2),
-                    (3u64, test_key("key3"), 3),
-                ];
-
-                for (index, key, expected_data) in &keys {
-                    let retrieved = archive
-                        .get(Identifier::Index(*index))
-                        .await
-                        .expect("Failed to get data")
-                        .expect("Data not found");
-                    assert_eq!(retrieved, *expected_data);
-
-                    let retrieved = archive
-                        .get(Identifier::Key(key))
-                        .await
-                        .expect("Failed to get data")
-                        .expect("Data not found");
-                    assert_eq!(retrieved, *expected_data);
-                }
-
-                archive.close().await.expect("Failed to close archive");
-            }
+            let archive = create_immutable(context, Some(3)).await;
+            test_ranges_impl(archive).await;
         });
     }
 
+    async fn test_persistence_impl<A, F, Fut>(context: Context, creator: F, compression: Option<u8>)
+    where
+        A: Archive<Key = FixedBytes<64>, Value = i32>,
+        F: Fn(Context, Option<u8>) -> Fut,
+        Fut: Future<Output = A>,
+    {
+        // Create and populate archive
+        {
+            let mut archive = creator(context.clone(), compression).await;
+
+            // Insert multiple keys
+            let keys = vec![
+                (1u64, test_key("key1"), 1),
+                (2u64, test_key("key2"), 2),
+                (3u64, test_key("key3"), 3),
+            ];
+
+            for (index, key, data) in &keys {
+                archive
+                    .put(*index, key.clone(), *data)
+                    .await
+                    .expect("Failed to put data");
+            }
+
+            // Close the archive
+            archive.close().await.expect("Failed to close archive");
+        }
+
+        // Reopen and verify data
+        {
+            let archive = creator(context, compression).await;
+
+            // Verify all keys are still present
+            let keys = vec![
+                (1u64, test_key("key1"), 1),
+                (2u64, test_key("key2"), 2),
+                (3u64, test_key("key3"), 3),
+            ];
+
+            for (index, key, expected_data) in &keys {
+                let retrieved = archive
+                    .get(Identifier::Index(*index))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(retrieved, *expected_data);
+
+                let retrieved = archive
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(retrieved, *expected_data);
+            }
+
+            archive.close().await.expect("Failed to close archive");
+        }
+    }
+
     #[test_traced]
-    fn test_persistence_immutable() {
+    fn test_persistence_prunable_no_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Create and populate archive
-            {
-                let mut archive = create_immutable(context.clone(), None).await;
-
-                // Insert multiple keys
-                let keys = vec![
-                    (1u64, test_key("key1"), 1),
-                    (2u64, test_key("key2"), 2),
-                    (3u64, test_key("key3"), 3),
-                ];
-
-                for (index, key, data) in &keys {
-                    archive
-                        .put(*index, key.clone(), *data)
-                        .await
-                        .expect("Failed to put data");
-                }
-
-                // Close the archive
-                archive.close().await.expect("Failed to close archive");
-            }
-
-            // Reopen and verify data
-            {
-                let archive = create_immutable(context, None).await;
-
-                // Verify all keys are still present
-                let keys = vec![
-                    (1u64, test_key("key1"), 1),
-                    (2u64, test_key("key2"), 2),
-                    (3u64, test_key("key3"), 3),
-                ];
-
-                for (index, key, expected_data) in &keys {
-                    let retrieved = archive
-                        .get(Identifier::Index(*index))
-                        .await
-                        .expect("Failed to get data")
-                        .expect("Data not found");
-                    assert_eq!(retrieved, *expected_data);
-
-                    let retrieved = archive
-                        .get(Identifier::Key(key))
-                        .await
-                        .expect("Failed to get data")
-                        .expect("Data not found");
-                    assert_eq!(retrieved, *expected_data);
-                }
-
-                archive.close().await.expect("Failed to close archive");
-            }
+            test_persistence_impl(context, create_prunable, None).await;
         });
     }
 
     #[test_traced]
-    fn test_many_keys_prunable() {
+    fn test_persistence_prunable_compression() {
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Insert many keys
-            let mut keys = BTreeMap::new();
-            {
-                let mut archive = create_prunable_large_value(context.clone(), None).await;
-
-                while keys.len() < 100 {
-                    let index = keys.len() as u64;
-                    let mut key = [0u8; 64];
-                    context.fill(&mut key);
-                    let key = FixedBytes::<64>::decode(key.as_ref()).unwrap();
-                    let mut data = [0u8; 1024];
-                    context.fill(&mut data);
-                    let data = FixedBytes::<1024>::decode(data.as_ref()).unwrap();
-
-                    archive
-                        .put(index, key.clone(), data.clone())
-                        .await
-                        .expect("Failed to put data");
-                    keys.insert(key, (index, data));
-                }
-
-                // Ensure all keys can be retrieved
-                for (key, (index, data)) in &keys {
-                    let retrieved = archive
-                        .get(Identifier::Index(*index))
-                        .await
-                        .expect("Failed to get data")
-                        .expect("Data not found");
-                    assert_eq!(&retrieved, data);
-                    let retrieved = archive
-                        .get(Identifier::Key(key))
-                        .await
-                        .expect("Failed to get data")
-                        .expect("Data not found");
-                    assert_eq!(&retrieved, data);
-                }
-
-                archive.close().await.expect("Failed to close archive");
-            }
-
-            // Reinitialize and verify
-            {
-                let archive = create_prunable_large_value(context.clone(), None).await;
-
-                // Ensure all keys can be retrieved
-                for (key, (index, data)) in &keys {
-                    let retrieved = archive
-                        .get(Identifier::Index(*index))
-                        .await
-                        .expect("Failed to get data")
-                        .expect("Data not found");
-                    assert_eq!(&retrieved, data);
-                    let retrieved = archive
-                        .get(Identifier::Key(key))
-                        .await
-                        .expect("Failed to get data")
-                        .expect("Data not found");
-                    assert_eq!(&retrieved, data);
-                }
-
-                archive.close().await.expect("Failed to close archive");
-            }
+        executor.start(|context| async move {
+            test_persistence_impl(context, create_prunable, Some(3)).await;
         });
     }
 
     #[test_traced]
-    fn test_many_keys_immutable() {
+    fn test_persistence_immutable_no_compression() {
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Insert many keys
-            let mut keys = BTreeMap::new();
-            {
-                let mut archive = create_immutable_large_value(context.clone(), None).await;
+        executor.start(|context| async move {
+            test_persistence_impl(context, create_immutable, None).await;
+        });
+    }
 
-                while keys.len() < 100 {
-                    let index = keys.len() as u64;
-                    let mut key = [0u8; 64];
-                    context.fill(&mut key);
-                    let key = FixedBytes::<64>::decode(key.as_ref()).unwrap();
-                    let mut data = [0u8; 1024];
-                    context.fill(&mut data);
-                    let data = FixedBytes::<1024>::decode(data.as_ref()).unwrap();
+    #[test_traced]
+    fn test_persistence_immutable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            test_persistence_impl(context, create_immutable, Some(3)).await;
+        });
+    }
 
-                    archive
-                        .put(index, key.clone(), data.clone())
-                        .await
-                        .expect("Failed to put data");
-                    keys.insert(key, (index, data));
-                }
+    async fn test_many_keys_impl<A, F, Fut>(
+        mut context: Context,
+        creator: F,
+        compression: Option<u8>,
+    ) where
+        A: Archive<Key = FixedBytes<64>, Value = FixedBytes<1024>>,
+        F: Fn(Context, Option<u8>) -> Fut,
+        Fut: Future<Output = A>,
+    {
+        // Insert many keys
+        let mut keys = BTreeMap::new();
+        {
+            let mut archive = creator(context.clone(), compression).await;
 
-                // Ensure all keys can be retrieved
-                for (key, (index, data)) in &keys {
-                    let retrieved = archive
-                        .get(Identifier::Index(*index))
-                        .await
-                        .expect("Failed to get data")
-                        .expect("Data not found");
-                    assert_eq!(&retrieved, data);
-                    let retrieved = archive
-                        .get(Identifier::Key(key))
-                        .await
-                        .expect("Failed to get data")
-                        .expect("Data not found");
-                    assert_eq!(&retrieved, data);
-                }
+            while keys.len() < 100 {
+                let index = keys.len() as u64;
+                let mut key = [0u8; 64];
+                context.fill(&mut key);
+                let key = FixedBytes::<64>::decode(key.as_ref()).unwrap();
+                let mut data = [0u8; 1024];
+                context.fill(&mut data);
+                let data = FixedBytes::<1024>::decode(data.as_ref()).unwrap();
 
-                archive.close().await.expect("Failed to close archive");
+                archive
+                    .put(index, key.clone(), data.clone())
+                    .await
+                    .expect("Failed to put data");
+                keys.insert(key, (index, data));
             }
 
-            // Reinitialize and verify
-            {
-                let archive = create_immutable_large_value(context.clone(), None).await;
-
-                // Ensure all keys can be retrieved
-                for (key, (index, data)) in &keys {
-                    let retrieved = archive
-                        .get(Identifier::Index(*index))
-                        .await
-                        .expect("Failed to get data")
-                        .expect("Data not found");
-                    assert_eq!(&retrieved, data);
-                    let retrieved = archive
-                        .get(Identifier::Key(key))
-                        .await
-                        .expect("Failed to get data")
-                        .expect("Data not found");
-                    assert_eq!(&retrieved, data);
-                }
-
-                archive.close().await.expect("Failed to close archive");
+            // Ensure all keys can be retrieved
+            for (key, (index, data)) in &keys {
+                let retrieved = archive
+                    .get(Identifier::Index(*index))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+                let retrieved = archive
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
             }
+
+            archive.close().await.expect("Failed to close archive");
+        }
+
+        // Reinitialize and verify
+        {
+            let archive = creator(context.clone(), compression).await;
+
+            // Ensure all keys can be retrieved
+            for (key, (index, data)) in &keys {
+                let retrieved = archive
+                    .get(Identifier::Index(*index))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+                let retrieved = archive
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+            }
+
+            archive.close().await.expect("Failed to close archive");
+        }
+    }
+
+    #[test_traced]
+    fn test_many_keys_prunable_no_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            test_many_keys_impl(context, create_prunable_large_value, None).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_many_keys_prunable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            test_many_keys_impl(context, create_prunable_large_value, Some(3)).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_many_keys_immutable_no_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            test_many_keys_impl(context, create_immutable_large_value, None).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_many_keys_immutable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            test_many_keys_impl(context, create_immutable_large_value, Some(3)).await;
         });
     }
 }
