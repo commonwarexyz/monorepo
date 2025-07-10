@@ -1,4 +1,4 @@
-use commonware_cryptography::{Hasher, Sha256};
+use commonware_cryptography::{blake3::Blake3, Hasher};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
@@ -11,7 +11,7 @@ fn benchmark_hash_message(c: &mut Criterion) {
         let msg = msg.as_slice();
         c.bench_function(&format!("{}/msg_len={}", module_path!(), msg.len()), |b| {
             b.iter(|| {
-                let mut hasher = Sha256::new();
+                let mut hasher = Blake3::new();
                 hasher.update(msg);
                 hasher.finalize();
             });

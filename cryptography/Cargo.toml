@@ -17,6 +17,7 @@ bytes = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
+blake3 = { workspace = true }
 rayon = { workspace = true }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 ed25519-consensus = "2.1.0"
@@ -37,6 +38,7 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 portable = ["blst/portable"]
+parallel-blake3 = ["blake3/rayon"]
 
 [[bench]]
 name = "bls12381"
@@ -57,3 +59,8 @@ path = "src/secp256r1/benches/bench.rs"
 name = "sha256"
 harness = false
 path = "src/sha256/benches/bench.rs"
+
+[[bench]]
+name = "blake3"
+harness = false
+path = "src/blake3/benches/bench.rs"
