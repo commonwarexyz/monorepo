@@ -705,13 +705,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             // This prevents an overflow of the added field when there are many operations before resize.
             self.should_resize = true;
         } else {
+            // If a resize is ongoing and an item has already been rewritten, we still increment added
+            // to ensure we resize again.
+            //
+            // This isn't a perfect solution because an interrupted resize will have reset the added
+            // field to 0 when the incomplete new table is not fully populated but consider it the right
+            // balance between correctness and performance.
             added = added.checked_add(1).expect("added overflow");
         }
 
+        // Update the old position
         self.modified_sections.insert(self.current_section);
         let new_entry = Entry::new(self.next_epoch, self.current_section, offset, added);
-
-        // Update the old position
         Self::update_head(&self.table, table_index, &entry1, &entry2, new_entry).await?;
 
         // If we're mid-resize and this bucket has already been processed, update the new position too
