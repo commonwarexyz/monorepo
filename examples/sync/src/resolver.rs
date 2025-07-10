@@ -6,11 +6,13 @@ use crate::{
     GetServerMetadataResponse, Message,
 };
 use commonware_codec::{DecodeExt, Encode, Read};
-use commonware_storage::adb::any::sync::{
-    resolver::{GetOperationsResult, Resolver},
-    Error as SyncError,
+use commonware_storage::{
+    adb::any::sync::{
+        resolver::{GetOperationsResult, Resolver},
+        Error as SyncError,
+    },
+    mmr::verification::Proof,
 };
-use commonware_storage::mmr::verification::Proof;
 use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::{
