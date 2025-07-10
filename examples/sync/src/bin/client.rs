@@ -57,7 +57,7 @@ where
     Ok(metadata)
 }
 
-/// Perform a sync operation using the actual ADB sync functionality.
+/// Create a new database synced to the server's state.
 async fn sync<E>(
     context: E,
     resolver: NetworkResolver<E>,
