@@ -65,7 +65,7 @@ Client options:
    ```
    INFO  ADB Sync Server starting
    INFO  Configuration port=8080 initial_ops=50 storage_dir=/tmp/adb_sync_server
-   INFO  Initializing database db_id=db_1234567890
+   INFO  Initializing database
    INFO  Database ready op_count=51 root_hash=abc123...
    INFO  Server listening addr=127.0.0.1:8080
    ```

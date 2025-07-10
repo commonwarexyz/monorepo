@@ -41,32 +41,19 @@ pub fn crate_version() -> &'static str {
 }
 
 /// Create a database configuration with appropriate partitioning.
-pub fn create_adb_config(db_id: &str) -> Config<Translator> {
+pub fn create_adb_config() -> Config<Translator> {
     Config {
-        mmr_journal_partition: format!("mmr_journal_{db_id}"),
-        mmr_metadata_partition: format!("mmr_metadata_{db_id}"),
+        mmr_journal_partition: "mmr_journal".into(),
+        mmr_metadata_partition: "mmr_metadata".into(),
         mmr_items_per_blob: 4096,
         mmr_write_buffer: 1024,
-        log_journal_partition: format!("log_journal_{db_id}"),
+        log_journal_partition: "log_journal".into(),
         log_items_per_blob: 4096,
         log_write_buffer: 1024,
         translator: Translator::default(),
         thread_pool: None,
         buffer_pool: commonware_runtime::buffer::PoolRef::new(1024, 10),
     }
-}
-
-/// Generate a unique database ID based on current timestamp.
-pub fn generate_db_id<E>(context: &E) -> String
-where
-    E: commonware_runtime::Clock,
-{
-    let timestamp = context
-        .current()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    format!("db_{timestamp}")
 }
 
 /// Create deterministic test operations for demonstration purposes.

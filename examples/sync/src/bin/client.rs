@@ -87,9 +87,8 @@ where
     );
 
     // Create database configuration
-    let db_id = commonware_sync::generate_db_id(&context);
-    let db_config = create_adb_config(&db_id);
-    info!(db_id = %db_id, "Created local database");
+    let db_config = create_adb_config();
+    info!("Created local database");
 
     // Create sync configuration
     let sync_config = SyncConfig::<

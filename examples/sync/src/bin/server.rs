@@ -8,8 +8,8 @@ use commonware_runtime::{
 use commonware_storage::mmr::hasher::Standard;
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    crate_version, create_adb_config, create_test_operations, generate_db_id, Database,
-    ErrorResponse, GetOperationsRequest, GetOperationsResponse, GetServerMetadataRequest,
+    crate_version, create_adb_config, create_test_operations, Database, ErrorResponse,
+    GetOperationsRequest, GetOperationsResponse, GetServerMetadataRequest,
     GetServerMetadataResponse, Message, Operation, ProtocolError, MAX_MESSAGE_SIZE,
 };
 use std::{
@@ -377,10 +377,8 @@ fn main() {
         );
 
         // Create and initialize database
-        let db_id = generate_db_id(&context);
-        let db_config = create_adb_config(&db_id);
-
-        info!(db_id = %db_id, "Initializing database");
+        let db_config = create_adb_config();
+        info!("Initializing database");
 
         let mut database = match Database::init(context.with_label("database"), db_config).await {
             Ok(db) => db,
