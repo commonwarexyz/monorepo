@@ -174,13 +174,7 @@ where
             Message::GetOperationsResponse(response) => response,
             Message::Error(err) => {
                 error!(error = %err.message, "❌ Server error");
-                return Err(SyncError::Adb(
-                    commonware_storage::adb::Error::JournalError(
-                        commonware_storage::journal::Error::Runtime(
-                            commonware_runtime::Error::ConnectionFailed,
-                        ),
-                    ),
-                ));
+                return Err(SyncError::Resolver(Box::new(err)));
             }
             _ => {
                 error!("❌ Unexpected response type");
@@ -192,11 +186,7 @@ where
         let proof = {
             let mut buf = &response.proof_bytes[..];
             let max_digests = 10_000; // Allow up to 10,000 digests
-            Proof::read_cfg(&mut buf, &max_digests).map_err(|e| {
-                SyncError::Adb(commonware_storage::adb::Error::JournalError(
-                    commonware_storage::journal::Error::Codec(e),
-                ))
-            })?
+            Proof::read_cfg(&mut buf, &max_digests).map_err(|e| SyncError::Resolver(Box::new(e)))?
         };
 
         // Deserialize the operations
@@ -208,11 +198,7 @@ where
                 &mut buf,
                 &(range_cfg, ()),
             )
-            .map_err(|e| {
-                SyncError::Adb(commonware_storage::adb::Error::JournalError(
-                    commonware_storage::journal::Error::Codec(e),
-                ))
-            })?
+            .map_err(|e| SyncError::Resolver(Box::new(e)))?
         };
 
         info!(
@@ -252,11 +238,7 @@ pub enum ResolverError {
 }
 
 impl From<ResolverError> for SyncError {
-    fn from(_err: ResolverError) -> Self {
-        SyncError::Adb(commonware_storage::adb::Error::JournalError(
-            commonware_storage::journal::Error::Runtime(
-                commonware_runtime::Error::ConnectionFailed,
-            ),
-        ))
+    fn from(err: ResolverError) -> Self {
+        SyncError::Resolver(Box::new(err))
     }
 }
