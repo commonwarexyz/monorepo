@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 fn bench_put(c: &mut Criterion) {
     let runner = tokio::Runner::default();
-    for items in [10_000, 50_000, 100_000] {
+    for items in [10_000, 50_000, 100_000, 250_000] {
         let label = format!("{}/items={}", module_path!(), items);
         c.bench_function(&label, |b| {
             b.to_async(&runner).iter_custom(move |iters| async move {

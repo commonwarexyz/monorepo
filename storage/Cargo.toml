@@ -52,6 +52,11 @@ harness = false
 path = "src/bmt/benches/bench.rs"
 
 [[bench]]
+name="freezer"
+harness = false
+path = "src/freezer/benches/bench.rs"
+
+[[bench]]
 name="index"
 harness = false
 path = "src/index/benches/bench.rs"
