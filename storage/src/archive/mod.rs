@@ -1,156 +1,33 @@
-//! A write-once key-value store optimized for low-latency reads.
+//! A write-once key-value store for ordered data.
 //!
-//! `Archive` is a key-value store designed for workloads where all data is written only once and is
+//! [Archive] is a key-value store designed for workloads where all data is written only once and is
 //! uniquely associated with both an `index` and a `key`.
-//!
-//! Data is stored in `Journal` (an append-only log) and the location of written data is stored
-//! in-memory by both index and key (translated representation using a caller-provided `Translator`)
-//! to enable **single-read lookups** for both query patterns over all archived data.
-//!
-//! _Notably, `Archive` does not make use of compaction nor on-disk indexes (and thus has no read
-//! nor write amplification during normal operation)._
-//!
-//! # Format
-//!
-//! `Archive` stores data in the following format:
-//!
-//! ```text
-//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |12 |      ...      |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-//! |          Index(u64)           |  Key(Fixed Size)  |     Data      |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-//! ```
-//!
-//! # Uniqueness
-//!
-//! `Archive` assumes all stored indexes and keys are unique. If the same key is associated with
-//! multiple `indices`, there is no guarantee which value will be returned. If the key is written to
-//! an existing `index`, `Archive` will return an error.
-//!
-//! ## Conflicts
-//!
-//! Because a translated representation of a key is only ever stored in memory, it is possible (and
-//! expected) that two keys will eventually be represented by the same translated key. To handle this
-//! case, `Archive` must check the persisted form of all conflicting keys to ensure data from the
-//! correct key is returned. To support efficient checks, `Archive` (via [crate::index::Index])
-//! keeps a linked list of all keys with the same translated prefix:
-//!
-//! ```rust
-//! struct Record {
-//!     index: u64,
-//!
-//!     next: Option<Box<Record>>,
-//! }
-//! ```
-//!
-//! _To avoid random memory reads in the common case, the in-memory index directly stores the first
-//! item in the linked list instead of a pointer to the first item._
-//!
-//! `index` is the key to the map used to serve lookups by `index` that stores the location of data
-//! in a given `Blob` (selected by `section = index & section_mask` to minimize the number of open
-//! `Journals`):
-//!
-//! ```rust
-//! struct Location {
-//!     offset: u32,
-//!     len: u32,
-//! }
-//! ```
-//!
-//! _If the `Translator` provided by the caller does not uniformly distribute keys across the key
-//! space or uses a translated representation that means keys on average have many conflicts,
-//! performance will degrade._
-//!
-//! ## Memory Overhead
-//!
-//! `Archive` uses two maps to enable lookups by both index and key. The memory used to track each
-//! index item is `8 + 4 + 4` (where `8` is the index, `4` is the offset, and `4` is the length).
-//! The memory used to track each key item is `~translated(key).len() + 16` bytes (where `16` is the
-//! size of the `Record` struct). This means that an `Archive` employing a `Translator` that uses
-//! the first `8` bytes of a key will use `~40` bytes to index each key.
-//!
-//! # Sync
-//!
-//! `Archive` flushes writes in a given `section` (computed by `index & section_mask`) to `Storage`
-//! after `pending_writes`. If the caller requires durability on a particular write, they can call
-//! `sync`.
-//!
-//! # Pruning
-//!
-//! `Archive` supports pruning up to a minimum `index` using the `prune` method. After `prune` is
-//! called on a `section`, all interaction with a `section` less than the pruned `section` will
-//! return an error.
-//!
-//! ## Lazy Index Cleanup
-//!
-//! Instead of performing a full iteration of the in-memory index, storing an additional in-memory
-//! index per `section`, or replaying a `section` of `Journal`, `Archive` lazily cleans up the
-//! in-memory index after pruning. When a new key is stored that overlaps (same translated value)
-//! with a pruned key, the pruned key is removed from the in-memory index.
-//!
-//! # Single Operation Reads
-//!
-//! To enable single operation reads (i.e. reading all of an item in a single call to `Blob`),
-//! `Archive` caches the length of each item in its in-memory index. While it increases the
-//! footprint per key stored, the benefit of only ever performing a single operation to read a key
-//! (when there are no conflicts) is worth the tradeoff.
-//!
-//! # Compression
-//!
-//! `Archive` supports compressing data before storing it on disk. This can be enabled by setting
-//! the `compression` field in the `Config` struct to a valid `zstd` compression level. This setting
-//! can be changed between initializations of `Archive`, however, it must remain populated if any
-//! data was written with compression enabled.
-//!
-//! # Querying for Gaps
-//!
-//! `Archive` tracks gaps in the index space to enable the caller to efficiently fetch unknown keys
-//! using `next_gap`. This is a very common pattern when syncing blocks in a blockchain.
-//!
-//! # Example
-//!
-//! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic};
-//! use commonware_cryptography::hash;
-//! use commonware_storage::{
-//!     translator::FourCap,
-//!     archive::{Archive, Config},
-//! };
-//!
-//! let executor = deterministic::Runner::default();
-//! executor.start(|context| async move {
-//!     // Create an archive
-//!     let cfg = Config {
-//!         translator: FourCap,
-//!         partition: "demo".into(),
-//!         compression: Some(3),
-//!         codec_config: (),
-//!         section_mask: 0xffff_ffff_ffff_0000u64,
-//!         pending_writes: 10,
-//!         write_buffer: 1024 * 1024,
-//!         replay_buffer: 4096,
-//!     };
-//!     let mut archive = Archive::init(context, cfg).await.unwrap();
-//!
-//!     // Put a key
-//!     archive.put(1, hash(b"data"), 10).await.unwrap();
-//!
-//!     // Close the archive (also closes the journal)
-//!     archive.close().await.unwrap();
-//! });
-//! ```
 
-mod storage;
-pub use crate::translator::Translator;
-pub use storage::{Archive, Identifier};
+use commonware_codec::Codec;
+use commonware_utils::Array;
+use std::future::Future;
 use thiserror::Error;
+
+pub mod immutable;
+pub mod prunable;
+
+/// Subject of a `get` or `has` operation.
+pub enum Identifier<'a, K: Array> {
+    Index(u64),
+    Key(&'a K),
+}
 
 /// Errors that can occur when interacting with the archive.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
+    #[error("ordinal error: {0}")]
+    Ordinal(#[from] crate::ordinal::Error),
+    #[error("metadata error: {0}")]
+    Metadata(#[from] crate::metadata::Error),
+    #[error("freezer error: {0}")]
+    Freezer(#[from] crate::freezer::Error),
     #[error("record corrupted")]
     RecordCorrupted,
     #[error("already pruned to: {0}")]
@@ -159,59 +36,82 @@ pub enum Error {
     RecordTooLarge,
 }
 
-/// Configuration for `Archive` storage.
-#[derive(Clone)]
-pub struct Config<T: Translator, C> {
-    /// Logic to transform keys into their index representation.
+/// A write-once key-value store where each key is associated with a unique index.
+pub trait Archive {
+    /// The type of the key.
+    type Key: Array;
+
+    /// The type of the value.
+    type Value: Codec;
+
+    /// Store an item in [Archive]. Both indices and keys are assumed to both be globally unique.
     ///
-    /// `Archive` assumes that all internal keys are spread uniformly across the key space.
-    /// If that is not the case, lookups may be O(n) instead of O(1).
-    pub translator: T,
+    /// If the index already exists, put does nothing and returns. If the same key is stored multiple times
+    /// at different indices (not recommended), any value associated with the key may be returned.
+    fn put(
+        &mut self,
+        index: u64,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<(), Error>>;
 
-    /// The partition to use for the archive's [crate::journal] storage.
-    pub partition: String,
+    /// [Archive::put] and [Archive::sync] in a single operation.
+    fn put_sync(
+        &mut self,
+        index: u64,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<(), Error>> {
+        async move {
+            self.put(index, key, value).await?;
+            self.sync().await?;
+            Ok(())
+        }
+    }
 
-    /// The compression level to use for the archive's [crate::journal] storage.
-    pub compression: Option<u8>,
+    /// Retrieve an item from [Archive].
+    fn get(
+        &self,
+        identifier: Identifier<'_, Self::Key>,
+    ) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
 
-    /// The codec configuration to use for the value stored in the archive.
-    pub codec_config: C,
+    /// Check if an item exists in [Archive].
+    fn has(
+        &self,
+        identifier: Identifier<'_, Self::Key>,
+    ) -> impl Future<Output = Result<bool, Error>>;
 
-    /// Mask to apply to indices to determine section.
+    /// Retrieve the end of the current range including `index` (inclusive) and
+    /// the start of the next range after `index` (if it exists).
     ///
-    /// This value is `index & section_mask`.
-    pub section_mask: u64,
+    /// This is useful for driving backfill operations over the archive.
+    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>);
 
-    /// The number of writes to buffer in a section before forcing a sync in the journal.
+    /// Sync all pending writes.
+    fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
+
+    /// Close [Archive] (and underlying storage).
     ///
-    /// If set to 0, the journal will be synced each time a new item is stored.
-    pub pending_writes: usize,
+    /// Any pending writes are synced prior to closing.
+    fn close(self) -> impl Future<Output = Result<(), Error>>;
 
-    /// The amount of bytes that can be buffered in a section before being written to disk.
-    pub write_buffer: usize,
-
-    /// The buffer size to use when replaying a blob.
-    pub replay_buffer: usize,
+    /// Remove all persistent data created by this [Archive].
+    fn destroy(self) -> impl Future<Output = Result<(), Error>>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        journal::Error as JournalError,
-        translator::{FourCap, TwoCap},
-    };
-    use commonware_codec::{varint::UInt, DecodeExt, EncodeSize, Error as CodecError};
+    use crate::translator::TwoCap;
+    use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
+    use commonware_runtime::{
+        deterministic::{self, Context},
+        Runner,
+    };
     use commonware_utils::array::FixedBytes;
     use rand::Rng;
     use std::collections::BTreeMap;
-
-    const DEFAULT_SECTION_MASK: u64 = 0xffff_ffff_ffff_0000u64;
-    const DEFAULT_PENDING_WRITES: usize = 10;
-    const DEFAULT_WRITE_BUFFER: usize = 1024;
-    const DEFAULT_REPLAY_BUFFER: usize = 4096;
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -221,473 +121,278 @@ mod tests {
         FixedBytes::decode(buf.as_ref()).unwrap()
     }
 
-    fn test_archive_put_get(compression: Option<u8>) {
-        // Initialize the deterministic context
+    async fn create_prunable(
+        context: Context,
+        compression: Option<u8>,
+    ) -> impl Archive<Key = FixedBytes<64>, Value = i32> {
+        let cfg = prunable::Config {
+            partition: "test".into(),
+            translator: TwoCap,
+            compression,
+            codec_config: (),
+            items_per_section: 1024,
+            write_buffer: 1024,
+            replay_buffer: 1024,
+        };
+        prunable::Archive::init(context, cfg).await.unwrap()
+    }
+
+    async fn create_immutable(
+        context: Context,
+        compression: Option<u8>,
+    ) -> impl Archive<Key = FixedBytes<64>, Value = i32> {
+        let cfg = immutable::Config {
+            metadata_partition: "test_metadata".into(),
+            freezer_table_partition: "test_table".into(),
+            freezer_table_initial_size: 64,
+            freezer_table_resize_frequency: 2,
+            freezer_journal_partition: "test_journal".into(),
+            freezer_journal_target_size: 1024 * 1024,
+            freezer_journal_compression: compression,
+            ordinal_partition: "test_ordinal".into(),
+            items_per_section: 1024,
+            write_buffer: 1024 * 1024,
+            replay_buffer: 1024 * 1024,
+            codec_config: (),
+        };
+        immutable::Archive::init(context, cfg).await.unwrap()
+    }
+
+    async fn test_put_get_impl(mut archive: impl Archive<Key = FixedBytes<64>, Value = i32>) {
+        let index = 1u64;
+        let key = test_key("testkey");
+        let data = 1;
+
+        // Has the key before put
+        let has = archive
+            .has(Identifier::Index(index))
+            .await
+            .expect("Failed to check key");
+        assert!(!has);
+        let has = archive
+            .has(Identifier::Key(&key))
+            .await
+            .expect("Failed to check key");
+        assert!(!has);
+
+        // Put the key-data pair
+        archive
+            .put(index, key.clone(), data)
+            .await
+            .expect("Failed to put data");
+
+        // Has the key after put
+        let has = archive
+            .has(Identifier::Index(index))
+            .await
+            .expect("Failed to check key");
+        assert!(has);
+        let has = archive
+            .has(Identifier::Key(&key))
+            .await
+            .expect("Failed to check key");
+        assert!(has);
+
+        // Get the data by key
+        let retrieved = archive
+            .get(Identifier::Key(&key))
+            .await
+            .expect("Failed to get data");
+        assert_eq!(retrieved, Some(data));
+
+        // Get the data by index
+        let retrieved = archive
+            .get(Identifier::Index(index))
+            .await
+            .expect("Failed to get data");
+        assert_eq!(retrieved, Some(data));
+
+        // Force a sync
+        archive.sync().await.expect("Failed to sync data");
+
+        // Close the archive
+        archive.close().await.expect("Failed to close archive");
+    }
+
+    #[test_traced]
+    fn test_put_get_prunable_no_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize the archive
-            let cfg = Config {
-                partition: "test_partition".into(),
-                translator: FourCap,
-                compression,
-                codec_config: (),
-                pending_writes: DEFAULT_PENDING_WRITES,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: DEFAULT_SECTION_MASK,
-            };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
-
-            let index = 1u64;
-            let key = test_key("testkey");
-            let data = 1;
-
-            // Has the key
-            let has = archive
-                .has(Identifier::Index(index))
-                .await
-                .expect("Failed to check key");
-            assert!(!has);
-            let has = archive
-                .has(Identifier::Key(&key))
-                .await
-                .expect("Failed to check key");
-            assert!(!has);
-
-            // Put the key-data pair
-            archive
-                .put(index, key.clone(), data)
-                .await
-                .expect("Failed to put data");
-
-            // Has the key
-            let has = archive
-                .has(Identifier::Index(index))
-                .await
-                .expect("Failed to check key");
-            assert!(has);
-            let has = archive
-                .has(Identifier::Key(&key))
-                .await
-                .expect("Failed to check key");
-            assert!(has);
-
-            // Get the data back
-            let retrieved = archive
-                .get(Identifier::Index(index))
-                .await
-                .expect("Failed to get data")
-                .expect("Data not found");
-            assert_eq!(retrieved, data);
-            let retrieved = archive
-                .get(Identifier::Key(&key))
-                .await
-                .expect("Failed to get data")
-                .expect("Data not found");
-            assert_eq!(retrieved, data);
-
-            // Check metrics
-            let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 1"));
-            assert!(buffer.contains("unnecessary_reads_total 0"));
-            assert!(buffer.contains("gets_total 4")); // has for a key is just a get
-            assert!(buffer.contains("has_total 4"));
-            assert!(buffer.contains("syncs_total 0"));
-
-            // Force a sync
-            archive.sync().await.expect("Failed to sync data");
-
-            // Check metrics
-            let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 1"));
-            assert!(buffer.contains("unnecessary_reads_total 0"));
-            assert!(buffer.contains("gets_total 4"));
-            assert!(buffer.contains("has_total 4"));
-            assert!(buffer.contains("syncs_total 1"));
+            let archive = create_prunable(context, None).await;
+            test_put_get_impl(archive).await;
         });
     }
 
     #[test_traced]
-    fn test_archive_put_get_no_compression() {
-        test_archive_put_get(None);
-    }
-
-    #[test_traced]
-    fn test_archive_put_get_compression() {
-        test_archive_put_get(Some(3));
-    }
-
-    #[test_traced]
-    fn test_archive_compression_then_none() {
-        // Initialize the deterministic context
+    fn test_put_get_prunable_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize the archive
-            let cfg = Config {
-                partition: "test_partition".into(),
-                translator: FourCap,
-                codec_config: (),
-                compression: Some(3),
-                pending_writes: DEFAULT_PENDING_WRITES,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: DEFAULT_SECTION_MASK,
-            };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
-
-            // Put the key-data pair
-            let index = 1u64;
-            let key = test_key("testkey");
-            let data = 1;
-            archive
-                .put(index, key.clone(), data)
-                .await
-                .expect("Failed to put data");
-
-            // Close the archive
-            archive.close().await.expect("Failed to close archive");
-
-            // Initialize the archive again without compression
-            let cfg = Config {
-                partition: "test_partition".into(),
-                translator: FourCap,
-                codec_config: (),
-                compression: None,
-                pending_writes: 10,
-                write_buffer: 1024,
-                replay_buffer: 4096,
-                section_mask: DEFAULT_SECTION_MASK,
-            };
-            let result = Archive::<_, _, FixedBytes<64>, i32>::init(context, cfg.clone()).await;
-            assert!(matches!(
-                result,
-                Err(Error::Journal(JournalError::Codec(CodecError::EndOfBuffer)))
-            ));
+            let archive = create_prunable(context, Some(3)).await;
+            test_put_get_impl(archive).await;
         });
     }
 
     #[test_traced]
-    fn test_archive_record_corruption() {
-        // Initialize the deterministic context
+    fn test_put_get_immutable_no_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize the archive
-            let cfg = Config {
-                partition: "test_partition".into(),
-                translator: FourCap,
-                codec_config: (),
-                compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: DEFAULT_SECTION_MASK,
-            };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
-
-            let index = 1u64;
-            let key = test_key("testkey");
-            let data = 1;
-
-            // Put the key-data pair
-            archive
-                .put(index, key.clone(), data)
-                .await
-                .expect("Failed to put data");
-
-            // Close the archive
-            archive.close().await.expect("Failed to close archive");
-
-            // Corrupt the value
-            let section = index & DEFAULT_SECTION_MASK;
-            let (blob, _) = context
-                .open("test_partition", &section.to_be_bytes())
-                .await
-                .unwrap();
-            let value_location = 4 /* journal size */ + UInt(1u64).encode_size() as u64 /* index */ + 64 + 4 /* value length */;
-            blob.write_at(b"testdaty".to_vec(), value_location).await.unwrap();
-            blob.close().await.unwrap();
-
-            // Initialize the archive again
-            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
-                context,
-                Config {
-                    partition: "test_partition".into(),
-                    translator: FourCap,
-                    codec_config: (),
-                    compression: None,
-                    pending_writes: DEFAULT_PENDING_WRITES,
-                    write_buffer: DEFAULT_WRITE_BUFFER,
-                    replay_buffer: DEFAULT_REPLAY_BUFFER,
-                    section_mask: DEFAULT_SECTION_MASK,
-                },
-            )
-            .await.expect("Failed to initialize archive");
-
-            // Check that the archive is empty
-            let retrieved: Option<i32> = archive
-                .get(Identifier::Index(index))
-                .await
-                .expect("Failed to get data");
-            assert!(retrieved.is_none());
+            let archive = create_immutable(context, None).await;
+            test_put_get_impl(archive).await;
         });
     }
 
     #[test_traced]
-    fn test_archive_duplicate_key() {
-        // Initialize the deterministic context
+    fn test_put_get_immutable_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize the archive
-            let cfg = Config {
-                partition: "test_partition".into(),
-                translator: FourCap,
-                codec_config: (),
-                compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: DEFAULT_SECTION_MASK,
-            };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
+            let archive = create_immutable(context, Some(3)).await;
+            test_put_get_impl(archive).await;
+        });
+    }
 
-            let index = 1u64;
-            let key = test_key("duplicate");
-            let data1 = 1;
-            let data2 = 2;
+    async fn test_duplicate_key_impl(mut archive: impl Archive<Key = FixedBytes<64>, Value = i32>) {
+        let index = 1u64;
+        let key = test_key("duplicate");
+        let data1 = 1;
+        let data2 = 2;
 
-            // Put the key-data pair
-            archive
-                .put(index, key.clone(), data1)
-                .await
-                .expect("Failed to put data");
+        // Put the key-data pair
+        archive
+            .put(index, key.clone(), data1)
+            .await
+            .expect("Failed to put data");
 
-            // Put the key-data pair again
-            archive
-                .put(index, key.clone(), data2)
-                .await
-                .expect("Duplicate put should not fail");
+        // Put the key-data pair again (should be idempotent)
+        archive
+            .put(index, key.clone(), data2)
+            .await
+            .expect("Duplicate put should not fail");
 
-            // Get the data back
-            let retrieved = archive
-                .get(Identifier::Index(index))
-                .await
-                .expect("Failed to get data")
-                .expect("Data not found");
-            assert_eq!(retrieved, data1);
-            let retrieved = archive
-                .get(Identifier::Key(&key))
-                .await
-                .expect("Failed to get data")
-                .expect("Data not found");
-            assert_eq!(retrieved, data1);
+        // Get the data back - should still be the first value
+        let retrieved = archive
+            .get(Identifier::Index(index))
+            .await
+            .expect("Failed to get data")
+            .expect("Data not found");
+        assert_eq!(retrieved, data1);
 
-            // Check metrics
-            let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 1"));
-            assert!(buffer.contains("unnecessary_reads_total 0"));
-            assert!(buffer.contains("gets_total 2"));
+        let retrieved = archive
+            .get(Identifier::Key(&key))
+            .await
+            .expect("Failed to get data")
+            .expect("Data not found");
+        assert_eq!(retrieved, data1);
+
+        archive.close().await.expect("Failed to close archive");
+    }
+
+    #[test_traced]
+    fn test_duplicate_key_prunable_no_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_prunable(context, None).await;
+            test_duplicate_key_impl(archive).await;
         });
     }
 
     #[test_traced]
-    fn test_archive_get_nonexistent() {
-        // Initialize the deterministic context
+    fn test_duplicate_key_prunable_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize the archive
-            let cfg = Config {
-                partition: "test_partition".into(),
-                translator: FourCap,
-                codec_config: (),
-                compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: DEFAULT_SECTION_MASK,
-            };
-            let archive = Archive::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
-
-            // Attempt to get an index that doesn't exist
-            let index = 1u64;
-            let retrieved: Option<i32> = archive
-                .get(Identifier::Index(index))
-                .await
-                .expect("Failed to get data");
-            assert!(retrieved.is_none());
-
-            // Attempt to get a key that doesn't exist
-            let key = test_key("nonexistent");
-            let retrieved = archive
-                .get(Identifier::Key(&key))
-                .await
-                .expect("Failed to get data");
-            assert!(retrieved.is_none());
-
-            // Check metrics
-            let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 0"));
-            assert!(buffer.contains("unnecessary_reads_total 0"));
-            assert!(buffer.contains("gets_total 2"));
+            let archive = create_prunable(context, Some(3)).await;
+            test_duplicate_key_impl(archive).await;
         });
     }
 
     #[test_traced]
-    fn test_archive_overlapping_key_basic() {
-        // Initialize the deterministic context
+    fn test_duplicate_key_immutable_no_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize the archive
-            let cfg = Config {
-                partition: "test_partition".into(),
-                translator: FourCap,
-                codec_config: (),
-                compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: DEFAULT_SECTION_MASK,
-            };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
-
-            let index1 = 1u64;
-            let key1 = test_key("keys1");
-            let data1 = 1;
-            let index2 = 2u64;
-            let key2 = test_key("keys2");
-            let data2 = 2;
-
-            // Put the key-data pair
-            archive
-                .put(index1, key1.clone(), data1)
-                .await
-                .expect("Failed to put data");
-
-            // Put the key-data pair
-            archive
-                .put(index2, key2.clone(), data2)
-                .await
-                .expect("Failed to put data");
-
-            // Get the data back
-            let retrieved = archive
-                .get(Identifier::Key(&key1))
-                .await
-                .expect("Failed to get data")
-                .expect("Data not found");
-            assert_eq!(retrieved, data1);
-
-            // Get the data back
-            let retrieved = archive
-                .get(Identifier::Key(&key2))
-                .await
-                .expect("Failed to get data")
-                .expect("Data not found");
-            assert_eq!(retrieved, data2);
-
-            // Check metrics
-            let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 2"));
-            assert!(buffer.contains("unnecessary_reads_total 1"));
-            assert!(buffer.contains("gets_total 2"));
+            let archive = create_immutable(context, None).await;
+            test_duplicate_key_impl(archive).await;
         });
     }
 
     #[test_traced]
-    fn test_archive_overlapping_key_multiple_sections() {
-        // Initialize the deterministic context
+    fn test_duplicate_key_immutable_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize the archive
-            let cfg = Config {
-                partition: "test_partition".into(),
-                translator: FourCap,
-                codec_config: (),
-                compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: DEFAULT_SECTION_MASK,
-            };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
+            let archive = create_immutable(context, Some(3)).await;
+            test_duplicate_key_impl(archive).await;
+        });
+    }
 
-            let index1 = 1u64;
-            let key1 = test_key("keys1");
-            let data1 = 1;
-            let index2 = 2_000_000u64;
-            let key2 = test_key("keys2");
-            let data2 = 2;
+    async fn test_get_nonexistent_impl(archive: impl Archive<Key = FixedBytes<64>, Value = i32>) {
+        // Attempt to get an index that doesn't exist
+        let index = 1u64;
+        let retrieved: Option<i32> = archive
+            .get(Identifier::Index(index))
+            .await
+            .expect("Failed to get data");
+        assert!(retrieved.is_none());
 
-            // Put the key-data pair
-            archive
-                .put(index1, key1.clone(), data1)
-                .await
-                .expect("Failed to put data");
+        // Attempt to get a key that doesn't exist
+        let key = test_key("nonexistent");
+        let retrieved = archive
+            .get(Identifier::Key(&key))
+            .await
+            .expect("Failed to get data");
+        assert!(retrieved.is_none());
 
-            // Put the key-data pair
-            archive
-                .put(index2, key2.clone(), data2)
-                .await
-                .expect("Failed to put data");
+        archive.close().await.expect("Failed to close archive");
+    }
 
-            // Get the data back
-            let retrieved = archive
-                .get(Identifier::Key(&key1))
-                .await
-                .expect("Failed to get data")
-                .expect("Data not found");
-            assert_eq!(retrieved, data1);
-
-            // Get the data back
-            let retrieved = archive
-                .get(Identifier::Key(&key2))
-                .await
-                .expect("Failed to get data")
-                .expect("Data not found");
-            assert_eq!(retrieved, data2);
+    #[test_traced]
+    fn test_get_nonexistent_prunable_no_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_prunable(context, None).await;
+            test_get_nonexistent_impl(archive).await;
         });
     }
 
     #[test_traced]
-    fn test_archive_prune_keys() {
-        // Initialize the deterministic context
+    fn test_get_nonexistent_prunable_compression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Initialize the archive
-            let cfg = Config {
-                partition: "test_partition".into(),
-                translator: FourCap,
-                codec_config: (),
-                compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: 0xffff_ffff_ffff_ffffu64, // no mask
-            };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
+            let archive = create_prunable(context, Some(3)).await;
+            test_get_nonexistent_impl(archive).await;
+        });
+    }
 
-            // Insert multiple keys across different sections
+    #[test_traced]
+    fn test_get_nonexistent_immutable_no_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_immutable(context, None).await;
+            test_get_nonexistent_impl(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_get_nonexistent_immutable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_immutable(context, Some(3)).await;
+            test_get_nonexistent_impl(archive).await;
+        });
+    }
+
+    async fn test_persistence_impl<A, F, Fut>(context: Context, creator: F, compression: Option<u8>)
+    where
+        A: Archive<Key = FixedBytes<64>, Value = i32>,
+        F: Fn(Context, Option<u8>) -> Fut,
+        Fut: Future<Output = A>,
+    {
+        // Create and populate archive
+        {
+            let mut archive = creator(context.clone(), compression).await;
+
+            // Insert multiple keys
             let keys = vec![
-                (1u64, test_key("key1-blah"), 1),
-                (2u64, test_key("key2-blah"), 2),
-                (3u64, test_key("key3-blah"), 3),
-                (4u64, test_key("key3-bleh"), 3),
-                (5u64, test_key("key4-blah"), 4),
+                (1u64, test_key("key1"), 1),
+                (2u64, test_key("key2"), 2),
+                (3u64, test_key("key3"), 3),
             ];
 
             for (index, key, data) in &keys {
@@ -697,301 +402,319 @@ mod tests {
                     .expect("Failed to put data");
             }
 
-            // Check metrics
-            let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 5"));
+            // Close the archive
+            archive.close().await.expect("Failed to close archive");
+        }
 
-            // Prune sections less than 3
-            archive.prune(3).await.expect("Failed to prune");
+        // Reopen and verify data
+        {
+            let archive = creator(context, compression).await;
 
-            // Ensure keys 1 and 2 are no longer present
-            for (index, key, data) in keys {
+            // Verify all keys are still present
+            let keys = vec![
+                (1u64, test_key("key1"), 1),
+                (2u64, test_key("key2"), 2),
+                (3u64, test_key("key3"), 3),
+            ];
+
+            for (index, key, expected_data) in &keys {
                 let retrieved = archive
-                    .get(Identifier::Key(&key))
+                    .get(Identifier::Index(*index))
                     .await
-                    .expect("Failed to get data");
-                if index < 3 {
-                    assert!(retrieved.is_none());
-                } else {
-                    assert_eq!(retrieved.expect("Data not found"), data);
-                }
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(retrieved, *expected_data);
+
+                let retrieved = archive
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(retrieved, *expected_data);
             }
 
-            // Check metrics
-            let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 3"));
-            assert!(buffer.contains("indices_pruned_total 2"));
-            assert!(buffer.contains("pruned_total 0")); // no lazy cleanup yet
+            archive.close().await.expect("Failed to close archive");
+        }
+    }
 
-            // Try to prune older section
-            archive.prune(2).await.expect("Failed to prune");
-
-            // Try to prune current section again
-            archive.prune(3).await.expect("Failed to prune");
-
-            // Try to put older index
-            let result = archive.put(1, test_key("key1-blah"), 1).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedTo(3))));
-
-            // Trigger lazy removal of keys
-            archive
-                .put(6, test_key("key2-blfh"), 5)
-                .await
-                .expect("Failed to put data");
-
-            // Check metrics
-            let buffer = context.encode();
-            assert!(buffer.contains("items_tracked 4")); // lazily remove one, add one
-            assert!(buffer.contains("indices_pruned_total 2"));
-            assert!(buffer.contains("pruned_total 1"));
+    #[test_traced]
+    fn test_persistence_prunable_no_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            test_persistence_impl(context, create_prunable, None).await;
         });
     }
 
-    fn test_archive_keys_and_restart(num_keys: usize) -> String {
-        // Initialize the deterministic context
+    #[test_traced]
+    fn test_persistence_prunable_compression() {
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Initialize the archive
-            let section_mask = 0xffff_ffff_ffff_ff00u64;
-            let cfg = Config {
-                partition: "test_partition".into(),
-                translator: TwoCap,
-                codec_config: (),
-                compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask,
-            };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
+        executor.start(|context| async move {
+            test_persistence_impl(context, create_prunable, Some(3)).await;
+        });
+    }
 
-            // Insert multiple keys across different sections
-            let mut keys = BTreeMap::new();
-            while keys.len() < num_keys {
+    #[test_traced]
+    fn test_persistence_immutable_no_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            test_persistence_impl(context, create_immutable, None).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_persistence_immutable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            test_persistence_impl(context, create_immutable, Some(3)).await;
+        });
+    }
+
+    async fn test_ranges_impl<A, F, Fut>(mut context: Context, creator: F, compression: Option<u8>)
+    where
+        A: Archive<Key = FixedBytes<64>, Value = i32>,
+        F: Fn(Context, Option<u8>) -> Fut,
+        Fut: Future<Output = A>,
+    {
+        let mut keys = BTreeMap::new();
+        {
+            let mut archive = creator(context.clone(), compression).await;
+
+            // Insert 100 keys with gaps
+            let mut last_index = 0u64;
+            while keys.len() < 100 {
+                let gap: u64 = context.gen_range(1..=10);
+                let index = last_index + gap;
+                last_index = index;
+
+                let mut key_bytes = [0u8; 64];
+                context.fill(&mut key_bytes);
+                let key = FixedBytes::<64>::decode(key_bytes.as_ref()).unwrap();
+                let data: i32 = context.gen();
+
+                if keys.contains_key(&index) {
+                    continue;
+                }
+                keys.insert(index, (key.clone(), data));
+
+                archive
+                    .put(index, key, data)
+                    .await
+                    .expect("Failed to put data");
+            }
+
+            archive.close().await.expect("Failed to close archive");
+        }
+
+        {
+            let archive = creator(context, compression).await;
+            let sorted_indices: Vec<u64> = keys.keys().cloned().collect();
+
+            // Check gap before the first element
+            let (current_end, start_next) = archive.next_gap(0);
+            assert!(current_end.is_none());
+            assert_eq!(start_next, Some(sorted_indices[0]));
+
+            // Check gaps between elements
+            let mut i = 0;
+            while i < sorted_indices.len() {
+                let current_index = sorted_indices[i];
+
+                // Find the end of the current contiguous block
+                let mut j = i;
+                while j + 1 < sorted_indices.len() && sorted_indices[j + 1] == sorted_indices[j] + 1
+                {
+                    j += 1;
+                }
+                let block_end_index = sorted_indices[j];
+                let next_actual_index = if j + 1 < sorted_indices.len() {
+                    Some(sorted_indices[j + 1])
+                } else {
+                    None
+                };
+
+                let (current_end, start_next) = archive.next_gap(current_index);
+                assert_eq!(current_end, Some(block_end_index));
+                assert_eq!(start_next, next_actual_index);
+
+                // If there's a gap, check an index within the gap
+                if let Some(next_index) = next_actual_index {
+                    if next_index > block_end_index + 1 {
+                        let in_gap_index = block_end_index + 1;
+                        let (current_end, start_next) = archive.next_gap(in_gap_index);
+                        assert!(current_end.is_none());
+                        assert_eq!(start_next, Some(next_index));
+                    }
+                }
+                i = j + 1;
+            }
+
+            // Check the last element
+            let last_index = *sorted_indices.last().unwrap();
+            let (current_end, start_next) = archive.next_gap(last_index);
+            assert!(current_end.is_some());
+            assert!(start_next.is_none());
+
+            archive.close().await.expect("Failed to close archive");
+        }
+    }
+
+    #[test_traced]
+    fn test_ranges_prunable_no_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            test_ranges_impl(context, create_prunable, None).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_ranges_prunable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            test_ranges_impl(context, create_prunable, Some(3)).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_ranges_immutable_no_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            test_ranges_impl(context, create_immutable, None).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_ranges_immutable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            test_ranges_impl(context, create_immutable, Some(3)).await;
+        });
+    }
+
+    async fn test_many_keys_impl<A, F, Fut>(
+        mut context: Context,
+        creator: F,
+        compression: Option<u8>,
+        num: usize,
+    ) where
+        A: Archive<Key = FixedBytes<64>, Value = i32>,
+        F: Fn(Context, Option<u8>) -> Fut,
+        Fut: Future<Output = A>,
+    {
+        // Insert many keys
+        let mut keys = BTreeMap::new();
+        {
+            let mut archive = creator(context.clone(), compression).await;
+            while keys.len() < num {
                 let index = keys.len() as u64;
                 let mut key = [0u8; 64];
                 context.fill(&mut key);
                 let key = FixedBytes::<64>::decode(key.as_ref()).unwrap();
-                let mut data = [0u8; 1024];
-                context.fill(&mut data);
-                let data = FixedBytes::<1024>::decode(data.as_ref()).unwrap();
+                let data: i32 = context.gen();
 
                 archive
-                    .put(index, key.clone(), data.clone())
+                    .put(index, key.clone(), data)
                     .await
                     .expect("Failed to put data");
                 keys.insert(key, (index, data));
-            }
 
-            // Ensure all keys can be retrieved
-            for (key, (index, data)) in &keys {
-                let retrieved = archive
-                    .get(Identifier::Index(*index))
-                    .await
-                    .expect("Failed to get data")
-                    .expect("Data not found");
-                assert_eq!(&retrieved, data);
-                let retrieved = archive
-                    .get(Identifier::Key(key))
-                    .await
-                    .expect("Failed to get data")
-                    .expect("Data not found");
-                assert_eq!(&retrieved, data);
-            }
-
-            // Check metrics
-            let buffer = context.encode();
-            let tracked = format!("items_tracked {num_keys:?}");
-            assert!(buffer.contains(&tracked));
-            assert!(buffer.contains("pruned_total 0"));
-
-            // Close the archive
-            archive.close().await.expect("Failed to close archive");
-
-            // Reinitialize the archive
-            let cfg = Config {
-                partition: "test_partition".into(),
-                translator: TwoCap,
-                codec_config: (),
-                compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask,
-            };
-            let mut archive =
-                Archive::<_, _, _, FixedBytes<1024>>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize archive");
-
-            // Ensure all keys can be retrieved
-            for (key, (index, data)) in &keys {
-                let retrieved = archive
-                    .get(Identifier::Index(*index))
-                    .await
-                    .expect("Failed to get data")
-                    .expect("Data not found");
-                assert_eq!(&retrieved, data);
-                let retrieved = archive
-                    .get(Identifier::Key(key))
-                    .await
-                    .expect("Failed to get data")
-                    .expect("Data not found");
-                assert_eq!(&retrieved, data);
-            }
-
-            // Prune first half
-            let min = (keys.len() / 2) as u64;
-            archive.prune(min).await.expect("Failed to prune");
-
-            // Ensure all keys can be retrieved that haven't been pruned
-            let min = min & section_mask;
-            let mut removed = 0;
-            for (key, (index, data)) in keys {
-                if index >= min {
-                    let retrieved = archive
-                        .get(Identifier::Key(&key))
-                        .await
-                        .expect("Failed to get data")
-                        .expect("Data not found");
-                    assert_eq!(retrieved, data);
-
-                    // Check range
-                    let (current_end, start_next) = archive.next_gap(index);
-                    assert_eq!(current_end.unwrap(), num_keys as u64 - 1);
-                    assert!(start_next.is_none());
-                } else {
-                    let retrieved = archive
-                        .get(Identifier::Key(&key))
-                        .await
-                        .expect("Failed to get data");
-                    assert!(retrieved.is_none());
-                    removed += 1;
-
-                    // Check range
-                    let (current_end, start_next) = archive.next_gap(index);
-                    assert!(current_end.is_none());
-                    assert_eq!(start_next.unwrap(), min);
+                // Randomly sync the archive
+                if context.gen_bool(0.1) {
+                    archive.sync().await.expect("Failed to sync archive");
                 }
             }
+            archive.sync().await.expect("Failed to sync archive");
 
-            // Check metrics
-            let buffer = context.encode();
-            let tracked = format!("items_tracked {:?}", num_keys - removed);
-            assert!(buffer.contains(&tracked));
-            let pruned = format!("indices_pruned_total {removed}");
-            assert!(buffer.contains(&pruned));
-            assert!(buffer.contains("pruned_total 0")); // have not lazily removed keys yet
+            // Ensure all keys can be retrieved
+            for (key, (index, data)) in &keys {
+                let retrieved = archive
+                    .get(Identifier::Index(*index))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+                let retrieved = archive
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+            }
 
+            archive.close().await.expect("Failed to close archive");
+        }
+
+        // Reinitialize and verify
+        {
+            let archive = creator(context.clone(), compression).await;
+
+            // Ensure all keys can be retrieved
+            for (key, (index, data)) in &keys {
+                let retrieved = archive
+                    .get(Identifier::Index(*index))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+                let retrieved = archive
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(&retrieved, data);
+            }
+
+            archive.close().await.expect("Failed to close archive");
+        }
+    }
+
+    fn test_many_keys_determinism<F, Fut, A>(creator: F, compression: Option<u8>, num: usize)
+    where
+        A: Archive<Key = FixedBytes<64>, Value = i32>,
+        F: Fn(Context, Option<u8>) -> Fut + Copy + Send + 'static,
+        Fut: Future<Output = A> + Send,
+    {
+        let executor = deterministic::Runner::default();
+        let state1 = executor.start(|context| async move {
+            test_many_keys_impl(context.clone(), creator, compression, num).await;
             context.auditor().state()
-        })
-    }
-
-    #[test_traced]
-    #[ignore]
-    fn test_archive_many_keys_and_restart() {
-        test_archive_keys_and_restart(100_000); // 391 sections
-    }
-
-    #[test_traced]
-    #[ignore]
-    fn test_determinism() {
-        let state1 = test_archive_keys_and_restart(5_000); // 20 sections
-        let state2 = test_archive_keys_and_restart(5_000);
+        });
+        let executor = deterministic::Runner::default();
+        let state2 = executor.start(|context| async move {
+            test_many_keys_impl(context.clone(), creator, compression, num).await;
+            context.auditor().state()
+        });
         assert_eq!(state1, state2);
     }
 
     #[test_traced]
-    fn test_ranges() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Initialize the archive
-            let cfg = Config {
-                partition: "test_partition".into(),
-                translator: FourCap,
-                codec_config: (),
-                compression: None,
-                pending_writes: DEFAULT_PENDING_WRITES,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
-                section_mask: DEFAULT_SECTION_MASK,
-            };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
+    fn test_many_keys_prunable_no_compression() {
+        test_many_keys_determinism(create_prunable, None, 1_000);
+    }
 
-            // Insert multiple keys across different indices
-            let keys = vec![
-                (1u64, test_key("key1-blah"), 1),
-                (10u64, test_key("key2-blah"), 2),
-                (11u64, test_key("key3-blah"), 3),
-                (14u64, test_key("key3-bleh"), 3),
-            ];
-            for (index, key, data) in &keys {
-                archive
-                    .put(*index, key.clone(), *data)
-                    .await
-                    .expect("Failed to put data");
-            }
+    #[test_traced]
+    fn test_many_keys_prunable_compression() {
+        test_many_keys_determinism(create_prunable, Some(3), 1_000);
+    }
 
-            // Check ranges
-            let (current_end, start_next) = archive.next_gap(0);
-            assert!(current_end.is_none());
-            assert_eq!(start_next.unwrap(), 1);
+    #[test_traced]
+    fn test_many_keys_immutable_no_compression() {
+        test_many_keys_determinism(create_immutable, None, 1_000);
+    }
 
-            let (current_end, start_next) = archive.next_gap(1);
-            assert_eq!(current_end.unwrap(), 1);
-            assert_eq!(start_next.unwrap(), 10);
+    #[test_traced]
+    fn test_many_keys_immutable_compression() {
+        test_many_keys_determinism(create_immutable, Some(3), 1_000);
+    }
 
-            let (current_end, start_next) = archive.next_gap(10);
-            assert_eq!(current_end.unwrap(), 11);
-            assert_eq!(start_next.unwrap(), 14);
+    #[test_traced]
+    #[ignore]
+    fn test_many_keys_prunable_large() {
+        test_many_keys_determinism(create_prunable, None, 50_000);
+    }
 
-            let (current_end, start_next) = archive.next_gap(11);
-            assert_eq!(current_end.unwrap(), 11);
-            assert_eq!(start_next.unwrap(), 14);
-
-            let (current_end, start_next) = archive.next_gap(12);
-            assert!(current_end.is_none());
-            assert_eq!(start_next.unwrap(), 14);
-
-            let (current_end, start_next) = archive.next_gap(14);
-            assert_eq!(current_end.unwrap(), 14);
-            assert!(start_next.is_none());
-
-            // Close and check again
-            archive.close().await.expect("Failed to close archive");
-            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context, cfg.clone())
-                .await
-                .expect("Failed to initialize archive");
-
-            // Check ranges again
-            let (current_end, start_next) = archive.next_gap(0);
-            assert!(current_end.is_none());
-            assert_eq!(start_next.unwrap(), 1);
-
-            let (current_end, start_next) = archive.next_gap(1);
-            assert_eq!(current_end.unwrap(), 1);
-            assert_eq!(start_next.unwrap(), 10);
-
-            let (current_end, start_next) = archive.next_gap(10);
-            assert_eq!(current_end.unwrap(), 11);
-            assert_eq!(start_next.unwrap(), 14);
-
-            let (current_end, start_next) = archive.next_gap(11);
-            assert_eq!(current_end.unwrap(), 11);
-            assert_eq!(start_next.unwrap(), 14);
-
-            let (current_end, start_next) = archive.next_gap(12);
-            assert!(current_end.is_none());
-            assert_eq!(start_next.unwrap(), 14);
-
-            let (current_end, start_next) = archive.next_gap(14);
-            assert_eq!(current_end.unwrap(), 14);
-            assert!(start_next.is_none());
-        });
+    #[test_traced]
+    #[ignore]
+    fn test_many_keys_immutable_large() {
+        test_many_keys_determinism(create_immutable, None, 50_000);
     }
 }
