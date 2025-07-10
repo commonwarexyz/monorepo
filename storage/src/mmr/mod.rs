@@ -110,4 +110,12 @@ pub enum Error {
     Empty,
     #[error("invalid update")]
     InvalidUpdate,
+    #[error("invalid proof length")]
+    InvalidProofLength,
+    #[error("proof missing digest at position: {0}")]
+    MissingDigest(u64),
+    #[error("given historical size >= database size: ({0}) >= ({1})")]
+    HistoricalSizeTooLarge(u64, u64),
+    #[error("given historical size <= start location: ({0}) <= ({1})")]
+    HistoricalSizeTooSmall(u64, u64),
 }

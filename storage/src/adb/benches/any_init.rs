@@ -8,7 +8,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     adb::any::{Any, Config as AConfig},
-    index::translator::EightCap,
+    translator::EightCap,
 };
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};

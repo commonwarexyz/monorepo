@@ -18,7 +18,7 @@ use crate::{
     },
 };
 use commonware_codec::DecodeExt;
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::array::prefixed_u64::U64;
 use std::collections::HashMap;
@@ -47,6 +47,18 @@ pub struct Config {
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
+}
+
+/// Configuration for initializing a journaled MMR in a synced state.
+pub struct SyncConfig<D: Digest> {
+    /// Base configuration for the MMR (journal, metadata, etc.)
+    pub config: Config,
+
+    /// The position up to which elements have been pruned (first non-pruned element index).
+    pub pruned_to_pos: u64,
+
+    /// The pinned nodes to use for the MMR.
+    pub pinned_nodes: Vec<D>,
 }
 
 /// A MMR backed by a fixed-item-length journal.
@@ -212,6 +224,47 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         }
 
         Ok(s)
+    }
+
+    /// Initialize a new [Mmr] instance in an empty, pruned state.
+    pub async fn init_pruned(context: E, cfg: SyncConfig<H::Digest>) -> Result<Self, Error> {
+        // Initialize the journal in an empty, pruned state.
+        let journal = Journal::<E, H::Digest>::init_pruned(
+            context.with_label("mmr_journal"),
+            JConfig {
+                partition: cfg.config.journal_partition,
+                items_per_blob: cfg.config.items_per_blob,
+                write_buffer: cfg.config.write_buffer,
+                buffer_pool: cfg.config.buffer_pool.clone(),
+            },
+            cfg.pruned_to_pos,
+        )
+        .await?;
+
+        // Set up metadata
+        let metadata_cfg = MConfig {
+            partition: cfg.config.metadata_partition,
+            codec_config: ((0..).into(), ()),
+        };
+        let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
+
+        // Store the pruning boundary in metadata
+        let prune_key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
+        metadata.put(prune_key, cfg.pruned_to_pos.to_be_bytes().into());
+        metadata.sync().await.map_err(Error::MetadataError)?;
+
+        Ok(Self {
+            mem_mmr: MemMmr::init(MemConfig {
+                nodes: vec![],
+                pruned_to_pos: cfg.pruned_to_pos,
+                pinned_nodes: cfg.pinned_nodes,
+                pool: cfg.config.pool,
+            }),
+            journal,
+            journal_size: cfg.pruned_to_pos,
+            metadata,
+            pruned_to_pos: cfg.pruned_to_pos,
+        })
     }
 
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
@@ -443,6 +496,24 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Proof::<H::Digest>::range_proof::<Mmr<E, H>>(self, start_element_pos, end_element_pos).await
     }
 
+    /// Analagous to range_proof but for a previous database state.
+    /// Specifically, the state when the MMR had `size` elements.
+    pub async fn historical_range_proof(
+        &self,
+        size: u64,
+        start_element_pos: u64,
+        end_element_pos: u64,
+    ) -> Result<Proof<H::Digest>, Error> {
+        assert!(!self.mem_mmr.is_dirty());
+        Proof::<H::Digest>::historical_range_proof::<Mmr<E, H>>(
+            self,
+            size,
+            start_element_pos,
+            end_element_pos,
+        )
+        .await
+    }
+
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
     /// blob.
     pub async fn prune_all(&mut self, h: &mut impl Hasher<H>) -> Result<(), Error> {
@@ -537,6 +608,11 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     }
 
     #[cfg(test)]
+    pub fn get_pinned_nodes(&self) -> HashMap<u64, H::Digest> {
+        self.mem_mmr.pinned_nodes.clone()
+    }
+
+    #[cfg(test)]
     pub async fn simulate_pruning_failure(
         mut self,
         h: &mut impl Hasher<H>,
@@ -568,7 +644,7 @@ mod tests {
     };
     use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob as _, Runner};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
     use commonware_utils::hex;
 
     fn test_digest(v: usize) -> Digest {
@@ -1022,5 +1098,375 @@ mod tests {
                 .unwrap();
             mmr.destroy().await.unwrap();
         });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_init_pruned() {
+        const PRUNED_TO_POS: u64 = 7;
+        const NUM_OPERATIONS: usize = 10;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            let mut source_mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                .await
+                .unwrap();
+            let mut operations = vec![];
+            for i in 0..NUM_OPERATIONS {
+                operations.push(test_digest(i));
+                source_mmr.add(&mut hasher, &operations[i]).await.unwrap();
+            }
+            source_mmr.sync(&mut hasher).await.unwrap();
+
+            // Prune to position 7 (keeping elements 7-17, which includes leaves 7, 8, 10, 11, 15, 16)
+            source_mmr
+                .prune_to_pos(&mut hasher, PRUNED_TO_POS)
+                .await
+                .unwrap();
+
+            let pinned_nodes_map = source_mmr.get_pinned_nodes();
+            // Convert into Vec in order of expected by Proof::nodes_to_pin
+            let pinned_nodes = Proof::<Digest>::nodes_to_pin(PRUNED_TO_POS)
+                .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
+                .collect();
+
+            // Create a new MMR using init_pruned
+            // After pruning to position 7, the remaining leaves are at positions 7, 8, 10, 11, 15, 16
+            // These correspond to operations 4, 5, 6, 7, 8, 9 (0-indexed)
+            let sync_config = SyncConfig {
+                config: Config {
+                    journal_partition: "pruned_journal_partition".into(),
+                    metadata_partition: "pruned_metadata_partition".into(),
+                    items_per_blob: 7,
+                    write_buffer: 1024,
+                    pool: None,
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                },
+                pruned_to_pos: PRUNED_TO_POS,
+                pinned_nodes,
+            };
+            let synced_mmr: Mmr<_, Sha256> = Mmr::init_pruned(context.clone(), sync_config)
+                .await
+                .unwrap();
+
+            // Verify the synced MMR has the expected state
+            assert_eq!(synced_mmr.size(), PRUNED_TO_POS);
+            assert_eq!(synced_mmr.pruned_to_pos(), PRUNED_TO_POS);
+            assert_eq!(synced_mmr.oldest_retained_pos(), None);
+            assert_eq!(synced_mmr.journal.size().await.unwrap(), PRUNED_TO_POS);
+            assert_eq!(synced_mmr.journal_size, PRUNED_TO_POS);
+
+            synced_mmr.destroy().await.unwrap();
+            source_mmr.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_pruned_prune_all() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Create source MMR with 5 elements
+            let mut source_mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                .await
+                .unwrap();
+            for i in 0..5 {
+                source_mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+            }
+            source_mmr.sync(&mut hasher).await.unwrap();
+
+            // Prune everything (prune to the end)
+            let source_mmr_size = source_mmr.size();
+            source_mmr
+                .prune_to_pos(&mut hasher, source_mmr_size)
+                .await
+                .unwrap();
+
+            let pinned_nodes_map = source_mmr.get_pinned_nodes();
+            // Convert into Vec in order of expected by Proof::nodes_to_pin
+            let pinned_nodes = Proof::<Digest>::nodes_to_pin(source_mmr_size)
+                .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
+                .collect();
+
+            // Initialize synced MMR with empty operations
+            let sync_config = SyncConfig {
+                config: Config {
+                    journal_partition: "pruned_journal_partition".into(),
+                    metadata_partition: "pruned_metadata_partition".into(),
+                    items_per_blob: 7,
+                    write_buffer: 1024,
+                    pool: None,
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                },
+                pruned_to_pos: source_mmr_size,
+                pinned_nodes,
+            };
+
+            let synced_mmr: Mmr<_, Sha256> = Mmr::init_pruned(context.clone(), sync_config)
+                .await
+                .unwrap();
+            assert_eq!(synced_mmr.size(), source_mmr_size);
+            assert_eq!(synced_mmr.pruned_to_pos(), source_mmr_size);
+            assert_eq!(synced_mmr.oldest_retained_pos(), None);
+
+            synced_mmr.destroy().await.unwrap();
+            source_mmr.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_historical_range_proof_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create MMR with 10 elements
+            let mut hasher = Standard::<Sha256>::new();
+            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                .await
+                .unwrap();
+            let mut elements = Vec::new();
+            let mut positions = Vec::new();
+            for i in 0..10 {
+                elements.push(test_digest(i));
+                positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
+            }
+            let original_size = mmr.size();
+
+            // Historical proof should match "regular" proof when historical size == current database size
+            let historical_proof = mmr
+                .historical_range_proof(original_size, positions[2], positions[5])
+                .await
+                .unwrap();
+            assert_eq!(historical_proof.size, original_size);
+            let root = mmr.root(&mut hasher);
+            assert!(historical_proof.verify_range_inclusion(
+                &mut hasher,
+                &elements[2..=5],
+                positions[2],
+                &root
+            ));
+            let regular_proof = mmr.range_proof(positions[2], positions[5]).await.unwrap();
+            assert_eq!(regular_proof.size, historical_proof.size);
+            assert_eq!(regular_proof.digests, historical_proof.digests);
+
+            // Add more elements to the MMR
+            for i in 10..20 {
+                elements.push(test_digest(i));
+                positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
+            }
+            let new_historical_proof = mmr
+                .historical_range_proof(original_size, positions[2], positions[5])
+                .await
+                .unwrap();
+            assert_eq!(new_historical_proof.size, historical_proof.size);
+            assert_eq!(new_historical_proof.digests, historical_proof.digests);
+
+            mmr.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_historical_range_proof_with_pruning() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                .await
+                .unwrap();
+
+            // Add many elements
+            let mut elements = Vec::new();
+            let mut positions = Vec::new();
+            for i in 0..50 {
+                elements.push(test_digest(i));
+                positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
+            }
+
+            // Prune to position 30
+            let prune_pos = 30;
+            mmr.prune_to_pos(&mut hasher, prune_pos).await.unwrap();
+
+            // Create reference MMR for verification to get correct size
+            let mut ref_mmr = Mmr::init(
+                context.clone(),
+                &mut hasher,
+                Config {
+                    journal_partition: "ref_journal_pruned".into(),
+                    metadata_partition: "ref_metadata_pruned".into(),
+                    items_per_blob: 7,
+                    write_buffer: 1024,
+                    pool: None,
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                },
+            )
+            .await
+            .unwrap();
+
+            for elt in elements.iter().take(41) {
+                ref_mmr.add(&mut hasher, elt).await.unwrap();
+            }
+            let historical_size = ref_mmr.size();
+            let historical_root = ref_mmr.root(&mut hasher);
+
+            // Test proof at historical position after pruning
+            let historical_proof = mmr
+                .historical_range_proof(
+                    historical_size,
+                    positions[35], // Start after prune point
+                    positions[38], // End before historical size
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(historical_proof.size, historical_size);
+
+            // Verify proof works despite pruning
+            assert!(historical_proof.verify_range_inclusion(
+                &mut hasher,
+                &elements[35..=38],
+                positions[35],
+                &historical_root
+            ));
+
+            ref_mmr.destroy().await.unwrap();
+            mmr.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_historical_range_proof_large() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            let mut mmr = Mmr::init(
+                context.clone(),
+                &mut hasher,
+                Config {
+                    journal_partition: "server_journal".into(),
+                    metadata_partition: "server_metadata".into(),
+                    items_per_blob: 7,
+                    write_buffer: 1024,
+                    pool: None,
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                },
+            )
+            .await
+            .unwrap();
+
+            let mut elements = Vec::new();
+            let mut positions = Vec::new();
+            for i in 0..100 {
+                elements.push(test_digest(i));
+                positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
+            }
+
+            let start_pos = 30;
+            let end_pos = 60;
+
+            // Only apply elements up to end_pos to the reference MMR.
+            let mut ref_mmr = Mmr::init(
+                context.clone(),
+                &mut hasher,
+                Config {
+                    journal_partition: "client_journal".into(),
+                    metadata_partition: "client_metadata".into(),
+                    items_per_blob: 7,
+                    write_buffer: 1024,
+                    pool: None,
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                },
+            )
+            .await
+            .unwrap();
+
+            // Add elements up to end_pos to verify historical root
+            for elt in elements.iter().take(end_pos + 1) {
+                ref_mmr.add(&mut hasher, elt).await.unwrap();
+            }
+            let historical_size = ref_mmr.size();
+            let expected_root = ref_mmr.root(&mut hasher);
+
+            // Generate proof from full MMR
+            let proof = mmr
+                .historical_range_proof(historical_size, positions[start_pos], positions[end_pos])
+                .await
+                .unwrap();
+
+            assert!(proof.verify_range_inclusion(
+                &mut hasher,
+                &elements[start_pos..=end_pos],
+                positions[start_pos],
+                &expected_root // Compare to historical (reference) root
+            ));
+
+            ref_mmr.destroy().await.unwrap();
+            mmr.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_historical_range_proof_singleton() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                .await
+                .unwrap();
+
+            let element = test_digest(0);
+            let position = mmr.add(&mut hasher, &element).await.unwrap();
+
+            // Test single element proof at historical position
+            let single_proof = mmr
+                .historical_range_proof(
+                    position + 1, // Historical size after first element
+                    position,
+                    position,
+                )
+                .await
+                .unwrap();
+
+            let root = mmr.root(&mut hasher);
+            assert!(single_proof.verify_range_inclusion(&mut hasher, &[element], position, &root));
+
+            mmr.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_historical_range_proof_invalid_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                .await
+                .unwrap();
+            for i in 0..10 {
+                mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+            }
+            let mmr_size = mmr.size();
+
+            const BATCH_SIZE: u64 = 10;
+
+            // Historical size > MMR size is invalid
+            let result = mmr.historical_range_proof(mmr_size + 1, 1, BATCH_SIZE).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooLarge(given_size, actual_size)) if given_size == mmr_size + 1 && actual_size == mmr_size));
+
+            // Historical size == start location is invalid
+            let result = mmr.historical_range_proof(0, 0, BATCH_SIZE).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 0 && start_loc == 0));
+            let result = mmr.historical_range_proof(1, 1, BATCH_SIZE).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 1 && start_loc == 1));
+            let result = mmr.historical_range_proof(mmr_size, mmr_size, BATCH_SIZE).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == mmr_size && start_loc == mmr_size));
+
+            // Historical size < start location is invalid
+            let result = mmr.historical_range_proof(0, 1, BATCH_SIZE).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 0 && start_loc == 1));
+            let result = mmr.historical_range_proof(mmr_size-1, mmr_size, BATCH_SIZE).await;
+            assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == mmr_size-1 && start_loc == mmr_size));
+});
     }
 }

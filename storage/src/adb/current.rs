@@ -10,7 +10,7 @@ use crate::{
         operation::Operation,
         Error,
     },
-    index::{Index, Translator},
+    index::Index,
     mmr::{
         bitmap::Bitmap,
         hasher::{Grafting, GraftingVerifier, Hasher, Standard},
@@ -18,6 +18,7 @@ use crate::{
         storage::Grafting as GStorage,
         verification::Proof,
     },
+    translator::Translator,
 };
 use commonware_codec::FixedSize;
 use commonware_cryptography::Hasher as CHasher;
@@ -732,7 +733,7 @@ impl<
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::index::translator::TwoCap;
+    use crate::translator::TwoCap;
     use commonware_cryptography::{hash, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};

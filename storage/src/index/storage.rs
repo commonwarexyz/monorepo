@@ -1,4 +1,4 @@
-use crate::index::Translator;
+use crate::translator::Translator;
 use commonware_runtime::Metrics;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{
@@ -8,7 +8,7 @@ use std::collections::{
 
 /// The initial capacity of the internal hashmap. This is a guess at the number of unique keys we will
 /// encounter. The hashmap will grow as needed, but this is a good starting point (covering
-/// the entire [super::translator::OneCap] range).
+/// the entire [crate::translator::OneCap] range).
 const INITIAL_CAPACITY: usize = 256;
 
 /// Panic message shown when `next()` is not called after `Cursor` creation or after `insert()` or ``delete()`.

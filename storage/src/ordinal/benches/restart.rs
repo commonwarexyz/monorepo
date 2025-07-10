@@ -7,7 +7,7 @@ use commonware_runtime::{
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
-fn bench_ordinal_restart(c: &mut Criterion) {
+fn bench_restart(c: &mut Criterion) {
     // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
     let cfg = Config::default();
     for items in [10_000, 50_000, 100_000, 500_000] {
@@ -47,5 +47,5 @@ fn bench_ordinal_restart(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_ordinal_restart
+    targets = bench_restart
 }

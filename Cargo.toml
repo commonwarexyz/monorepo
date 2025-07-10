@@ -42,6 +42,7 @@ commonware-utils = { version = "0.0.54", path = "utils" }
 thiserror = "2.0.12"
 bytes = "1.7.1"
 sha2 = "0.10.8"
+blake3 = "1.8.2"
 rand = "0.8.5"
 rand_distr = "0.4.3"
 futures = "0.3.31"
@@ -80,6 +81,7 @@ libc = "0.2.172"
 zeroize = "1.5.7"
 blst = "0.3.13"
 p256 = "0.13.2"
+test-case = "3.3.1"
 chacha20poly1305 = "0.10.1"
 
 # Fuzz deps

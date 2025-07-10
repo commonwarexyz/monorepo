@@ -1,6 +1,6 @@
 use commonware_cryptography::hash;
 use commonware_runtime::Metrics;
-use commonware_storage::index::{translator::TwoCap, Index};
+use commonware_storage::{index::Index, translator::TwoCap};
 use criterion::{criterion_group, Criterion};
 use prometheus_client::registry::Metric;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
