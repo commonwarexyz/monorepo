@@ -25,6 +25,7 @@
 //!
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic};
+//! use commonware_cryptography::hash;
 //! use commonware_storage::{
 //!     archive::{
 //!         Archive as _,
@@ -37,19 +38,19 @@
 //!     // Create an archive
 //!     let cfg = Config {
 //!         metadata_partition: "metadata".into(),
-//!         table_partition: "table".into(),
-//!         table_initial_size: 1024,
-//!         table_resize_frequency: 10,
-//!         table_read_buffer: 1024,
-//!         table_write_buffer: 1024,
-//!         journal_partition: "journal".into(),
-//!         journal_target_size: 1024,
+//!         freezer_table_partition: "table".into(),
+//!         freezer_table_initial_size: 1024,
+//!         freezer_table_resize_frequency: 10,
+//!         freezer_table_read_buffer: 1024,
+//!         freezer_table_write_buffer: 1024,
+//!         freezer_journal_partition: "journal".into(),
+//!         freezer_journal_target_size: 1024,
+//!         freezer_journal_compression: Some(3),
 //!         ordinal_partition: "ordinal".into(),
-//!         compression: Some(3),
-//!         codec_config: (),
 //!         items_per_section: 1024,
 //!         write_buffer: 1024,
 //!         replay_buffer: 1024,
+//!         codec_config: (),
 //!     };
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
 //!
@@ -96,7 +97,7 @@ pub struct Config<C> {
     /// The partition to use for the archive's ordinal.
     pub ordinal_partition: String,
 
-    /// The number of items per section (the granularity of pruning).
+    /// The number of items per section.
     pub items_per_section: u64,
 
     /// The amount of bytes that can be buffered in a section before being written to a
