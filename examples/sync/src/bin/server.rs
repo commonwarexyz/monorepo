@@ -12,12 +12,10 @@ use commonware_sync::{
     GetOperationsRequest, GetOperationsResponse, GetServerMetadataRequest,
     GetServerMetadataResponse, Message, Operation, ProtocolError, MAX_MESSAGE_SIZE,
 };
+use prometheus_client::metrics::counter::Counter;
 use std::{
     net::{Ipv4Addr, SocketAddr},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::Arc,
 };
 use tracing::{error, info, warn};
 
@@ -47,36 +45,28 @@ where
     /// The database wrapped in async mutex.
     database: Arc<RwLock<Database<E>>>,
     /// Request counter for metrics.
-    request_counter: AtomicU64,
+    request_counter: Counter,
     /// Error counter for metrics.
-    error_counter: AtomicU64,
+    error_counter: Counter,
 }
 
 impl<E> ServerState<E>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
-    fn new(database: Database<E>) -> Self {
-        Self {
+    fn new(context: E, database: Database<E>) -> Self {
+        let state = Self {
             database: Arc::new(RwLock::new(database)),
-            request_counter: AtomicU64::new(0),
-            error_counter: AtomicU64::new(0),
-        }
-    }
-
-    fn inc_requests(&self) {
-        self.request_counter.fetch_add(1, Ordering::SeqCst);
-    }
-
-    fn inc_errors(&self) {
-        self.error_counter.fetch_add(1, Ordering::SeqCst);
-    }
-
-    fn get_stats(&self) -> (u64, u64) {
-        (
-            self.request_counter.load(Ordering::SeqCst),
-            self.error_counter.load(Ordering::SeqCst),
-        )
+            request_counter: Counter::default(),
+            error_counter: Counter::default(),
+        };
+        context.register(
+            "request",
+            "Number of requests",
+            state.request_counter.clone(),
+        );
+        context.register("error", "Number of errors", state.error_counter.clone());
+        state
     }
 }
 
@@ -113,7 +103,7 @@ where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
     request.validate()?;
-    state.inc_requests();
+    state.request_counter.inc();
 
     let database = state.database.read().await;
 
@@ -147,7 +137,7 @@ where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
     request.validate()?;
-    state.inc_requests();
+    state.request_counter.inc();
 
     let database = state.database.read().await;
 
@@ -223,7 +213,7 @@ where
             Ok(data) => data,
             Err(e) => {
                 info!(client_addr = %client_addr, error = %e, "Recv failed (likely because client disconnected)");
-                state.inc_errors();
+                state.error_counter.inc();
                 break;
             }
         };
@@ -233,7 +223,7 @@ where
             Ok(msg) => msg,
             Err(e) => {
                 error!(client_addr = %client_addr, error = %e, "❌ Failed to parse message");
-                state.inc_errors();
+                state.error_counter.inc();
                 continue;
             }
         };
@@ -245,7 +235,7 @@ where
                     Ok(response) => Message::GetOperationsResponse(response),
                     Err(e) => {
                         warn!(client_addr = %client_addr, error = %e, "❌ GetOperations failed");
-                        state.inc_errors();
+                        state.error_counter.inc();
                         Message::Error(e.into())
                     }
                 }
@@ -255,14 +245,14 @@ where
                     Ok(response) => Message::GetServerMetadataResponse(response),
                     Err(e) => {
                         warn!(client_addr = %client_addr, error = %e, "❌ GetServerMetadata failed");
-                        state.inc_errors();
+                        state.error_counter.inc();
                         Message::Error(e.into())
                     }
                 }
             }
             _ => {
                 warn!(client_addr = %client_addr, "❌ Unexpected message type");
-                state.inc_errors();
+                state.error_counter.inc();
                 Message::Error(ErrorResponse::new(
                     None,
                     commonware_sync::ErrorCode::InvalidRequest,
@@ -275,7 +265,7 @@ where
         let response_data = response.encode().to_vec();
         if let Err(e) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
             info!(client_addr = %client_addr, error = %e, "Send failed (likely because client disconnected)");
-            state.inc_errors();
+            state.error_counter.inc();
             break;
         }
     }
@@ -430,7 +420,7 @@ fn main() {
         info!(addr = %addr, "Server listening");
 
         // Handle each client connection in a separate task.
-        let state = Arc::new(ServerState::new(database));
+        let state = Arc::new(ServerState::new(context.clone(), database));
         loop {
             match listener.accept().await {
                 Ok((client_addr, sink, stream)) => {
@@ -440,12 +430,6 @@ fn main() {
                             handle_client(state.clone(), sink, stream, client_addr).await
                         {
                             error!(client_addr = %client_addr, error = %e, "❌ Error handling client");
-                        }
-
-                        // Log server stats periodically
-                        let (requests, errors) = state.get_stats();
-                        if requests > 0 && requests % 10 == 0 {
-                            info!(requests, errors, "Server stats");
                         }
                     });
                 }
