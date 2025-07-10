@@ -14,6 +14,7 @@ use futures::{pin_mut, StreamExt};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_REPLAY_BUF: usize = 2048;
+const MAX_WRITE_BUF: usize = 2048;
 
 fn bounded_non_zero(u: &mut Unstructured<'_>) -> Result<usize> {
     let v = u.int_in_range(1..=MAX_REPLAY_BUF)?;
@@ -73,13 +74,13 @@ fn fuzz(input: FuzzInput) {
             JournalType::Fixed => FixedConfig {
                 partition: "fixed_journal_operations_fuzz_test".to_string(),
                 items_per_blob: 3,
-                write_buffer: 512,
+                write_buffer: MAX_WRITE_BUF,
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             JournalType::Variable => VariableConfig {
                 partition: "variable_journal_operations_fuzz_test".to_string(),
                 items_per_blob: 3,
-                write_buffer: 512,
+                write_buffer: MAX_WRITE_BUF,
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         };
