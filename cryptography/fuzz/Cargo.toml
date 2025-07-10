@@ -51,3 +51,10 @@ path = "fuzz_targets/bls12381_primitive_operations.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bloomfilter"
+path = "fuzz_targets/bloomfilter.rs"
+test = false
+doc = false
+bench = false
