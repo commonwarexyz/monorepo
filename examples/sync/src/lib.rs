@@ -46,7 +46,7 @@ pub fn create_adb_config(db_id: &str) -> Config<Translator> {
         log_items_per_blob: 1024,
         log_write_buffer: 64,
         translator: Translator::default(),
-        pool: None,
+        thread_pool: None,
         buffer_pool: commonware_runtime::buffer::PoolRef::new(1024, 10),
     }
 }
