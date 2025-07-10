@@ -591,7 +591,6 @@ mod tests {
         let mut keys = BTreeMap::new();
         {
             let mut archive = creator(context.clone(), compression).await;
-
             while keys.len() < 1000 {
                 let index = keys.len() as u64;
                 let mut key = [0u8; 64];
@@ -668,35 +667,42 @@ mod tests {
         }
     }
 
+    fn test_many_keys_determinism<F, Fut, A>(creator: F, compression: Option<u8>)
+    where
+        A: Archive<Key = FixedBytes<64>, Value = i32>,
+        F: Fn(Context, Option<u8>) -> Fut + Copy + Send + 'static,
+        Fut: Future<Output = A> + Send,
+    {
+        let executor = deterministic::Runner::default();
+        let state1 = executor.start(|context| async move {
+            test_many_keys_impl(context.clone(), creator, compression).await;
+            context.auditor().state()
+        });
+        let executor = deterministic::Runner::default();
+        let state2 = executor.start(|context| async move {
+            test_many_keys_impl(context.clone(), creator, compression).await;
+            context.auditor().state()
+        });
+        assert_eq!(state1, state2);
+    }
+
     #[test_traced]
     fn test_many_keys_prunable_no_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            test_many_keys_impl(context, create_prunable, None).await;
-        });
+        test_many_keys_determinism(create_prunable, None);
     }
 
     #[test_traced]
     fn test_many_keys_prunable_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            test_many_keys_impl(context, create_prunable, Some(3)).await;
-        });
+        test_many_keys_determinism(create_prunable, Some(3));
     }
 
     #[test_traced]
     fn test_many_keys_immutable_no_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            test_many_keys_impl(context, create_immutable, None).await;
-        });
+        test_many_keys_determinism(create_immutable, None);
     }
 
     #[test_traced]
     fn test_many_keys_immutable_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            test_many_keys_impl(context, create_immutable, Some(3)).await;
-        });
+        test_many_keys_determinism(create_immutable, Some(3));
     }
 }
