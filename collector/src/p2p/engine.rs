@@ -3,11 +3,12 @@ use super::{
     Config,
 };
 use crate::p2p::{Handler, Monitor};
-use commonware_codec::{Codec, DecodeExt, Encode};
+use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
+use commonware_utils::futures::Pool;
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt,
@@ -81,7 +82,7 @@ impl<
         (mut req_tx, mut req_rx): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         (mut res_tx, mut res_rx): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        let pool = Pool::new(self.context.spawner(), 10);
+        let mut processed: Pool<Result<(P, Rs), oneshot::Canceled>> = Pool::default();
         loop {
             select! {
                 // Command from the mailbox
@@ -110,6 +111,18 @@ impl<
                     }
                 },
 
+                // Ready future
+                ready = processed.next_completed() => {
+                    // Error handling
+                    let Ok((peer, reply)) = ready else {
+                        continue;
+                    };
+
+                    // Send the response
+                    let reply = reply.encode();
+                    let _ = res_tx.send(Recipients::One(peer), reply.into(), self.priority_response).await;
+                },
+
                 // Request from an originator
                 message = req_rx.recv() => {
                     // Error handling
@@ -133,17 +146,9 @@ impl<
                     // Handle the request
                     let (tx, rx) = oneshot::channel();
                     self.handler.process(peer.clone(), msg, tx).await;
-
-                    // Send the response
-                    match rx.await {
-                        Ok(result) => {
-                            let result = result.encode();
-                            let _ = res_tx.send(Recipients::One(peer), result.into(), self.priority_response).await;
-                        }
-                        Err(err) => {
-                            error!(?err, ?peer, "failed to send response");
-                        }
-                    }
+                    processed.push(async move {
+                        Ok((peer, rx.await?))
+                    });
                 },
 
                 // Response from an endpoint
