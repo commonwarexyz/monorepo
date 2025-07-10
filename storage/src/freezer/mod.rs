@@ -130,6 +130,10 @@
 //! items are added (and resizes occur), the latency for fetching old data will increase logarithmically
 //! (with the number of items stored).
 //!
+//! To prevent a "stall" during a single resize, the table is resized incrementally across multiple sync calls.
+//! Each sync will process up to `table_resize_chunk_size` entries until the resize is complete. If there is
+//! an ongoing resize when closing the [Freezer], the resize will be completed before closing.
+//!
 //! # Example
 //!
 //! ```rust
@@ -146,10 +150,10 @@
 //!         journal_write_buffer: 1024 * 1024, // 1MB
 //!         journal_target_size: 100 * 1024 * 1024, // 100MB
 //!         table_partition: "freezer_table".into(),
-//!         table_initial_size: 65_536,
+//!         table_initial_size: 65_536, // ~3MB initial table size
 //!         table_resize_frequency: 4, // Force resize once 4 writes to the same entry occur
+//!         table_resize_chunk_size: 16_384, // ~1MB of table entries rewritten per sync
 //!         table_replay_buffer: 1024 * 1024, // 1MB
-//!         table_write_buffer: 1024 * 1024, // 1MB
 //!         codec_config: (),
 //!     };
 //!     let mut freezer = Freezer::<_, FixedBytes<32>, i32>::init(context, cfg).await.unwrap();
@@ -226,11 +230,11 @@ pub struct Config<C> {
     /// The number of items added to an table entry before the table is resized.
     pub table_resize_frequency: u8,
 
+    /// The number of items to move during each resize operation (many may be required to complete a resize).
+    pub table_resize_chunk_size: u32,
+
     /// The size of the read buffer to use when scanning the table (e.g., during recovery or resize).
     pub table_replay_buffer: usize,
-
-    /// The size of the write buffer to use when scanning the table (e.g., during resize).
-    pub table_write_buffer: usize,
 
     /// The codec configuration to use for the value stored in the freezer.
     pub codec_config: C,
@@ -249,8 +253,8 @@ mod tests {
     const DEFAULT_JOURNAL_TARGET_SIZE: u64 = 10 * 1024 * 1024;
     const DEFAULT_TABLE_INITIAL_SIZE: u32 = 256;
     const DEFAULT_TABLE_RESIZE_FREQUENCY: u8 = 4;
+    const DEFAULT_TABLE_RESIZE_CHUNK_SIZE: u32 = 128; // force multiple chunks
     const DEFAULT_TABLE_REPLAY_BUFFER: usize = 64 * 1024; // 64KB
-    const DEFAULT_TABLE_WRITE_BUFFER: usize = 64 * 1024; // 64KB
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -273,8 +277,8 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -340,8 +344,8 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -390,8 +394,8 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: 4, // Very small to force collisions
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -450,8 +454,8 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
 
@@ -519,8 +523,8 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
 
@@ -617,8 +621,8 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             {
@@ -675,8 +679,8 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let checkpoint = {
@@ -732,8 +736,8 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
 
@@ -795,8 +799,8 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
 
@@ -869,8 +873,8 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: 2, // Very small initial size to force multiple resizes
                 table_resize_frequency: 2, // Resize after 2 items per bucket
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
@@ -938,8 +942,8 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: 8,     // Small table to force collisions
                 table_resize_frequency: 2, // Force resize frequently
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
-                table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
             };
             let mut freezer =

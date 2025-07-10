@@ -41,6 +41,7 @@
 //!         freezer_table_partition: "table".into(),
 //!         freezer_table_initial_size: 65_536,
 //!         freezer_table_resize_frequency: 4,
+//!         freezer_table_resize_chunk_size: 16_384,
 //!         freezer_journal_partition: "journal".into(),
 //!         freezer_journal_target_size: 1024,
 //!         freezer_journal_compression: Some(3),
@@ -76,6 +77,9 @@ pub struct Config<C> {
 
     /// The number of items added to the freezer table before it is resized.
     pub freezer_table_resize_frequency: u8,
+
+    /// The number of items to move during each resize operation (many may be required to complete a resize).
+    pub freezer_table_resize_chunk_size: u32,
 
     /// The partition to use for the archive's freezer journal.
     pub freezer_journal_partition: String,
