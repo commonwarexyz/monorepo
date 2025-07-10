@@ -21,7 +21,7 @@ use commonware_runtime::{
 };
 use commonware_utils::Array;
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
-use std::{marker::PhantomData, num::NonZeroU64, sync::Arc};
+use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, info, warn};
 
 /// Configuration for the sync client
@@ -32,7 +32,7 @@ where
     V: Array,
     H: Hasher,
     T: Translator,
-    R: Resolver<H, K, V>,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
     /// Context for the database.
     pub context: E,
@@ -62,8 +62,6 @@ where
     /// before committing the database while applying operations.
     /// Higher value will cause more memory usage during sync.
     pub apply_batch_size: usize,
-
-    _phantom: PhantomData<(K, V)>,
 }
 
 /// Prometheus metrics for the sync client.
@@ -146,7 +144,7 @@ where
     V: Array,
     H: Hasher,
     T: Translator,
-    R: Resolver<H, K, V>,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
     /// Next step is to fetch and verify operations.
     FetchData {
@@ -175,7 +173,7 @@ where
     V: Array,
     H: Hasher,
     T: Translator,
-    R: Resolver<H, K, V>,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
     /// Create a new sync client
     pub(crate) async fn new(config: Config<E, K, V, H, T, R>) -> Result<Self, Error> {
@@ -539,7 +537,6 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher,
                 apply_batch_size: 1024,
-                _phantom: PhantomData,
             };
             let got_db = sync(config).await.unwrap();
             let mut hasher = create_test_hasher();
@@ -602,7 +599,6 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
-                _phantom: PhantomData,
             };
 
             let result = Client::new(config).await;
@@ -654,7 +650,6 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
-                _phantom: PhantomData,
             };
 
             let synced_db = sync(config).await.unwrap();
