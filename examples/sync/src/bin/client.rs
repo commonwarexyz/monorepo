@@ -117,10 +117,7 @@ where
 
     // Do the sync.
     info!("Beginning sync operation...");
-    let database = sync::sync(sync_config).await.map_err(|e| {
-        error!(error = %e, "❌ Sync failed");
-        Box::new(e) as Box<dyn std::error::Error>
-    })?;
+    let database = sync::sync(sync_config).await?;
 
     // Get the root hash of the synced database
     let mut hasher = Standard::new();
