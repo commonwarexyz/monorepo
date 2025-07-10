@@ -33,7 +33,7 @@ pub type Database<E> = commonware_storage::adb::any::Any<E, Key, Value, Hasher, 
 pub type Operation = commonware_storage::adb::operation::Operation<Key, Value>;
 
 /// Translator type for the database.
-pub type Translator = commonware_storage::index::translator::EightCap;
+pub type Translator = commonware_storage::translator::EightCap;
 
 /// Create a database configuration with appropriate partitioning.
 pub fn create_adb_config(db_id: &str) -> Config<Translator> {
