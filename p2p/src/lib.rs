@@ -10,7 +10,6 @@ use commonware_cryptography::PublicKey;
 use std::{error::Error as StdError, fmt::Debug, future::Future};
 
 pub mod authenticated;
-pub mod collection;
 pub mod simulated;
 pub mod utils;
 
