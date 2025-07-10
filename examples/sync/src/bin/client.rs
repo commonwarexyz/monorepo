@@ -20,9 +20,6 @@ use tracing::{error, info};
 /// Default server address.
 const DEFAULT_SERVER: &str = "127.0.0.1:8080";
 
-/// Port on binary where metrics are exposed
-const CLIENT_METRICS_PORT: u16 = 9090;
-
 #[derive(Debug)]
 struct ClientConfig {
     /// Server address to connect to.
@@ -31,6 +28,8 @@ struct ClientConfig {
     batch_size: u64,
     /// Storage directory.
     storage_dir: String,
+    /// Port on which metrics are exposed.
+    metrics_port: u16,
 }
 
 #[derive(Debug)]
@@ -177,6 +176,14 @@ fn main() {
                 .help("Storage directory for local database")
                 .default_value("/tmp/adb_sync_client"),
         )
+        .arg(
+            Arg::new("metrics-port")
+                .short('m')
+                .long("metrics-port")
+                .value_name("PORT")
+                .help("Port on which metrics are exposed")
+                .default_value("9090"),
+        )
         .get_matches();
 
     let config = ClientConfig {
@@ -200,6 +207,14 @@ fn main() {
             .get_one::<String>("storage-dir")
             .unwrap()
             .to_string(),
+        metrics_port: matches
+            .get_one::<String>("metrics-port")
+            .unwrap()
+            .parse()
+            .unwrap_or_else(|e| {
+                eprintln!("❌ Invalid metrics port: {e}");
+                std::process::exit(1);
+            }),
     };
 
     info!("ADB Sync Client starting");
@@ -207,6 +222,7 @@ fn main() {
         server = %config.server,
         batch_size = config.batch_size,
         storage_dir = %config.storage_dir,
+        metrics_port = config.metrics_port,
         "Configuration"
     );
 
@@ -220,7 +236,7 @@ fn main() {
                 level: tracing::Level::INFO,
                 json: false,
             },
-            Some(SocketAddr::from((Ipv4Addr::LOCALHOST, CLIENT_METRICS_PORT))),
+            Some(SocketAddr::from((Ipv4Addr::LOCALHOST, config.metrics_port))),
             None,
         );
 

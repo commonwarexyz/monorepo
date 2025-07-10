@@ -21,9 +21,6 @@ use tracing::{error, info, warn};
 
 const MAX_BATCH_SIZE: u64 = 100;
 
-/// Port on binary where metrics are exposed
-pub const SERVER_METRICS_PORT: u16 = 9091;
-
 /// Server configuration.
 #[derive(Debug)]
 struct ServerConfig {
@@ -35,6 +32,8 @@ struct ServerConfig {
     storage_dir: String,
     /// Seed for generating test operations.
     seed: u64,
+    /// Port on which metrics are exposed.
+    metrics_port: u16,
 }
 
 /// Server state containing the database and metrics.
@@ -310,6 +309,14 @@ fn main() {
                 .help("Seed for generating test operations")
                 .default_value("1337"),
         )
+        .arg(
+            Arg::new("metrics-port")
+                .short('m')
+                .long("metrics-port")
+                .value_name("PORT")
+                .help("Port on which metrics are exposed")
+                .default_value("9091"),
+        )
         .get_matches();
 
     let config = ServerConfig {
@@ -341,6 +348,14 @@ fn main() {
                 eprintln!("❌ Invalid seed: {e}");
                 std::process::exit(1);
             }),
+        metrics_port: matches
+            .get_one::<String>("metrics-port")
+            .unwrap()
+            .parse()
+            .unwrap_or_else(|e| {
+                eprintln!("❌ Invalid metrics port: {e}");
+                std::process::exit(1);
+            }),
     };
 
     info!(
@@ -348,6 +363,7 @@ fn main() {
         initial_ops = config.initial_ops,
         storage_dir = %config.storage_dir,
         seed = %config.seed,
+        metrics_port = config.metrics_port,
         "Configuration"
     );
 
@@ -361,7 +377,7 @@ fn main() {
                 level: tracing::Level::INFO,
                 json: false,
             },
-            Some(SocketAddr::from((Ipv4Addr::LOCALHOST, SERVER_METRICS_PORT))),
+            Some(SocketAddr::from((Ipv4Addr::LOCALHOST, config.metrics_port))),
             None,
         );
 

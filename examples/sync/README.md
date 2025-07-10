@@ -30,7 +30,7 @@ cargo test
 cargo run --bin server
 
 # Start server with custom settings
-cargo run --bin server -- --port 8080 --initial-ops 50 --storage-dir /tmp/my_server --seed 1337
+cargo run --bin server -- --port 8080 --initial-ops 50 --storage-dir /tmp/my_server --seed 1337 --metrics-port 9091
 ```
 
 Server options:
@@ -38,6 +38,7 @@ Server options:
 - `-i, --initial-ops <COUNT>`: Number of initial operations to create (default: 100)
 - `-d, --storage-dir <PATH>`: Storage directory (default: /tmp/adb_sync_server)
 - `-s, --seed <SEED>`: Seed for generating test operations (default: 1337)
+- `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9091)
 
 ### Running the Client
 
@@ -46,13 +47,14 @@ Server options:
 cargo run --bin client
 
 # Connect with custom settings
-cargo run --bin client -- --server 127.0.0.1:8080 --batch-size 25 --storage-dir /tmp/my_client
+cargo run --bin client -- --server 127.0.0.1:8080 --batch-size 25 --storage-dir /tmp/my_client --metrics-port 9090
 ```
 
 Client options:
 - `-s, --server <ADDRESS>`: Server address to connect to (default: 127.0.0.1:8080)
 - `-b, --batch-size <SIZE>`: Batch size for fetching operations (default: 50)
 - `-d, --storage-dir <PATH>`: Storage directory (default: /tmp/adb_sync_client)
+- `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9090)
 
 ## Example Session
 
@@ -64,7 +66,7 @@ Client options:
    You should see output like:
    ```
    INFO  ADB Sync Server starting
-   INFO  Configuration port=8080 initial_ops=50 storage_dir=/tmp/adb_sync_server
+   INFO  Configuration port=8080 initial_ops=50 storage_dir=/tmp/adb_sync_server seed=1337 metrics_port=9091
    INFO  Initializing database
    INFO  Database ready op_count=51 root_hash=abc123...
    INFO  Server listening addr=127.0.0.1:8080
@@ -78,7 +80,7 @@ Client options:
    You should see output like:
    ```
    INFO ADB Sync Client starting
-   INFO Configuration server=127.0.0.1:8080 batch_size=25 storage_dir=/tmp/adb_sync_client
+   INFO Configuration server=127.0.0.1:8080 batch_size=25 storage_dir=/tmp/adb_sync_client metrics_port=9090
    INFO Starting ADB sync from server server=127.0.0.1:8080
    INFO Establishing connection server_addr=127.0.0.1:8080
    INFO Connected server_addr=127.0.0.1:8080
@@ -86,6 +88,12 @@ Client options:
    INFO Beginning sync operation...
    INFO ✅ Sync completed successfully database_ops=51 root_hash=abc123...
    ```
+
+## Metrics
+
+Both the server and client expose Prometheus metrics:
+- Server metrics: `http://localhost:9091/metrics` (configurable with `--metrics-port`)
+- Client metrics: `http://localhost:9090/metrics` (configurable with `--metrics-port`)
 
 ## Sync Process
 
