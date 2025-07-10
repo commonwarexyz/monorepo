@@ -11,7 +11,7 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use std::{io::Write, num::NonZeroU64};
+use std::num::NonZeroU64;
 use thiserror::Error;
 
 /// Protocol version identifier.
@@ -34,8 +34,6 @@ pub enum Message {
     /// Error response.
     Error(ErrorResponse),
 }
-
-// ========== Request/Response Types ==========
 
 /// Request for operations from the server.
 #[derive(Debug, Clone)]
