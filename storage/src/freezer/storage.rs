@@ -272,6 +272,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     table_partition: String,
     table_size: u32,
     table_resize_frequency: u8,
+    table_resize_chunk_size: u32,
     table_replay_buffer: usize,
     table_write_buffer: usize,
 
@@ -289,6 +290,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Sections with pending table updates to be synced
     modified_sections: BTreeSet<u64>,
     should_resize: bool,
+    resize_progress: Option<(u32, u32, u64)>,
 
     // Metrics
     puts: Counter,
@@ -592,6 +594,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             table_partition: config.table_partition,
             table_size: checkpoint.table_size,
             table_resize_frequency: config.table_resize_frequency,
+            table_resize_chunk_size: config.table_resize_chunk_size,
             table_replay_buffer: config.table_replay_buffer,
             table_write_buffer: config.table_write_buffer,
             table,
@@ -599,12 +602,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             journal_target_size: config.journal_target_size,
             current_section: checkpoint.section,
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
+            modified_sections: BTreeSet::new(),
+            should_resize: false,
+            resize_progress: None,
             puts,
             gets,
             unnecessary_reads,
             resizes,
-            modified_sections: BTreeSet::new(),
-            should_resize: false,
             _phantom: PhantomData,
         })
     }

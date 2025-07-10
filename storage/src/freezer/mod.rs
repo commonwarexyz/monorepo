@@ -226,6 +226,9 @@ pub struct Config<C> {
     /// The number of items added to an table entry before the table is resized.
     pub table_resize_frequency: u8,
 
+    /// The number of items to move during each resize operation (many may be required to complete a resize).
+    pub table_resize_chunk_size: u32,
+
     /// The size of the read buffer to use when scanning the table (e.g., during recovery or resize).
     pub table_replay_buffer: usize,
 
@@ -249,6 +252,7 @@ mod tests {
     const DEFAULT_JOURNAL_TARGET_SIZE: u64 = 10 * 1024 * 1024;
     const DEFAULT_TABLE_INITIAL_SIZE: u32 = 256;
     const DEFAULT_TABLE_RESIZE_FREQUENCY: u8 = 4;
+    const DEFAULT_TABLE_RESIZE_CHUNK_SIZE: u32 = 128; // force multiple chunks
     const DEFAULT_TABLE_REPLAY_BUFFER: usize = 64 * 1024; // 64KB
     const DEFAULT_TABLE_WRITE_BUFFER: usize = 64 * 1024; // 64KB
 
@@ -273,6 +277,7 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
                 table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
@@ -340,6 +345,7 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
                 table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
@@ -390,6 +396,7 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: 4, // Very small to force collisions
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
                 table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
@@ -450,6 +457,7 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
                 table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
@@ -519,6 +527,7 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
                 table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
@@ -617,6 +626,7 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
                 table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
@@ -675,6 +685,7 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
                 table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
@@ -732,6 +743,7 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
                 table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
@@ -795,6 +807,7 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
                 table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
@@ -869,6 +882,7 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: 2, // Very small initial size to force multiple resizes
                 table_resize_frequency: 2, // Resize after 2 items per bucket
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
                 table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
@@ -938,6 +952,7 @@ mod tests {
                 table_partition: "test_table".into(),
                 table_initial_size: 8,     // Small table to force collisions
                 table_resize_frequency: 2, // Force resize frequently
+                table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
                 table_write_buffer: DEFAULT_TABLE_WRITE_BUFFER,
                 codec_config: (),
