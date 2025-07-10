@@ -20,15 +20,6 @@ pub trait Originator: Clone + Send + 'static {
         + 'static;
     type PublicKey: PublicKey;
 
-    /// Registers a request for collection.
-    ///
-    /// Once `minimum` responses have been collected, the [Originator] will be notified.
-    fn register(
-        &mut self,
-        commitment: <Self::Request as Committable>::Commitment,
-        minimum: usize,
-    ) -> impl Future<Output = ()> + Send;
-
     /// Sends a `request` to a set of `recipients`, returning the list of recipients that were
     /// successfully sent to.
     ///
@@ -63,7 +54,7 @@ pub trait Handler: Clone + Send + 'static {
         &mut self,
         origin: Self::PublicKey,
         request: Self::Request,
-        responder: oneshot::Sender<Self::Response>,
+        response: oneshot::Sender<Self::Response>,
     ) -> impl Future<Output = ()> + Send;
 }
 
@@ -77,5 +68,6 @@ pub trait Monitor: Clone + Send + 'static {
         &mut self,
         origin: Self::PublicKey,
         response: Self::Response,
+        count: usize,
     ) -> impl Future<Output = ()> + Send;
 }
