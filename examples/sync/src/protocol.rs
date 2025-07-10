@@ -231,7 +231,6 @@ impl GetOperationsResponse {
 }
 
 impl GetServerMetadataRequest {
-    /// Create a new GetServerMetadataRequest.
     pub fn new(request_id: u64) -> Self {
         Self {
             version: PROTOCOL_VERSION,

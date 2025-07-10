@@ -43,6 +43,9 @@ pub enum Error {
     /// Maximum retries exceeded
     #[error("Maximum retries exceeded")]
     MaxRetriesExceeded,
+    /// Resolver error
+    #[error("Resolver error: {0:?}")]
+    Resolver(Box<dyn fmt::Debug + Send + Sync>),
 }
 
 /// Synchronizes a database by fetching, verifying, and applying operations from a remote source.
