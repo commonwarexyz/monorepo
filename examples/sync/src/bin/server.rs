@@ -5,7 +5,7 @@
 //! with test operations and serves them via a TCP protocol.
 
 use clap::{Arg, Command};
-use commonware_codec::Encode;
+use commonware_codec::{DecodeExt, Encode};
 use commonware_runtime::{tokio as tokio_runtime, Listener, Network, Runner, Sink, Stream};
 use commonware_storage::mmr::hasher::Standard;
 use commonware_sync::{
@@ -284,7 +284,7 @@ where
         };
 
         // Parse the message
-        let message: Message = match serde_json::from_slice(&message_data) {
+        let message: Message = match Message::decode(&message_data[..]) {
             Ok(msg) => msg,
             Err(e) => {
                 error!(client_addr = %client_addr, error = %e, "❌ Failed to parse message");
@@ -327,7 +327,7 @@ where
         };
 
         // Send the response with length prefix
-        let response_data = serde_json::to_vec(&response)?;
+        let response_data = response.encode().to_vec();
         if let Err(e) = send_message(&mut sink, &response_data).await {
             error!(client_addr = %client_addr, error = %e, "❌ Failed to send response");
             state.inc_errors();

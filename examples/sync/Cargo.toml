@@ -12,43 +12,18 @@ name = "client"
 path = "src/bin/client.rs"
 
 [dependencies]
-# Storage dependencies
 commonware-storage = { workspace = true }
-
-# Runtime dependencies
 commonware-runtime = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-utils = { workspace = true }
 commonware-cryptography = { workspace = true }
 
-# Network dependencies
-futures = "0.3"
-tokio = { version = "1.0", features = ["full"] }
+tokio = {workspace = true }
 bytes = { workspace = true }
-
-# CLI dependencies
-clap = { version = "4.0", features = ["derive"] }
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json"] }
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio-util = { version = "0.7", features = ["codec"] }
-
-# Async utilities
-async-trait = "0.1"
-
-# Random number generation
-rand = "0.8"
-
-# Error handling
-thiserror = "1.0"
-
-# Metrics
-prometheus-client = "0.22"
-
-[dev-dependencies]
-tokio-test = "0.4"
+futures = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+prometheus-client = { workspace = true }

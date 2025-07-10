@@ -5,7 +5,7 @@
 //! handles message serialization, and verifies proofs.
 
 use crate::{GetOperationsRequest, GetServerMetadataRequest, GetServerMetadataResponse, Message};
-use commonware_codec::Read;
+use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_runtime::{Sink, Stream};
 use commonware_storage::adb::any::sync::{
     resolver::{GetOperationsResult, Resolver},
@@ -163,8 +163,7 @@ where
             .ok_or_else(|| ResolverError::ConnectionError("No connection available".to_string()))?;
 
         // Serialize and send the request
-        let request_data = serde_json::to_vec(&request)
-            .map_err(|e| ResolverError::SerializationError(e.to_string()))?;
+        let request_data = request.encode().to_vec();
 
         Self::send_message(&mut connection.sink, &request_data).await?;
 
@@ -172,7 +171,7 @@ where
         let response_data = Self::read_message(&mut connection.stream).await?;
 
         // Deserialize the response
-        let response = serde_json::from_slice(&response_data)
+        let response = Message::decode(&response_data[..])
             .map_err(|e| ResolverError::DeserializationError(e.to_string()))?;
 
         Ok(response)
