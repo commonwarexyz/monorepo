@@ -3,7 +3,10 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
-    archive::{Archive, Config, Identifier},
+    archive::{
+        prunable::{Archive, Config},
+        Archive as _, Identifier,
+    },
     translator::EightCap,
 };
 use commonware_utils::array::FixedBytes;
@@ -42,8 +45,7 @@ fn fuzz(data: FuzzInput) {
     runner.start(|context| async move {
         let cfg = Config {
             partition: "test".into(),
-            section_mask: 0xffff_ffff_ffff_ff00u64,
-            pending_writes: 1000, // Flush after 1000 writes
+            items_per_section: 1024,
             write_buffer: 1024,
             translator: EightCap,
             replay_buffer: 1024*1024,
@@ -183,19 +185,18 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 ArchiveOperation::Prune(min) => {
-                    let min = cfg.section_mask & min;
-                    archive.prune(min).await.expect("prune failed");
+                    archive.prune(*min).await.expect("prune failed");
                     match oldest_allowed {
                         None => {
-                            oldest_allowed = Some(min);
-                            items.retain(|(i, _, _)| *i >= min);
-                            written_indices.retain(|i| *i >= min);
+                            oldest_allowed = Some(*min);
+                            items.retain(|(i, _, _)| *i >= *min);
+                            written_indices.retain(|i| *i >= *min);
                         }
                         Some(already_pruned) => {
-                            if min > already_pruned {
-                                oldest_allowed = Some(min);
-                                items.retain(|(i, _, _)| *i >= min);
-                                written_indices.retain(|i| *i >= min);
+                            if *min > already_pruned {
+                                oldest_allowed = Some(*min);
+                                items.retain(|(i, _, _)| *i >= *min);
+                                written_indices.retain(|i| *i >= *min);
                             }
                         }
                     }
