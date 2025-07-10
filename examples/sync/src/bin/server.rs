@@ -11,7 +11,7 @@ use commonware_sync::{
     ProtocolError,
 };
 use std::{
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -416,7 +416,7 @@ fn main() {
         );
 
         // Create listener to accept connections
-        let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
         let mut listener = match context.bind(addr).await {
             Ok(listener) => listener,
             Err(e) => {
