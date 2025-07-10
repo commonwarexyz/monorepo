@@ -476,97 +476,91 @@ mod tests {
         });
     }
 
-    // /// Tests concurrent requests with different commitments.
-    // /// This test verifies that multiple requests can be handled concurrently
-    // /// and responses are properly associated with their requests.
-    // #[test_traced]
-    // fn test_concurrent_requests() {
-    //     let executor = deterministic::Runner::timed(Duration::from_secs(10));
-    //     executor.start(|context| async move {
-    //         let (mut oracle, schemes, peers, mut connections) =
-    //             setup_network_and_peers(&context, &[1, 2]).await;
+    #[test_traced]
+    fn test_concurrent_requests() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, schemes, peers, connections) =
+                setup_network_and_peers(&context, &[0, 1]).await;
+            let mut schemes = schemes.into_iter();
+            let mut connections = connections.into_iter();
 
-    //         let mut schemes_iter = schemes.into_iter();
-    //         let mut conns_iter = connections.into_iter();
+            // Link the peers
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
-    //         let scheme1 = schemes_iter.next().unwrap();
-    //         let scheme2 = schemes_iter.next().unwrap();
+            // Setup peer 1
+            let scheme1 = schemes.next().unwrap();
+            let conn1 = connections.next().unwrap();
+            let req_conn1 = conn1.0;
+            let res_conn1 = conn1.1;
+            let (mon1, mut mon_out1) = Monitor::new();
+            let mut mailbox1 = setup_and_spawn_engine(
+                &context,
+                scheme1,
+                (req_conn1, res_conn1),
+                mon1,
+                Handler::dummy(),
+            )
+            .await;
 
-    //         let conn1 = conns_iter.next().unwrap();
-    //         let req_conn1 = conn1.0;
-    //         let res_conn1 = conn1.1;
-    //         let conn2 = conns_iter.next().unwrap();
-    //         let req_conn2 = conn2.0;
-    //         let res_conn2 = conn2.1;
+            // Setup peer 2
+            let scheme2 = schemes.next().unwrap();
+            let conn2 = connections.next().unwrap();
+            let req_conn2 = conn2.0;
+            let res_conn2 = conn2.1;
+            let (mut handler2, _) = Handler::new(false);
+            handler2.set_response(10, Response { id: 10, result: 20 });
+            handler2.set_response(20, Response { id: 20, result: 40 });
+            let _mailbox2 = setup_and_spawn_engine(
+                &context,
+                scheme2,
+                (req_conn2, res_conn2),
+                Monitor::dummy(),
+                handler2,
+            )
+            .await;
 
-    //         let (mon1, mut mon_out1) = Monitor::new();
-    //         let (mut handler2, _) = Handler::new(false);
+            // Send multiple concurrent requests
+            let request1 = Request { id: 10, data: 10 };
+            let request2 = Request { id: 20, data: 20 };
+            mailbox1
+                .send(Recipients::One(peers[1].clone()), request1)
+                .await;
+            mailbox1
+                .send(Recipients::One(peers[1].clone()), request2)
+                .await;
 
-    //         // Configure different responses for different requests
-    //         handler2.set_response(10, Response { id: 10, result: 20 });
-    //         handler2.set_response(20, Response { id: 20, result: 40 });
+            // Collect both responses
+            let mut response10_received = false;
+            let mut response20_received = false;
+            for _ in 0..2 {
+                let event = mon_out1.next().await.unwrap();
+                match event {
+                    MonitorEvent::Collected {
+                        handler,
+                        response,
+                        count: _,
+                    } => {
+                        assert_eq!(handler, peers[1]);
+                        match response.id {
+                            10 => {
+                                assert_eq!(response.result, 20);
+                                response10_received = true;
+                            }
+                            20 => {
+                                assert_eq!(response.result, 40);
+                                response20_received = true;
+                            }
+                            _ => panic!("Unexpected response ID"),
+                        }
+                    }
+                }
+            }
 
-    //         let mut mailbox1 = setup_and_spawn_engine(
-    //             &context,
-    //             scheme1,
-    //             (req_conn1, res_conn1),
-    //             mon1,
-    //             Handler::dummy(),
-    //         )
-    //         .await;
-
-    //         let _mailbox2 = setup_and_spawn_engine(
-    //             &context,
-    //             scheme2,
-    //             (req_conn2, res_conn2),
-    //             Monitor::dummy(),
-    //             handler2,
-    //         )
-    //         .await;
-
-    //         // Send multiple concurrent requests
-    //         let request1 = Request { id: 10, data: 10 };
-    //         let request2 = Request { id: 20, data: 20 };
-
-    //         mailbox1
-    //             .send(Recipients::One(peers[1].clone()), request1)
-    //             .await;
-    //         mailbox1
-    //             .send(Recipients::One(peers[1].clone()), request2)
-    //             .await;
-
-    //         // Collect both responses
-    //         let mut response10_received = false;
-    //         let mut response20_received = false;
-
-    //         for _ in 0..2 {
-    //             let event = mon_out1.next().await.unwrap();
-    //             match event {
-    //                 MonitorEvent::Collected {
-    //                     handler,
-    //                     response,
-    //                     count: _,
-    //                 } => {
-    //                     assert_eq!(handler, peers[1]);
-    //                     match response.id {
-    //                         10 => {
-    //                             assert_eq!(response.result, 20);
-    //                             response10_received = true;
-    //                         }
-    //                         20 => {
-    //                             assert_eq!(response.result, 40);
-    //                             response20_received = true;
-    //                         }
-    //                         _ => panic!("Unexpected response ID"),
-    //                     }
-    //                 }
-    //             }
-    //         }
-
-    //         assert!(response10_received);
-    //         assert!(response20_received);
-    //     });
-    // }
+            assert!(response10_received);
+            assert!(response20_received);
+        });
+    }
 
     // /// Tests behavior with unreliable network links.
     // /// This test verifies that the system handles network failures gracefully.
