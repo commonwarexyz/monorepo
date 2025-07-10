@@ -58,7 +58,7 @@ pub struct Config<T: Translator> {
     pub translator: T,
 
     /// An optional thread pool to use for parallelizing batch operations.
-    pub pool: Option<ThreadPool>,
+    pub thread_pool: Option<ThreadPool>,
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
@@ -141,12 +141,12 @@ impl<
             log_items_per_blob: config.log_items_per_blob,
             log_write_buffer: config.log_write_buffer,
             translator: config.translator.clone(),
-            pool: config.pool,
+            thread_pool: config.thread_pool,
             buffer_pool: config.buffer_pool,
         };
 
         let context = context.with_label("adb::current");
-        let cloned_pool = cfg.pool.clone();
+        let cloned_pool = cfg.thread_pool.clone();
         let mut status = Bitmap::restore_pruned(
             context.with_label("bitmap"),
             &config.bitmap_metadata_partition,
@@ -753,7 +753,7 @@ pub mod test {
             log_write_buffer: 1024,
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: TwoCap,
-            pool: None,
+            thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }

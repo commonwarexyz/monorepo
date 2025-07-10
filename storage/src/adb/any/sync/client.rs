@@ -479,7 +479,7 @@ pub(crate) mod tests {
             log_items_per_blob: 1024,
             log_write_buffer: 64,
             translator: TestTranslator::default(),
-            pool: None,
+            thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }

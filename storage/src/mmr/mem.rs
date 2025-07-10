@@ -63,7 +63,7 @@ pub struct Mmr<H: CHasher> {
     dirty_digest: H::Digest,
 
     /// Thread pool to use for parallelizing updates.
-    pub(super) pool: Option<ThreadPool>,
+    pub(super) thread_pool: Option<ThreadPool>,
 }
 
 impl<H: CHasher> Default for Mmr<H> {
@@ -94,7 +94,7 @@ impl<H: CHasher> Mmr<H> {
             pinned_nodes: HashMap::new(),
             dirty_nodes: HashSet::new(),
             dirty_digest: Self::dirty_digest(),
-            pool: None,
+            thread_pool: None,
         }
     }
 
@@ -112,7 +112,7 @@ impl<H: CHasher> Mmr<H> {
             pinned_nodes: HashMap::new(),
             dirty_nodes: HashSet::new(),
             dirty_digest: Self::dirty_digest(),
-            pool: config.pool,
+            thread_pool: config.pool,
         };
         if mmr.size() == 0 {
             return mmr;
@@ -342,7 +342,7 @@ impl<H: CHasher> Mmr<H> {
         hasher: &mut impl Hasher<H>,
         updates: &[(u64, T)],
     ) {
-        if updates.len() >= MIN_TO_PARALLELIZE && self.pool.is_some() {
+        if updates.len() >= MIN_TO_PARALLELIZE && self.thread_pool.is_some() {
             self.update_leaf_parallel(hasher, updates);
             return;
         }
@@ -397,7 +397,7 @@ impl<H: CHasher> Mmr<H> {
         hasher: &mut impl Hasher<H>,
         updates: &[(u64, T)],
     ) {
-        let pool = self.pool.as_ref().unwrap().clone();
+        let pool = self.thread_pool.as_ref().unwrap().clone();
         pool.install(|| {
             let digests: Vec<(u64, H::Digest)> = updates
                 .par_iter()
@@ -428,7 +428,7 @@ impl<H: CHasher> Mmr<H> {
         if self.dirty_nodes.is_empty() {
             return;
         }
-        if self.dirty_nodes.len() >= MIN_TO_PARALLELIZE && self.pool.is_some() {
+        if self.dirty_nodes.len() >= MIN_TO_PARALLELIZE && self.thread_pool.is_some() {
             self.sync_parallel(hasher, MIN_TO_PARALLELIZE);
             return;
         }
@@ -514,7 +514,7 @@ impl<H: CHasher> Mmr<H> {
         height: u32,
     ) {
         let two_h = 1 << height;
-        let pool = self.pool.as_ref().unwrap().clone();
+        let pool = self.thread_pool.as_ref().unwrap().clone();
         pool.install(|| {
             let computed_digests: Vec<(usize, H::Digest)> = same_height
                 .par_iter()
