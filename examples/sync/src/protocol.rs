@@ -21,22 +21,20 @@ pub const PROTOCOL_VERSION: u8 = 1;
 /// Maximum message size in bytes (10MB).
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
-// ========== Message Framing Functions ==========
-
 /// Read a length-prefixed message from a stream.
 ///
 /// This function reads a 4-byte big-endian length prefix followed by the message data.
 /// The message length is validated to prevent DoS attacks.
-pub async fn read_message<S: Stream>(stream: &mut S) -> Result<Vec<u8>, MessageFramingError> {
+pub async fn read_message<S: Stream>(stream: &mut S) -> Result<Vec<u8>, NetworkError> {
     // Read the 4-byte length prefix
     let length_buf = vec![0u8; 4];
     let length_data = stream
         .recv(length_buf)
         .await
-        .map_err(|e| MessageFramingError::ReadFailed(e.to_string()))?;
+        .map_err(|e| NetworkError::ReadFailed(e.to_string()))?;
 
     if length_data.len() != 4 {
-        return Err(MessageFramingError::InvalidLengthPrefix);
+        return Err(NetworkError::InvalidLengthPrefix);
     }
 
     // Convert bytes to u32 (network byte order)
@@ -49,7 +47,7 @@ pub async fn read_message<S: Stream>(stream: &mut S) -> Result<Vec<u8>, MessageF
 
     // Validate message length (prevent DoS)
     if message_length == 0 || message_length > MAX_MESSAGE_SIZE {
-        return Err(MessageFramingError::InvalidMessageLength(message_length));
+        return Err(NetworkError::InvalidMessageLength(message_length));
     }
 
     // Read the actual message
@@ -57,10 +55,10 @@ pub async fn read_message<S: Stream>(stream: &mut S) -> Result<Vec<u8>, MessageF
     let message_data = stream
         .recv(message_buf)
         .await
-        .map_err(|e| MessageFramingError::ReadFailed(e.to_string()))?;
+        .map_err(|e| NetworkError::ReadFailed(e.to_string()))?;
 
     if message_data.len() != message_length {
-        return Err(MessageFramingError::MessageLengthMismatch {
+        return Err(NetworkError::MessageLengthMismatch {
             expected: message_length,
             actual: message_data.len(),
         });
@@ -72,13 +70,10 @@ pub async fn read_message<S: Stream>(stream: &mut S) -> Result<Vec<u8>, MessageF
 /// Send a length-prefixed message to a sink.
 ///
 /// This function sends a 4-byte big-endian length prefix followed by the message data.
-pub async fn send_message<S: Sink>(
-    sink: &mut S,
-    message: &[u8],
-) -> Result<(), MessageFramingError> {
+pub async fn send_message<S: Sink>(sink: &mut S, message: &[u8]) -> Result<(), NetworkError> {
     // Validate message length
     if message.len() > MAX_MESSAGE_SIZE {
-        return Err(MessageFramingError::MessageTooLarge(message.len()));
+        return Err(NetworkError::MessageTooLarge(message.len()));
     }
 
     // Send 4-byte length prefix
@@ -86,19 +81,19 @@ pub async fn send_message<S: Sink>(
     let length_bytes = length.to_be_bytes();
     sink.send(length_bytes.to_vec())
         .await
-        .map_err(|e| MessageFramingError::WriteFailed(e.to_string()))?;
+        .map_err(|e| NetworkError::WriteFailed(e.to_string()))?;
 
     // Send the actual message
     sink.send(message.to_vec())
         .await
-        .map_err(|e| MessageFramingError::WriteFailed(e.to_string()))?;
+        .map_err(|e| NetworkError::WriteFailed(e.to_string()))?;
 
     Ok(())
 }
 
 /// Errors that can occur during message framing operations.
 #[derive(Debug, Error)]
-pub enum MessageFramingError {
+pub enum NetworkError {
     #[error("Failed to read from stream: {0}")]
     ReadFailed(String),
 

@@ -7,7 +7,7 @@ use commonware_storage::mmr::hasher::Standard;
 use commonware_sync::{
     create_adb_config, create_test_operations, generate_db_id, read_message, send_message,
     Database, ErrorResponse, GetOperationsRequest, GetOperationsResponse, GetServerMetadataRequest,
-    GetServerMetadataResponse, Message, MessageFramingError, Operation, ProtocolError,
+    GetServerMetadataResponse, Message, NetworkError, Operation, ProtocolError,
 };
 use std::{
     net::SocketAddr,
@@ -218,7 +218,7 @@ where
         // Read length-prefixed message
         let message_data = match read_message(&mut stream).await {
             Ok(data) => data,
-            Err(MessageFramingError::ReadFailed(_)) => {
+            Err(NetworkError::ReadFailed(_)) => {
                 info!(client_addr = %client_addr, "👋 Client disconnected");
                 break;
             }
