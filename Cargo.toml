@@ -21,7 +21,8 @@ members = [
     "codec/fuzz",
     "cryptography/fuzz",
     "stream/fuzz",
-    "storage/fuzz"
+    "storage/fuzz",
+    "utils/fuzz"
 ]
 resolver = "2"
 
