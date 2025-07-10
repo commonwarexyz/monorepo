@@ -62,11 +62,11 @@ Client options:
    
    You should see output like:
    ```
-   INFO 🎬 ADB Sync Server starting
-   INFO 🔧 Configuration port=8080 initial_ops=50 storage_dir=/tmp/adb_sync_server
-   INFO 💾 Initializing database db_id=db_1234567890
-   INFO ✅ Database ready op_count=51 root_hash=abc123...
-   INFO 🚀 Server listening addr=127.0.0.1:8080
+   INFO  ADB Sync Server starting
+   INFO  Configuration port=8080 initial_ops=50 storage_dir=/tmp/adb_sync_server
+   INFO  Initializing database db_id=db_1234567890
+   INFO  Database ready op_count=51 root_hash=abc123...
+   INFO  Server listening addr=127.0.0.1:8080
    ```
 
 2. **In another terminal, run the client:**
@@ -76,15 +76,14 @@ Client options:
    
    You should see output like:
    ```
-   INFO 🎬 ADB Sync Client starting
-   INFO 🔧 Configuration server=127.0.0.1:8080 batch_size=25 storage_dir=/tmp/adb_sync_client
-   INFO 🚀 Starting ADB sync from server server=127.0.0.1:8080
-   INFO 🔗 Establishing connection server_addr=127.0.0.1:8080
-   INFO ✅ Connected server_addr=127.0.0.1:8080
-   INFO 📊 Received server metadata
-   INFO 🔄 Beginning sync operation...
+   INFO ADB Sync Client starting
+   INFO Configuration server=127.0.0.1:8080 batch_size=25 storage_dir=/tmp/adb_sync_client
+   INFO Starting ADB sync from server server=127.0.0.1:8080
+   INFO Establishing connection server_addr=127.0.0.1:8080
+   INFO Connected server_addr=127.0.0.1:8080
+   INFO Received server metadata
+   INFO Beginning sync operation...
    INFO ✅ Sync completed successfully database_ops=51 root_hash=abc123...
-   INFO 🎉 Client completed successfully
    ```
 
 ## Sync Process

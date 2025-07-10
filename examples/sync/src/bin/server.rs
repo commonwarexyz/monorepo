@@ -127,7 +127,7 @@ where
         oldest_retained_loc,
         latest_op_loc,
     );
-    info!(?response, "📊 Serving metadata");
+    info!(?response, "Serving metadata");
     Ok(response)
 }
 
@@ -163,7 +163,7 @@ where
         max_ops,
         start_loc = request.start_loc,
         db_size,
-        "📦 Operations request"
+        "Operations request"
     );
 
     // Get the historical proof and operations
@@ -185,7 +185,7 @@ where
     info!(
         operations_len = operations.len(),
         proof_bytes_len = proof_bytes.len(),
-        "📤 Sending operations with proof"
+        "Sending operations with proof"
     );
 
     Ok(GetOperationsResponse::new(
@@ -208,14 +208,14 @@ where
         + commonware_runtime::Metrics
         + commonware_runtime::Network,
 {
-    info!(client_addr = %client_addr, "🔗 Client connected");
+    info!(client_addr = %client_addr, "Client connected");
 
     loop {
         // Read length-prefixed message
         let message_data = match read_message(&mut stream).await {
             Ok(data) => data,
             Err(NetworkError::ReadFailed(_)) => {
-                info!(client_addr = %client_addr, "👋 Client disconnected");
+                info!(client_addr = %client_addr, "Client disconnected");
                 break;
             }
             Err(e) => {
@@ -342,12 +342,12 @@ fn main() {
             .to_string(),
     };
 
-    info!("▶️ ADB Sync Server starting");
+    info!("ADB Sync Server starting");
     info!(
         port = config.port,
         initial_ops = config.initial_ops,
         storage_dir = %config.storage_dir,
-        "🔧 Configuration"
+        "Configuration"
     );
 
     let executor = tokio_runtime::Runner::default();
@@ -356,7 +356,7 @@ fn main() {
         let db_id = generate_db_id(&context);
         let db_config = create_adb_config(&db_id);
 
-        info!(db_id = %db_id, "💾 Initializing database");
+        info!(db_id = %db_id, "Initializing database");
 
         let mut database = match Database::init(context.clone(), db_config).await {
             Ok(db) => db,
@@ -368,7 +368,7 @@ fn main() {
 
         // Create and add initial operations
         let initial_ops = create_test_operations(config.initial_ops, 12345);
-        info!(operations_len = initial_ops.len(), "📝 Creating initial operations");
+        info!(operations_len = initial_ops.len(), "Creating initial operations");
 
         if let Err(e) = add_operations(&mut database, initial_ops).await {
             error!(error = %e, "❌ Failed to add initial operations");
@@ -393,7 +393,7 @@ fn main() {
         info!(
             op_count = database.op_count(),
             root_hash = %root_hash_hex,
-            "✅ Database ready"
+            "Database ready"
         );
 
         // Create listener to accept connections
@@ -406,7 +406,7 @@ fn main() {
             }
         };
 
-        info!(addr = %addr, "🚀 Server listening");
+        info!(addr = %addr, "Server listening");
 
         // Handle each client connection in a separate task.
         let state = Arc::new(ServerState::new(database));
@@ -424,7 +424,7 @@ fn main() {
                         // Log server stats periodically
                         let (requests, errors) = state.get_stats();
                         if requests > 0 && requests % 10 == 0 {
-                            info!(requests, errors, "📊 Server stats");
+                            info!(requests, errors, "Server stats");
                         }
                     });
                 }

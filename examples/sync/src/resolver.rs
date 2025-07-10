@@ -74,7 +74,7 @@ where
         }
 
         // Create new connection
-        info!(server_addr = %self.server_addr, "🔗 Establishing connection");
+        info!(server_addr = %self.server_addr, "Establishing connection");
         let (sink, stream) = self
             .context
             .dial(self.server_addr)
@@ -82,7 +82,7 @@ where
             .map_err(|e| ResolverError::ConnectionError(format!("Failed to connect: {e}")))?;
 
         *connection_guard = Some(Connection { sink, stream });
-        info!(server_addr = %self.server_addr, "✅ Connected");
+        info!(server_addr = %self.server_addr, "Connected");
 
         Ok(())
     }
@@ -132,7 +132,7 @@ where
             .await?
         {
             Message::GetServerMetadataResponse(response) => {
-                info!("✅ Received server metadata");
+                info!("Received server metadata");
                 Ok(response)
             }
             Message::Error(err) => {
@@ -165,7 +165,7 @@ where
 
         info!(
             max_ops = max_ops.get(),
-            start_loc, "📦 Requesting operations from server"
+            start_loc, "Requesting operations from server"
         );
 
         let response = self
@@ -205,7 +205,7 @@ where
         info!(
             operations_len = operations.len(),
             proof_len = proof.digests.len(),
-            "✅ Received operations and proof"
+            "Received operations and proof"
         );
 
         // Create a oneshot channel for proof verification feedback.

@@ -40,7 +40,7 @@ async fn get_server_metadata<E>(
 where
     E: commonware_runtime::Network + Clone,
 {
-    info!("📡 Requesting server metadata...");
+    info!("Requesting server metadata...");
 
     let metadata = resolver.get_server_metadata().await?;
     let metadata = ServerMetadata {
@@ -48,7 +48,7 @@ where
         oldest_retained_loc: metadata.oldest_retained_loc,
         latest_op_loc: metadata.latest_op_loc,
     };
-    info!(?metadata, "📊 Received server metadata");
+    info!(?metadata, "Received server metadata");
     Ok(metadata)
 }
 
@@ -64,7 +64,7 @@ where
         + commonware_runtime::Metrics
         + commonware_runtime::Network,
 {
-    info!(server = %config.server, "🚀 Starting ADB sync from server");
+    info!(server = %config.server, "Starting ADB sync from server");
 
     // Get server metadata to determine sync parameters
     let ServerMetadata {
@@ -76,13 +76,13 @@ where
     info!(
         lower_bound = oldest_retained_loc,
         upper_bound = latest_op_loc,
-        "📈 Sync parameters"
+        "Sync parameters"
     );
 
     // Create database configuration
     let db_id = commonware_sync::generate_db_id(&context);
     let db_config = create_adb_config(&db_id);
-    info!(db_id = %db_id, "💾 Created local database");
+    info!(db_id = %db_id, "Created local database");
 
     // Create sync configuration
     let sync_config = SyncConfig::<
@@ -109,11 +109,11 @@ where
         batch_size = config.batch_size,
         lower_bound = sync_config.lower_bound_ops,
         upper_bound = sync_config.upper_bound_ops,
-        "⚙️  Sync configuration"
+        "Sync configuration"
     );
 
     // Do the sync.
-    info!("🔄 Beginning sync operation...");
+    info!("Beginning sync operation...");
     let database = sync::sync(sync_config).await.map_err(|e| {
         error!(error = %e, "❌ Sync failed");
         Box::new(e) as Box<dyn std::error::Error>
@@ -204,12 +204,12 @@ fn main() {
             .to_string(),
     };
 
-    info!("🎬 ADB Sync Client starting");
+    info!("ADB Sync Client starting");
     info!(
         server = %config.server,
         batch_size = config.batch_size,
         storage_dir = %config.storage_dir,
-        "🔧 Configuration"
+        "Configuration"
     );
 
     let executor = tokio_runtime::Runner::default();
@@ -222,7 +222,6 @@ fn main() {
             Ok(_database) => {
                 // _database is now synced to the server's state.
                 // We don't use it in this example, but at this point it's ready to be used.
-                info!("🎉 Client completed successfully");
             }
             Err(e) => {
                 error!(error = %e, "❌ Sync failed");
