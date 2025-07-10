@@ -185,18 +185,19 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 ArchiveOperation::Prune(min) => {
-                    archive.prune(*min).await.expect("prune failed");
+                    let min = min - min % cfg.items_per_section;
+                    archive.prune(min).await.expect("prune failed");
                     match oldest_allowed {
                         None => {
-                            oldest_allowed = Some(*min);
-                            items.retain(|(i, _, _)| *i >= *min);
-                            written_indices.retain(|i| *i >= *min);
+                            oldest_allowed = Some(min);
+                            items.retain(|(i, _, _)| *i >= min);
+                            written_indices.retain(|i| *i >= min);
                         }
                         Some(already_pruned) => {
-                            if *min > already_pruned {
-                                oldest_allowed = Some(*min);
-                                items.retain(|(i, _, _)| *i >= *min);
-                                written_indices.retain(|i| *i >= *min);
+                            if min > already_pruned {
+                                oldest_allowed = Some(min);
+                                items.retain(|(i, _, _)| *i >= min);
+                                written_indices.retain(|i| *i >= min);
                             }
                         }
                     }
