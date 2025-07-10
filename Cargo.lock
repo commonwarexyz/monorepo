@@ -1016,7 +1016,6 @@ dependencies = [
 name = "commonware-collector"
 version = "0.0.54"
 dependencies = [
- "bimap",
  "bytes",
  "commonware-codec",
  "commonware-cryptography",
