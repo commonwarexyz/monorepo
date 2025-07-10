@@ -325,14 +325,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         Self::parse_entries(read_buf.as_ref())
     }
 
-    /// Read entries from a buffer.
-    async fn read_buffer(blob: &mut buffer::Read<E::Blob>) -> Result<(Entry, Entry), Error> {
-        let mut buf = [0u8; Entry::FULL_SIZE];
-        blob.read_exact(&mut buf, Entry::FULL_SIZE).await?;
-
-        Self::parse_entries(&buf)
-    }
-
     /// Recover a single table entry and update tracking.
     async fn recover_entry(
         blob: &E::Blob,
@@ -391,7 +383,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             let offset = Self::table_offset(table_index);
 
             // Read both entries from the buffer
-            let (entry1, entry2) = Self::read_buffer(&mut reader).await?;
+            let mut buf = [0u8; Entry::FULL_SIZE];
+            reader.read_exact(&mut buf, Entry::FULL_SIZE).await?;
+            let (entry1, entry2) = Self::parse_entries(&buf)?;
 
             // Check both entries
             let entry1_modified = Self::recover_entry(
@@ -718,14 +712,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let new_entry = Entry::new(self.next_epoch, self.current_section, offset, added);
 
         // Update the old position
-        Self::update_head(
-            &self.table,
-            table_index,
-            &entry1,
-            &entry2,
-            new_entry.clone(),
-        )
-        .await?;
+        Self::update_head(&self.table, table_index, &entry1, &entry2, new_entry).await?;
 
         // If we're mid-resize and this bucket has already been processed, update the new position too
         if let Some(resize_progress) = self.resize_progress {
@@ -734,6 +721,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 let new_table_index = self.table_size + table_index;
                 let (new_entry1, new_entry2) =
                     Self::read_table(&self.table, new_table_index).await?;
+                let new_entry = Entry::new(self.next_epoch, self.current_section, offset, added);
                 Self::update_head(
                     &self.table,
                     new_table_index,
@@ -823,7 +811,28 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         Ok(())
     }
 
-    /// Continue a resize operation.
+    /// Write a pair of entries to a buffer, replacing one slot with the new entry.
+    fn rewrite_entries(
+        buf: &mut Vec<u8>,
+        entry1: &Entry,
+        entry2: &Entry,
+        new_entry: &Entry,
+        epoch: u64,
+    ) {
+        if Self::select_write_slot(entry1, entry2, epoch) == 0 {
+            buf.extend_from_slice(&new_entry.encode());
+            buf.extend_from_slice(&entry2.encode());
+        } else {
+            buf.extend_from_slice(&entry1.encode());
+            buf.extend_from_slice(&new_entry.encode());
+        }
+    }
+
+    /// Continue a resize operation by processing the next chunk of entries.
+    ///
+    /// This function processes `table_resize_chunk_size` entries at a time,
+    /// allowing the resize to be spread across multiple sync operations to
+    /// avoid latency spikes.
     async fn advance_resize(&mut self) -> Result<(), Error> {
         // Compute the range to update
         let current_index = self.resize_progress.unwrap();
@@ -838,7 +847,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let read_buf: Vec<u8> = self.table.read_at(read_buf, read_offset).await?.into();
 
         // Process each entry in the chunk
-        let mut writes = vec![0u8; chunk_bytes];
+        let mut writes = Vec::with_capacity(chunk_bytes);
         for i in 0..chunk_size {
             // Get the entry
             let entry_offset = i as usize * Entry::FULL_SIZE;
@@ -848,29 +857,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             // Parse the two slots
             let (entry1, entry2) = Self::parse_entries(entry_buf)?;
 
-            // Get the current head (re-read to capture any recent inserts)
+            // Get the current head
             let (section, offset) = self
                 .select_valid_entry(&entry1, &entry2)
                 .map(|(s, o, _)| (s, o))
                 .unwrap_or((0, 0));
 
-            // Create new entry with added=0
+            // Rewrite the entries
             let reset_entry = Entry::new(self.next_epoch, section, offset, 0);
-
-            // Determine which slot to write to
-            let slot_offset = Self::select_write_slot(&entry1, &entry2, self.next_epoch);
-
-            // Write the entries
-            if slot_offset == 0 {
-                writes[entry_offset..entry_offset + Entry::SIZE]
-                    .copy_from_slice(&reset_entry.encode());
-                writes[entry_offset + Entry::SIZE..entry_offset + Entry::FULL_SIZE]
-                    .copy_from_slice(&entry2.encode());
-            } else {
-                writes[entry_offset..entry_offset + slot_offset].copy_from_slice(&entry1.encode());
-                writes[entry_offset + slot_offset..entry_offset + Entry::FULL_SIZE]
-                    .copy_from_slice(&reset_entry.encode());
-            }
+            Self::rewrite_entries(&mut writes, &entry1, &entry2, &reset_entry, self.next_epoch);
         }
 
         // Put the writes into the table
@@ -901,8 +896,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Sync all pending data in [Freezer].
     ///
-    /// If the table needs to be resized, it will occur during [Freezer::sync] (rather than unexpectedly
-    /// during [Freezer::put]).
+    /// If the table needs to be resized, the resize will begin during this sync.
+    /// The resize operation is performed incrementally across multiple sync calls
+    /// to avoid latency spikes. Each sync will process up to `table_resize_chunk_size`
+    /// entries until the resize is complete.
     pub async fn sync(&mut self) -> Result<Checkpoint, Error> {
         // Sync all modified journal sections
         let mut updates = Vec::with_capacity(self.modified_sections.len());
