@@ -1,52 +1,50 @@
-//! TBA
+//! Collect responses to requests.
 
 pub mod p2p;
 
-/// An [Originator] sends requests out to a set of [Endpoint]s and collects responses.
-///
-/// The originator's [Collector] is used to distribute and collect responses.
-/// The endpoint's [Collector] is used to receive and respond to requests.
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use futures::channel::oneshot;
 use std::future::Future;
 
-/// Interface for actor that will disperse requests and collect responses.
+/// An [Originator] sends requests out to a set of [Handler]s and collects replies.
 pub trait Originator: Clone + Send + 'static {
-    type Request: Committable + Digestible + Send + 'static;
-    type Response: Committable<Commitment = <Self::Request as Committable>::Commitment>
-        + Digestible<Digest = <Self::Request as Digestible>::Digest>
-        + Send
-        + 'static;
+    /// The [PublicKey] of a recipient.
     type PublicKey: PublicKey;
 
-    /// Sends a `request` to a set of `recipients`, returning the list of recipients that were
-    /// successfully sent to.
-    ///
-    /// Once a quorum of responses have been collected, the [Originator] will be notified.
+    /// The type of request to send.
+    type Request: Committable + Digestible + Send + 'static;
+
+    /// Sends a `Request` to a set of [Recipients], returning the list of handlers that we
+    /// tried to send to.
     fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
         request: Self::Request,
     ) -> impl Future<Output = Vec<Self::PublicKey>> + Send;
 
-    /// Cancels a request by `digest`, dropping all existing and future responses.
+    /// Cancel a request by `commitment`, ignoring any future responses.
     fn cancel(
         &mut self,
         commitment: <Self::Request as Committable>::Commitment,
     ) -> impl Future<Output = ()> + Send;
 }
 
-/// Interface for the application that receives requests from an origin and sends responses.
+/// A [Handler] receives requests and (optionally) sends replies.
 pub trait Handler: Clone + Send + 'static {
+    /// The [PublicKey] of the [Originator].
+    type PublicKey: PublicKey;
+
+    /// The type of request received.
     type Request: Committable + Digestible + Send + 'static;
+
+    /// The type of response to send.
     type Response: Committable<Commitment = <Self::Request as Committable>::Commitment>
         + Digestible<Digest = <Self::Request as Digestible>::Digest>
         + Send
         + 'static;
-    type PublicKey: PublicKey;
 
-    /// Processes a `request` from `origin` and (optionally) sends a response.
+    /// Processes a `request` from an [Originator] and (optionally) send a response.
     ///
     /// If no response is needed, the `responder` should be dropped.
     fn process(
@@ -57,15 +55,21 @@ pub trait Handler: Clone + Send + 'static {
     ) -> impl Future<Output = ()> + Send;
 }
 
-/// Interface for the application that originates requests.
+/// A [Monitor] collects responses from [Handler]s.
 pub trait Monitor: Clone + Send + 'static {
-    type Response: Committable + Digestible + Send + 'static;
+    /// The [PublicKey] of the [Handler].
     type PublicKey: PublicKey;
 
-    /// Called for each response once `minimum` responses have been collected for a commitment.
+    /// The type of response collected.
+    type Response: Committable + Digestible + Send + 'static;
+
+    /// Called for each response collected with the number of responses collected so far for
+    /// the same commitment.
+    ///
+    /// [Monitor::collected] is only called once per `handler`.
     fn collected(
         &mut self,
-        origin: Self::PublicKey,
+        handler: Self::PublicKey,
         response: Self::Response,
         count: usize,
     ) -> impl Future<Output = ()> + Send;
