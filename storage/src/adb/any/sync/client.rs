@@ -32,7 +32,7 @@ where
     V: Array,
     H: Hasher,
     T: Translator,
-    R: Resolver<H, K, V>,
+    R: Resolver<H::Digest, K, V>,
 {
     /// Context for the database.
     pub context: E,
@@ -146,7 +146,7 @@ where
     V: Array,
     H: Hasher,
     T: Translator,
-    R: Resolver<H, K, V>,
+    R: Resolver<H::Digest, K, V>,
 {
     /// Next step is to fetch and verify operations.
     FetchData {
@@ -175,7 +175,7 @@ where
     V: Array,
     H: Hasher,
     T: Translator,
-    R: Resolver<H, K, V>,
+    R: Resolver<H::Digest, K, V>,
 {
     /// Create a new sync client
     pub(crate) async fn new(config: Config<E, K, V, H, T, R>) -> Result<Self, Error> {
