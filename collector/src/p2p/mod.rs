@@ -54,6 +54,7 @@ pub trait Handler: Clone + Send + 'static {
         &mut self,
         origin: Self::PublicKey,
         request: Self::Request,
+        // TODO: add futures pool to handle replies rather than waiting
         response: oneshot::Sender<Self::Response>,
     ) -> impl Future<Output = ()> + Send;
 }
