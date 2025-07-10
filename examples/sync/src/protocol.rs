@@ -437,17 +437,6 @@ impl From<ProtocolError> for ErrorResponse {
 }
 
 impl GetOperationsRequest {
-    /// Create a new [GetOperationsRequest].
-    pub fn new(size: u64, start_loc: u64, max_ops: NonZeroU64, request_id: u64) -> Self {
-        Self {
-            version: PROTOCOL_VERSION,
-            size,
-            start_loc,
-            max_ops,
-            request_id,
-        }
-    }
-
     /// Validate the request parameters.
     pub fn validate(&self) -> Result<(), ProtocolError> {
         if self.version != PROTOCOL_VERSION {
@@ -472,27 +461,7 @@ impl GetOperationsRequest {
     }
 }
 
-impl GetOperationsResponse {
-    /// Create a new [GetOperationsResponse].
-    pub fn new(request_id: u64, proof_bytes: Vec<u8>, operations_bytes: Vec<u8>) -> Self {
-        Self {
-            version: PROTOCOL_VERSION,
-            request_id,
-            proof_bytes,
-            operations_bytes,
-        }
-    }
-}
-
 impl GetServerMetadataRequest {
-    /// Create a new [GetServerMetadataRequest].
-    pub fn new(request_id: u64) -> Self {
-        Self {
-            version: PROTOCOL_VERSION,
-            request_id,
-        }
-    }
-
     /// Validate the request parameters.
     pub fn validate(&self) -> Result<(), ProtocolError> {
         if self.version != PROTOCOL_VERSION {
@@ -505,36 +474,6 @@ impl GetServerMetadataRequest {
     }
 }
 
-impl GetServerMetadataResponse {
-    /// Create a new [GetServerMetadataResponse].
-    pub fn new(
-        request_id: u64,
-        target_hash: Digest,
-        oldest_retained_loc: u64,
-        latest_op_loc: u64,
-    ) -> Self {
-        Self {
-            version: PROTOCOL_VERSION,
-            request_id,
-            target_hash,
-            oldest_retained_loc,
-            latest_op_loc,
-        }
-    }
-}
-
-impl ErrorResponse {
-    /// Create a new [ErrorResponse].
-    pub fn new(request_id: Option<u64>, error_code: ErrorCode, message: String) -> Self {
-        Self {
-            version: PROTOCOL_VERSION,
-            request_id,
-            error_code,
-            message,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,26 +482,49 @@ mod tests {
     #[test]
     fn test_get_operations_request_validation() {
         // Valid request
-        let request = GetOperationsRequest::new(100, 10, NZU64!(50), 1);
+        let request = GetOperationsRequest {
+            version: PROTOCOL_VERSION,
+            size: 100,
+            start_loc: 10,
+            max_ops: NZU64!(50),
+            request_id: 1,
+        };
         assert!(request.validate().is_ok());
 
         // Invalid version
-        let mut request = GetOperationsRequest::new(100, 10, NZU64!(50), 1);
-        request.version = 99;
+        let request = GetOperationsRequest {
+            version: 99,
+            size: 100,
+            start_loc: 10,
+            max_ops: NZU64!(50),
+            request_id: 1,
+        };
         assert!(matches!(
             request.validate(),
             Err(ProtocolError::UnsupportedVersion { .. })
         ));
 
         // Invalid start_loc
-        let request = GetOperationsRequest::new(100, 100, NZU64!(50), 1);
+        let request = GetOperationsRequest {
+            version: PROTOCOL_VERSION,
+            size: 100,
+            start_loc: 100,
+            max_ops: NZU64!(50),
+            request_id: 1,
+        };
         assert!(matches!(
             request.validate(),
             Err(ProtocolError::InvalidRequest { .. })
         ));
 
         // start_loc beyond size
-        let request = GetOperationsRequest::new(100, 150, NZU64!(50), 1);
+        let request = GetOperationsRequest {
+            version: PROTOCOL_VERSION,
+            size: 100,
+            start_loc: 150,
+            max_ops: NZU64!(50),
+            request_id: 1,
+        };
         assert!(matches!(
             request.validate(),
             Err(ProtocolError::InvalidRequest { .. })
@@ -572,12 +534,17 @@ mod tests {
     #[test]
     fn test_get_server_metadata_request_validation() {
         // Valid request
-        let request = GetServerMetadataRequest::new(1);
+        let request = GetServerMetadataRequest {
+            version: PROTOCOL_VERSION,
+            request_id: 1,
+        };
         assert!(request.validate().is_ok());
 
         // Invalid version
-        let mut request = GetServerMetadataRequest::new(1);
-        request.version = 99;
+        let request = GetServerMetadataRequest {
+            version: PROTOCOL_VERSION.wrapping_sub(1),
+            request_id: 1,
+        };
         assert!(matches!(
             request.validate(),
             Err(ProtocolError::UnsupportedVersion { .. })

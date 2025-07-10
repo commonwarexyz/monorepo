@@ -241,10 +241,10 @@ fn main() {
         );
 
         // Create the network resolver with the runtime context
-        let resolver = NetworkResolver::new(config.server, context.clone());
+        let resolver = NetworkResolver::new(context.with_label("resolver"), config.server);
 
         // Perform the sync operation
-        match sync(context.clone(), resolver, &config).await {
+        match sync(context.with_label("sync"), resolver, &config).await {
             Ok(_database) => {
                 // _database is now synced to the server's state.
                 // We don't use it in this example, but at this point it's ready to be used.

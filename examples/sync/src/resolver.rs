@@ -56,7 +56,7 @@ where
     E: commonware_runtime::Network + Clone,
 {
     /// Returns a new [NetworkResolver] that communicates with the server at `server_addr`.
-    pub fn new(server_addr: SocketAddr, context: E) -> Self {
+    pub fn new(context: E, server_addr: SocketAddr) -> Self {
         Self {
             server_addr,
             connection: Arc::new(RwLock::new(None)),
@@ -126,7 +126,10 @@ where
     /// Get server metadata (target hash and bounds)
     pub async fn get_server_metadata(&self) -> Result<GetServerMetadataResponse, ResolverError> {
         let request_id = self.generate_request_id();
-        let request = GetServerMetadataRequest::new(request_id);
+        let request = GetServerMetadataRequest {
+            version: crate::PROTOCOL_VERSION,
+            request_id,
+        };
 
         match self
             .send_request(Message::GetServerMetadataRequest(request))
@@ -162,7 +165,13 @@ where
         max_ops: NonZeroU64,
     ) -> Result<GetOperationsResult<H, K, V>, SyncError> {
         let request_id = self.generate_request_id();
-        let request = GetOperationsRequest::new(size, start_loc, max_ops, request_id);
+        let request = GetOperationsRequest {
+            version: crate::PROTOCOL_VERSION,
+            size,
+            start_loc,
+            max_ops,
+            request_id,
+        };
 
         info!(
             max_ops = max_ops.get(),

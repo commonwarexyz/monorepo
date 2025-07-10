@@ -53,7 +53,7 @@ pub fn init(
     let log_layer = if logging.json {
         log_layer.json().boxed()
     } else {
-        log_layer.pretty().boxed()
+        log_layer.compact().boxed()
     };
 
     // Create OpenTelemetry layer for tracing

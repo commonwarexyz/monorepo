@@ -117,12 +117,13 @@ where
 
     drop(database);
 
-    let response = GetServerMetadataResponse::new(
-        request.request_id,
+    let response = GetServerMetadataResponse {
+        version: commonware_sync::PROTOCOL_VERSION,
+        request_id: request.request_id,
         target_hash,
         oldest_retained_loc,
         latest_op_loc,
-    );
+    };
     info!(?response, "Serving metadata");
     Ok(response)
 }
@@ -184,11 +185,12 @@ where
         "Sending operations with proof"
     );
 
-    Ok(GetOperationsResponse::new(
-        request.request_id,
+    Ok(GetOperationsResponse {
+        version: commonware_sync::PROTOCOL_VERSION,
+        request_id: request.request_id,
         proof_bytes,
         operations_bytes,
-    ))
+    })
 }
 
 /// Handle a client connection using commonware-runtime networking with message framing.
@@ -252,11 +254,12 @@ where
             _ => {
                 warn!(client_addr = %client_addr, "❌ Unexpected message type");
                 state.error_counter.inc();
-                Message::Error(ErrorResponse::new(
-                    None,
-                    commonware_sync::ErrorCode::InvalidRequest,
-                    "Unexpected message type".to_string(),
-                ))
+                Message::Error(ErrorResponse {
+                    version: commonware_sync::PROTOCOL_VERSION,
+                    request_id: None,
+                    error_code: commonware_sync::ErrorCode::InvalidRequest,
+                    message: "Unexpected message type".to_string(),
+                })
             }
         };
 
@@ -425,7 +428,7 @@ fn main() {
 
         // Create listener to accept connections
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
-        let mut listener = match context.bind(addr).await {
+        let mut listener = match context.with_label("listener").bind(addr).await {
             Ok(listener) => listener,
             Err(e) => {
                 error!(addr = %addr, error = %e, "❌ Failed to bind");
@@ -436,12 +439,12 @@ fn main() {
         info!(addr = %addr, "Server listening");
 
         // Handle each client connection in a separate task.
-        let state = Arc::new(ServerState::new(context.clone(), database));
+        let state = Arc::new(ServerState::new(context.with_label("server"), database));
         loop {
             match listener.accept().await {
                 Ok((client_addr, sink, stream)) => {
                     let state = state.clone();
-                    context.clone().spawn(move|_|async move {
+                    context.with_label("client").spawn(move|_|async move {
                         if let Err(e) =
                             handle_client(state.clone(), sink, stream, client_addr).await
                         {
