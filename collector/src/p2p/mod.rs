@@ -302,102 +302,102 @@ mod tests {
         });
     }
 
-    // /// Tests broadcast to multiple peers.
-    // /// This test sends a request to multiple peers and verifies
-    // /// that responses are collected from all of them.
-    // #[test_traced]
-    // fn test_broadcast_request() {
-    //     let executor = deterministic::Runner::timed(Duration::from_secs(10));
-    //     executor.start(|context| async move {
-    //         let (mut oracle, schemes, peers, mut connections) =
-    //             setup_network_and_peers(&context, &[1, 2, 3]).await;
-    //         let mut schemes_iter = schemes.into_iter();
-    //         let mut conns_iter = connections.into_iter();
+    #[test_traced]
+    fn test_broadcast_request() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, schemes, peers, connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+            let mut schemes = schemes.into_iter();
+            let mut connections = connections.into_iter();
 
-    //         // Link the two peers
-    //         add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-    //         add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            // Link the peers
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
 
-    //         let scheme1 = schemes_iter.next().unwrap();
-    //         let conn1 = conns_iter.next().unwrap();
-    //         let req_conn1 = conn1.0;
-    //         let res_conn1 = conn1.1;
-    //         let (mon1, mut mon_out1) = Monitor::new();
-    //         let mut mailbox1 = setup_and_spawn_engine(
-    //             &context,
-    //             scheme1,
-    //             (req_conn1, res_conn1),
-    //             mon1,
-    //             Handler::dummy(),
-    //         )
-    //         .await;
+            // Setup peer 1
+            let scheme1 = schemes.next().unwrap();
+            let conn1 = connections.next().unwrap();
+            let req_conn1 = conn1.0;
+            let res_conn1 = conn1.1;
+            let (mon1, mut mon_out1) = Monitor::new();
+            let mut mailbox1 = setup_and_spawn_engine(
+                &context,
+                scheme1,
+                (req_conn1, res_conn1),
+                mon1,
+                Handler::dummy(),
+            )
+            .await;
 
-    //         let scheme2 = schemes_iter.next().unwrap();
-    //         let conn2 = conns_iter.next().unwrap();
-    //         let req_conn2 = conn2.0;
-    //         let res_conn2 = conn2.1;
-    //         let (handler2, _) = Handler::new(true);
-    //         let _mailbox2 = setup_and_spawn_engine(
-    //             &context,
-    //             scheme2,
-    //             (req_conn2, res_conn2),
-    //             Monitor::dummy(),
-    //             handler2,
-    //         )
-    //         .await;
+            // Setup peer 2
+            let scheme2 = schemes.next().unwrap();
+            let conn2 = connections.next().unwrap();
+            let req_conn2 = conn2.0;
+            let res_conn2 = conn2.1;
+            let (handler2, _) = Handler::new(true);
+            let _mailbox2 = setup_and_spawn_engine(
+                &context,
+                scheme2,
+                (req_conn2, res_conn2),
+                Monitor::dummy(),
+                handler2,
+            )
+            .await;
 
-    //         let scheme3 = schemes_iter.next().unwrap();
-    //         let conn3 = conns_iter.next().unwrap();
-    //         let req_conn3 = conn3.0;
-    //         let res_conn3 = conn3.1;
-    //         let (handler3, _) = Handler::new(true);
-    //         let _mailbox3 = setup_and_spawn_engine(
-    //             &context,
-    //             scheme3,
-    //             (req_conn3, res_conn3),
-    //             Monitor::dummy(),
-    //             handler3,
-    //         )
-    //         .await;
+            // Setup peer 3
+            let scheme3 = schemes.next().unwrap();
+            let conn3 = connections.next().unwrap();
+            let req_conn3 = conn3.0;
+            let res_conn3 = conn3.1;
+            let (handler3, _) = Handler::new(true);
+            let _mailbox3 = setup_and_spawn_engine(
+                &context,
+                scheme3,
+                (req_conn3, res_conn3),
+                Monitor::dummy(),
+                handler3,
+            )
+            .await;
 
-    //         // Broadcast request
-    //         let request = Request { id: 3, data: 3 };
-    //         let recipients = mailbox1.send(Recipients::All, request.clone()).await;
-    //         assert_eq!(recipients.len(), 2);
-    //         assert!(recipients.contains(&peers[1]));
-    //         assert!(recipients.contains(&peers[2]));
+            // Broadcast request
+            let request = Request { id: 3, data: 3 };
+            let recipients = mailbox1.send(Recipients::All, request.clone()).await;
+            assert_eq!(recipients.len(), 2);
+            assert!(recipients.contains(&peers[1]));
+            assert!(recipients.contains(&peers[2]));
 
-    //         // Collect responses
-    //         let mut responses_collected = 0;
-    //         let mut peer2_responded = false;
-    //         let mut peer3_responded = false;
+            // Collect responses
+            let mut responses_collected = 0;
+            let mut peer2_responded = false;
+            let mut peer3_responded = false;
 
-    //         for _ in 0..2 {
-    //             let event = mon_out1.next().await.unwrap();
-    //             match event {
-    //                 MonitorEvent::Collected {
-    //                     handler,
-    //                     response,
-    //                     count,
-    //                 } => {
-    //                     assert_eq!(response.id, 3);
-    //                     assert_eq!(response.result, 6);
-    //                     responses_collected += 1;
-    //                     assert_eq!(count, responses_collected);
+            for _ in 0..2 {
+                let event = mon_out1.next().await.unwrap();
+                match event {
+                    MonitorEvent::Collected {
+                        handler,
+                        response,
+                        count,
+                    } => {
+                        assert_eq!(response.id, 3);
+                        assert_eq!(response.result, 6);
+                        responses_collected += 1;
+                        assert_eq!(count, responses_collected);
 
-    //                     if handler == peers[1] {
-    //                         peer2_responded = true;
-    //                     } else if handler == peers[2] {
-    //                         peer3_responded = true;
-    //                     }
-    //                 }
-    //             }
-    //         }
+                        if handler == peers[1] {
+                            peer2_responded = true;
+                        } else if handler == peers[2] {
+                            peer3_responded = true;
+                        }
+                    }
+                }
+            }
 
-    //         assert!(peer2_responded);
-    //         assert!(peer3_responded);
-    //     });
-    // }
+            assert!(peer2_responded);
+            assert!(peer3_responded);
+        });
+    }
 
     // /// Tests handling of handlers that don't respond.
     // /// This test verifies that the system handles non-responding handlers correctly.
