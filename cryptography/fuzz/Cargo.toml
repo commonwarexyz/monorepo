@@ -61,8 +61,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "batch_verifier"
-path = "fuzz_targets/batch_verifier.rs"
+name = "bls12381_batch_verifier"
+path = "fuzz_targets/bls12381_batch_verifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ed25519_batch_verifier"
+path = "fuzz_targets/ed25519_batch_verifier.rs"
 test = false
 doc = false
 bench = false

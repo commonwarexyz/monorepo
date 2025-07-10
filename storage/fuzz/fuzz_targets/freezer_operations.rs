@@ -48,19 +48,19 @@ fn fuzz(input: FuzzInput) {
             .await
             .unwrap();
 
-        let mut model: HashMap<FixedBytes<32>, i32> = HashMap::new();
+        let mut expected_state: HashMap<FixedBytes<32>, i32> = HashMap::new();
 
         for op in input.ops.into_iter().take(64) {
             match op {
                 Op::Put { key, value } => {
                     let k = vec_to_key(&key);
                     freezer.put(k.clone(), value).await.unwrap();
-                    model.insert(k, value);
+                    expected_state.insert(k, value);
                 }
                 Op::Get { key } => {
                     let k = vec_to_key(&key);
                     let res = freezer.get(Identifier::Key(&k)).await.unwrap();
-                    assert_eq!(res, model.get(&k).cloned());
+                    assert_eq!(res, expected_state.get(&k).cloned());
                 }
                 Op::Sync => {
                     freezer.sync().await.unwrap();
