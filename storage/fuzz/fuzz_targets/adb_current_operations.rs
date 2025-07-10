@@ -92,12 +92,9 @@ fn fuzz(data: FuzzInput) {
 
                 CurrentOperation::Delete { key } => {
                     let k = Key::new(*key);
-                    
                     // Check if key exists before deletion
                     let key_existed = db.get(&k).await.expect("Get before delete should not fail").is_some();
-                    
                     db.delete(k).await.expect("Delete should not fail");
-
                     if key_existed {
                         expected_state.insert(*key, None);
                         all_keys.insert(*key);
@@ -239,12 +236,8 @@ fn fuzz(data: FuzzInput) {
                         }
                         Err(commonware_storage::adb::Error::KeyNotFound) => {
                             let expected_value = expected_state.get(key);
-                            match expected_value {
-                                Some(Some(_)) => {
-                                    panic!("Key {key:?} should exist but proof generation failed");
-                                }
-                                Some(None) | None => {
-                                }
+                            if let Some(Some(_)) = expected_value {
+                                panic!("Key {key:?} should exist but proof generation failed");
                             }
                         }
                         Err(e) => {
