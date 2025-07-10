@@ -813,6 +813,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let buf = vec![0; max as usize * Entry::FULL_SIZE as usize];
         let buf = self.table.read_at(Self::table_offset(current), buf).await?;
 
+        // Update all entires to have added = 0
+
+        // Store in existing table and new table with self.next_epoch
+
 
         // Create write buffers for efficient batched writes
         let old_buffered_table = buffer::Write::new(
