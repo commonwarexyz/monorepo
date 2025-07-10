@@ -1,7 +1,14 @@
 [package]
 name = "commonware-sync"
-version = "0.1.0"
 edition = "2021"
+publish = true
+version = "0.0.54"
+license = "MIT OR Apache-2.0"
+description = "Sync a new [adb::any::Any] database to an existing instance's state."
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/sync"
+documentation = "https://docs.rs/commonware-sync"
 
 [[bin]]
 name = "server"

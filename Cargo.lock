@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-sync"
-version = "0.1.0"
+version = "0.0.54"
 dependencies = [
  "bytes",
  "clap",
