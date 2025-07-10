@@ -158,8 +158,7 @@ fn fuzz(input: FuzzInput) {
                 let result = ed25519_batch.verify(&mut rng);
                 assert_eq!(
                     result, expected_ed25519_result,
-                    "Ed25519 batch verification result mismatch: expected {}, got {}",
-                    expected_ed25519_result, result
+                    "Ed25519 batch verification result mismatch: expected {expected_ed25519_result}, got {result}",
                 );
                 
                 // Reset batch and expectation after verification
@@ -171,8 +170,7 @@ fn fuzz(input: FuzzInput) {
                 let result = bls12381_batch.verify(&mut rng);
                 assert_eq!(
                     result, expected_bls12381_result,
-                    "BLS12-381 batch verification result mismatch: expected {}, got {}",
-                    expected_bls12381_result, result
+                    "BLS12-381 batch verification result mismatch: expected {expected_bls12381_result}, got {result}",
                 );
                 
                 // Reset batch and expectation after verification
