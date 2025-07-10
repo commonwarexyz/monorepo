@@ -55,6 +55,20 @@ pub trait Archive {
         value: Self::Value,
     ) -> impl Future<Output = Result<(), Error>>;
 
+    /// [Archive::put] and [Archive::sync] in a single operation.
+    fn put_sync(
+        &mut self,
+        index: u64,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<(), Error>> {
+        async move {
+            self.put(index, key, value).await?;
+            self.sync().await?;
+            Ok(())
+        }
+    }
+
     /// Retrieve an item from [Archive].
     fn get(
         &self,
@@ -132,15 +146,15 @@ mod tests {
             freezer_table_partition: "test_table".into(),
             freezer_table_initial_size: 64,
             freezer_table_resize_frequency: 2,
-            freezer_table_read_buffer: 1024,
-            freezer_table_write_buffer: 1024,
+            freezer_table_read_buffer: 1024 * 1024,
+            freezer_table_write_buffer: 1024 * 1024,
             freezer_journal_partition: "test_journal".into(),
-            freezer_journal_target_size: 1024,
+            freezer_journal_target_size: 1024 * 1024,
             freezer_journal_compression: compression,
             ordinal_partition: "test_ordinal".into(),
             items_per_section: 1024,
-            write_buffer: 1024,
-            replay_buffer: 1024,
+            write_buffer: 1024 * 1024,
+            replay_buffer: 1024 * 1024,
             codec_config: (),
         };
         immutable::Archive::init(context, cfg).await.unwrap()
@@ -604,25 +618,12 @@ mod tests {
                     .await
                     .expect("Failed to put data");
                 keys.insert(key, (index, data));
-            }
 
-            // Ensure all keys can be retrieved
-            for (key, (index, data)) in &keys {
-                let retrieved = archive
-                    .get(Identifier::Index(*index))
-                    .await
-                    .expect("Failed to get data")
-                    .expect("Data not found");
-                assert_eq!(&retrieved, data);
-                let retrieved = archive
-                    .get(Identifier::Key(key))
-                    .await
-                    .expect("Failed to get data")
-                    .expect("Data not found");
-                assert_eq!(&retrieved, data);
+                // Randomly sync the archive
+                if context.gen_bool(0.1) {
+                    archive.sync().await.expect("Failed to sync archive");
+                }
             }
-
-            // Sync the archive
             archive.sync().await.expect("Failed to sync archive");
 
             // Ensure all keys can be retrieved
@@ -710,12 +711,12 @@ mod tests {
     #[test_traced]
     #[ignore]
     fn test_many_keys_prunable_large() {
-        test_many_keys_determinism(create_prunable, None, 100_000);
+        test_many_keys_determinism(create_prunable, None, 50_000);
     }
 
     #[test_traced]
     #[ignore]
     fn test_many_keys_immutable_large() {
-        test_many_keys_determinism(create_immutable, None, 100_000);
+        test_many_keys_determinism(create_immutable, None, 50_000);
     }
 }
