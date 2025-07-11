@@ -100,10 +100,8 @@ where
             .map_err(|e| ResolverError::ConnectionError(e.to_string()))?;
 
         // Deserialize the response
-        let response = Message::decode(&response_data[..])
-            .map_err(|e| ResolverError::DeserializationError(e.to_string()))?;
-
-        Ok(response)
+        Message::decode(&response_data[..])
+            .map_err(|e| ResolverError::DeserializationError(e.to_string()))
     }
 
     /// Get server metadata (target hash and bounds)

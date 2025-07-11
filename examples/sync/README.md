@@ -68,7 +68,7 @@ Client options:
    
    You should see output like:
    ```
-   INFO  ADB Sync Server starting
+   INFO  Sync Server starting
    INFO  Configuration port=8080 initial_ops=50 storage_dir=/tmp/adb_sync_server seed=1337 metrics_port=9091
    INFO  Initializing database
    INFO  Database ready op_count=51 root_hash=abc123...

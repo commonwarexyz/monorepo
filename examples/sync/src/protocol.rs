@@ -30,6 +30,10 @@ pub enum Message {
     /// Response with server metadata.
     GetServerMetadataResponse(GetServerMetadataResponse),
     /// Error response.
+    /// Note that, in this example, the server sends an error response to the client in the event
+    /// of an invalid request or internal error. In a real-world application, this may be inadvisable.
+    /// A server may want to simply ignore the client's faulty request and close the connection
+    /// to the client. Similarly, a client may not care about the reason for the server's error.
     Error(ErrorResponse),
 }
 

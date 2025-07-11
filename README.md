@@ -32,6 +32,7 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 * [chat](./examples/chat/README.md): Send encrypted messages to a group of friends.
 * [flood](./examples/flood/README.md): Spam peers deployed to AWS EC2 with random messages.
 * [log](./examples/log/README.md): Commit to a secret log and agree to its hash.
+* [sync](./examples/sync/README.md): Synchronize state between a server and client.
 * [vrf](./examples/vrf/README.md): Generate bias-resistant randomness with untrusted contributors.
 
 ## Miscellaneous
