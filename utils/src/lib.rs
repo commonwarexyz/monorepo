@@ -2,6 +2,7 @@
 
 use bytes::{BufMut, BytesMut};
 use commonware_codec::{EncodeSize, Write};
+use std::time::Duration;
 
 pub mod array;
 pub use array::Array;
@@ -146,6 +147,46 @@ macro_rules! NZU64 {
         // This will panic at runtime if $val is zero.
         // For literals, the compiler *might* optimize, but the check is still conceptually there.
         std::num::NonZeroU64::new($val).expect("value must be non-zero")
+    };
+}
+
+/// A wrapper around `Duration` that guarantees the duration is non-zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NonZeroDuration(Duration);
+
+impl NonZeroDuration {
+    /// Creates a `NonZeroDuration` if the given duration is non-zero.
+    pub fn new(duration: Duration) -> Option<Self> {
+        if duration == Duration::ZERO {
+            None
+        } else {
+            Some(Self(duration))
+        }
+    }
+
+    /// Creates a `NonZeroDuration` from the given duration, panicking if it's zero.
+    pub fn new_panic(duration: Duration) -> Self {
+        Self::new(duration).expect("duration must be non-zero")
+    }
+
+    /// Returns the wrapped `Duration`.
+    pub fn get(self) -> Duration {
+        self.0
+    }
+}
+
+impl From<NonZeroDuration> for Duration {
+    fn from(nz_duration: NonZeroDuration) -> Self {
+        nz_duration.0
+    }
+}
+
+/// A macro to create a `NonZeroDuration` from a duration, panicking if the duration is zero.
+#[macro_export]
+macro_rules! NZDuration {
+    ($val:expr) => {
+        // This will panic at runtime if $val is zero.
+        $crate::NonZeroDuration::new_panic($val)
     };
 }
 
@@ -391,10 +432,35 @@ mod tests {
         assert!(std::panic::catch_unwind(|| NZUsize!(0)).is_err());
         assert!(std::panic::catch_unwind(|| NZU32!(0)).is_err());
         assert!(std::panic::catch_unwind(|| NZU64!(0)).is_err());
+        assert!(std::panic::catch_unwind(|| NZDuration!(Duration::ZERO)).is_err());
 
         // Test case 1: non-zero value
         assert_eq!(NZUsize!(1).get(), 1);
         assert_eq!(NZU32!(2).get(), 2);
         assert_eq!(NZU64!(3).get(), 3);
+        assert_eq!(
+            NZDuration!(Duration::from_secs(1)).get(),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn test_non_zero_duration() {
+        // Test case 0: zero duration
+        assert!(NonZeroDuration::new(Duration::ZERO).is_none());
+
+        // Test case 1: non-zero duration
+        let duration = Duration::from_millis(100);
+        let nz_duration = NonZeroDuration::new(duration).unwrap();
+        assert_eq!(nz_duration.get(), duration);
+        assert_eq!(Duration::from(nz_duration), duration);
+
+        // Test case 2: panic on zero
+        assert!(std::panic::catch_unwind(|| NonZeroDuration::new_panic(Duration::ZERO)).is_err());
+
+        // Test case 3: ordering
+        let d1 = NonZeroDuration::new(Duration::from_millis(100)).unwrap();
+        let d2 = NonZeroDuration::new(Duration::from_millis(200)).unwrap();
+        assert!(d1 < d2);
     }
 }
