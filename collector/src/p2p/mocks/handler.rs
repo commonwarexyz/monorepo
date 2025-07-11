@@ -95,6 +95,5 @@ impl crate::Handler for Handler {
                 result: request.data.wrapping_mul(2),
             });
         }
-        // Otherwise, drop the responder to indicate no response
     }
 }
