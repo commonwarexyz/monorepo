@@ -111,3 +111,25 @@ curl http://localhost:9090/metrics
 4. Client repeatedly fetches, applies operations served by Server
 5. Client continues until all operations applied, state matches Server
 6. Client disconnects and stops; Server keeps running
+
+## Notes About Production Usage
+
+For the sake of making this example short, straightforward, and to the point, we've taken some 
+expedients that would be inadvisable in a production system.
+
+### Authenticated Connections
+
+In this example, the client simply dials the server and connects. It does not do any authentication
+of the server's identity. In a real application, this may be necessary.
+
+Look at the [chat](../chat/README.md) example to see how to use Commonware networking primitives
+like [commonware_p2p::authenticated](https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html) 
+to do authenticated networking.
+
+### Trusting the Server
+
+In typical usage, the server is untrusted, which is the reason the client uses cryptographic proofs
+to verify the data it receives from the server. 
+In this example, however, the client trusts the server to provide it the correct target root hash.
+In a real application, the client should get the target information from a trusted source such as,
+for example, a chain state. That is, in typical usage, the server 
