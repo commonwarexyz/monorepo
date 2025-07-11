@@ -30,6 +30,8 @@ pub trait Originator: Clone + Send + 'static {
     ) -> impl Future<Output = Vec<Self::PublicKey>> + Send;
 
     /// Cancel a request by `commitment`, ignoring any future responses.
+    ///
+    /// Tracked commitments are not removed until explicitly cancelled.
     fn cancel(
         &mut self,
         commitment: <Self::Request as Committable>::Commitment,

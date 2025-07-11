@@ -154,7 +154,9 @@ where
                                 }
                             },
                             Message::Cancel { commitment } => {
-                                assert!(self.tracked.remove(&commitment).is_some(), "removed unknown commitment");
+                                if self.tracked.remove(&commitment).is_none() {
+                                    debug!(?commitment, "ignoring removal of unknown commitment");
+                                }
                                 self.outstanding.set(self.tracked.len() as i64);
                             }
                         }
