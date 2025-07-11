@@ -6,7 +6,7 @@ use crate::p2p::{Handler, Monitor};
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
-use commonware_p2p::{utils::codec::wrap, Receiver, Recipients, Sender};
+use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::futures::Pool;
 use futures::{
@@ -15,20 +15,22 @@ use futures::{
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{HashMap, HashSet};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 /// Engine that will disperse messages and collect responses.
-pub struct Engine<E, Rq, Rs, P, M, H>
+pub struct Engine<E, B, Rq, Rs, P, M, H>
 where
     E: Clock + Spawner,
+    P: PublicKey,
+    B: Blocker<PublicKey = P>,
     Rq: Committable + Digestible + Codec,
     Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest> + Codec,
-    P: PublicKey,
     M: Monitor<Response = Rs, PublicKey = P>,
     H: Handler<Request = Rq, Response = Rs, PublicKey = P>,
 {
     // Configuration
     context: E,
+    blocker: B,
     priority_request: bool,
     request_codec: Rq::Cfg,
     priority_response: bool,
@@ -48,19 +50,20 @@ where
     responses: Counter,
 }
 
-impl<E, Rq, Rs, P, M, H> Engine<E, Rq, Rs, P, M, H>
+impl<E, B, Rq, Rs, P, M, H> Engine<E, B, Rq, Rs, P, M, H>
 where
     E: Clock + Spawner + Metrics,
+    P: PublicKey,
+    B: Blocker<PublicKey = P>,
     Rq: Committable + Digestible + Codec,
     Rs: Committable<Commitment = Rq::Commitment> + Digestible<Digest = Rq::Digest> + Codec,
-    P: PublicKey,
     M: Monitor<Response = Rs, PublicKey = P>,
     H: Handler<Request = Rq, Response = Rs, PublicKey = P>,
 {
     /// Creates a new engine with the given configuration.
     ///
     /// Returns a tuple of the engine and the mailbox for sending messages.
-    pub fn new(context: E, cfg: Config<M, H, Rq::Cfg, Rs::Cfg>) -> (Self, Mailbox<P, Rq>) {
+    pub fn new(context: E, cfg: Config<B, M, H, Rq::Cfg, Rs::Cfg>) -> (Self, Mailbox<P, Rq>) {
         // Create mailbox
         let (tx, rx) = mpsc::channel(cfg.mailbox_size);
         let mailbox: Mailbox<P, Rq> = Mailbox::new(tx);
@@ -80,6 +83,7 @@ where
         (
             Self {
                 context,
+                blocker: cfg.blocker,
                 priority_request: cfg.priority_request,
                 request_codec: cfg.request_codec,
                 priority_response: cfg.priority_response,
@@ -183,7 +187,8 @@ where
                     let msg = match msg {
                         Ok(msg) => msg,
                         Err(err) => {
-                            debug!(?err, ?peer, "failed to decode message");
+                            warn!(?err, ?peer, "blocking peer");
+                            self.blocker.block(peer).await;
                             continue;
                         }
                     };
@@ -209,7 +214,8 @@ where
                     let msg = match msg {
                         Ok(msg) => msg,
                         Err(err) => {
-                            debug!(?err, ?peer, "failed to decode message");
+                            warn!(?err, ?peer, "blocking peer");
+                            self.blocker.block(peer).await;
                             continue;
                         }
                     };

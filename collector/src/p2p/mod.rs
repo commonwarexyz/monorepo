@@ -3,6 +3,7 @@
 use crate::{Handler, Monitor};
 
 mod engine;
+use commonware_p2p::Blocker;
 pub use engine::Engine;
 mod ingress;
 pub use ingress::{Mailbox, Message};
@@ -12,7 +13,10 @@ mod mocks;
 
 /// Configuration for an [Engine].
 #[derive(Clone)]
-pub struct Config<M: Monitor, H: Handler, RqC, RsC> {
+pub struct Config<B: Blocker, M: Monitor, H: Handler, RqC, RsC> {
+    /// The [commonware_p2p::Blocker] that will be used to block peers from sending messages.
+    pub blocker: B,
+
     /// The [Monitor] that will be notified when a response is collected.
     pub monitor: M,
 
@@ -52,7 +56,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{Link, Network, Oracle, Receiver, Sender},
-        Recipients,
+        Blocker, Recipients,
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use futures::StreamExt;
@@ -126,6 +130,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     async fn setup_and_spawn_engine(
         context: &deterministic::Context,
+        blocker: impl Blocker<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
         connection: (
             (Sender<PublicKey>, Receiver<PublicKey>),
@@ -138,6 +143,7 @@ mod tests {
         let (engine, mailbox) = Engine::new(
             context.with_label(&format!("engine_{public_key}")),
             Config {
+                blocker,
                 monitor,
                 handler,
                 mailbox_size: MAILBOX_SIZE,
@@ -172,6 +178,7 @@ mod tests {
             let (mon, mut mon_out) = Monitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
+                oracle.control(scheme.public_key()),
                 scheme,
                 (req_conn, res_conn),
                 mon,
@@ -187,6 +194,7 @@ mod tests {
             let (handler, mut handler_out) = Handler::new(true);
             let _mailbox = setup_and_spawn_engine(
                 &context,
+                oracle.control(scheme.public_key()),
                 scheme,
                 (req_conn, res_conn),
                 Monitor::dummy(),
@@ -252,6 +260,7 @@ mod tests {
             let (mon, mut mon_out) = Monitor::new();
             let mut mailbox = setup_and_spawn_engine(
                 &context,
+                oracle.control(scheme.public_key()),
                 scheme,
                 (req_conn, res_conn),
                 mon,
@@ -267,6 +276,7 @@ mod tests {
             let (handler, _) = Handler::new(true);
             let _mailbox = setup_and_spawn_engine(
                 &context,
+                oracle.control(scheme.public_key()),
                 scheme,
                 (req_conn, res_conn),
                 Monitor::dummy(),
@@ -318,6 +328,7 @@ mod tests {
             let (mon1, mut mon_out1) = Monitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
+                oracle.control(scheme1.public_key()),
                 scheme1,
                 (req_conn1, res_conn1),
                 mon1,
@@ -333,6 +344,7 @@ mod tests {
             let (handler2, _) = Handler::new(true);
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
+                oracle.control(scheme2.public_key()),
                 scheme2,
                 (req_conn2, res_conn2),
                 Monitor::dummy(),
@@ -348,6 +360,7 @@ mod tests {
             let (handler3, _) = Handler::new(true);
             let _mailbox3 = setup_and_spawn_engine(
                 &context,
+                oracle.control(scheme3.public_key()),
                 scheme3,
                 (req_conn3, res_conn3),
                 Monitor::dummy(),
@@ -414,6 +427,7 @@ mod tests {
             let (mon1, mut mon_out1) = Monitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
+                oracle.control(scheme1.public_key()),
                 scheme1,
                 (req_conn1, res_conn1),
                 mon1,
@@ -429,6 +443,7 @@ mod tests {
             let (handler2, _) = Handler::new(true);
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
+                oracle.control(scheme2.public_key()),
                 scheme2,
                 (req_conn2, res_conn2),
                 Monitor::dummy(),
@@ -491,6 +506,7 @@ mod tests {
             let (mon1, mut mon_out1) = Monitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
+                oracle.control(scheme1.public_key()),
                 scheme1,
                 (req_conn1, res_conn1),
                 mon1,
@@ -508,6 +524,7 @@ mod tests {
             handler2.set_response(20, Response { id: 20, result: 40 });
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
+                oracle.control(scheme2.public_key()),
                 scheme2,
                 (req_conn2, res_conn2),
                 Monitor::dummy(),
@@ -578,6 +595,7 @@ mod tests {
             let (mon1, mut mon_out1) = Monitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
+                oracle.control(scheme1.public_key()),
                 scheme1,
                 (req_conn1, res_conn1),
                 mon1,
@@ -593,6 +611,7 @@ mod tests {
             let (handler2, mut handler_out2) = Handler::new(false);
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
+                oracle.control(scheme2.public_key()),
                 scheme2,
                 (req_conn2, res_conn2),
                 Monitor::dummy(),
@@ -637,7 +656,7 @@ mod tests {
     fn test_empty_recipients() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let (_, schemes, _, connections) = setup_network_and_peers(&context, &[0]).await;
+            let (oracle, schemes, _, connections) = setup_network_and_peers(&context, &[0]).await;
             let mut schemes = schemes.into_iter();
             let mut connections = connections.into_iter();
 
@@ -649,6 +668,7 @@ mod tests {
             let (mon, mut mon_out) = Monitor::new();
             let mut mailbox = setup_and_spawn_engine(
                 &context,
+                oracle.control(scheme.public_key()),
                 scheme,
                 (req_conn, res_conn),
                 mon,
