@@ -1,4 +1,4 @@
-//! Implementation of the [crate::Originator], [crate::Handler], and [crate::Monitor] traits for [commonware_p2p].
+//! Implementation of a [commonware_p2p]-optimized `collector`.
 
 use crate::{Handler, Monitor};
 
