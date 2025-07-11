@@ -1,12 +1,17 @@
 //! Collect responses to [Committable] requests.
-
-pub mod p2p;
+//!
+//! # Status
+//!
+//! `commonware-collector` is **ALPHA** software and is not yet recommended for production use. Developers should
+//! expect breaking changes and occasional instability.
 
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use futures::channel::oneshot;
 use std::future::Future;
+
+pub mod p2p;
 
 /// An [Originator] sends requests out to a set of [Handler]s and collects replies.
 pub trait Originator: Clone + Send + 'static {
