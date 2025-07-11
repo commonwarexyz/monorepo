@@ -1163,7 +1163,7 @@ mod tests {
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
                 lower_bound: PRUNED_TO_POS,
-                upper_bound: 1000,
+                upper_bound: NUM_OPERATIONS as u64,
                 pinned_nodes,
             };
             let synced_mmr: Mmr<_, Sha256> = Mmr::init_pruned(context.clone(), sync_config)
@@ -1221,7 +1221,7 @@ mod tests {
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
                 lower_bound: source_mmr_size,
-                upper_bound: 1000,
+                upper_bound: source_mmr_size,
                 pinned_nodes,
             };
 
@@ -1571,6 +1571,7 @@ mod tests {
             for i in 0..5 {
                 initial_mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
             }
+            let initial_size = initial_mmr.size();
             initial_mmr.sync(&mut hasher).await.unwrap();
             initial_mmr.close(&mut hasher).await.unwrap();
 
@@ -1590,7 +1591,7 @@ mod tests {
                     buffer_pool: initial_config.buffer_pool.clone(),
                 },
                 lower_bound: pruned_to_pos,
-                upper_bound: 1000,
+                upper_bound: initial_size - 1,
                 pinned_nodes,
             };
 
@@ -1624,6 +1625,7 @@ mod tests {
                 initial_mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
             }
             initial_mmr.sync(&mut hasher).await.unwrap();
+            let initial_size = initial_mmr.size();
             initial_mmr.close(&mut hasher).await.unwrap();
 
             // Test init_pruned with reuse
@@ -1642,7 +1644,7 @@ mod tests {
                     buffer_pool: initial_config.buffer_pool.clone(),
                 },
                 lower_bound: pruned_to_pos,
-                upper_bound: 1000,
+                upper_bound: initial_size - 1,
                 pinned_nodes,
             };
 
