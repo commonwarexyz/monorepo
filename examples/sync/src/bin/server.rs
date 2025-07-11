@@ -93,7 +93,7 @@ where
     Ok(())
 }
 
-/// Handle a [GetServerMetadataRequest] and return server state information.
+/// Handle a request for server state information.
 async fn handle_get_server_metadata_request<E>(
     state: &ServerState<E>,
 ) -> Result<GetServerMetadataResponse, ProtocolError>
