@@ -1,10 +1,7 @@
 //! Provides a [Resolver] implementation that communicates with a remote server
 //! to fetch operations and proofs.
 
-use crate::{
-    GetOperationsRequest, GetServerMetadataRequest, GetServerMetadataResponse, Message,
-    MAX_MESSAGE_SIZE,
-};
+use crate::{GetOperationsRequest, GetServerMetadataResponse, Message, MAX_MESSAGE_SIZE};
 use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_runtime::RwLock;
 use commonware_storage::{
@@ -111,14 +108,7 @@ where
 
     /// Get server metadata (target hash and bounds)
     pub async fn get_server_metadata(&self) -> Result<GetServerMetadataResponse, ResolverError> {
-        let request = GetServerMetadataRequest {
-            version: crate::PROTOCOL_VERSION,
-        };
-
-        match self
-            .send_request(Message::GetServerMetadataRequest(request))
-            .await?
-        {
+        match self.send_request(Message::GetServerMetadataRequest).await? {
             Message::GetServerMetadataResponse(response) => {
                 info!("Received server metadata");
                 Ok(response)
@@ -150,7 +140,6 @@ where
         max_ops: NonZeroU64,
     ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, SyncError> {
         let request = GetOperationsRequest {
-            version: crate::PROTOCOL_VERSION,
             size,
             start_loc,
             max_ops,

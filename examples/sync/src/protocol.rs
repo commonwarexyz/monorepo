@@ -29,7 +29,7 @@ pub enum Message {
     /// Response with operations and proof.
     GetOperationsResponse(GetOperationsResponse),
     /// Request server metadata (target hash, bounds, etc.).
-    GetServerMetadataRequest(GetServerMetadataRequest),
+    GetServerMetadataRequest,
     /// Response with server metadata.
     GetServerMetadataResponse(GetServerMetadataResponse),
     /// Error response.
@@ -39,8 +39,6 @@ pub enum Message {
 /// Request for operations from the server.
 #[derive(Debug, Clone)]
 pub struct GetOperationsRequest {
-    /// Protocol version.
-    pub version: u8,
     /// Size of the database at the root we are syncing to.
     pub size: u64,
     /// Starting location for the operations.
@@ -52,26 +50,15 @@ pub struct GetOperationsRequest {
 /// Response with operations and proof.
 #[derive(Debug, Clone)]
 pub struct GetOperationsResponse {
-    /// Protocol version.
-    pub version: u8,
     /// Serialized proof that the operations were in the database.
     pub proof_bytes: Vec<u8>,
     /// Serialized operations in the requested range.
     pub operations_bytes: Vec<u8>,
 }
 
-/// Request for server metadata.
-#[derive(Debug, Clone)]
-pub struct GetServerMetadataRequest {
-    /// Protocol version.
-    pub version: u8,
-}
-
 /// Response with server metadata.
 #[derive(Debug, Clone)]
 pub struct GetServerMetadataResponse {
-    /// Protocol version.
-    pub version: u8,
     /// Target hash of the database.
     pub target_hash: Digest,
     /// Oldest retained operation location.
@@ -83,8 +70,6 @@ pub struct GetServerMetadataResponse {
 /// Error response.
 #[derive(Debug, Clone)]
 pub struct ErrorResponse {
-    /// Protocol version.
-    pub version: u8,
     /// Error code.
     pub error_code: ErrorCode,
     /// Human-readable error message.
@@ -135,9 +120,8 @@ impl Write for Message {
                 1u8.write(buf);
                 resp.write(buf);
             }
-            Message::GetServerMetadataRequest(req) => {
+            Message::GetServerMetadataRequest => {
                 2u8.write(buf);
-                req.write(buf);
             }
             Message::GetServerMetadataResponse(resp) => {
                 3u8.write(buf);
@@ -157,7 +141,7 @@ impl EncodeSize for Message {
         1 + match self {
             Message::GetOperationsRequest(req) => req.encode_size(),
             Message::GetOperationsResponse(resp) => resp.encode_size(),
-            Message::GetServerMetadataRequest(req) => req.encode_size(),
+            Message::GetServerMetadataRequest => 0,
             Message::GetServerMetadataResponse(resp) => resp.encode_size(),
             Message::Error(err) => err.encode_size(),
         }
@@ -176,9 +160,7 @@ impl Read for Message {
             1 => Ok(Message::GetOperationsResponse(GetOperationsResponse::read(
                 buf,
             )?)),
-            2 => Ok(Message::GetServerMetadataRequest(
-                GetServerMetadataRequest::read(buf)?,
-            )),
+            2 => Ok(Message::GetServerMetadataRequest),
             3 => Ok(Message::GetServerMetadataResponse(
                 GetServerMetadataResponse::read(buf)?,
             )),
@@ -190,7 +172,6 @@ impl Read for Message {
 
 impl Write for GetOperationsRequest {
     fn write(&self, buf: &mut impl BufMut) {
-        self.version.write(buf);
         self.size.write(buf);
         self.start_loc.write(buf);
         self.max_ops.get().write(buf);
@@ -199,10 +180,7 @@ impl Write for GetOperationsRequest {
 
 impl EncodeSize for GetOperationsRequest {
     fn encode_size(&self) -> usize {
-        self.version.encode_size()
-            + self.size.encode_size()
-            + self.start_loc.encode_size()
-            + self.max_ops.get().encode_size()
+        self.size.encode_size() + self.start_loc.encode_size() + self.max_ops.get().encode_size()
     }
 }
 
@@ -210,14 +188,12 @@ impl Read for GetOperationsRequest {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let version = u8::read(buf)?;
         let size = u64::read(buf)?;
         let start_loc = u64::read(buf)?;
         let max_ops_raw = u64::read(buf)?;
         let max_ops = NonZeroU64::new(max_ops_raw)
             .ok_or_else(|| CodecError::Invalid("GetOperationsRequest", "max_ops cannot be zero"))?;
         Ok(Self {
-            version,
             size,
             start_loc,
             max_ops,
@@ -227,7 +203,6 @@ impl Read for GetOperationsRequest {
 
 impl Write for GetOperationsResponse {
     fn write(&self, buf: &mut impl BufMut) {
-        self.version.write(buf);
         self.proof_bytes.write(buf);
         self.operations_bytes.write(buf);
     }
@@ -235,9 +210,7 @@ impl Write for GetOperationsResponse {
 
 impl EncodeSize for GetOperationsResponse {
     fn encode_size(&self) -> usize {
-        self.version.encode_size()
-            + self.proof_bytes.encode_size()
-            + self.operations_bytes.encode_size()
+        self.proof_bytes.encode_size() + self.operations_bytes.encode_size()
     }
 }
 
@@ -246,42 +219,17 @@ impl Read for GetOperationsResponse {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         use commonware_codec::ReadRangeExt;
-        let version = u8::read(buf)?;
         let proof_bytes = Vec::<u8>::read_range(buf, 0..=MAX_MESSAGE_SIZE)?;
         let operations_bytes = Vec::<u8>::read_range(buf, 0..=MAX_MESSAGE_SIZE)?;
         Ok(Self {
-            version,
             proof_bytes,
             operations_bytes,
         })
     }
 }
 
-impl Write for GetServerMetadataRequest {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.version.write(buf);
-    }
-}
-
-impl EncodeSize for GetServerMetadataRequest {
-    fn encode_size(&self) -> usize {
-        self.version.encode_size()
-    }
-}
-
-impl Read for GetServerMetadataRequest {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Ok(Self {
-            version: u8::read(buf)?,
-        })
-    }
-}
-
 impl Write for GetServerMetadataResponse {
     fn write(&self, buf: &mut impl BufMut) {
-        self.version.write(buf);
         self.target_hash.write(buf);
         self.oldest_retained_loc.write(buf);
         self.latest_op_loc.write(buf);
@@ -290,8 +238,7 @@ impl Write for GetServerMetadataResponse {
 
 impl EncodeSize for GetServerMetadataResponse {
     fn encode_size(&self) -> usize {
-        self.version.encode_size()
-            + self.target_hash.encode_size()
+        self.target_hash.encode_size()
             + self.oldest_retained_loc.encode_size()
             + self.latest_op_loc.encode_size()
     }
@@ -301,12 +248,10 @@ impl Read for GetServerMetadataResponse {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let version = u8::read(buf)?;
         let target_hash = Digest::read(buf)?;
         let oldest_retained_loc = u64::read(buf)?;
         let latest_op_loc = u64::read(buf)?;
         Ok(Self {
-            version,
             target_hash,
             oldest_retained_loc,
             latest_op_loc,
@@ -316,7 +261,6 @@ impl Read for GetServerMetadataResponse {
 
 impl Write for ErrorResponse {
     fn write(&self, buf: &mut impl BufMut) {
-        self.version.write(buf);
         self.error_code.write(buf);
         self.message.as_bytes().to_vec().write(buf);
     }
@@ -324,9 +268,7 @@ impl Write for ErrorResponse {
 
 impl EncodeSize for ErrorResponse {
     fn encode_size(&self) -> usize {
-        self.version.encode_size()
-            + self.error_code.encode_size()
-            + self.message.as_bytes().to_vec().encode_size()
+        self.error_code.encode_size() + self.message.as_bytes().to_vec().encode_size()
     }
 }
 
@@ -334,14 +276,12 @@ impl Read for ErrorResponse {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let version = u8::read(buf)?;
         let error_code = ErrorCode::read(buf)?;
         // Read string as Vec<u8> and convert to String
         let message_bytes = Vec::<u8>::read_range(buf, 0..=MAX_MESSAGE_SIZE)?;
         let message = String::from_utf8(message_bytes)
             .map_err(|_| CodecError::Invalid("ErrorResponse", "invalid UTF-8 in message"))?;
         Ok(Self {
-            version,
             error_code,
             message,
         })
@@ -398,7 +338,6 @@ impl From<ProtocolError> for ErrorResponse {
         };
 
         ErrorResponse {
-            version: PROTOCOL_VERSION,
             error_code,
             message,
         }
@@ -408,12 +347,6 @@ impl From<ProtocolError> for ErrorResponse {
 impl GetOperationsRequest {
     /// Validate the request parameters.
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        if self.version != PROTOCOL_VERSION {
-            return Err(ProtocolError::UnsupportedVersion {
-                version: self.version,
-            });
-        }
-
         if self.start_loc >= self.size {
             return Err(ProtocolError::InvalidRequest {
                 message: format!("start_loc >= size ({}) >= ({})", self.start_loc, self.size),
@@ -430,19 +363,6 @@ impl GetOperationsRequest {
     }
 }
 
-impl GetServerMetadataRequest {
-    /// Validate the request parameters.
-    pub fn validate(&self) -> Result<(), ProtocolError> {
-        if self.version != PROTOCOL_VERSION {
-            return Err(ProtocolError::UnsupportedVersion {
-                version: self.version,
-            });
-        }
-
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,28 +372,14 @@ mod tests {
     fn test_get_operations_request_validation() {
         // Valid request
         let request = GetOperationsRequest {
-            version: PROTOCOL_VERSION,
             size: 100,
             start_loc: 10,
             max_ops: NZU64!(50),
         };
         assert!(request.validate().is_ok());
 
-        // Invalid version
-        let request = GetOperationsRequest {
-            version: 99,
-            size: 100,
-            start_loc: 10,
-            max_ops: NZU64!(50),
-        };
-        assert!(matches!(
-            request.validate(),
-            Err(ProtocolError::UnsupportedVersion { .. })
-        ));
-
         // Invalid start_loc
         let request = GetOperationsRequest {
-            version: PROTOCOL_VERSION,
             size: 100,
             start_loc: 100,
             max_ops: NZU64!(50),
@@ -485,7 +391,6 @@ mod tests {
 
         // start_loc beyond size
         let request = GetOperationsRequest {
-            version: PROTOCOL_VERSION,
             size: 100,
             start_loc: 150,
             max_ops: NZU64!(50),
@@ -493,24 +398,6 @@ mod tests {
         assert!(matches!(
             request.validate(),
             Err(ProtocolError::InvalidRequest { .. })
-        ));
-    }
-
-    #[test]
-    fn test_get_server_metadata_request_validation() {
-        // Valid request
-        let request = GetServerMetadataRequest {
-            version: PROTOCOL_VERSION,
-        };
-        assert!(request.validate().is_ok());
-
-        // Invalid version
-        let request = GetServerMetadataRequest {
-            version: PROTOCOL_VERSION.wrapping_sub(1),
-        };
-        assert!(matches!(
-            request.validate(),
-            Err(ProtocolError::UnsupportedVersion { .. })
         ));
     }
 }

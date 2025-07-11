@@ -9,8 +9,8 @@ use commonware_storage::mmr::hasher::Standard;
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     crate_version, create_adb_config, create_test_operations, Database, ErrorResponse,
-    GetOperationsRequest, GetOperationsResponse, GetServerMetadataRequest,
-    GetServerMetadataResponse, Message, Operation, ProtocolError, MAX_MESSAGE_SIZE,
+    GetOperationsRequest, GetOperationsResponse, GetServerMetadataResponse, Message, Operation,
+    ProtocolError, MAX_MESSAGE_SIZE,
 };
 use prometheus_client::metrics::counter::Counter;
 use std::{
@@ -96,12 +96,10 @@ where
 /// Handle a [GetServerMetadataRequest] and return server state information.
 async fn handle_get_server_metadata_request<E>(
     state: &ServerState<E>,
-    request: GetServerMetadataRequest,
 ) -> Result<GetServerMetadataResponse, ProtocolError>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
-    request.validate()?;
     state.request_counter.inc();
 
     let database = state.database.read().await;
@@ -118,7 +116,6 @@ where
     drop(database);
 
     let response = GetServerMetadataResponse {
-        version: commonware_sync::PROTOCOL_VERSION,
         target_hash,
         oldest_retained_loc,
         latest_op_loc,
@@ -185,7 +182,6 @@ where
     );
 
     Ok(GetOperationsResponse {
-        version: commonware_sync::PROTOCOL_VERSION,
         proof_bytes,
         operations_bytes,
     })
@@ -239,8 +235,8 @@ where
                     }
                 }
             }
-            Message::GetServerMetadataRequest(request) => {
-                match handle_get_server_metadata_request(&state, request).await {
+            Message::GetServerMetadataRequest => {
+                match handle_get_server_metadata_request(&state).await {
                     Ok(response) => Message::GetServerMetadataResponse(response),
                     Err(e) => {
                         warn!(client_addr = %client_addr, error = %e, "❌ GetServerMetadata failed");
@@ -253,7 +249,6 @@ where
                 warn!(client_addr = %client_addr, "❌ Unexpected message type");
                 state.error_counter.inc();
                 Message::Error(ErrorResponse {
-                    version: commonware_sync::PROTOCOL_VERSION,
                     error_code: commonware_sync::ErrorCode::InvalidRequest,
                     message: "Unexpected message type".to_string(),
                 })
