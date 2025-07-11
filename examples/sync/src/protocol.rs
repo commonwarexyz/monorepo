@@ -9,6 +9,7 @@
 //! - Fetching operations with cryptographic proofs
 //! - Error handling
 
+use crate::Operation;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, ReadRangeExt as _, Write,
@@ -17,8 +18,6 @@ use commonware_cryptography::sha256::Digest;
 use commonware_storage::mmr::verification::Proof;
 use std::num::NonZeroU64;
 use thiserror::Error;
-
-use crate::Operation;
 
 /// Maximum message size in bytes (10MB).
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
