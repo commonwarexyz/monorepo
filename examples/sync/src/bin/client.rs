@@ -122,17 +122,17 @@ where
     // Get the root hash of the synced database
     let mut hasher = Standard::new();
     let root_hash = database.root(&mut hasher);
-    let root_hash_hex = root_hash
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
 
     // Verify the hash matches the  target hash.
     if root_hash != target_hash {
         return Err(format!("Synced database root hash does not match target hash: {root_hash:?} != {target_hash:?}").into());
     }
 
+    let root_hash_hex = root_hash
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
     info!(
         database_ops = database.op_count(),
         root_hash = %root_hash_hex,

@@ -16,11 +16,7 @@ use commonware_storage::{
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::channel::oneshot;
-use std::{
-    net::SocketAddr,
-    num::NonZeroU64,
-    sync::{atomic::AtomicU64, Arc},
-};
+use std::{net::SocketAddr, num::NonZeroU64, sync::Arc};
 use thiserror::Error;
 use tracing::{error, info};
 
@@ -46,8 +42,6 @@ where
     server_addr: SocketAddr,
     /// Persistent connection (wrapped in mutex for async access).
     connection: Arc<RwLock<Option<Connection<E>>>>,
-    /// Request ID counter.
-    request_id_counter: AtomicU64,
 }
 
 impl<E> NetworkResolver<E>
@@ -60,7 +54,6 @@ where
             server_addr,
             connection: Arc::new(RwLock::new(None)),
             context,
-            request_id_counter: AtomicU64::new(0),
         }
     }
 
@@ -85,12 +78,6 @@ where
         info!(server_addr = %self.server_addr, "Connected");
 
         Ok(())
-    }
-
-    /// Generate a unique request ID.
-    fn generate_request_id(&self) -> u64 {
-        self.request_id_counter
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Send a request and receive a response using the persistent connection.
@@ -124,10 +111,8 @@ where
 
     /// Get server metadata (target hash and bounds)
     pub async fn get_server_metadata(&self) -> Result<GetServerMetadataResponse, ResolverError> {
-        let request_id = self.generate_request_id();
         let request = GetServerMetadataRequest {
             version: crate::PROTOCOL_VERSION,
-            request_id,
         };
 
         match self
@@ -164,13 +149,11 @@ where
         start_loc: u64,
         max_ops: NonZeroU64,
     ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, SyncError> {
-        let request_id = self.generate_request_id();
         let request = GetOperationsRequest {
             version: crate::PROTOCOL_VERSION,
             size,
             start_loc,
             max_ops,
-            request_id,
         };
 
         info!(

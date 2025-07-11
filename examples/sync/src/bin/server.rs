@@ -119,7 +119,6 @@ where
 
     let response = GetServerMetadataResponse {
         version: commonware_sync::PROTOCOL_VERSION,
-        request_id: request.request_id,
         target_hash,
         oldest_retained_loc,
         latest_op_loc,
@@ -187,7 +186,6 @@ where
 
     Ok(GetOperationsResponse {
         version: commonware_sync::PROTOCOL_VERSION,
-        request_id: request.request_id,
         proof_bytes,
         operations_bytes,
     })
@@ -256,7 +254,6 @@ where
                 state.error_counter.inc();
                 Message::Error(ErrorResponse {
                     version: commonware_sync::PROTOCOL_VERSION,
-                    request_id: None,
                     error_code: commonware_sync::ErrorCode::InvalidRequest,
                     message: "Unexpected message type".to_string(),
                 })
