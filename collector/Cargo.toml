@@ -4,7 +4,7 @@ edition = "2021"
 publish = true
 version = "0.0.54"
 license = "MIT OR Apache-2.0"
-description = "TBA"
+description = "Collect responses to committable requests."
 readme = "README.md"
 homepage = "https://commonware.xyz"
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/collector"
@@ -18,7 +18,6 @@ commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-stream = { workspace = true }
 commonware-utils = { workspace = true }
-bimap = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
 futures = { workspace = true }
