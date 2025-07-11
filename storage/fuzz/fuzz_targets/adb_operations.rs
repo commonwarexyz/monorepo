@@ -250,7 +250,9 @@ fn fuzz(data: FuzzInput) {
             }
         }
 
-        adb.close().await.expect("close should not fail");
+        adb.destroy().await.expect("destroy should not fail");
+        expected_state.clear();
+        all_keys.clear();
     });
 }
 

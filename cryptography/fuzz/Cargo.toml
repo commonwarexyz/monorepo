@@ -16,6 +16,7 @@ libfuzzer-sys = { workspace = true }
 p256 = { workspace = true, features = ["ecdsa"] }
 sha2 = { workspace = true }
 ed25519-zebra = "4.0.3"
+rand = { workspace = true }
 
 [[bin]]
 name = "bls12381_decode"
@@ -48,6 +49,27 @@ bench = false
 [[bin]]
 name = "bls12381_primitive_operations"
 path = "fuzz_targets/bls12381_primitive_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bloomfilter"
+path = "fuzz_targets/bloomfilter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bls12381_batch_verifier"
+path = "fuzz_targets/bls12381_batch_verifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ed25519_batch_verifier"
+path = "fuzz_targets/ed25519_batch_verifier.rs"
 test = false
 doc = false
 bench = false

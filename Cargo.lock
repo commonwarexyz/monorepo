@@ -1113,6 +1113,7 @@ dependencies = [
  "ed25519-zebra",
  "libfuzzer-sys",
  "p256",
+ "rand",
  "sha2 0.10.8",
 ]
 
