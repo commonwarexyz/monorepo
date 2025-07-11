@@ -207,8 +207,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         context: E,
         cfg: SyncConfig<E, K, V, T, H::Digest>,
     ) -> Result<Self, Error> {
-        // Use the MMR's init_with_smart_reuse method to properly handle the pruned state with pinned nodes
-        let mut mmr = Mmr::init_with_smart_reuse(
+        // Use the MMR's init_sync method to properly handle the pruned state with pinned nodes
+        let mut mmr = Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
                 config: crate::mmr::journaled::Config {
@@ -1566,8 +1566,8 @@ pub(super) mod test {
             let mut hasher = Standard::<Sha256>::new();
             let target_hash = source_db.root(&mut hasher);
 
-            // Create log with operations using smart reuse
-            let mut log = Journal::<_, Operation<Digest, Digest>>::init_with_smart_reuse(
+            // Create log
+            let mut log = Journal::<_, Operation<Digest, Digest>>::init_sync(
                 context.clone().with_label("ops_log"),
                 JConfig {
                     partition: format!("ops_log_{}", context.next_u64()),
@@ -1656,8 +1656,8 @@ pub(super) mod test {
             for lower_bound in [0, 50, 100, 150] {
                 let upper_bound = std::cmp::min(lower_bound + 49, total_ops - 1);
 
-                // Create log with operations using smart reuse
-                let mut log = Journal::<_, Operation<Digest, Digest>>::init_with_smart_reuse(
+                // Create log with operations
+                let mut log = Journal::<_, Operation<Digest, Digest>>::init_sync(
                     context.clone().with_label("boundary_log"),
                     JConfig {
                         partition: format!("boundary_log_{}_{}", lower_bound, context.next_u64()),

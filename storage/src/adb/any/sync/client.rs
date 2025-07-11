@@ -185,8 +185,8 @@ where
             });
         }
 
-        // Initialize the log journal with smart reuse capabilities
-        let log = Journal::<E, Operation<K, V>>::init_with_smart_reuse(
+        // Initialize the log journal with sync capabilities
+        let log = Journal::<E, Operation<K, V>>::init_sync(
             config.context.clone().with_label("log"),
             JConfig {
                 partition: config.db_config.log_journal_partition.clone(),

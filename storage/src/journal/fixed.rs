@@ -42,9 +42,9 @@
 //! The `prune` method allows the `Journal` to prune blobs consisting entirely of items prior to a
 //! given point in history.
 //!
-//! # Smart Reuse Initialization
+//! # Re-using Existing Data
 //!
-//! The `init_with_smart_reuse` method provides intelligent reuse of existing persistent data during
+//! The `init_sync` method provides intelligent reuse of existing persistent data during
 //! initialization. This is particularly useful for synchronization scenarios where you want to avoid
 //! re-downloading data that already exists locally.
 //!
@@ -241,7 +241,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         })
     }
 
-    /// Initialize a new [Journal] instance with smart reuse logic based on sync boundaries.
+    /// Initialize a new [Journal] instance optimized for synchronization scenarios.
     ///
     /// This method implements intelligent reuse of existing persistent data, making it ideal for
     /// synchronization scenarios where you want to avoid re-downloading data that already exists
@@ -253,7 +253,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     /// * `lower_bound` - The pruning boundary (operations below this will be pruned)
     /// * `upper_bound` - The sync boundary (operations above this will be rewound if present)
     ///
-    /// # Smart Reuse Behavior
+    /// # Sync Behavior
     ///
     /// The method inspects existing persistent data and applies one of three strategies:
     ///
@@ -282,14 +282,14 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     ///
     /// ```rust,ignore
     /// // Sync operations 100-200 from a remote source
-    /// let journal = Journal::init_with_smart_reuse(
+    /// let journal = Journal::init_sync(
     ///     context,
     ///     config,
     ///     100,  // lower_bound: prune operations < 100
     ///     200   // upper_bound: rewind operations > 200
     /// ).await?;
     /// ```
-    pub(crate) async fn init_with_smart_reuse(
+    pub(crate) async fn init_sync(
         context: E,
         cfg: Config,
         lower_bound: u64,
@@ -1651,7 +1651,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Test Case 1: Initialize with smart reuse at position 0 (empty journal)
+            // Test Case 1: Initialize at position 0 (empty journal)
             {
                 let cfg = Config {
                     partition: "test_smart_reuse_position_0".into(),
@@ -1660,14 +1660,10 @@ mod tests {
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
 
-                let synced_journal = Journal::<Context, Digest>::init_with_smart_reuse(
-                    context.clone(),
-                    cfg.clone(),
-                    0,
-                    1000,
-                )
-                .await
-                .expect("Failed to init with smart reuse at position 0");
+                let synced_journal =
+                    Journal::<Context, Digest>::init_sync(context.clone(), cfg.clone(), 0, 1000)
+                        .await
+                        .expect("Failed to init sync at position 0");
 
                 // Verify the synced journal state
                 assert_eq!(synced_journal.size().await.unwrap(), 0);
@@ -1680,7 +1676,7 @@ mod tests {
                 synced_journal.destroy().await.unwrap();
             }
 
-            // Test Case 2: Initialize with smart reuse in the middle of first blob
+            // Test Case 2: Initialize in the middle of first blob
             {
                 const STARTING_POSITION: u64 = 3;
 
@@ -1691,14 +1687,14 @@ mod tests {
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
 
-                let synced_journal = Journal::<Context, Digest>::init_with_smart_reuse(
+                let synced_journal = Journal::<Context, Digest>::init_sync(
                     context.clone(),
                     cfg.clone(),
                     STARTING_POSITION,
                     1000,
                 )
                 .await
-                .expect("Failed to init with smart reuse at position 3");
+                .expect("Failed to init sync at position 3");
 
                 // Verify the synced journal matches expected state
                 assert_eq!(synced_journal.size().await.unwrap(), STARTING_POSITION);
@@ -1714,7 +1710,7 @@ mod tests {
                 synced_journal.destroy().await.unwrap();
             }
 
-            // Test Case 3: Initialize with smart reuse exactly at blob boundary
+            // Test Case 3: Initialize exactly at blob boundary
             {
                 let cfg = Config {
                     partition: "test_smart_reuse_at_boundary".into(),
@@ -1723,14 +1719,14 @@ mod tests {
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
 
-                let synced_journal = Journal::<Context, Digest>::init_with_smart_reuse(
+                let synced_journal = Journal::<Context, Digest>::init_sync(
                     context.clone(),
                     cfg.clone(),
                     ITEMS_PER_BLOB, // Exactly one full blob
                     1000,
                 )
                 .await
-                .expect("Failed to init with smart reuse at blob boundary");
+                .expect("Failed to init sync at blob boundary");
 
                 // Verify the synced journal has correct state
                 assert_eq!(synced_journal.size().await.unwrap(), ITEMS_PER_BLOB);
@@ -1743,7 +1739,7 @@ mod tests {
                 synced_journal.destroy().await.unwrap();
             }
 
-            // Test Case 4: Initialize with smart reuse spanning multiple blobs
+            // Test Case 4: Initialize spanning multiple blobs
             {
                 const MULTI_BLOB_POSITION: u64 = 14; // 2 full blobs + 4 items in third blob
 
@@ -1754,14 +1750,14 @@ mod tests {
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
 
-                let synced_journal = Journal::<Context, Digest>::init_with_smart_reuse(
+                let synced_journal = Journal::<Context, Digest>::init_sync(
                     context.clone(),
                     cfg.clone(),
                     MULTI_BLOB_POSITION,
                     1000,
                 )
                 .await
-                .expect("Failed to init with smart reuse spanning multiple blobs");
+                .expect("Failed to init sync spanning multiple blobs");
 
                 // Verify the synced journal state
                 assert_eq!(synced_journal.size().await.unwrap(), MULTI_BLOB_POSITION);
@@ -1780,7 +1776,7 @@ mod tests {
                 synced_journal.destroy().await.unwrap();
             }
 
-            // Test Case 5: Test operations after initializing with smart reuse
+            // Test Case 5: Test operations after initializin
             {
                 const STARTING_POSITION: u64 = 7;
                 const OPERATIONS_PER_BLOB: u64 = 3;
@@ -1792,15 +1788,15 @@ mod tests {
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
 
-                // Initialize journal with smart reuse
-                let mut synced_journal = Journal::<Context, Digest>::init_with_smart_reuse(
+                // Initialize journal with sync
+                let mut synced_journal = Journal::<Context, Digest>::init_sync(
                     context.clone(),
                     cfg.clone(),
                     STARTING_POSITION,
                     1000,
                 )
                 .await
-                .expect("Failed to init with smart reuse");
+                .expect("Failed to init sync");
 
                 // Verify initial synced state
                 assert_eq!(synced_journal.size().await.unwrap(), STARTING_POSITION);
@@ -1813,7 +1809,7 @@ mod tests {
                     Journal::<Context, Digest>::CHUNK_SIZE_U64
                 );
 
-                // Test that operations work normally after smart reuse initialization
+                // Test that operations work normally after initialization
                 let pos = synced_journal.append(test_digest(100)).await.unwrap();
                 assert_eq!(pos, 7);
                 assert_eq!(synced_journal.size().await.unwrap(), 8);
@@ -1841,7 +1837,7 @@ mod tests {
                 let item = synced_journal.read(9).await.unwrap();
                 assert_eq!(item, test_digest(102));
 
-                // Note: In init_with_smart_reuse, positions 0-6 are initialized with dummy data
+                // Note: In init_sync, positions 0-6 are initialized with dummy data
                 // The read() method doesn't distinguish between real and dummy data, so these
                 // positions would return dummy data that shouldn't be used in practice
 
@@ -1918,15 +1914,15 @@ mod tests {
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
-            // Initialize journal with smart reuse
-            let mut journal = Journal::<Context, Digest>::init_with_smart_reuse(
+            // Initialize journa
+            let mut journal = Journal::<Context, Digest>::init_sync(
                 context.clone(),
                 cfg.clone(),
                 6, // 1 full blob + 2 items in second blob
                 1000,
             )
             .await
-            .expect("Failed to init with smart reuse");
+            .expect("Failed to init sync");
 
             // Add some actual data to the journal
             journal.append(test_digest(100)).await.unwrap(); // position 6
@@ -1967,7 +1963,7 @@ mod tests {
         });
     }
 
-    /// Test that init_with_smart_reuse maintains Journal invariants and append behavior works correctly
+    /// Test that init_sync maintains Journal invariants and append behavior works correctly
     #[test_traced]
     fn test_smart_reuse_invariants_and_append() {
         let executor = deterministic::Runner::default();
@@ -1979,15 +1975,11 @@ mod tests {
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
-            // Test case: init_with_smart_reuse with 7 operations (2 full blobs + 1 item in tail)
-            let mut journal = Journal::<Context, Digest>::init_with_smart_reuse(
-                context.clone(),
-                cfg.clone(),
-                7,
-                1000,
-            )
-            .await
-            .expect("Failed to init with smart reuse");
+            // Test case: init_sync with 7 operations (2 full blobs + 1 item in tail)
+            let mut journal =
+                Journal::<Context, Digest>::init_sync(context.clone(), cfg.clone(), 7, 1000)
+                    .await
+                    .expect("Failed to init sync");
 
             // Verify Journal invariants
             // 1. blobs contains only full blobs, never the tail
@@ -2070,7 +2062,7 @@ mod tests {
             initial_journal.close().await.unwrap();
 
             // Test case 1: init_pruned with boundary < existing data should reuse
-            let reused_journal = Journal::<Context, Digest>::init_with_smart_reuse(
+            let reused_journal = Journal::<Context, Digest>::init_sync(
                 context.clone(),
                 cfg.clone(),
                 10, // Prune to position 10, existing data has 15 operations
@@ -2111,7 +2103,7 @@ mod tests {
             initial_journal.sync().await.unwrap();
             initial_journal.close().await.unwrap();
 
-            let fresh_journal = Journal::<Context, Digest>::init_with_smart_reuse(
+            let fresh_journal = Journal::<Context, Digest>::init_sync(
                 context.clone(),
                 cfg.clone(),
                 20, // Prune to position 20, existing data only has 15 operations
@@ -2129,7 +2121,7 @@ mod tests {
         });
     }
 
-    /// Test that init_pruned works correctly when no existing journal exists
+    /// Test that init_sync works correctly when no existing journal exists
     #[test_traced]
     fn test_init_pruned_no_existing_data() {
         let executor = deterministic::Runner::default();
@@ -2141,15 +2133,11 @@ mod tests {
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
-            // Call init_pruned on a non-existent partition
-            let fresh_journal = Journal::<Context, Digest>::init_with_smart_reuse(
-                context.clone(),
-                cfg.clone(),
-                7,
-                1000,
-            )
-            .await
-            .expect("Failed to init fresh journal");
+            // Call init_sync on a non-existent partition
+            let fresh_journal =
+                Journal::<Context, Digest>::init_sync(context.clone(), cfg.clone(), 7, 1000)
+                    .await
+                    .expect("Failed to init fresh journal");
 
             assert_eq!(fresh_journal.size().await.unwrap(), 7);
             assert_eq!(fresh_journal.oldest_retained_pos().await.unwrap(), Some(6));
@@ -2158,7 +2146,7 @@ mod tests {
         });
     }
 
-    /// Test that init_pruned reuse behavior is consistent with operations after reuse
+    /// Test that init_sync reuse behavior is consistent with operations after reuse
     #[test_traced]
     fn test_init_pruned_reuse_and_append() {
         let executor = deterministic::Runner::default();
@@ -2183,14 +2171,10 @@ mod tests {
             initial_journal.close().await.unwrap();
 
             // Reuse with pruning to position 8
-            let mut reused_journal = Journal::<Context, Digest>::init_with_smart_reuse(
-                context.clone(),
-                cfg.clone(),
-                8,
-                1000,
-            )
-            .await
-            .expect("Failed to init with reuse");
+            let mut reused_journal =
+                Journal::<Context, Digest>::init_sync(context.clone(), cfg.clone(), 8, 1000)
+                    .await
+                    .expect("Failed to init with reuse");
 
             // Journal should be properly pruned and ready for new operations
             let size_after_reuse = reused_journal.size().await.unwrap();
@@ -2208,7 +2192,7 @@ mod tests {
         });
     }
 
-    /// Test all three cases of the smart reuse logic
+    /// Test all three cases of the re-using existing data logic
     #[test_traced]
     fn test_init_pruned_smart_reuse_comprehensive() {
         let executor = deterministic::Runner::default();
@@ -2233,9 +2217,9 @@ mod tests {
                 initial_journal.sync().await.unwrap();
                 initial_journal.close().await.unwrap();
 
-                // Apply smart reuse with lower_bound=15, upper_bound=20
+                // Initialize with lower_bound=15, upper_bound=20
                 // Since persisted_size=10 < lower_bound=15, should erase and start fresh
-                let reused_journal = Journal::<_, Digest>::init_with_smart_reuse(
+                let reused_journal = Journal::<_, Digest>::init_sync(
                     context.clone().with_label("case1"),
                     cfg.clone(),
                     15, // lower_bound
@@ -2270,9 +2254,9 @@ mod tests {
                 initial_journal.sync().await.unwrap();
                 initial_journal.close().await.unwrap();
 
-                // Apply smart reuse with lower_bound=10, upper_bound=30
+                // Initialize with lower_bound=10, upper_bound=30
                 // Since 10 ≤ persisted_size=25 ≤ 30, should prune to 10 and reuse
-                let reused_journal = Journal::<_, Digest>::init_with_smart_reuse(
+                let reused_journal = Journal::<_, Digest>::init_sync(
                     context.clone().with_label("case2"),
                     cfg.clone(),
                     10, // lower_bound
@@ -2320,9 +2304,9 @@ mod tests {
                 initial_journal.sync().await.unwrap();
                 initial_journal.close().await.unwrap();
 
-                // Apply smart reuse with lower_bound=10, upper_bound=25
+                // Initialize with lower_bound=10, upper_bound=25
                 // Since persisted_size=40 > upper_bound=25, should prune to 10 and rewind to 26
-                let reused_journal = Journal::<_, Digest>::init_with_smart_reuse(
+                let reused_journal = Journal::<_, Digest>::init_sync(
                     context.clone().with_label("case3"),
                     cfg.clone(),
                     10, // lower_bound

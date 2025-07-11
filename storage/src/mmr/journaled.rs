@@ -49,9 +49,9 @@ pub struct Config {
     pub buffer_pool: PoolRef,
 }
 
-/// Configuration for initializing a journaled MMR with smart reuse capabilities.
+/// Configuration for initializing a journaled MMR in preparation for synchronization.
 ///
-/// This configuration is used by [`Mmr::init_with_smart_reuse`] to initialize an MMR
+/// This configuration is used by [`Mmr::init_sync`] to initialize an MMR
 /// that can intelligently reuse existing persistent data during synchronization scenarios.
 ///
 /// # Smart Reuse Strategy
@@ -259,15 +259,15 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Ok(s)
     }
 
-    /// Initialize a new [Mmr] instance with smart-reuse logic based on sync boundaries.
+    /// Initialize a new [Mmr] instance optimized for synchronization scenarios.
     ///
     /// This method provides intelligent reuse of existing persistent MMR data, making it
     /// ideal for synchronization scenarios where you want to avoid re-downloading and
     /// re-processing operations that already exist locally.
     ///
-    /// # Smart Reuse Behavior
+    /// # Sync Behavior
     ///
-    /// The method leverages the underlying journal's smart reuse capabilities to handle
+    /// The method leverages the underlying journal's sync capabilities to handle
     /// three distinct scenarios:
     ///
     /// 1. **Fresh Start**: If existing data is too old to be useful
@@ -305,15 +305,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///     upper_bound: 2000,  // Rewind operations > 2000
     ///     pinned_nodes: extracted_nodes,
     /// };
-    /// let mmr = Mmr::init_with_smart_reuse(context, sync_config).await?;
+    /// let mmr = Mmr::init_sync(context, sync_config).await?;
     /// ```
-    pub async fn init_with_smart_reuse(
-        context: E,
-        cfg: SyncConfig<H::Digest>,
-    ) -> Result<Self, Error> {
-        // The journal's init_with_smart_reuse will handle the reuse logic automatically
+    pub async fn init_sync(context: E, cfg: SyncConfig<H::Digest>) -> Result<Self, Error> {
+        // The journal's init_sync will handle the reuse logic automatically
         // It will check for existing useful data and reuse, rewind, or create fresh as appropriate
-        let journal = Journal::<E, H::Digest>::init_with_smart_reuse(
+        let journal = Journal::<E, H::Digest>::init_sync(
             context.with_label("mmr_journal"),
             JConfig {
                 partition: cfg.config.journal_partition,
@@ -1225,7 +1222,7 @@ mod tests {
                 .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
                 .collect();
 
-            // Create a new MMR using init_with_smart_reuse
+            // Create a new MMR using init_sync
             // After pruning to position 7, the remaining leaves are at positions 7, 8, 10, 11, 15, 16
             // These correspond to operations 4, 5, 6, 7, 8, 9 (0-indexed)
             let sync_config = SyncConfig {
@@ -1242,9 +1239,7 @@ mod tests {
                 pinned_nodes,
             };
             let synced_mmr: Mmr<_, Sha256> =
-                Mmr::init_with_smart_reuse(context.clone(), sync_config)
-                    .await
-                    .unwrap();
+                Mmr::init_sync(context.clone(), sync_config).await.unwrap();
 
             // Verify the synced MMR has the expected state
             assert_eq!(synced_mmr.size(), PRUNING_BOUNDARY);
@@ -1304,9 +1299,7 @@ mod tests {
             };
 
             let synced_mmr: Mmr<_, Sha256> =
-                Mmr::init_with_smart_reuse(context.clone(), sync_config)
-                    .await
-                    .unwrap();
+                Mmr::init_sync(context.clone(), sync_config).await.unwrap();
             assert_eq!(synced_mmr.size(), source_mmr_size);
             assert_eq!(synced_mmr.pruned_to_pos(), source_mmr_size);
             assert_eq!(synced_mmr.oldest_retained_pos(), None);
@@ -1593,7 +1586,7 @@ mod tests {
             initial_mmr.sync(&mut hasher).await.unwrap();
             initial_mmr.close(&mut hasher).await.unwrap();
 
-            // Test smart reuse with existing journal data - prune to position 10
+            // Test with existing journal data - prune to position 10
             let pinned_nodes = Proof::<Digest>::nodes_to_pin(PRUNING_BOUNDARY)
                 .map(|pos| {
                     // For test purposes, use a dummy digest
@@ -1617,11 +1610,9 @@ mod tests {
             };
 
             let reused_mmr: Mmr<_, Sha256> =
-                Mmr::init_with_smart_reuse(context.clone(), sync_config)
-                    .await
-                    .unwrap();
+                Mmr::init_sync(context.clone(), sync_config).await.unwrap();
 
-            // Verify the MMR was properly initialized with smart reuse
+            // Verify the MMR was properly initialized with sync
             assert_eq!(reused_mmr.size(), PRUNING_BOUNDARY);
             assert_eq!(reused_mmr.pruned_to_pos(), PRUNING_BOUNDARY);
             assert_eq!(reused_mmr.journal_size, initial_size);
@@ -1678,9 +1669,7 @@ mod tests {
             };
 
             let fresh_mmr: Mmr<_, Sha256> =
-                Mmr::init_with_smart_reuse(context.clone(), sync_config)
-                    .await
-                    .unwrap();
+                Mmr::init_sync(context.clone(), sync_config).await.unwrap();
 
             // Verify fresh creation
             assert_eq!(fresh_mmr.size(), pruned_to_pos);
@@ -1711,7 +1700,7 @@ mod tests {
             let initial_size = initial_mmr.size();
             initial_mmr.close(&mut hasher).await.unwrap();
 
-            // Test init_pruned with reuse
+            // Test init_sync with reuse
             let pruned_to_pos = 8;
             let pinned_nodes = Proof::<Digest>::nodes_to_pin(pruned_to_pos)
                 .map(|pos| test_digest(pos as usize))
@@ -1732,9 +1721,7 @@ mod tests {
             };
 
             let reused_mmr: Mmr<_, Sha256> =
-                Mmr::init_with_smart_reuse(context.clone(), sync_config)
-                    .await
-                    .unwrap();
+                Mmr::init_sync(context.clone(), sync_config).await.unwrap();
 
             // Verify metadata consistency
             // The metadata should be fresh and consistent with the new config
@@ -1801,7 +1788,7 @@ mod tests {
                 let initial_size = initial_mmr.size();
                 initial_mmr.close(&mut hasher).await.unwrap();
 
-                // Apply smart reuse - should trigger fresh start since lower_bound > initial_size
+                // should trigger fresh start since lower_bound > initial_size
                 let pinned_nodes = Proof::<Digest>::nodes_to_pin(SCENARIO_1_LOWER_BOUND)
                     .map(|pos| test_digest(pos as usize))
                     .collect();
@@ -1824,9 +1811,7 @@ mod tests {
                 };
 
                 let fresh_mmr: Mmr<_, Sha256> =
-                    Mmr::init_with_smart_reuse(context.clone(), sync_config)
-                        .await
-                        .unwrap();
+                    Mmr::init_sync(context.clone(), sync_config).await.unwrap();
 
                 // Verify fresh start behavior
                 assert_eq!(fresh_mmr.size(), SCENARIO_1_LOWER_BOUND);
@@ -1870,7 +1855,7 @@ mod tests {
                 let initial_size = initial_mmr.size();
                 initial_mmr.close(&mut hasher).await.unwrap();
 
-                // Apply smart reuse - should trigger prune and reuse since lower_bound ≤ initial_size ≤ upper_bound
+                // Apply sync - should trigger prune and reuse since lower_bound ≤ initial_size ≤ upper_bound
                 let pinned_nodes = Proof::<Digest>::nodes_to_pin(SCENARIO_2_LOWER_BOUND)
                     .map(|pos| test_digest(pos as usize))
                     .collect();
@@ -1893,9 +1878,7 @@ mod tests {
                 };
 
                 let reused_mmr: Mmr<_, Sha256> =
-                    Mmr::init_with_smart_reuse(context.clone(), sync_config)
-                        .await
-                        .unwrap();
+                    Mmr::init_sync(context.clone(), sync_config).await.unwrap();
 
                 // Verify prune and reuse behavior
                 assert_eq!(reused_mmr.size(), SCENARIO_2_LOWER_BOUND);
@@ -1935,7 +1918,7 @@ mod tests {
                 let initial_size = initial_mmr.size();
                 initial_mmr.close(&mut hasher).await.unwrap();
 
-                // Apply smart reuse - should trigger prune and rewind since initial_size > upper_bound
+                // Apply sync - should trigger prune and rewind since initial_size > upper_bound
                 let pinned_nodes = Proof::<Digest>::nodes_to_pin(SCENARIO_3_LOWER_BOUND)
                     .map(|pos| test_digest(pos as usize))
                     .collect();
@@ -1958,9 +1941,7 @@ mod tests {
                 };
 
                 let rewound_mmr: Mmr<_, Sha256> =
-                    Mmr::init_with_smart_reuse(context.clone(), sync_config)
-                        .await
-                        .unwrap();
+                    Mmr::init_sync(context.clone(), sync_config).await.unwrap();
 
                 // Verify prune and rewind behavior
                 assert_eq!(rewound_mmr.size(), SCENARIO_3_LOWER_BOUND);
@@ -2018,9 +1999,7 @@ mod tests {
                 };
 
                 let empty_mmr: Mmr<_, Sha256> =
-                    Mmr::init_with_smart_reuse(context.clone(), sync_config)
-                        .await
-                        .unwrap();
+                    Mmr::init_sync(context.clone(), sync_config).await.unwrap();
 
                 // Verify fresh start from empty
                 assert_eq!(empty_mmr.size(), BOUNDARY_LOWER);
@@ -2057,7 +2036,7 @@ mod tests {
                 let initial_size = initial_mmr.size();
                 initial_mmr.close(&mut hasher).await.unwrap();
 
-                // Apply smart reuse - should trigger prune and reuse since existing_size == lower_bound
+                // should trigger prune and reuse since existing_size == lower_bound
                 let pinned_nodes = Proof::<Digest>::nodes_to_pin(BOUNDARY_LOWER)
                     .map(|pos| test_digest(pos as usize))
                     .collect();
@@ -2077,9 +2056,7 @@ mod tests {
                 };
 
                 let boundary_mmr: Mmr<_, Sha256> =
-                    Mmr::init_with_smart_reuse(context.clone(), sync_config)
-                        .await
-                        .unwrap();
+                    Mmr::init_sync(context.clone(), sync_config).await.unwrap();
 
                 // Verify prune and reuse behavior (not fresh start)
                 assert_eq!(boundary_mmr.size(), BOUNDARY_LOWER);
@@ -2116,7 +2093,7 @@ mod tests {
                 let initial_size = initial_mmr.size();
                 initial_mmr.close(&mut hasher).await.unwrap();
 
-                // Apply smart reuse - should trigger prune and rewind since existing_size > upper_bound
+                // should trigger prune and rewind since existing_size > upper_bound
                 // (When we add 20 operations, MMR size becomes 38, which exceeds upper_bound=20)
                 let pinned_nodes = Proof::<Digest>::nodes_to_pin(BOUNDARY_LOWER)
                     .map(|pos| test_digest(pos as usize))
@@ -2140,9 +2117,7 @@ mod tests {
                 };
 
                 let upper_boundary_mmr: Mmr<_, Sha256> =
-                    Mmr::init_with_smart_reuse(context.clone(), sync_config)
-                        .await
-                        .unwrap();
+                    Mmr::init_sync(context.clone(), sync_config).await.unwrap();
 
                 // Verify prune and rewind behavior (not reuse)
                 // Since existing_size (38) > upper_bound (20), this is a prune and rewind scenario
@@ -2180,7 +2155,7 @@ mod tests {
                 initial_mmr.sync(&mut hasher).await.unwrap();
                 initial_mmr.close(&mut hasher).await.unwrap();
 
-                // Apply smart reuse - should trigger fresh start since existing_size < lower_bound
+                // should trigger fresh start since existing_size < lower_bound
                 let pinned_nodes = Proof::<Digest>::nodes_to_pin(BOUNDARY_LOWER)
                     .map(|pos| test_digest(pos as usize))
                     .collect();
@@ -2200,9 +2175,7 @@ mod tests {
                 };
 
                 let single_mmr: Mmr<_, Sha256> =
-                    Mmr::init_with_smart_reuse(context.clone(), sync_config)
-                        .await
-                        .unwrap();
+                    Mmr::init_sync(context.clone(), sync_config).await.unwrap();
 
                 // Verify fresh start behavior
                 assert_eq!(single_mmr.size(), BOUNDARY_LOWER);
