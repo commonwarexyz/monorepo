@@ -43,12 +43,13 @@ pub struct Config<B: Blocker, M: Monitor, H: Handler, RqC, RsC> {
 mod tests {
     use super::{
         mocks::{
-            HandlerEvent, MockHandler as Handler, MockMonitor as Monitor, MonitorEvent, Request,
-            Response,
+            handler::Handler as MockHandler,
+            monitor::Monitor as MockMonitor,
+            types::{Request, Response},
         },
         Config, Engine, Mailbox,
     };
-    use crate::Originator;
+    use crate::{Handler, Monitor, Originator};
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Committable, PrivateKeyExt, Signer,
@@ -136,8 +137,8 @@ mod tests {
             (Sender<PublicKey>, Receiver<PublicKey>),
             (Sender<PublicKey>, Receiver<PublicKey>),
         ),
-        monitor: Monitor,
-        handler: Handler,
+        monitor: impl Monitor<PublicKey = PublicKey, Response = Response>,
+        handler: impl Handler<PublicKey = PublicKey, Request = Request, Response = Response>,
     ) -> Mailbox<PublicKey, Request> {
         let public_key = signer.public_key();
         let (engine, mailbox) = Engine::new(
@@ -175,14 +176,14 @@ mod tests {
             let conn = connections.next().unwrap();
             let req_conn = conn.0;
             let res_conn = conn.1;
-            let (mon, mut mon_out) = Monitor::new();
+            let (mon, mut mon_out) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme.public_key()),
                 scheme,
                 (req_conn, res_conn),
                 mon,
-                Handler::dummy(),
+                MockHandler::dummy(),
             )
             .await;
 
@@ -191,13 +192,13 @@ mod tests {
             let conn = connections.next().unwrap();
             let req_conn = conn.0;
             let res_conn = conn.1;
-            let (handler, mut handler_out) = Handler::new(true);
+            let (handler, mut handler_out) = MockHandler::new(true);
             let _mailbox = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme.public_key()),
                 scheme,
                 (req_conn, res_conn),
-                Monitor::dummy(),
+                MockMonitor::dummy(),
                 handler,
             )
             .await;
@@ -210,33 +211,17 @@ mod tests {
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Verify peer 2 received the request
-            let event = handler_out.next().await.unwrap();
-            match event {
-                HandlerEvent::ReceivedRequest {
-                    origin,
-                    request: received_request,
-                    responded,
-                } => {
-                    assert_eq!(origin, peers[0]);
-                    assert_eq!(received_request, request);
-                    assert!(responded);
-                }
-            }
+            let processed = handler_out.next().await.unwrap();
+            assert_eq!(processed.origin, peers[0]);
+            assert_eq!(processed.request, request);
+            assert!(processed.responded);
 
             // Verify peer 1's monitor collected the response
-            let event = mon_out.next().await.unwrap();
-            match event {
-                MonitorEvent::Collected {
-                    handler,
-                    response,
-                    count,
-                } => {
-                    assert_eq!(handler, peers[1]);
-                    assert_eq!(response.id, 1);
-                    assert_eq!(response.result, 2);
-                    assert_eq!(count, 1);
-                }
-            }
+            let collected = mon_out.next().await.unwrap();
+            assert_eq!(collected.handler, peers[1]);
+            assert_eq!(collected.response.id, 1);
+            assert_eq!(collected.response.result, 2);
+            assert_eq!(collected.count, 1);
         });
     }
 
@@ -257,14 +242,14 @@ mod tests {
             let conn = connections.next().unwrap();
             let req_conn = conn.0;
             let res_conn = conn.1;
-            let (mon, mut mon_out) = Monitor::new();
+            let (mon, mut mon_out) = MockMonitor::new();
             let mut mailbox = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme.public_key()),
                 scheme,
                 (req_conn, res_conn),
                 mon,
-                Handler::dummy(),
+                MockHandler::dummy(),
             )
             .await;
 
@@ -273,13 +258,13 @@ mod tests {
             let conn = connections.next().unwrap();
             let req_conn = conn.0;
             let res_conn = conn.1;
-            let (handler, _) = Handler::new(true);
+            let (handler, _) = MockHandler::new(true);
             let _mailbox = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme.public_key()),
                 scheme,
                 (req_conn, res_conn),
-                Monitor::dummy(),
+                MockMonitor::dummy(),
                 handler,
             )
             .await;
@@ -325,14 +310,14 @@ mod tests {
             let conn1 = connections.next().unwrap();
             let req_conn1 = conn1.0;
             let res_conn1 = conn1.1;
-            let (mon1, mut mon_out1) = Monitor::new();
+            let (mon1, mut mon_out1) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme1.public_key()),
                 scheme1,
                 (req_conn1, res_conn1),
                 mon1,
-                Handler::dummy(),
+                MockHandler::dummy(),
             )
             .await;
 
@@ -341,13 +326,13 @@ mod tests {
             let conn2 = connections.next().unwrap();
             let req_conn2 = conn2.0;
             let res_conn2 = conn2.1;
-            let (handler2, _) = Handler::new(true);
+            let (handler2, _) = MockHandler::new(true);
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme2.public_key()),
                 scheme2,
                 (req_conn2, res_conn2),
-                Monitor::dummy(),
+                MockMonitor::dummy(),
                 handler2,
             )
             .await;
@@ -357,13 +342,13 @@ mod tests {
             let conn3 = connections.next().unwrap();
             let req_conn3 = conn3.0;
             let res_conn3 = conn3.1;
-            let (handler3, _) = Handler::new(true);
+            let (handler3, _) = MockHandler::new(true);
             let _mailbox3 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme3.public_key()),
                 scheme3,
                 (req_conn3, res_conn3),
-                Monitor::dummy(),
+                MockMonitor::dummy(),
                 handler3,
             )
             .await;
@@ -381,24 +366,16 @@ mod tests {
             let mut peer3_responded = false;
 
             for _ in 0..2 {
-                let event = mon_out1.next().await.unwrap();
-                match event {
-                    MonitorEvent::Collected {
-                        handler,
-                        response,
-                        count,
-                    } => {
-                        assert_eq!(response.id, 3);
-                        assert_eq!(response.result, 6);
-                        responses_collected += 1;
-                        assert_eq!(count, responses_collected);
+                let collected = mon_out1.next().await.unwrap();
+                assert_eq!(collected.response.id, 3);
+                assert_eq!(collected.response.result, 6);
+                responses_collected += 1;
+                assert_eq!(collected.count, responses_collected);
 
-                        if handler == peers[1] {
-                            peer2_responded = true;
-                        } else if handler == peers[2] {
-                            peer3_responded = true;
-                        }
-                    }
+                if collected.handler == peers[1] {
+                    peer2_responded = true;
+                } else if collected.handler == peers[2] {
+                    peer3_responded = true;
                 }
             }
 
@@ -424,14 +401,14 @@ mod tests {
             let conn1 = connections.next().unwrap();
             let req_conn1 = conn1.0;
             let res_conn1 = conn1.1;
-            let (mon1, mut mon_out1) = Monitor::new();
+            let (mon1, mut mon_out1) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme1.public_key()),
                 scheme1,
                 (req_conn1, res_conn1),
                 mon1,
-                Handler::dummy(),
+                MockHandler::dummy(),
             )
             .await;
 
@@ -440,13 +417,13 @@ mod tests {
             let conn2 = connections.next().unwrap();
             let req_conn2 = conn2.0;
             let res_conn2 = conn2.1;
-            let (handler2, _) = Handler::new(true);
+            let (handler2, _) = MockHandler::new(true);
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme2.public_key()),
                 scheme2,
                 (req_conn2, res_conn2),
-                Monitor::dummy(),
+                MockMonitor::dummy(),
                 handler2,
             )
             .await;
@@ -461,18 +438,10 @@ mod tests {
             }
 
             // Should only receive one response
-            let event = mon_out1.next().await.unwrap();
-            match event {
-                MonitorEvent::Collected {
-                    handler,
-                    response,
-                    count,
-                } => {
-                    assert_eq!(handler, peers[1]);
-                    assert_eq!(response.id, 5);
-                    assert_eq!(count, 1);
-                }
-            }
+            let collected = mon_out1.next().await.unwrap();
+            assert_eq!(collected.handler, peers[1]);
+            assert_eq!(collected.response.id, 5);
+            assert_eq!(collected.count, 1);
 
             // Wait and verify no more responses
             select! {
@@ -503,14 +472,14 @@ mod tests {
             let conn1 = connections.next().unwrap();
             let req_conn1 = conn1.0;
             let res_conn1 = conn1.1;
-            let (mon1, mut mon_out1) = Monitor::new();
+            let (mon1, mut mon_out1) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme1.public_key()),
                 scheme1,
                 (req_conn1, res_conn1),
                 mon1,
-                Handler::dummy(),
+                MockHandler::dummy(),
             )
             .await;
 
@@ -519,7 +488,7 @@ mod tests {
             let conn2 = connections.next().unwrap();
             let req_conn2 = conn2.0;
             let res_conn2 = conn2.1;
-            let (mut handler2, _) = Handler::new(false);
+            let (mut handler2, _) = MockHandler::new(false);
             handler2.set_response(10, Response { id: 10, result: 20 });
             handler2.set_response(20, Response { id: 20, result: 40 });
             let _mailbox2 = setup_and_spawn_engine(
@@ -527,7 +496,7 @@ mod tests {
                 oracle.control(scheme2.public_key()),
                 scheme2,
                 (req_conn2, res_conn2),
-                Monitor::dummy(),
+                MockMonitor::dummy(),
                 handler2,
             )
             .await;
@@ -546,27 +515,19 @@ mod tests {
             let mut response10_received = false;
             let mut response20_received = false;
             for _ in 0..2 {
-                let event = mon_out1.next().await.unwrap();
-                match event {
-                    MonitorEvent::Collected {
-                        handler,
-                        response,
-                        count,
-                    } => {
-                        assert_eq!(handler, peers[1]);
-                        assert_eq!(count, 1);
-                        match response.id {
-                            10 => {
-                                assert_eq!(response.result, 20);
-                                response10_received = true;
-                            }
-                            20 => {
-                                assert_eq!(response.result, 40);
-                                response20_received = true;
-                            }
-                            _ => panic!("Unexpected response ID"),
-                        }
+                let collected = mon_out1.next().await.unwrap();
+                assert_eq!(collected.handler, peers[1]);
+                assert_eq!(collected.count, 1);
+                match collected.response.id {
+                    10 => {
+                        assert_eq!(collected.response.result, 20);
+                        response10_received = true;
                     }
+                    20 => {
+                        assert_eq!(collected.response.result, 40);
+                        response20_received = true;
+                    }
+                    _ => panic!("Unexpected response ID"),
                 }
             }
 
@@ -592,14 +553,14 @@ mod tests {
             let conn1 = connections.next().unwrap();
             let req_conn1 = conn1.0;
             let res_conn1 = conn1.1;
-            let (mon1, mut mon_out1) = Monitor::new();
+            let (mon1, mut mon_out1) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme1.public_key()),
                 scheme1,
                 (req_conn1, res_conn1),
                 mon1,
-                Handler::dummy(),
+                MockHandler::dummy(),
             )
             .await;
 
@@ -608,13 +569,13 @@ mod tests {
             let conn2 = connections.next().unwrap();
             let req_conn2 = conn2.0;
             let res_conn2 = conn2.1;
-            let (handler2, mut handler_out2) = Handler::new(false);
+            let (handler2, mut handler_out2) = MockHandler::new(false);
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme2.public_key()),
                 scheme2,
                 (req_conn2, res_conn2),
-                Monitor::dummy(),
+                MockMonitor::dummy(),
                 handler2,
             )
             .await;
@@ -627,18 +588,10 @@ mod tests {
             assert_eq!(recipients, vec![peers[1].clone()]);
 
             // Verify handler received request but didn't respond
-            let event = handler_out2.next().await.unwrap();
-            match event {
-                HandlerEvent::ReceivedRequest {
-                    origin,
-                    request: received_request,
-                    responded,
-                } => {
-                    assert_eq!(origin, peers[0]);
-                    assert_eq!(received_request, request);
-                    assert!(!responded);
-                }
-            }
+            let processed = handler_out2.next().await.unwrap();
+            assert_eq!(processed.origin, peers[0]);
+            assert_eq!(processed.request, request);
+            assert!(!processed.responded);
 
             // Verify no response collected
             select! {
@@ -665,14 +618,14 @@ mod tests {
             let conn = connections.next().unwrap();
             let req_conn = conn.0;
             let res_conn = conn.1;
-            let (mon, mut mon_out) = Monitor::new();
+            let (mon, mut mon_out) = MockMonitor::new();
             let mut mailbox = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme.public_key()),
                 scheme,
                 (req_conn, res_conn),
                 mon,
-                Handler::dummy(),
+                MockHandler::dummy(),
             )
             .await;
 

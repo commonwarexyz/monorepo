@@ -1,28 +1,25 @@
-use super::Response;
+use super::types::Response;
 use commonware_cryptography::ed25519::PublicKey;
 use futures::{channel::mpsc, SinkExt};
 
-/// Events that can be observed from the monitor
+/// Monitor collected a response
 #[derive(Debug, Clone)]
-pub enum Event {
-    /// Monitor collected a response
-    Collected {
-        handler: PublicKey,
-        response: Response,
-        count: usize,
-    },
+pub struct Collected {
+    pub handler: PublicKey,
+    pub response: Response,
+    pub count: usize,
 }
 
 /// A mock monitor for testing
 #[derive(Clone)]
 pub struct Monitor {
     /// Channel to send events
-    sender: mpsc::UnboundedSender<Event>,
+    sender: mpsc::UnboundedSender<Collected>,
 }
 
 impl Monitor {
     /// Create a new mock monitor
-    pub fn new() -> (Self, mpsc::UnboundedReceiver<Event>) {
+    pub fn new() -> (Self, mpsc::UnboundedReceiver<Collected>) {
         let (sender, receiver) = mpsc::unbounded();
         (Self { sender }, receiver)
     }
@@ -46,7 +43,7 @@ impl crate::Monitor for Monitor {
     ) {
         let _ = self
             .sender
-            .send(Event::Collected {
+            .send(Collected {
                 handler,
                 response,
                 count,

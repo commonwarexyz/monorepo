@@ -1,10 +1,5 @@
-//! Mock implementations for testing the collector module.
+//! Mock implementations for testing the collector.
 
-mod handler;
-pub use handler::{Event as HandlerEvent, Handler as MockHandler};
-
-mod monitor;
-pub use monitor::{Event as MonitorEvent, Monitor as MockMonitor};
-
-mod request;
-pub use request::{Request, Response};
+pub mod handler;
+pub mod monitor;
+pub mod types;

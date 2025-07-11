@@ -1,4 +1,4 @@
-use super::{Request, Response};
+use super::types::{Request, Response};
 use commonware_cryptography::ed25519::PublicKey;
 use futures::{
     channel::{mpsc, oneshot},
@@ -6,22 +6,19 @@ use futures::{
 };
 use std::collections::HashMap;
 
-/// Events that can be observed from the handler
+/// Handler received a request
 #[derive(Debug, Clone)]
-pub enum Event {
-    /// Handler received a request
-    ReceivedRequest {
-        origin: PublicKey,
-        request: Request,
-        responded: bool,
-    },
+pub struct Processed {
+    pub origin: PublicKey,
+    pub request: Request,
+    pub responded: bool,
 }
 
 /// A mock handler for testing
 #[derive(Clone)]
 pub struct Handler {
     /// Channel to send events
-    sender: mpsc::UnboundedSender<Event>,
+    sender: mpsc::UnboundedSender<Processed>,
 
     /// Configured responses for specific request IDs
     responses: HashMap<u64, Response>,
@@ -32,7 +29,7 @@ pub struct Handler {
 
 impl Handler {
     /// Create a new mock handler
-    pub fn new(respond_by_default: bool) -> (Self, mpsc::UnboundedReceiver<Event>) {
+    pub fn new(respond_by_default: bool) -> (Self, mpsc::UnboundedReceiver<Processed>) {
         let (sender, receiver) = mpsc::unbounded();
         (
             Self {
@@ -79,7 +76,7 @@ impl crate::Handler for Handler {
         // Send event
         let _ = self
             .sender
-            .send(Event::ReceivedRequest {
+            .send(Processed {
                 origin: origin.clone(),
                 request: request.clone(),
                 responded: should_respond,
