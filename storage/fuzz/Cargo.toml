@@ -85,10 +85,3 @@ path = "fuzz_targets/adb_current_operations.rs"
 test = false
 doc = false
 bench = false
-
-[[bin]]
-name = "adb_any_sync_operations"
-path = "fuzz_targets/adb_any_sync_operations.rs"
-test = false
-doc = false
-bench = false
