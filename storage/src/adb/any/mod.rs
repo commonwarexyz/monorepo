@@ -80,17 +80,20 @@ pub struct SyncConfig<E: RStorage + Metrics, K: Array, V: Array, T: Translator, 
     pub db_config: Config<T>,
 
     /// The [Any]'s log of operations.
-    /// This log is expected to be pruned to the `pruned_to_loc` boundary
-    /// and contain all subsequent operations.
+    /// This log is expected to be pruned to the lower_bound boundary
+    /// and contain all subsequent operations up to upper_bound.
     pub log: Journal<E, Operation<K, V>>,
 
-    /// The location in the [Any] up to which operations have been pruned.
-    /// This serves as both the log pruning boundary and the inactivity floor.
-    /// Everything before this location is considered pruned/inactive.
-    pub pruned_to_loc: u64,
+    /// The lower bound of operations (pruning boundary, inclusive).
+    /// Operations below this will be considered pruned/inactive.
+    pub lower_bound: u64,
+
+    /// The upper bound of operations (inclusive).
+    /// Operations above this will not be included in the sync.
+    pub upper_bound: u64,
 
     /// The pinned nodes the MMR needs at the pruning boundary given by
-    /// `pruned_to_loc`, in the order specified by [Proof::nodes_to_pin].
+    /// `lower_bound`, in the order specified by [Proof::nodes_to_pin].
     pub pinned_nodes: Vec<D>,
 
     /// The maximum number of operations to keep in memory
@@ -204,24 +207,28 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         context: E,
         cfg: SyncConfig<E, K, V, T, H::Digest>,
     ) -> Result<Self, Error> {
-        let mmr_config = crate::mmr::journaled::SyncConfig {
-            config: MmrConfig {
-                journal_partition: cfg.db_config.mmr_journal_partition,
-                metadata_partition: cfg.db_config.mmr_metadata_partition,
-                items_per_blob: cfg.db_config.mmr_items_per_blob,
-                write_buffer: cfg.db_config.mmr_write_buffer,
-                thread_pool: cfg.db_config.thread_pool.clone(),
-                buffer_pool: cfg.db_config.buffer_pool,
+        // Use the MMR's init_pruned method to properly handle the pruned state with pinned nodes
+        let mut mmr = Mmr::init_pruned(
+            context.with_label("mmr"),
+            crate::mmr::journaled::SyncConfig {
+                config: crate::mmr::journaled::Config {
+                    journal_partition: cfg.db_config.mmr_journal_partition,
+                    metadata_partition: cfg.db_config.mmr_metadata_partition,
+                    items_per_blob: cfg.db_config.mmr_items_per_blob,
+                    write_buffer: cfg.db_config.mmr_write_buffer,
+                    thread_pool: cfg.db_config.thread_pool.clone(),
+                    buffer_pool: cfg.db_config.buffer_pool.clone(),
+                },
+                lower_bound: cfg.lower_bound,
+                upper_bound: cfg.upper_bound,
+                pinned_nodes: cfg.pinned_nodes,
             },
-            pruned_to_pos: leaf_num_to_pos(cfg.pruned_to_loc),
-            pinned_nodes: cfg.pinned_nodes,
-        };
-        let mut mmr = Mmr::init_pruned(context.with_label("mmr"), mmr_config)
-            .await
-            .map_err(Error::MmrError)?;
+        )
+        .await
+        .map_err(Error::MmrError)?;
 
         let mut hasher = Standard::<H>::new();
-        for i in cfg.pruned_to_loc..cfg.log.size().await? {
+        for i in cfg.lower_bound..cfg.log.size().await? {
             let op = cfg.log.read(i).await?;
             let digest = Self::op_digest(&mut hasher, &op);
             mmr.add_batched(&mut hasher, &digest).await?;
@@ -239,7 +246,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         );
 
         Any::<E, K, V, H, T>::build_snapshot_from_log::<0 /* UNUSED_N */>(
-            cfg.pruned_to_loc,
+            cfg.lower_bound,
             &cfg.log,
             &mut snapshot,
             None,
@@ -250,7 +257,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             ops: mmr,
             log: cfg.log,
             snapshot,
-            inactivity_floor_loc: cfg.pruned_to_loc,
+            inactivity_floor_loc: cfg.lower_bound,
             uncommitted_ops: 0,
             hasher: Standard::<H>::new(),
         };
@@ -1499,7 +1506,8 @@ pub(super) mod test {
             .unwrap();
             let sync_config: SyncConfig<Context, Digest, Digest, TwoCap, Digest> = SyncConfig {
                 db_config: any_db_config("sync_basic"),
-                pruned_to_loc: 0, // No pruning
+                lower_bound: 0, // No pruning
+                upper_bound: 0,
                 pinned_nodes: vec![],
                 log,
                 apply_batch_size: 1024,
@@ -1568,6 +1576,7 @@ pub(super) mod test {
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
                 lower_bound_ops,
+                upper_bound_ops,
             )
             .await
             .unwrap();
@@ -1583,7 +1592,8 @@ pub(super) mod test {
                 SyncConfig {
                     db_config: create_test_config(context.next_u64()),
                     log,
-                    pruned_to_loc: lower_bound_ops,
+                    lower_bound: lower_bound_ops,
+                    upper_bound: upper_bound_ops,
                     pinned_nodes,
                     apply_batch_size: 1024,
                 },
@@ -1656,6 +1666,7 @@ pub(super) mod test {
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     },
                     lower_bound,
+                    upper_bound,
                 )
                 .await
                 .unwrap();
@@ -1680,7 +1691,8 @@ pub(super) mod test {
                     SyncConfig {
                         db_config: create_test_config(context.next_u64()),
                         log,
-                        pruned_to_loc: lower_bound,
+                        lower_bound,
+                        upper_bound,
                         pinned_nodes,
                         apply_batch_size: 1024,
                     },

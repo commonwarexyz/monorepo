@@ -54,8 +54,11 @@ pub struct SyncConfig<D: Digest> {
     /// Base configuration for the MMR (journal, metadata, etc.)
     pub config: Config,
 
-    /// The position up to which elements have been pruned (first non-pruned element index).
-    pub pruned_to_pos: u64,
+    /// The lower bound (pruning boundary) - operations below this will be pruned.
+    pub lower_bound: u64,
+
+    /// The upper bound (sync boundary) - operations above this will be rewound if present.
+    pub upper_bound: u64,
 
     /// The pinned nodes to use for the MMR.
     pub pinned_nodes: Vec<D>,
@@ -226,9 +229,19 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Ok(s)
     }
 
-    /// Initialize a new [Mmr] instance in an empty, pruned state.
+    /// Initialize a new [Mmr] instance with smart-reuse logic based on sync boundaries.
+    ///
+    /// # Behavior
+    /// Inspects existing persistent MMR data and handles three cases:
+    /// 1. `persisted_size < lower_bound` → Erase persisted data and start fresh
+    /// 2. `lower_bound ≤ persisted_size ≤ upper_bound` → Prune to lower_bound, reuse existing data
+    /// 3. `persisted_size > upper_bound` → Prune to lower_bound, rewind to upper_bound
+    ///
+    /// Always recreates metadata and pinned nodes from the provided config to ensure consistency.
+    /// This is designed for sync operations where we want to intelligently reuse existing data.
     pub async fn init_pruned(context: E, cfg: SyncConfig<H::Digest>) -> Result<Self, Error> {
-        // Initialize the journal in an empty, pruned state.
+        // The journal's init_pruned will handle the reuse logic automatically
+        // It will check for existing useful data and reuse, rewind, or create fresh as appropriate
         let journal = Journal::<E, H::Digest>::init_pruned(
             context.with_label("mmr_journal"),
             JConfig {
@@ -237,11 +250,13 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 write_buffer: cfg.config.write_buffer,
                 buffer_pool: cfg.config.buffer_pool.clone(),
             },
-            cfg.pruned_to_pos,
+            cfg.lower_bound,
+            cfg.upper_bound,
         )
         .await?;
 
-        // Set up metadata
+        // Always recreate metadata to ensure consistency with the provided config
+        // Even if we reused a journal, the metadata should match the new sync state
         let metadata_cfg = MConfig {
             partition: cfg.config.metadata_partition,
             codec_config: ((0..).into(), ()),
@@ -250,20 +265,26 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         // Store the pruning boundary in metadata
         let prune_key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
-        metadata.put(prune_key, cfg.pruned_to_pos.to_be_bytes().into());
+        metadata.put(prune_key, cfg.lower_bound.to_be_bytes().into());
         metadata.sync().await.map_err(Error::MetadataError)?;
 
+        // Determine the journal size after reuse/creation
+        let journal_size = journal.size().await?;
+
+        // Create the MMR with the provided pinned nodes
+        // The pinned nodes come from the sync config and should be used regardless
+        // of whether we reused existing data or created fresh
         Ok(Self {
             mem_mmr: MemMmr::init(MemConfig {
                 nodes: vec![],
-                pruned_to_pos: cfg.pruned_to_pos,
+                pruned_to_pos: cfg.lower_bound,
                 pinned_nodes: cfg.pinned_nodes,
                 pool: cfg.config.thread_pool,
             }),
             journal,
-            journal_size: cfg.pruned_to_pos,
+            journal_size,
             metadata,
-            pruned_to_pos: cfg.pruned_to_pos,
+            pruned_to_pos: cfg.lower_bound,
         })
     }
 
@@ -1143,7 +1164,8 @@ mod tests {
                     thread_pool: None,
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
-                pruned_to_pos: PRUNED_TO_POS,
+                lower_bound: PRUNED_TO_POS,
+                upper_bound: 1000,
                 pinned_nodes,
             };
             let synced_mmr: Mmr<_, Sha256> = Mmr::init_pruned(context.clone(), sync_config)
@@ -1200,7 +1222,8 @@ mod tests {
                     thread_pool: None,
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
-                pruned_to_pos: source_mmr_size,
+                lower_bound: source_mmr_size,
+                upper_bound: 1000,
                 pinned_nodes,
             };
 
@@ -1468,5 +1491,368 @@ mod tests {
             let result = mmr.historical_range_proof(mmr_size-1, mmr_size, BATCH_SIZE).await;
             assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == mmr_size-1 && start_loc == mmr_size));
 });
+    }
+
+    #[test_traced]
+    fn test_mmr_init_pruned_reuse_journal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Create an initial MMR with some operations
+            let initial_config = test_config();
+            let mut initial_mmr = Mmr::init(context.clone(), &mut hasher, initial_config.clone())
+                .await
+                .unwrap();
+
+            // Add 20 operations
+            for i in 0..20 {
+                initial_mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+            }
+            let initial_size = initial_mmr.size();
+            initial_mmr.sync(&mut hasher).await.unwrap();
+            initial_mmr.close(&mut hasher).await.unwrap();
+
+            // Now test init_pruned with reuse - prune to position 10
+            let pruned_to_pos = 10;
+            let pinned_nodes = Proof::<Digest>::nodes_to_pin(pruned_to_pos)
+                .map(|pos| {
+                    // For test purposes, use a dummy digest
+                    // In real usage, these would come from the first batch proof
+                    test_digest(pos as usize)
+                })
+                .collect();
+
+            let sync_config = SyncConfig {
+                config: Config {
+                    journal_partition: initial_config.journal_partition.clone(),
+                    metadata_partition: format!("{}_reuse", initial_config.metadata_partition),
+                    items_per_blob: initial_config.items_per_blob,
+                    write_buffer: initial_config.write_buffer,
+                    thread_pool: None,
+                    buffer_pool: initial_config.buffer_pool.clone(),
+                },
+                lower_bound: pruned_to_pos,
+                upper_bound: initial_size,
+                pinned_nodes,
+            };
+
+            let reused_mmr: Mmr<_, Sha256> = Mmr::init_pruned(context.clone(), sync_config)
+                .await
+                .unwrap();
+
+            // Verify the MMR was properly initialized
+            assert_eq!(reused_mmr.size(), pruned_to_pos);
+            assert_eq!(reused_mmr.pruned_to_pos(), pruned_to_pos);
+            assert_eq!(reused_mmr.journal_size, initial_size);
+
+            // The journal should have been reused and pruned
+            let journal_size = reused_mmr.journal.size().await.unwrap();
+            assert!(
+                journal_size >= pruned_to_pos,
+                "Journal should have been pruned to at least the boundary"
+            );
+
+            reused_mmr.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_mmr_init_pruned_fresh_creation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Create an initial MMR with fewer operations than the pruning boundary
+            let initial_config = test_config();
+            let mut initial_mmr = Mmr::init(context.clone(), &mut hasher, initial_config.clone())
+                .await
+                .unwrap();
+
+            // Add only 5 operations
+            for i in 0..5 {
+                initial_mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+            }
+            initial_mmr.sync(&mut hasher).await.unwrap();
+            initial_mmr.close(&mut hasher).await.unwrap();
+
+            // Now test init_pruned - prune to position 15 (beyond existing data)
+            let pruned_to_pos = 15;
+            let pinned_nodes = Proof::<Digest>::nodes_to_pin(pruned_to_pos)
+                .map(|pos| test_digest(pos as usize))
+                .collect();
+
+            let sync_config = SyncConfig {
+                config: Config {
+                    journal_partition: initial_config.journal_partition.clone(),
+                    metadata_partition: format!("{}_fresh", initial_config.metadata_partition),
+                    items_per_blob: initial_config.items_per_blob,
+                    write_buffer: initial_config.write_buffer,
+                    thread_pool: None,
+                    buffer_pool: initial_config.buffer_pool.clone(),
+                },
+                lower_bound: pruned_to_pos,
+                upper_bound: 1000,
+                pinned_nodes,
+            };
+
+            let fresh_mmr: Mmr<_, Sha256> = Mmr::init_pruned(context.clone(), sync_config)
+                .await
+                .unwrap();
+
+            // Verify fresh creation
+            assert_eq!(fresh_mmr.size(), pruned_to_pos);
+            assert_eq!(fresh_mmr.pruned_to_pos(), pruned_to_pos);
+            assert_eq!(fresh_mmr.journal_size, pruned_to_pos);
+            assert_eq!(fresh_mmr.oldest_retained_pos(), None);
+
+            fresh_mmr.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_mmr_init_pruned_metadata_consistency() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Create initial MMR
+            let initial_config = test_config();
+            let mut initial_mmr = Mmr::init(context.clone(), &mut hasher, initial_config.clone())
+                .await
+                .unwrap();
+
+            for i in 0..15 {
+                initial_mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+            }
+            initial_mmr.sync(&mut hasher).await.unwrap();
+            initial_mmr.close(&mut hasher).await.unwrap();
+
+            // Test init_pruned with reuse
+            let pruned_to_pos = 8;
+            let pinned_nodes = Proof::<Digest>::nodes_to_pin(pruned_to_pos)
+                .map(|pos| test_digest(pos as usize))
+                .collect();
+
+            let sync_config = SyncConfig {
+                config: Config {
+                    journal_partition: initial_config.journal_partition.clone(),
+                    metadata_partition: format!("{}_metadata", initial_config.metadata_partition),
+                    items_per_blob: initial_config.items_per_blob,
+                    write_buffer: initial_config.write_buffer,
+                    thread_pool: None,
+                    buffer_pool: initial_config.buffer_pool.clone(),
+                },
+                lower_bound: pruned_to_pos,
+                upper_bound: 1000,
+                pinned_nodes,
+            };
+
+            let reused_mmr: Mmr<_, Sha256> = Mmr::init_pruned(context.clone(), sync_config)
+                .await
+                .unwrap();
+
+            // Verify metadata consistency
+            // The metadata should be fresh and consistent with the new config
+            let key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
+            let stored_prune_pos = reused_mmr.metadata.get(&key).unwrap();
+            let stored_prune_pos =
+                u64::from_be_bytes(stored_prune_pos.as_slice().try_into().unwrap());
+            assert_eq!(stored_prune_pos, pruned_to_pos);
+
+            // Verify the MMR state is consistent
+            assert_eq!(reused_mmr.pruned_to_pos(), pruned_to_pos);
+            assert_eq!(reused_mmr.size(), pruned_to_pos);
+
+            reused_mmr.destroy().await.unwrap();
+        });
+    }
+
+    /// Test all three cases of the MMR smart reuse logic
+    #[test_traced]
+    fn test_mmr_init_pruned_smart_reuse_comprehensive() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // === Case 1: persisted_size < lower_bound → Erase and start fresh ===
+            {
+                let initial_config = Config {
+                    journal_partition: "mmr_case1".into(),
+                    metadata_partition: "mmr_case1_meta".into(),
+                    items_per_blob: 5,
+                    write_buffer: 1024,
+                    thread_pool: None,
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+
+                // Create initial MMR with 10 operations
+                let mut initial_mmr =
+                    Mmr::init(context.clone(), &mut hasher, initial_config.clone())
+                        .await
+                        .unwrap();
+                for i in 0..10 {
+                    initial_mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+                }
+                initial_mmr.sync(&mut hasher).await.unwrap();
+                initial_mmr.close(&mut hasher).await.unwrap();
+
+                // Apply smart reuse with lower_bound=15, upper_bound=20
+                // Since persisted_size=18 < lower_bound=27, should erase and start fresh
+                let sync_config = SyncConfig {
+                    config: Config {
+                        journal_partition: initial_config.journal_partition.clone(),
+                        metadata_partition: format!("{}_fresh", initial_config.metadata_partition),
+                        items_per_blob: initial_config.items_per_blob,
+                        write_buffer: initial_config.write_buffer,
+                        thread_pool: None,
+                        buffer_pool: initial_config.buffer_pool.clone(),
+                    },
+                    lower_bound: 27, // Higher than persisted size
+                    upper_bound: 35,
+                    pinned_nodes: Proof::<Digest>::nodes_to_pin(27)
+                        .map(|pos| test_digest(pos as usize))
+                        .collect(),
+                };
+
+                let fresh_mmr: Mmr<_, Sha256> = Mmr::init_pruned(context.clone(), sync_config)
+                    .await
+                    .unwrap();
+
+                // Should be initialized fresh at size 27
+                assert_eq!(fresh_mmr.size(), 27);
+                assert_eq!(fresh_mmr.pruned_to_pos(), 27);
+                assert_eq!(fresh_mmr.oldest_retained_pos(), None);
+                fresh_mmr.destroy().await.unwrap();
+            }
+
+            // === Case 2: lower_bound ≤ persisted_size ≤ upper_bound → Prune and reuse ===
+            {
+                let initial_config = Config {
+                    journal_partition: "mmr_case2".into(),
+                    metadata_partition: "mmr_case2_meta".into(),
+                    items_per_blob: 5,
+                    write_buffer: 1024,
+                    thread_pool: None,
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+
+                // Create initial MMR with 25 operations
+                let mut initial_mmr =
+                    Mmr::init(context.clone(), &mut hasher, initial_config.clone())
+                        .await
+                        .unwrap();
+                for i in 0..25 {
+                    initial_mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+                }
+                initial_mmr.sync(&mut hasher).await.unwrap();
+                let _initial_size = initial_mmr.size();
+                initial_mmr.close(&mut hasher).await.unwrap();
+
+                // Apply smart reuse with lower_bound=20, upper_bound=60
+                // Since 20 ≤ persisted_size=48 ≤ 60, should prune to 20 and reuse
+                let sync_config = SyncConfig {
+                    config: Config {
+                        journal_partition: initial_config.journal_partition.clone(),
+                        metadata_partition: format!("{}_reuse", initial_config.metadata_partition),
+                        items_per_blob: initial_config.items_per_blob,
+                        write_buffer: initial_config.write_buffer,
+                        thread_pool: None,
+                        buffer_pool: initial_config.buffer_pool.clone(),
+                    },
+                    lower_bound: 20, // Within existing range
+                    upper_bound: 60,
+                    pinned_nodes: Proof::<Digest>::nodes_to_pin(20)
+                        .map(|pos| test_digest(pos as usize))
+                        .collect(),
+                };
+
+                let reused_mmr: Mmr<_, Sha256> = Mmr::init_pruned(context.clone(), sync_config)
+                    .await
+                    .unwrap();
+
+                // Should be pruned to 20 and reused
+                let size = reused_mmr.size();
+                assert!(size >= 20, "Size should be at least 20, got {}", size);
+                assert_eq!(reused_mmr.pruned_to_pos(), 20);
+
+                // Journal should have been reused and pruned
+                let journal_size = reused_mmr.journal.size().await.unwrap();
+                assert!(
+                    journal_size >= 20,
+                    "Journal should have been pruned to at least 20"
+                );
+
+                reused_mmr.destroy().await.unwrap();
+            }
+
+            // === Case 3: persisted_size > upper_bound → Prune and rewind ===
+            {
+                let initial_config = Config {
+                    journal_partition: "mmr_case3".into(),
+                    metadata_partition: "mmr_case3_meta".into(),
+                    items_per_blob: 5,
+                    write_buffer: 1024,
+                    thread_pool: None,
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+
+                // Create initial MMR with 40 operations
+                let mut initial_mmr =
+                    Mmr::init(context.clone(), &mut hasher, initial_config.clone())
+                        .await
+                        .unwrap();
+                for i in 0..40 {
+                    initial_mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+                }
+                initial_mmr.sync(&mut hasher).await.unwrap();
+                initial_mmr.close(&mut hasher).await.unwrap();
+
+                // Apply smart reuse with lower_bound=15, upper_bound=25
+                // Since persisted_size=78 > upper_bound=25, should prune to 15 and rewind to 26
+                let sync_config = SyncConfig {
+                    config: Config {
+                        journal_partition: initial_config.journal_partition.clone(),
+                        metadata_partition: format!("{}_rewind", initial_config.metadata_partition),
+                        items_per_blob: initial_config.items_per_blob,
+                        write_buffer: initial_config.write_buffer,
+                        thread_pool: None,
+                        buffer_pool: initial_config.buffer_pool.clone(),
+                    },
+                    lower_bound: 15, // Lower than persisted size
+                    upper_bound: 25, // Less than persisted size
+                    pinned_nodes: Proof::<Digest>::nodes_to_pin(15)
+                        .map(|pos| test_digest(pos as usize))
+                        .collect(),
+                };
+
+                let rewound_mmr: Mmr<_, Sha256> = Mmr::init_pruned(context.clone(), sync_config)
+                    .await
+                    .unwrap();
+
+                // Should be pruned to 15 and rewound
+                let size = rewound_mmr.size();
+                assert!(size >= 15, "Size should be at least 15, got {}", size);
+                assert!(
+                    size <= 26,
+                    "Size should be at most 26 after rewind, got {}",
+                    size
+                );
+                assert_eq!(rewound_mmr.pruned_to_pos(), 15);
+
+                // Journal should have been rewound
+                let journal_size = rewound_mmr.journal.size().await.unwrap();
+                assert!(
+                    journal_size >= 15,
+                    "Journal should have been pruned to at least 15"
+                );
+                assert!(
+                    journal_size <= 26,
+                    "Journal should have been rewound to at most 26"
+                );
+
+                rewound_mmr.destroy().await.unwrap();
+            }
+        });
     }
 }

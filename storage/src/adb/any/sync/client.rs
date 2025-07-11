@@ -195,6 +195,7 @@ where
                 buffer_pool: config.db_config.buffer_pool.clone(),
             },
             config.lower_bound_ops,
+            config.upper_bound_ops,
         )
         .await
         .map_err(adb::Error::JournalError)
@@ -384,7 +385,8 @@ where
                         SyncConfig {
                             db_config: config.db_config.clone(),
                             log,
-                            pruned_to_loc: config.lower_bound_ops,
+                            lower_bound: config.lower_bound_ops,
+                            upper_bound: config.upper_bound_ops,
                             pinned_nodes: pinned_nodes.unwrap(),
                             apply_batch_size: config.apply_batch_size,
                         },
