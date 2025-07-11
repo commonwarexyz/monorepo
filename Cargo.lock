@@ -1343,6 +1343,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-sync"
+version = "0.0.54"
+dependencies = [
+ "bytes",
+ "clap",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-stream",
+ "commonware-utils",
+ "futures",
+ "prometheus-client",
+ "rand",
+ "thiserror 2.0.12",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "commonware-utils"
 version = "0.0.54"
 dependencies = [

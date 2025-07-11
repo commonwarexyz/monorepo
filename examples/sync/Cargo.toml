@@ -1,0 +1,37 @@
+[package]
+name = "commonware-sync"
+edition = "2021"
+publish = true
+version = "0.0.54"
+license = "MIT OR Apache-2.0"
+description = "Synchronize state between a server and client."
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/sync"
+documentation = "https://docs.rs/commonware-sync"
+
+[[bin]]
+name = "server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "client"
+path = "src/bin/client.rs"
+
+[dependencies]
+commonware-storage = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-codec = { workspace = true }
+commonware-utils = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-stream = { workspace = true }
+
+tokio = {workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+prometheus-client = { workspace = true }
