@@ -42,7 +42,7 @@ where
     mailbox: mpsc::Receiver<Message<P, Rq>>,
 
     // State
-    tracked: HashMap<Rq::Commitment, HashSet<P>>,
+    tracked: HashMap<Rq::Commitment, (HashSet<P>, HashSet<P>)>,
 
     // Metrics
     outstanding: Gauge,
@@ -131,8 +131,10 @@ where
                             Message::Send { request, recipients, responder } => {
                                 // Track commitment (if not already tracked)
                                 let commitment = request.commitment();
-                                self.tracked.entry(commitment).or_default();
-                                self.outstanding.set(self.tracked.len() as i64);
+                                let entry = self.tracked.entry(commitment).or_insert_with(|| {
+                                    self.outstanding.inc();
+                                    (HashSet::new(), HashSet::new())
+                                });
 
                                 // Send the request to recipients
                                 match req_tx.send(
@@ -141,6 +143,9 @@ where
                                     self.priority_request
                                 ).await {
                                     Ok(recipients) => {
+                                        for peer in &recipients {
+                                            entry.0.insert(peer.clone());
+                                        }
                                         let _ = responder.send(recipients);
                                     }
                                     Err(err) => {
@@ -226,13 +231,17 @@ where
                         debug!(?commitment, ?peer, "response for unknown commitment");
                         continue;
                     };
-                    if !responses.insert(peer.clone()) {
+                    if !responses.0.contains(&peer) {
+                        debug!(?commitment, ?peer, "never sent request");
+                        continue;
+                    }
+                    if !responses.1.insert(peer.clone()) {
                         debug!(?commitment, ?peer, "duplicate response");
                         continue;
                     }
 
                     // Send the response to the monitor
-                    self.monitor.collected(peer, msg, responses.len()).await;
+                    self.monitor.collected(peer, msg, responses.1.len()).await;
                 },
             }
         }
