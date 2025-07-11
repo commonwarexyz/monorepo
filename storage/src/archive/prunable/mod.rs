@@ -134,11 +134,9 @@
 //! });
 //! ```
 
+use crate::translator::Translator;
+
 mod storage;
-pub use crate::{
-    archive::{Error, Identifier},
-    translator::Translator,
-};
 pub use storage::Archive;
 
 /// Configuration for [Archive] storage.
@@ -174,7 +172,7 @@ pub struct Config<T: Translator, C> {
 mod tests {
     use super::*;
     use crate::{
-        archive::Archive as _,
+        archive::{Archive as _, Error, Identifier},
         journal::Error as JournalError,
         translator::{FourCap, TwoCap},
     };

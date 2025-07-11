@@ -258,6 +258,12 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         self.keys.set(self.map.len() as i64);
     }
 
+    /// Perform a [Self::put] and [Self::sync] in a single operation.
+    pub async fn put_sync(&mut self, key: K, value: V) -> Result<(), Error> {
+        self.put(key, value);
+        self.sync().await
+    }
+
     /// Remove a value from [Metadata] (if it exists).
     pub fn remove(&mut self, key: &K) -> Option<V> {
         // Get value
