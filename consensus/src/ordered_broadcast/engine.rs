@@ -375,14 +375,14 @@ impl<
                     let node = match msg {
                         Ok(node) => node,
                         Err(err) => {
-                            warn!(?err, ?sender, "node decode failed");
+                            debug!(?err, ?sender, "node decode failed");
                             continue;
                         }
                     };
                     let result = match self.validate_node(&node, &sender) {
                         Ok(result) => result,
                         Err(err) => {
-                            warn!(?err, ?sender, "node validate failed");
+                            debug!(?err, ?sender, "node validate failed");
                             continue;
                         }
                     };
@@ -419,16 +419,16 @@ impl<
                     let ack = match msg {
                         Ok(ack) => ack,
                         Err(err) => {
-                            warn!(?err, ?sender, "ack decode failed");
+                            debug!(?err, ?sender, "ack decode failed");
                             continue;
                         }
                     };
                     if let Err(err) = self.validate_ack(&ack, &sender) {
-                        warn!(?err, ?sender, "ack validate failed");
+                        debug!(?err, ?sender, "ack validate failed");
                         continue;
                     };
                     if let Err(err) = self.handle_ack(&ack).await {
-                        warn!(?err, ?sender, "ack handle failed");
+                        debug!(?err, ?sender, "ack handle failed");
                         guard.set(Status::Failure);
                         continue;
                     }
@@ -446,14 +446,14 @@ impl<
                             self.metrics.verify.inc(Status::Dropped);
                         }
                         Ok(false) => {
-                            warn!(?context, "verified was false");
+                            debug!(?context, "verified was false");
                             self.metrics.verify.inc(Status::Failure);
                         }
                         Ok(true) => {
                             debug!(?context, "verified");
                             self.metrics.verify.inc(Status::Success);
                             if let Err(err) = self.handle_app_verified(&context, &payload, &mut ack_sender).await {
-                                warn!(?err, ?context, ?payload, "verified handle failed");
+                                debug!(?err, ?context, ?payload, "verified handle failed");
                             }
                         },
                     }
