@@ -6,7 +6,7 @@ use futures::{
 };
 use std::collections::HashMap;
 
-/// Handler received a request
+/// A mock [crate::Handler] received a request.
 #[derive(Debug, Clone)]
 pub struct Processed {
     pub origin: PublicKey,
@@ -14,10 +14,9 @@ pub struct Processed {
     pub responded: bool,
 }
 
-/// A mock handler for testing
+/// A mock [crate::Handler].
 #[derive(Clone)]
 pub struct Handler {
-    /// Channel to send events
     sender: mpsc::UnboundedSender<Processed>,
 
     /// Configured responses for specific request IDs
@@ -28,7 +27,7 @@ pub struct Handler {
 }
 
 impl Handler {
-    /// Create a new mock handler
+    /// Create a new [Handler].
     pub fn new(respond_by_default: bool) -> (Self, mpsc::UnboundedReceiver<Processed>) {
         let (sender, receiver) = mpsc::unbounded();
         (
@@ -41,7 +40,7 @@ impl Handler {
         )
     }
 
-    /// Create a dummy handler that doesn't track events
+    /// Create a dummy [Handler] that doesn't track events.
     pub fn dummy() -> Self {
         let (sender, _) = mpsc::unbounded();
         Self {
@@ -51,7 +50,7 @@ impl Handler {
         }
     }
 
-    /// Configure a specific response for a request ID
+    /// Configure a specific response for a request ID.
     pub fn set_response(&mut self, request_id: u64, response: Response) {
         self.responses.insert(request_id, response);
     }
