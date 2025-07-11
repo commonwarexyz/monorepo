@@ -15,7 +15,7 @@ use futures::{
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{HashMap, HashSet};
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 /// Engine that will disperse messages and collect responses.
 pub struct Engine<E, Rq, Rs, P, M, H>
@@ -183,7 +183,7 @@ where
                     let msg = match msg {
                         Ok(msg) => msg,
                         Err(err) => {
-                            warn!(?err, ?peer, "failed to decode message");
+                            debug!(?err, ?peer, "failed to decode message");
                             continue;
                         }
                     };
@@ -209,7 +209,7 @@ where
                     let msg = match msg {
                         Ok(msg) => msg,
                         Err(err) => {
-                            warn!(?err, ?peer, "failed to decode message");
+                            debug!(?err, ?peer, "failed to decode message");
                             continue;
                         }
                     };
