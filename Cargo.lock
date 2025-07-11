@@ -1039,6 +1039,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-collector"
+version = "0.0.54"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-stream",
+ "commonware-utils",
+ "futures",
+ "governor",
+ "prometheus-client",
+ "rand",
+ "thiserror 2.0.12",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "commonware-consensus"
 version = "0.0.54"
 dependencies = [
