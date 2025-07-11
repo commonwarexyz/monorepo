@@ -172,20 +172,13 @@ where
         ProtocolError::DatabaseError(e)
     })?;
 
-    // Serialize the proof and operations
-    let proof_bytes = proof.encode().to_vec();
-    let operations_bytes = operations.encode().to_vec();
-
     info!(
         operations_len = operations.len(),
-        proof_bytes_len = proof_bytes.len(),
-        "Sending operations with proof"
+        proof_len = proof.digests.len(),
+        "Sending operations and proof"
     );
 
-    Ok(GetOperationsResponse {
-        proof_bytes,
-        operations_bytes,
-    })
+    Ok(GetOperationsResponse { proof, operations })
 }
 
 /// Handle a client connection using commonware-runtime networking with message framing.

@@ -2,22 +2,17 @@
 //! to fetch operations and proofs.
 
 use crate::{GetOperationsRequest, GetServerMetadataResponse, Message, MAX_MESSAGE_SIZE};
-use commonware_codec::{DecodeExt, Encode, RangeCfg, Read};
+use commonware_codec::{DecodeExt, Encode};
 use commonware_runtime::RwLock;
-use commonware_storage::{
-    adb::any::sync::{
-        resolver::{GetOperationsResult, Resolver as ResolverTrait},
-        Error as SyncError,
-    },
-    mmr::verification::Proof,
+use commonware_storage::adb::any::sync::{
+    resolver::{GetOperationsResult, Resolver as ResolverTrait},
+    Error as SyncError,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::channel::oneshot;
 use std::{net::SocketAddr, num::NonZeroU64, sync::Arc};
 use thiserror::Error;
 use tracing::{error, info};
-
-const MAX_DIGESTS: usize = 10_000;
 
 /// Connection state for persistent networking.
 struct Connection<E>
@@ -164,26 +159,9 @@ where
             }
         };
 
-        // Deserialize the proof
-        let proof = {
-            let mut buf = &response.proof_bytes[..];
-            Proof::read_cfg(&mut buf, &MAX_DIGESTS).map_err(|e| SyncError::Resolver(Box::new(e)))?
-        };
-
-        // Deserialize the operations
-        let operations = {
-            let mut buf = &response.operations_bytes[..];
-            let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
-            Vec::<commonware_storage::adb::operation::Operation<Self::Key, Self::Value>>::read_cfg(
-                &mut buf,
-                &(range_cfg, ()),
-            )
-            .map_err(|e| SyncError::Resolver(Box::new(e)))?
-        };
-
         info!(
-            operations_len = operations.len(),
-            proof_len = proof.digests.len(),
+            operations_len = response.operations.len(),
+            proof_len = response.proof.digests.len(),
             "Received operations and proof"
         );
 
@@ -191,8 +169,8 @@ where
         // We don't use the feedback, but this is required by the Resolver trait.
         let (success_tx, _success_rx) = oneshot::channel();
         Ok(GetOperationsResult {
-            proof,
-            operations,
+            proof: response.proof,
+            operations: response.operations,
             success_tx,
         })
     }

@@ -10,13 +10,21 @@
 //! - Error handling
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt as _, Write};
+use commonware_codec::{
+    EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, ReadRangeExt as _, Write,
+};
 use commonware_cryptography::sha256::Digest;
+use commonware_storage::mmr::verification::Proof;
 use std::num::NonZeroU64;
 use thiserror::Error;
 
+use crate::Operation;
+
 /// Maximum message size in bytes (10MB).
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+
+/// Maximum number of digests in a proof.
+const MAX_DIGESTS: usize = 10_000;
 
 /// Network protocol messages for syncing a [commonware_storage::adb::any::Any] database.
 #[derive(Debug, Clone)]
@@ -52,9 +60,9 @@ pub struct GetOperationsRequest {
 #[derive(Debug, Clone)]
 pub struct GetOperationsResponse {
     /// Serialized proof that the operations were in the database.
-    pub proof_bytes: Vec<u8>,
+    pub proof: Proof<Digest>,
     /// Serialized operations in the requested range.
-    pub operations_bytes: Vec<u8>,
+    pub operations: Vec<Operation>,
 }
 
 /// Response with server metadata.
@@ -199,14 +207,14 @@ impl Read for GetOperationsRequest {
 
 impl Write for GetOperationsResponse {
     fn write(&self, buf: &mut impl BufMut) {
-        self.proof_bytes.write(buf);
-        self.operations_bytes.write(buf);
+        self.proof.write(buf);
+        self.operations.write(buf);
     }
 }
 
 impl EncodeSize for GetOperationsResponse {
     fn encode_size(&self) -> usize {
-        self.proof_bytes.encode_size() + self.operations_bytes.encode_size()
+        self.proof.encode_size() + self.operations.encode_size()
     }
 }
 
@@ -214,13 +222,13 @@ impl Read for GetOperationsResponse {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        use commonware_codec::ReadRangeExt;
-        let proof_bytes = Vec::<u8>::read_range(buf, 0..=MAX_MESSAGE_SIZE)?;
-        let operations_bytes = Vec::<u8>::read_range(buf, 0..=MAX_MESSAGE_SIZE)?;
-        Ok(Self {
-            proof_bytes,
-            operations_bytes,
-        })
+        let proof = Proof::read_cfg(buf, &MAX_DIGESTS)?;
+        let operations = {
+            let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
+            Vec::<Operation>::read_cfg(buf, &(range_cfg, ()))?
+        };
+
+        Ok(Self { proof, operations })
     }
 }
 
