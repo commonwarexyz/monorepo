@@ -304,7 +304,7 @@ fn main() {
                 .long("metrics-port")
                 .value_name("PORT")
                 .help("Port on which metrics are exposed")
-                .default_value("9091"),
+                .default_value("9090"),
         )
         .get_matches();
 
