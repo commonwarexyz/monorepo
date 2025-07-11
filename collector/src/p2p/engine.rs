@@ -152,7 +152,7 @@ where
                     }
                 },
 
-                // Ready future
+                // Response from a handler
                 ready = processed.next_completed() => {
                     // Error handling
                     let Ok((peer, reply)) = ready else {
@@ -196,7 +196,7 @@ where
                     });
                 },
 
-                // Response from an endpoint
+                // Response from a handler
                 response = res_rx.recv() => {
                     // Error handling
                     let (peer, msg) = match response {
