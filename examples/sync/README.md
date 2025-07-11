@@ -1,9 +1,9 @@
 # commonware-sync
 
- [![Crates.io](https://img.shields.io/crates/v/commonware-sync.svg)](https://crates.io/crates/commonware-sync) 
- [![Docs.rs](https://docs.rs/commonware-sync/badge.svg)](https://docs.rs/commonware-sync) 
+ [![Crates.io](https://img.shields.io/crates/v/commonware-sync.svg)](https://crates.io/crates/commonware-sync)
+ [![Docs.rs](https://docs.rs/commonware-sync/badge.svg)](https://docs.rs/commonware-sync)
 
-In this example, a client synchronizes a new [adb::any::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/struct.Any.html) database to the server's database state.
+Synchronize state between a server and client with [adb::any::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/struct.Any.html).
 
 ## Components
 
@@ -65,7 +65,7 @@ Client options:
    ```bash
    cargo run --bin server -- --initial-ops 50
    ```
-   
+
    You should see output like:
    ```
    INFO  Sync Server starting
@@ -79,7 +79,7 @@ Client options:
    ```bash
    cargo run --bin client -- --batch-size 25
    ```
-   
+
    You should see output like:
    ```
    INFO Sync Client starting
@@ -112,24 +112,23 @@ curl http://localhost:9090/metrics
 5. Client continues until all operations applied, state matches Server
 6. Client disconnects and stops; Server keeps running
 
-## Notes About Production Usage
+## Adapting to Production
 
-For the sake of making this example short, straightforward, and to the point, we've taken some 
-expedients that would be inadvisable in a production system.
+To keep this example simple and sweet, we've taken some shortcuts that would be inadvisable in production.
 
 ### Authenticated Connections
 
-In this example, the client simply dials the server and connects. It does not do any authentication
+In `sync`, the client simply dials the server and connects. It does not perform any authentication
 of the server's identity. In a real application, this may be necessary.
 
-Look at the [chat](../chat/README.md) example to see how to use Commonware networking primitives
-like [commonware_p2p::authenticated](https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html) 
-to do authenticated networking.
+Refer to [chat](../chat/README.md) for an example of using [commonware_p2p::authenticated](https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html)
+to implement authenticated networking.
 
-### Trusting the Server
+### Sourcing a Sync Target
 
-In typical usage, the server is untrusted, which is the reason the client uses cryptographic proofs
-to verify the data it receives from the server. 
-In this example, however, the client trusts the server to provide it the correct target root hash.
-In a real application, the client should get the target information from a trusted source such as,
-for example, a chain state.
+When instantiating the client, it asks the server for a target root hash (to sync to).
+
+In a real application, the client should source this information from a trusted source (like a
+[commonware_consensus::threshold_simplex](https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html)
+consensus certificate) and only use the server for data that can be cryptographically verified against
+this target root hash.
