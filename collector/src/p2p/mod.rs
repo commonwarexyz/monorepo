@@ -50,6 +50,7 @@ mod tests {
         Config, Engine, Mailbox,
     };
     use crate::{Handler, Monitor, Originator};
+    use commonware_codec::Encode;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Committable, PrivateKeyExt, Signer,
@@ -57,7 +58,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{Link, Network, Oracle, Receiver, Sender},
-        Blocker, Recipients,
+        Blocker, Recipients, Sender as _,
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use futures::StreamExt;
@@ -641,6 +642,97 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_millis(1_000)) => {
                     // Expected: no events
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_response_from_unknown_peer() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, schemes, peers, connections) =
+                setup_network_and_peers(&context, &[0, 1, 2]).await;
+            let mut schemes = schemes.into_iter();
+            let mut connections = connections.into_iter();
+
+            // Link all peers
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 1, 2).await;
+
+            // Setup peer 1 (originator)
+            let scheme1 = schemes.next().unwrap();
+            let conn1 = connections.next().unwrap();
+            let req_conn1 = conn1.0;
+            let res_conn1 = conn1.1;
+            let (mon1, mut mon_out1) = MockMonitor::new();
+            let mut mailbox1 = setup_and_spawn_engine(
+                &context,
+                oracle.control(scheme1.public_key()),
+                scheme1,
+                (req_conn1, res_conn1),
+                mon1,
+                MockHandler::dummy(),
+            )
+            .await;
+
+            // Setup peer 2 (legitimate responder)
+            let scheme2 = schemes.next().unwrap();
+            let conn2 = connections.next().unwrap();
+            let req_conn2 = conn2.0;
+            let res_conn2 = conn2.1;
+            let (handler2, _) = MockHandler::new(true);
+            let _mailbox2 = setup_and_spawn_engine(
+                &context,
+                oracle.control(scheme2.public_key()),
+                scheme2,
+                (req_conn2, res_conn2),
+                MockMonitor::dummy(),
+                handler2,
+            )
+            .await;
+
+            // Setup peer 3 (will respond with same commitment as peer 2's request)
+            let conn3 = connections.next().unwrap();
+            let mut res_conn3 = conn3.1;
+
+            // Send request from peer 1 to peer 2 (this gets tracked)
+            let request_to_peer2 = Request { id: 42, data: 42 };
+            let recipients = mailbox1
+                .send(Recipients::One(peers[1].clone()), request_to_peer2.clone())
+                .await;
+            assert_eq!(recipients, vec![peers[1].clone()]);
+
+            // Send a response from peer 3 to peer 1
+            let response_to_peer1 = Response { id: 42, result: 72 };
+            res_conn3
+                .0
+                .send(
+                    Recipients::One(peers[0].clone()),
+                    response_to_peer1.encode().into(),
+                    true,
+                )
+                .await
+                .unwrap();
+
+            // Give some time for messages to be processed
+            context.sleep(Duration::from_millis(1_000)).await;
+
+            // Should only receive one response (from peer 2, not peer 3)
+            let collected = mon_out1.next().await.unwrap();
+            assert_eq!(collected.handler, peers[1]); // Response from peer 2
+            assert_eq!(collected.response.id, 42);
+            assert_eq!(collected.response.result, 84); // 42 * 2 (default mock behavior)
+            assert_eq!(collected.count, 1);
+
+            // Verify no additional responses (peer 3's response should be ignored)
+            select! {
+                _ = mon_out1.next() => {
+                    panic!("Should not receive response from unknown peer");
+                },
+                _ = context.sleep(Duration::from_millis(1_000)) => {
+                    // Expected: no more events
                 }
             }
         });
