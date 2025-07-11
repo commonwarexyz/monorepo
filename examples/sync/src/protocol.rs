@@ -15,9 +15,6 @@ use commonware_cryptography::sha256::Digest;
 use std::num::NonZeroU64;
 use thiserror::Error;
 
-/// Protocol version identifier.
-pub const PROTOCOL_VERSION: u8 = 0;
-
 /// Maximum message size in bytes (10MB).
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
@@ -79,8 +76,6 @@ pub struct ErrorResponse {
 /// Error codes for protocol errors.
 #[derive(Debug, Clone)]
 pub enum ErrorCode {
-    /// Unsupported protocol version.
-    UnsupportedVersion,
     /// Invalid request parameters.
     InvalidRequest,
     /// Database error occurred.
@@ -96,9 +91,6 @@ pub enum ErrorCode {
 /// Errors that can occur during protocol operations.
 #[derive(Debug, Error)]
 pub enum ProtocolError {
-    #[error("Unsupported protocol version: {version}")]
-    UnsupportedVersion { version: u8 },
-
     #[error("Invalid request: {message}")]
     InvalidRequest { message: String },
 
@@ -291,12 +283,11 @@ impl Read for ErrorResponse {
 impl Write for ErrorCode {
     fn write(&self, buf: &mut impl BufMut) {
         let discriminant = match self {
-            ErrorCode::UnsupportedVersion => 0u8,
-            ErrorCode::InvalidRequest => 1u8,
-            ErrorCode::DatabaseError => 2u8,
-            ErrorCode::NetworkError => 3u8,
-            ErrorCode::Timeout => 4u8,
-            ErrorCode::InternalError => 5u8,
+            ErrorCode::InvalidRequest => 0u8,
+            ErrorCode::DatabaseError => 1u8,
+            ErrorCode::NetworkError => 2u8,
+            ErrorCode::Timeout => 3u8,
+            ErrorCode::InternalError => 4u8,
         };
         discriminant.write(buf);
     }
@@ -314,12 +305,11 @@ impl Read for ErrorCode {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let discriminant = u8::read(buf)?;
         match discriminant {
-            0 => Ok(ErrorCode::UnsupportedVersion),
-            1 => Ok(ErrorCode::InvalidRequest),
-            2 => Ok(ErrorCode::DatabaseError),
-            3 => Ok(ErrorCode::NetworkError),
-            4 => Ok(ErrorCode::Timeout),
-            5 => Ok(ErrorCode::InternalError),
+            0 => Ok(ErrorCode::InvalidRequest),
+            1 => Ok(ErrorCode::DatabaseError),
+            2 => Ok(ErrorCode::NetworkError),
+            3 => Ok(ErrorCode::Timeout),
+            4 => Ok(ErrorCode::InternalError),
             _ => Err(CodecError::InvalidEnum(discriminant)),
         }
     }
@@ -328,10 +318,6 @@ impl Read for ErrorCode {
 impl From<ProtocolError> for ErrorResponse {
     fn from(error: ProtocolError) -> Self {
         let (error_code, message) = match error {
-            ProtocolError::UnsupportedVersion { version } => (
-                ErrorCode::UnsupportedVersion,
-                format!("Unsupported version: {version}"),
-            ),
             ProtocolError::InvalidRequest { message } => (ErrorCode::InvalidRequest, message),
             ProtocolError::DatabaseError(e) => (ErrorCode::DatabaseError, e.to_string()),
             ProtocolError::NetworkError(e) => (ErrorCode::NetworkError, e),
