@@ -9,7 +9,7 @@ use commonware_storage::{
     adb::any::sync::{self, client::Config as SyncConfig},
     mmr::hasher::Standard,
 };
-use commonware_sync::{crate_version, create_adb_config, Database, NetworkResolver};
+use commonware_sync::{crate_version, create_adb_config, Database, Resolver};
 use std::{
     net::{Ipv4Addr, SocketAddr},
     num::NonZeroU64,
@@ -40,7 +40,7 @@ struct ServerMetadata {
 
 /// Get server metadata to determine sync parameters.
 async fn get_server_metadata<E>(
-    resolver: &NetworkResolver<E>,
+    resolver: &Resolver<E>,
 ) -> Result<ServerMetadata, Box<dyn std::error::Error>>
 where
     E: commonware_runtime::Network + Clone,
@@ -60,7 +60,7 @@ where
 /// Create a new database synced to the server's state.
 async fn sync<E>(
     context: E,
-    resolver: NetworkResolver<E>,
+    resolver: Resolver<E>,
     config: &ClientConfig,
 ) -> Result<Database<E>, Box<dyn std::error::Error>>
 where
@@ -95,7 +95,7 @@ where
         commonware_sync::Value,
         commonware_sync::Hasher,
         commonware_sync::Translator,
-        NetworkResolver<E>,
+        Resolver<E>,
     > {
         context: context.clone(),
         db_config,
@@ -177,7 +177,7 @@ fn main() {
                 .long("metrics-port")
                 .value_name("PORT")
                 .help("Port on which metrics are exposed")
-                .default_value("9090"),
+                .default_value("9091"),
         )
         .get_matches();
 
@@ -236,7 +236,7 @@ fn main() {
         );
 
         // Create the network resolver with the runtime context
-        let resolver = NetworkResolver::new(context.with_label("resolver"), config.server);
+        let resolver = Resolver::new(context.with_label("resolver"), config.server);
 
         // Perform the sync operation
         match sync(context.with_label("sync"), resolver, &config).await {

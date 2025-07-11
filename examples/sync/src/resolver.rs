@@ -6,7 +6,7 @@ use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_runtime::RwLock;
 use commonware_storage::{
     adb::any::sync::{
-        resolver::{GetOperationsResult, Resolver},
+        resolver::{GetOperationsResult, Resolver as ResolverTrait},
         Error as SyncError,
     },
     mmr::verification::Proof,
@@ -29,7 +29,7 @@ where
 }
 
 /// Network resolver that fetches operations from a remote server.
-pub struct NetworkResolver<E>
+pub struct Resolver<E>
 where
     E: commonware_runtime::Network + Clone,
 {
@@ -41,7 +41,7 @@ where
     connection: Arc<RwLock<Option<Connection<E>>>>,
 }
 
-impl<E> NetworkResolver<E>
+impl<E> Resolver<E>
 where
     E: commonware_runtime::Network + Clone,
 {
@@ -125,7 +125,7 @@ where
     }
 }
 
-impl<E> Resolver for NetworkResolver<E>
+impl<E> ResolverTrait for Resolver<E>
 where
     E: commonware_runtime::Network,
 {

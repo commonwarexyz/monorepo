@@ -33,7 +33,7 @@ cargo test
 cargo run --bin server
 
 # Start server with custom settings
-cargo run --bin server -- --port 8080 --initial-ops 50 --storage-dir /tmp/my_server --seed 1337 --metrics-port 9091
+cargo run --bin server -- --port 8080 --initial-ops 50 --storage-dir /tmp/my_server --seed 1337 --metrics-port 9090
 ```
 
 Server options:
@@ -41,7 +41,7 @@ Server options:
 - `-i, --initial-ops <COUNT>`: Number of initial operations to create (default: 100)
 - `-d, --storage-dir <PATH>`: Storage directory (default: /tmp/adb_sync_server)
 - `-s, --seed <SEED>`: Seed for generating test operations (default: 1337)
-- `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9091)
+- `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9090)
 
 ### Running the Client
 
@@ -50,14 +50,14 @@ Server options:
 cargo run --bin client
 
 # Connect with custom settings
-cargo run --bin client -- --server 127.0.0.1:8080 --batch-size 25 --storage-dir /tmp/my_client --metrics-port 9090
+cargo run --bin client -- --server 127.0.0.1:8080 --batch-size 25 --storage-dir /tmp/my_client --metrics-port 9091
 ```
 
 Client options:
 - `-s, --server <ADDRESS>`: Server address to connect to (default: 127.0.0.1:8080)
 - `-b, --batch-size <SIZE>`: Batch size for fetching operations (default: 50)
 - `-d, --storage-dir <PATH>`: Storage directory (default: /tmp/adb_sync_client)
-- `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9090)
+- `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9091)
 
 ## Example Session
 
@@ -95,12 +95,12 @@ Client options:
 ## Metrics
 
 Both the server and client expose Prometheus metrics:
-- Server metrics: `http://localhost:9091/metrics` (configurable with `--metrics-port`)
-- Client metrics: `http://localhost:9090/metrics` (configurable with `--metrics-port`)
+- Server metrics: `http://localhost:9090/metrics` (configurable with `--metrics-port`)
+- Client metrics: `http://localhost:9091/metrics` (configurable with `--metrics-port`)
 
 To fetch server metrics (using default port):
 ```bash
-curl http://localhost:9091/metrics
+curl http://localhost:9090/metrics
 ```
 
 ## Sync Process
