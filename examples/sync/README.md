@@ -1,6 +1,9 @@
-# ADB Sync Example
+# commonware-sync
 
-In this example, we synchronize a new [adb::any::Any](../../storage/src/adb/any/mod.rs) database to the server's database state.
+ [![Crates.io](https://img.shields.io/crates/v/commonware-sync.svg)](https://crates.io/crates/commonware-sync) 
+ [![Docs.rs](https://docs.rs/commonware-sync/badge.svg)](https://docs.rs/commonware-sync) 
+
+In this example, a client synchronizes a new [adb::any::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/struct.Any.html) database to the server's database state.
 
 ## Components
 
@@ -9,19 +12,19 @@ In this example, we synchronize a new [adb::any::Any](../../storage/src/adb/any/
 - [NetworkResolver](src/resolver.rs): Used by client to communicate with server.
 - [Protocol](src/protocol.rs): Defines network messages.
 
-## Build
+## Usage
+
+### Build
 
 ```bash
 cargo build
 ```
 
-## Run Tests
+### Run Tests
 
 ```bash
 cargo test
 ```
-
-## Usage
 
 ### Running the Server
 
