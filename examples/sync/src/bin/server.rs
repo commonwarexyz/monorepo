@@ -181,7 +181,7 @@ where
     Ok(GetOperationsResponse { proof, operations })
 }
 
-/// Handle a client connection using commonware-runtime networking with message framing.
+/// Handle a client connection using [commonware_runtime::Network].
 async fn handle_client<E>(
     state: Arc<State<E>>,
     mut sink: commonware_runtime::SinkOf<E>,
@@ -288,7 +288,7 @@ fn main() {
                 .long("storage-dir")
                 .value_name("PATH")
                 .help("Storage directory for database")
-                .default_value("/tmp/adb_sync_server"),
+                .default_value("/tmp/commonware-sync/server"),
         )
         .arg(
             Arg::new("seed")

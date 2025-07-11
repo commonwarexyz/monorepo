@@ -39,7 +39,7 @@ cargo run --bin server -- --port 8080 --initial-ops 50 --storage-dir /tmp/my_ser
 Server options:
 - `-p, --port <PORT>`: Port to listen on (default: 8080)
 - `-i, --initial-ops <COUNT>`: Number of initial operations to create (default: 100)
-- `-d, --storage-dir <PATH>`: Storage directory (default: /tmp/adb_sync_server)
+- `-d, --storage-dir <PATH>`: Storage directory (default: /tmp/commonware-sync/server)
 - `-s, --seed <SEED>`: Seed for generating test operations (default: 1337)
 - `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9090)
 
@@ -56,7 +56,7 @@ cargo run --bin client -- --server 127.0.0.1:8080 --batch-size 25 --storage-dir 
 Client options:
 - `-s, --server <ADDRESS>`: Server address to connect to (default: 127.0.0.1:8080)
 - `-b, --batch-size <SIZE>`: Batch size for fetching operations (default: 50)
-- `-d, --storage-dir <PATH>`: Storage directory (default: /tmp/adb_sync_client)
+- `-d, --storage-dir <PATH>`: Storage directory (default:/tmp/commonware-sync/client)
 - `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9091)
 
 ## Example Session
@@ -132,4 +132,4 @@ In typical usage, the server is untrusted, which is the reason the client uses c
 to verify the data it receives from the server. 
 In this example, however, the client trusts the server to provide it the correct target root hash.
 In a real application, the client should get the target information from a trusted source such as,
-for example, a chain state. That is, in typical usage, the server 
+for example, a chain state.

@@ -170,7 +170,7 @@ fn main() {
                 .long("storage-dir")
                 .value_name("PATH")
                 .help("Storage directory for local database")
-                .default_value("/tmp/adb_sync_client"),
+                .default_value("/tmp/commonware-sync/client"),
         )
         .arg(
             Arg::new("metrics-port")
