@@ -1,6 +1,7 @@
-//! This client demonstrates how to use the ADB sync functionality
-//! to synchronize to the server's state. It fetches server metadata
-//! to determine sync parameters and then performs the actual sync operation.
+//! This client demonstrates how to use the [commonware_storage::adb::any::sync] functionality
+//! to synchronize to the server's state. It fetches server metadata to determine sync parameters
+//! and then performs the actual sync operation. It uses the [Resolver] trait to fetch operations
+//! from the server.
 
 use clap::{Arg, Command};
 use commonware_cryptography::sha256::Digest;

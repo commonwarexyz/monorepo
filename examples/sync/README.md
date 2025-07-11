@@ -9,7 +9,7 @@ In this example, a client synchronizes a new [adb::any::Any](https://docs.rs/com
 
 - [Server](src/bin/server.rs): Serves historical operations and proofs to clients.
 - [Client](src/bin/client.rs): Starting from an empty database, syncs to the server's database state.
-- [NetworkResolver](src/resolver.rs): Used by client to communicate with server.
+- [Resolver](src/resolver.rs): Used by client to communicate with server.
 - [Protocol](src/protocol.rs): Defines network messages.
 
 ## Usage

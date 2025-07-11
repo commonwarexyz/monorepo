@@ -1,13 +1,13 @@
-//! Network protocol definitions for ADB sync.
+//! Network protocol definitions for syncing a [commonware_storage::adb::any::Any] database.
 //!
-//! This module defines the network protocol used for ADB synchronization between
-//! clients and servers. It includes message types, error handling, and validation
+//! This module defines the network protocol used for syncing a [commonware_storage::adb::any::Any]
+//! database to a server's database state. It includes message types, error handling, and validation
 //! logic for safe network communication.
 //!
 //! The protocol supports:
 //! - Getting server metadata (database size, target hash, operation bounds)
 //! - Fetching operations with cryptographic proofs
-//! - Comprehensive error handling
+//! - Error handling
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt as _, Write};
@@ -18,7 +18,7 @@ use thiserror::Error;
 /// Maximum message size in bytes (10MB).
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
-/// Network protocol messages for ADB sync.
+/// Network protocol messages for syncing a [commonware_storage::adb::any::Any] database.
 #[derive(Debug, Clone)]
 pub enum Message {
     /// Request operations from the server.

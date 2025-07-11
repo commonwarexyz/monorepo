@@ -1,12 +1,14 @@
 //! [Any](commonware_storage::adb::any::Any) database sync example library.
 //!
-//! This library demonstrates ADB (Any Database) synchronization between clients and servers.
+//! This library how to use [commonware_storage::adb::any::sync] to synchronize a client's database
+//! to a server's database.
+//!
 //! It includes network protocols, database configuration, and utilities for creating test data.
 //!
 //! The sync example showcases how to:
-//! - Create and configure ADB databases
-//! - Implement network-based resolvers for fetching operations
-//! - Synchronize database state between remote peers
+//! - Create and configure a [commonware_storage::adb::any::Any] database
+//! - Implement a network-based [commonware_storage::adb::any::sync::resolver::Resolver] for fetching operations
+//! - Use [commonware_storage::adb::any::sync] to synchronize the client's database state with the server's state
 
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_storage::adb::any::Config;

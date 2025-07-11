@@ -45,7 +45,7 @@ impl<E> Resolver<E>
 where
     E: commonware_runtime::Network + Clone,
 {
-    /// Returns a new [NetworkResolver] that communicates with the server at `server_addr`.
+    /// Returns a new [Resolver] that communicates with the server at `server_addr`.
     pub fn new(context: E, server_addr: SocketAddr) -> Self {
         Self {
             server_addr,
