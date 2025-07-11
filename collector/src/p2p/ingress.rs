@@ -1,4 +1,5 @@
 use crate::Originator;
+use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use futures::{
@@ -7,7 +8,7 @@ use futures::{
 };
 
 /// Messages that can be sent to a [Mailbox].
-pub enum Message<P: PublicKey, R: Committable + Digestible> {
+pub enum Message<P: PublicKey, R: Committable + Digestible + Codec> {
     Send {
         request: R,
         recipients: Recipients<P>,
@@ -20,18 +21,18 @@ pub enum Message<P: PublicKey, R: Committable + Digestible> {
 
 /// A mailbox that can be used to send and receive [Message]s.
 #[derive(Clone)]
-pub struct Mailbox<P: PublicKey, R: Committable + Digestible> {
+pub struct Mailbox<P: PublicKey, R: Committable + Digestible + Codec> {
     sender: mpsc::Sender<Message<P, R>>,
 }
 
-impl<P: PublicKey, R: Committable + Digestible> Mailbox<P, R> {
+impl<P: PublicKey, R: Committable + Digestible + Codec> Mailbox<P, R> {
     /// Creates a new [Mailbox] with the given [mpsc::Sender].
     pub fn new(sender: mpsc::Sender<Message<P, R>>) -> Self {
         Self { sender }
     }
 }
 
-impl<P: PublicKey, R: Committable + Digestible> Originator for Mailbox<P, R> {
+impl<P: PublicKey, R: Committable + Digestible + Codec> Originator for Mailbox<P, R> {
     type Request = R;
     type PublicKey = P;
 

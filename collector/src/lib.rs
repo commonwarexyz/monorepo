@@ -2,6 +2,7 @@
 
 pub mod p2p;
 
+use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use futures::channel::oneshot;
@@ -13,7 +14,7 @@ pub trait Originator: Clone + Send + 'static {
     type PublicKey: PublicKey;
 
     /// The type of request to send.
-    type Request: Committable + Digestible + Send + 'static;
+    type Request: Committable + Digestible + Codec;
 
     /// Sends a `Request` to a set of [Recipients], returning the list of handlers that we
     /// tried to send to.
@@ -36,13 +37,12 @@ pub trait Handler: Clone + Send + 'static {
     type PublicKey: PublicKey;
 
     /// The type of request received.
-    type Request: Committable + Digestible + Send + 'static;
+    type Request: Committable + Digestible + Codec;
 
     /// The type of response to send.
     type Response: Committable<Commitment = <Self::Request as Committable>::Commitment>
         + Digestible<Digest = <Self::Request as Digestible>::Digest>
-        + Send
-        + 'static;
+        + Codec;
 
     /// Processes a `request` from an [Originator] and (optionally) send a response.
     ///
@@ -61,7 +61,7 @@ pub trait Monitor: Clone + Send + 'static {
     type PublicKey: PublicKey;
 
     /// The type of response collected.
-    type Response: Committable + Digestible + Send + 'static;
+    type Response: Committable + Digestible + Codec;
 
     /// Called for each response collected with the number of responses collected so far for
     /// the same commitment.
