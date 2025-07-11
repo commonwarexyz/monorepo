@@ -82,9 +82,9 @@ Client options:
    
    You should see output like:
    ```
-   INFO ADB Sync Client starting
+   INFO Sync Client starting
    INFO Configuration server=127.0.0.1:8080 batch_size=25 storage_dir=/tmp/adb_sync_client metrics_port=9090
-   INFO Starting ADB sync from server server=127.0.0.1:8080
+   INFO Starting sync to server's database state server=127.0.0.1:8080
    INFO Establishing connection server_addr=127.0.0.1:8080
    INFO Connected server_addr=127.0.0.1:8080
    INFO Received server metadata

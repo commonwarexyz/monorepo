@@ -1,7 +1,7 @@
-//! [Any](commonware_storage::adb::any::Any) database sync example library.
+//! Synchronize state between a server and client.
 //!
-//! This library how to use [commonware_storage::adb::any::sync] to synchronize a client's database
-//! to a server's database.
+//! This library how to use [commonware_storage::adb::any::sync] to synchronize a client's
+//! [commonware_storage::adb::any::Any] database to a server's database.
 //!
 //! It includes network protocols, database configuration, and utilities for creating test data.
 //!
@@ -14,9 +14,8 @@ use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_storage::adb::any::Config;
 
 pub mod protocol;
-pub mod resolver;
-
 pub use protocol::*;
+pub mod resolver;
 pub use resolver::Resolver;
 
 /// Hasher type used in the database.

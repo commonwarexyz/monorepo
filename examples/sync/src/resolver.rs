@@ -2,7 +2,7 @@
 //! to fetch operations and proofs.
 
 use crate::{GetOperationsRequest, GetServerMetadataResponse, Message, MAX_MESSAGE_SIZE};
-use commonware_codec::{DecodeExt, Encode, Read};
+use commonware_codec::{DecodeExt, Encode, RangeCfg, Read};
 use commonware_runtime::RwLock;
 use commonware_storage::{
     adb::any::sync::{
@@ -175,7 +175,6 @@ where
         // Deserialize the operations
         let operations = {
             let mut buf = &response.operations_bytes[..];
-            use commonware_codec::RangeCfg;
             let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
             Vec::<commonware_storage::adb::operation::Operation<Self::Key, Self::Value>>::read_cfg(
                 &mut buf,

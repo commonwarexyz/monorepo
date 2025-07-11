@@ -295,7 +295,7 @@ impl Write for ErrorCode {
 
 impl EncodeSize for ErrorCode {
     fn encode_size(&self) -> usize {
-        1 // u8 discriminant
+        size_of::<u8>()
     }
 }
 

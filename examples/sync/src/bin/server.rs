@@ -24,7 +24,7 @@ const MAX_BATCH_SIZE: u64 = 100;
 
 /// Server configuration.
 #[derive(Debug)]
-struct ServerConfig {
+struct Config {
     /// Port to listen on.
     port: u16,
     /// Number of initial operations to create.
@@ -38,7 +38,7 @@ struct ServerConfig {
 }
 
 /// Server state containing the database and metrics.
-struct ServerState<E>
+struct State<E>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
@@ -50,7 +50,7 @@ where
     error_counter: Counter,
 }
 
-impl<E> ServerState<E>
+impl<E> State<E>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
@@ -96,7 +96,7 @@ where
 
 /// Handle a request for server state information.
 async fn handle_get_server_metadata_request<E>(
-    state: &ServerState<E>,
+    state: &State<E>,
 ) -> Result<GetServerMetadataResponse, ProtocolError>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
@@ -127,7 +127,7 @@ where
 
 /// Handle a GetOperationsRequest and return operations with proof.
 async fn handle_get_operations_request<E>(
-    state: &ServerState<E>,
+    state: &State<E>,
     request: GetOperationsRequest,
 ) -> Result<GetOperationsResponse, ProtocolError>
 where
@@ -190,7 +190,7 @@ where
 
 /// Handle a client connection using commonware-runtime networking with message framing.
 async fn handle_client<E>(
-    state: Arc<ServerState<E>>,
+    state: Arc<State<E>>,
     mut sink: commonware_runtime::SinkOf<E>,
     mut stream: commonware_runtime::StreamOf<E>,
     client_addr: SocketAddr,
@@ -270,9 +270,9 @@ where
 
 fn main() {
     // Parse command line arguments
-    let matches = Command::new("ADB Sync Server")
+    let matches = Command::new("Sync Server")
         .version(crate_version())
-        .about("Serves ADB operations and proofs to sync clients")
+        .about("Serves database operations and proofs to sync clients")
         .arg(
             Arg::new("port")
                 .short('p')
@@ -315,7 +315,7 @@ fn main() {
         )
         .get_matches();
 
-    let config = ServerConfig {
+    let config = Config {
         port: matches
             .get_one::<String>("port")
             .unwrap()
@@ -432,7 +432,7 @@ fn main() {
         info!(addr = %addr, "Server listening");
 
         // Handle each client connection in a separate task.
-        let state = Arc::new(ServerState::new(context.with_label("server"), database));
+        let state = Arc::new(State::new(context.with_label("server"), database));
         loop {
             match listener.accept().await {
                 Ok((client_addr, sink, stream)) => {

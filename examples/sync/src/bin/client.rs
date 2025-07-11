@@ -21,7 +21,7 @@ use tracing::{error, info};
 const DEFAULT_SERVER: &str = "127.0.0.1:8080";
 
 #[derive(Debug)]
-struct ClientConfig {
+struct Config {
     /// Server address to connect to.
     server: SocketAddr,
     /// Batch size for fetching operations.
@@ -62,7 +62,7 @@ where
 async fn sync<E>(
     context: E,
     resolver: Resolver<E>,
-    config: &ClientConfig,
+    config: &Config,
 ) -> Result<Database<E>, Box<dyn std::error::Error>>
 where
     E: commonware_runtime::Storage
@@ -70,7 +70,7 @@ where
         + commonware_runtime::Metrics
         + commonware_runtime::Network,
 {
-    info!(server = %config.server, "Starting ADB sync from server");
+    info!(server = %config.server, "Starting sync to server's database state");
 
     // Get server metadata to determine sync parameters
     let ServerMetadata {
@@ -145,9 +145,9 @@ where
 
 fn main() {
     // Parse command line arguments
-    let matches = Command::new("ADB Sync Client")
+    let matches = Command::new("Sync Client")
         .version(crate_version())
-        .about("Syncs ADB operations from a server using cryptographic proofs")
+        .about("Syncs a database to a server's database state")
         .arg(
             Arg::new("server")
                 .short('s')
@@ -182,7 +182,7 @@ fn main() {
         )
         .get_matches();
 
-    let config = ClientConfig {
+    let config = Config {
         server: matches
             .get_one::<String>("server")
             .unwrap()
@@ -213,7 +213,7 @@ fn main() {
             }),
     };
 
-    info!("ADB Sync Client starting");
+    info!("Sync Client starting");
     info!(
         server = %config.server,
         batch_size = config.batch_size,
