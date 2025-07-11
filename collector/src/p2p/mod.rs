@@ -557,4 +557,119 @@ mod tests {
             assert!(response20_received);
         });
     }
+
+    #[test_traced]
+    fn test_handler_no_response() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, schemes, peers, connections) =
+                setup_network_and_peers(&context, &[0, 1]).await;
+            let mut schemes = schemes.into_iter();
+            let mut connections = connections.into_iter();
+
+            // Link the peers
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            // Setup peer 1
+            let scheme1 = schemes.next().unwrap();
+            let conn1 = connections.next().unwrap();
+            let req_conn1 = conn1.0;
+            let res_conn1 = conn1.1;
+            let (mon1, mut mon_out1) = Monitor::new();
+            let mut mailbox1 = setup_and_spawn_engine(
+                &context,
+                scheme1,
+                (req_conn1, res_conn1),
+                mon1,
+                Handler::dummy(),
+            )
+            .await;
+
+            // Setup peer 2 with handler that doesn't respond
+            let scheme2 = schemes.next().unwrap();
+            let conn2 = connections.next().unwrap();
+            let req_conn2 = conn2.0;
+            let res_conn2 = conn2.1;
+            let (handler2, mut handler_out2) = Handler::new(false);
+            let _mailbox2 = setup_and_spawn_engine(
+                &context,
+                scheme2,
+                (req_conn2, res_conn2),
+                Monitor::dummy(),
+                handler2,
+            )
+            .await;
+
+            // Send request
+            let request = Request { id: 100, data: 100 };
+            let recipients = mailbox1
+                .send(Recipients::One(peers[1].clone()), request.clone())
+                .await;
+            assert_eq!(recipients, vec![peers[1].clone()]);
+
+            // Verify handler received request but didn't respond
+            let event = handler_out2.next().await.unwrap();
+            match event {
+                HandlerEvent::ReceivedRequest {
+                    origin,
+                    request: received_request,
+                    responded,
+                } => {
+                    assert_eq!(origin, peers[0]);
+                    assert_eq!(received_request, request);
+                    assert!(!responded);
+                }
+            }
+
+            // Verify no response collected
+            select! {
+                _ = mon_out1.next() => {
+                    panic!("Should not receive any monitor events");
+                },
+                _ = context.sleep(Duration::from_millis(1_000)) => {
+                    // Expected: no events
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_empty_recipients() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (_, schemes, _, connections) = setup_network_and_peers(&context, &[0]).await;
+            let mut schemes = schemes.into_iter();
+            let mut connections = connections.into_iter();
+
+            // Setup peer 1
+            let scheme = schemes.next().unwrap();
+            let conn = connections.next().unwrap();
+            let req_conn = conn.0;
+            let res_conn = conn.1;
+            let (mon, mut mon_out) = Monitor::new();
+            let mut mailbox = setup_and_spawn_engine(
+                &context,
+                scheme,
+                (req_conn, res_conn),
+                mon,
+                Handler::dummy(),
+            )
+            .await;
+
+            // Send request with empty recipients list
+            let request = Request { id: 1, data: 1 };
+            let recipients = mailbox.send(Recipients::All, request.clone()).await;
+            assert_eq!(recipients, Vec::<PublicKey>::new());
+
+            // Verify no responses collected
+            select! {
+                _ = mon_out.next() => {
+                    panic!("Should not receive any monitor events");
+                },
+                _ = context.sleep(Duration::from_millis(1_000)) => {
+                    // Expected: no events
+                }
+            }
+        });
+    }
 }
