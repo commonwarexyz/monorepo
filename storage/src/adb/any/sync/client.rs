@@ -185,7 +185,7 @@ where
             });
         }
 
-        // Initialize only the pruned operation log. No MMR or snapshot yet.
+        // Initialize the log journal.
         let log = Journal::<E, Operation<K, V>>::init_pruned(
             config.context.clone().with_label("log"),
             JConfig {
@@ -310,6 +310,7 @@ where
                 }
 
                 // Install pinned nodes on first successful batch.
+                // We need pinned nodes if we don't have them yet and we're starting from the lower bound
                 if log_size == config.lower_bound_ops {
                     let start_pos = leaf_num_to_pos(log_size);
                     let end_pos = leaf_num_to_pos(log_size + operations_len - 1);

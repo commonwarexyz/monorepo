@@ -256,7 +256,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         lower_bound: u64,
         upper_bound: u64,
     ) -> Result<Self, Error> {
-        // Try to load existing journal first to check if we can reuse it
+        // Read existing journal data to check if we can reuse some of it.
         match Self::init(context.clone(), cfg.clone()).await {
             Ok(mut existing_journal) => {
                 let existing_size = existing_journal.size().await?;
@@ -2009,17 +2009,13 @@ mod tests {
             // Verify we can read operations that should still exist
             for i in 10..15 {
                 let result = reused_journal.read(i).await;
-                assert!(result.is_ok(), "Should be able to read operation {}", i);
+                assert!(result.is_ok());
             }
 
             // Verify operations before pruning boundary are gone
             for i in 0..10 {
                 let result = reused_journal.read(i).await;
-                assert!(
-                    matches!(result, Err(Error::ItemPruned(_))),
-                    "Operation {} should be pruned",
-                    i
-                );
+                assert!(matches!(result, Err(Error::ItemPruned(_))),);
             }
             reused_journal.destroy().await.unwrap();
 
@@ -2259,17 +2255,13 @@ mod tests {
                 // Should be able to read operations from 10 to 25
                 for i in 10..26 {
                     let result = reused_journal.read(i).await;
-                    assert!(result.is_ok(), "Should be able to read operation {}", i);
+                    assert!(result.is_ok());
                 }
 
                 // Operations before 10 should be pruned
                 for i in 0..10 {
                     let result = reused_journal.read(i).await;
-                    assert!(
-                        matches!(result, Err(crate::journal::Error::ItemPruned(_))),
-                        "Operation {} should be pruned",
-                        i
-                    );
+                    assert!(matches!(result, Err(crate::journal::Error::ItemPruned(_))),);
                 }
 
                 // Operations after 25 should not exist
@@ -2287,10 +2279,7 @@ mod tests {
                             // For now, we'll accept this as the rewind did remove the data
                         }
                         _ => {
-                            panic!(
-                                "Operation {} should not exist after rewind, got {:?}",
-                                i, result
-                            );
+                            panic!("Operation {i} should not exist after rewind, got {result:?}");
                         }
                     }
                 }

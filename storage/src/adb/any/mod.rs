@@ -219,8 +219,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                     thread_pool: cfg.db_config.thread_pool.clone(),
                     buffer_pool: cfg.db_config.buffer_pool.clone(),
                 },
-                lower_bound: cfg.lower_bound,
-                upper_bound: cfg.upper_bound,
+                lower_bound: leaf_num_to_pos(cfg.lower_bound),
+                upper_bound: leaf_num_to_pos(cfg.upper_bound),
                 pinned_nodes: cfg.pinned_nodes,
             },
         )
