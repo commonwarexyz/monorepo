@@ -55,13 +55,14 @@ impl Digestible for Request {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Response {
     pub id: u64,
-    pub result: u32,
+    // Use a different size to ensure we don't accidentally parse with `Request`.
+    pub result: u64,
 }
 
 impl Write for Response {
     fn write(&self, buf: &mut impl BufMut) {
         buf.put_u64(self.id);
-        buf.put_u32(self.result);
+        buf.put_u64(self.result);
     }
 }
 
@@ -70,13 +71,13 @@ impl Read for Response {
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &()) -> Result<Self, CodecError> {
         let id = buf.get_u64();
-        let result = buf.get_u32();
+        let result = buf.get_u64();
         Ok(Self { id, result })
     }
 }
 
 impl FixedSize for Response {
-    const SIZE: usize = u64::SIZE + u32::SIZE;
+    const SIZE: usize = u64::SIZE + u64::SIZE;
 }
 
 impl Committable for Response {

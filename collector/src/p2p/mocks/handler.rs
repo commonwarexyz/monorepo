@@ -89,7 +89,7 @@ impl crate::Handler for Handler {
         } else if self.respond_by_default {
             let _ = responder.send(Response {
                 id: request_id,
-                result: request.data.wrapping_mul(2),
+                result: request.data.wrapping_mul(2) as u64,
             });
         }
     }
