@@ -275,6 +275,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     // Table configuration
     table_partition: String,
     table_size: u32,
+    table_resize_threshold: u64,
     table_resize_frequency: u8,
     table_resize_chunk_size: u32,
 
@@ -291,7 +292,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 
     // Sections with pending table updates to be synced
     modified_sections: BTreeSet<u64>,
-    resizable_entries: u32,
+    resizable: u32,
     resize_progress: Option<u32>,
 
     // Metrics
@@ -492,7 +493,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             .await?;
 
         // Determine checkpoint based on initialization scenario
-        let (checkpoint, resizable_entries) = match (table_len, checkpoint) {
+        let (checkpoint, resizable) = match (table_len, checkpoint) {
             // New table with no data
             (0, None) => {
                 Self::init_table(&table, config.table_initial_size).await?;
@@ -614,6 +615,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             context,
             table_partition: config.table_partition,
             table_size: checkpoint.table_size,
+            table_resize_threshold: checkpoint.table_size as u64 * RESIZE_THRESHOLD / 100,
             table_resize_frequency: config.table_resize_frequency,
             table_resize_chunk_size: config.table_resize_chunk_size,
             table,
@@ -622,7 +624,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             current_section: checkpoint.section,
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
             modified_sections: BTreeSet::new(),
-            resizable_entries,
+            resizable,
             resize_progress: None,
             puts,
             gets,
@@ -650,8 +652,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Check if the table should be resized based on [RESIZE_THRESHOLD].
     fn should_resize(&self) -> bool {
-        let threshold_buckets = (self.table_size as u64 * RESIZE_THRESHOLD) / 100;
-        self.resizable_entries as u64 >= threshold_buckets
+        self.resizable as u64 >= self.table_resize_threshold
     }
 
     /// Choose the newer valid entry between two table slots.
@@ -736,7 +737,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // If we've reached the threshold for resizing, increment the resizable entries
         if added == self.table_resize_frequency {
-            self.resizable_entries += 1;
+            self.resizable += 1;
         }
 
         // Update the old position
@@ -749,7 +750,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             if table_index < resize_progress {
                 // If the previous entry crossed the threshold, so did this one
                 if added == self.table_resize_frequency {
-                    self.resizable_entries += 1;
+                    self.resizable += 1;
                 }
 
                 // This bucket has been processed, so we need to update the new position
@@ -894,7 +895,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
             // If the entry was over the threshold, decrement the resizable entries
             if added >= self.table_resize_frequency {
-                self.resizable_entries -= 1;
+                self.resizable -= 1;
             }
 
             // Rewrite the entries
@@ -912,6 +913,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         if chunk_end >= old_size {
             // Resize complete
             self.table_size = old_size * 2;
+            self.table_resize_threshold = self.table_size as u64 * RESIZE_THRESHOLD / 100;
             self.resize_progress = None;
             debug!(
                 old = old_size,
