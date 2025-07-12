@@ -710,7 +710,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_sync_data_use_existing_db() {
+    fn test_sync_use_existing_db_partial() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let target_ops = create_test_ops(50);
@@ -768,7 +768,7 @@ pub(crate) mod tests {
 
     /// Test case where existing database on disk exactly matches the sync target
     #[test]
-    fn test_sync_exact_match() {
+    fn test_sync_use_existing_db_exact_match() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let target_ops = create_test_ops(50);

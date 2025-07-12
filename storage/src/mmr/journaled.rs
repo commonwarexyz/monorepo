@@ -336,19 +336,9 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             pool: cfg.config.thread_pool,
         });
 
-        // Set journal_size to match the MMR's logical size after smart reuse
-        // In fresh start: journal contains positions 0..cfg.lower_bound (all pruned)
-        // In prune and reuse: journal has been pruned but contains reused data
-        // In prune and rewind: journal has been pruned and rewound
-        let actual_journal_size = journal.size().await?;
-        let journal_size = if actual_journal_size <= cfg.lower_bound {
-            // Fresh start or fully pruned case - journal_size should be the boundary
-            cfg.lower_bound
-        } else {
-            // Reuse or rewind case - journal_size should match the actual journal size
-            // since the MMR will need to be aware of what's already in the journal
-            actual_journal_size
-        };
+        // Set journal_size to the actual journal size after initialization
+        // This ensures that when sync() is called, it correctly tracks the journal state
+        let journal_size = journal.size().await?;
         Ok(Self {
             mem_mmr,
             journal,
@@ -720,6 +710,11 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         // Don't actually prune the journal to simulate failure
         Ok(())
+    }
+
+    /// Get the actual journal size (for sync scenarios)
+    pub(crate) async fn get_actual_journal_size(&self) -> Result<u64, Error> {
+        self.journal.size().await.map_err(Error::JournalError)
     }
 }
 
