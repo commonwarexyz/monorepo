@@ -244,7 +244,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// The returned MMR is always ready for sync operations starting from lower_bound.
     pub async fn init_sync(context: E, cfg: SyncConfig<H::Digest>) -> Result<Self, Error> {
-        let journal = Journal::<E, H::Digest>::init_sync(
+        let journal = Journal::<E, H::Digest>::init_fresh_at_position(
             context.with_label("mmr_journal"),
             JConfig {
                 partition: cfg.config.journal_partition,
@@ -253,7 +253,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 buffer_pool: cfg.config.buffer_pool.clone(),
             },
             cfg.lower_bound,
-            cfg.upper_bound,
         )
         .await?;
 
@@ -289,7 +288,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         let mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
-            pruned_to_pos: journal_size,
+            pruned_to_pos: cfg.lower_bound,
             pinned_nodes: pinned_nodes_vec,
             pool: cfg.config.thread_pool,
         });
@@ -297,7 +296,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Ok(Self {
             mem_mmr,
             journal,
-            journal_size,
+            journal_size: cfg.lower_bound,
             metadata,
             pruned_to_pos: cfg.lower_bound,
         })
@@ -1387,74 +1386,6 @@ mod tests {
             assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 0 && start_loc == 1));
             let result = mmr.historical_range_proof(mmr_size-1, mmr_size, BATCH_SIZE).await;
             assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == mmr_size-1 && start_loc == mmr_size));
-});
-    }
-
-    #[test_traced]
-    fn test_init_sync_reuse_existing_journal() {
-        const INITIAL_OPERATIONS: usize = 20;
-
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
-
-            // Create an MMR, add some operations, sync it, and close it
-            let config = test_config();
-            let mut initial_mmr = Mmr::init(context.clone(), &mut hasher, config.clone())
-                .await
-                .unwrap();
-            let mut expected_nodes = HashMap::new();
-            for i in 0..INITIAL_OPERATIONS {
-                initial_mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
-                expected_nodes.insert(i, initial_mmr.get_node(i as u64).await.unwrap().unwrap());
-            }
-            initial_mmr.sync(&mut hasher).await.unwrap();
-            let initial_size = initial_mmr.size();
-            let pruned_to_pos = initial_mmr.pruned_to_pos();
-            initial_mmr.close(&mut hasher).await.unwrap();
-
-            // Test with existing journal data - prune to position 10
-            let pinned_nodes = Proof::<Digest>::nodes_to_pin(pruned_to_pos)
-                .map(|pos| {
-                    // For test purposes, use a dummy digest
-                    // In real usage, these would come from the first batch proof
-                    test_digest(pos as usize)
-                })
-                .collect();
-
-            {
-                // Re-open the MMR for sync with the same config as the initial MMR
-                // so the journal is reused.
-                let sync_config = SyncConfig {
-                    config: Config {
-                        journal_partition: config.journal_partition.clone(),
-                        metadata_partition: config.metadata_partition.clone(),
-                        items_per_blob: config.items_per_blob,
-                        write_buffer: config.write_buffer,
-                        thread_pool: None,
-                        buffer_pool: config.buffer_pool.clone(),
-                    },
-                    lower_bound: pruned_to_pos,
-                    upper_bound: initial_size,
-                    pinned_nodes,
-                };
-                let mmr: Mmr<_, Sha256> =
-                    Mmr::init_sync(context.clone(), sync_config).await.unwrap();
-
-                // Verify the MMR was properly initialized
-                assert_eq!(mmr.size(), initial_size);
-                assert_eq!(mmr.pruned_to_pos(), pruned_to_pos);
-                assert_eq!(mmr.journal_size, initial_size);
-                let journal_size = mmr.journal.size().await.unwrap();
-                assert_eq!(journal_size, initial_size);
-                // All of the operations should be present in the journal
-                for i in pruned_to_pos..INITIAL_OPERATIONS as u64 {
-                    let digest = mmr.get_node(i).await.unwrap().unwrap();
-                    assert_eq!(digest, expected_nodes[&(i as usize)]);
-                }
-
-                mmr.destroy().await.unwrap();
-            }
         });
     }
 }

@@ -313,7 +313,11 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     /// **Returns**: A journal that appears to have `position` items without actual data.
     /// Operations 0 to position-1 are considered pruned. Creates the appropriate blob
     /// structure with correct size but no real content.
-    async fn init_fresh_at_position(context: E, cfg: Config, position: u64) -> Result<Self, Error> {
+    pub(crate) async fn init_fresh_at_position(
+        context: E,
+        cfg: Config,
+        position: u64,
+    ) -> Result<Self, Error> {
         // Remove all existing blobs to ensure clean state
         match context.scan(&cfg.partition).await {
             Ok(blobs) => {
