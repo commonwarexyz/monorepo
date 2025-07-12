@@ -529,7 +529,7 @@ where
 
 /// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
 ///
-/// This is just a wrapper around `threshold_signature_recover_multiple`.
+/// This is just a wrapper around `threshold_signature_recover_multiple` with concurrency set to 2.
 pub fn threshold_signature_recover_pair<'a, V, I>(
     threshold: u32,
     first: I,
