@@ -651,7 +651,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         hash & (self.table_size - 1)
     }
 
-    /// Check if the table should be resized based on RESIZE_THRESHOLD.
+    /// Check if the table should be resized based on [RESIZE_THRESHOLD].
     fn should_resize(&self) -> bool {
         let threshold_buckets = (self.table_size as u64 * RESIZE_THRESHOLD) / 100;
         self.resizable_entries as u64 >= threshold_buckets
