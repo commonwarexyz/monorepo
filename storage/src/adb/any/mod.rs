@@ -80,13 +80,13 @@ pub struct SyncConfig<E: RStorage + Metrics, K: Array, V: Array, T: Translator, 
     pub db_config: Config<T>,
 
     /// Log of operations from lower_bound to upper_bound.
-    /// Reports `lower_bound` operations as pruned.
+    /// Reports `lower_bound` as its pruning boundary (oldest retained operation index).
     pub log: Journal<E, Operation<K, V>>,
 
     /// Pruning boundary - operations below this are considered pruned.
     pub lower_bound: u64,
 
-    /// Sync boundary - operations above this are not included.
+    /// Sync boundary - operations above this are not synced.
     pub upper_bound: u64,
 
     /// The pinned nodes the MMR needs at the pruning boundary given by
