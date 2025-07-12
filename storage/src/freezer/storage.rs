@@ -9,6 +9,10 @@ use prometheus_client::metrics::counter::Counter;
 use std::{cmp::Ordering, collections::BTreeSet, marker::PhantomData, ops::Deref};
 use tracing::debug;
 
+/// The percentage of table entries that must reach `table_resize_frequency`
+/// before a resize is triggered.
+const RESIZE_THRESHOLD: u32 = 50;
+
 /// Location of an item in the [Freezer].
 ///
 /// This can be used to directly access the data for a given
@@ -287,7 +291,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 
     // Sections with pending table updates to be synced
     modified_sections: BTreeSet<u64>,
-    should_resize: bool,
+    resizable_entries: u32,
     resize_progress: Option<u32>,
 
     // Metrics
@@ -333,6 +337,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         max_valid_epoch: Option<u64>,
         max_epoch: &mut u64,
         max_section: &mut u64,
+        resizable_entries: &mut u32,
     ) -> Result<bool, Error> {
         if entry.is_empty() {
             return Ok(false);
@@ -361,16 +366,17 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Validate and clean invalid table entries for a given epoch.
     ///
-    /// Returns (modified, max_epoch, max_section) where:
+    /// Returns (modified, max_epoch, max_section, resizable_entries) where:
     /// - modified: whether any entries were cleaned
-    /// - max_epoch: the maximum valid epoch found (if max_valid_epoch is None)
-    /// - max_section: the section corresponding to max_epoch
+    /// - max_epoch: the maximum valid epoch found
+    /// - max_section: the section corresponding to `max_epoch`
+    /// - resizable_entries: the number of entries that can be resized
     async fn recover_table(
         blob: &E::Blob,
         table_size: u32,
         max_valid_epoch: Option<u64>,
         table_replay_buffer: usize,
-    ) -> Result<(bool, u64, u64), Error> {
+    ) -> Result<(bool, u64, u64, u32), Error> {
         // Create a buffered reader for efficient scanning
         let blob_size = Self::table_offset(table_size);
         let mut reader = buffer::Read::new(blob.clone(), blob_size, table_replay_buffer);
@@ -379,6 +385,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let mut modified = false;
         let mut max_epoch = 0u64;
         let mut max_section = 0u64;
+        let mut resizable_entries = 0u32;
         for table_index in 0..table_size {
             let offset = Self::table_offset(table_index);
 
@@ -395,6 +402,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 max_valid_epoch,
                 &mut max_epoch,
                 &mut max_section,
+                &mut resizable_entries,
             )
             .await?;
             let entry2_modified = Self::recover_entry(
@@ -404,13 +412,14 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 max_valid_epoch,
                 &mut max_epoch,
                 &mut max_section,
+                &mut resizable_entries,
             )
             .await?;
 
             modified |= entry1_modified || entry2_modified;
         }
 
-        Ok((modified, max_epoch, max_section))
+        Ok((modified, max_epoch, max_section, resizable_entries))
     }
 
     /// Determine the write slot for a table entry based on current entries and epoch.
@@ -478,14 +487,17 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             .await?;
 
         // Determine checkpoint based on initialization scenario
-        let checkpoint = match (table_len, checkpoint) {
+        let (checkpoint, resizable_entries) = match (table_len, checkpoint) {
             // New table with no data
             (0, None) => {
                 Self::init_table(&table, config.table_initial_size).await?;
-                Checkpoint {
-                    table_size: config.table_initial_size,
-                    ..Default::default()
-                }
+                (
+                    Checkpoint {
+                        table_size: config.table_initial_size,
+                        ..Default::default()
+                    },
+                    0,
+                )
             }
 
             // New table with explicit checkpoint (must be empty)
@@ -496,10 +508,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 assert_eq!(checkpoint.table_size, 0);
 
                 Self::init_table(&table, config.table_initial_size).await?;
-                Checkpoint {
-                    table_size: config.table_initial_size,
-                    ..Default::default()
-                }
+                (
+                    Checkpoint {
+                        table_size: config.table_initial_size,
+                        ..Default::default()
+                    },
+                    0,
+                )
             }
 
             // Existing table with checkpoint
@@ -806,7 +821,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Double the table size
         let old_size = self.table_size;
-        let new_size = old_size.checked_mul(2).expect("table size overflow");
+        let Some(new_size) = old_size.checked_mul(2) else {
+            // If we hit the max table size, just do nothing.
+            return Ok(());
+        };
         self.table.resize(Self::table_offset(new_size)).await?;
 
         // Start the resize
