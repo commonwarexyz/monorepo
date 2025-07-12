@@ -452,6 +452,46 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         }
     }
 
+    /// Choose the newer valid entry between two table slots.
+    fn select_valid_entry(entry1: &Entry, entry2: &Entry) -> Option<(u64, u32, u8)> {
+        match (
+            !entry1.is_empty() && entry1.is_valid(),
+            !entry2.is_empty() && entry2.is_valid(),
+        ) {
+            (true, true) => match entry1.epoch.cmp(&entry2.epoch) {
+                Ordering::Greater => Some((entry1.section, entry1.offset, entry1.added)),
+                Ordering::Less => Some((entry2.section, entry2.offset, entry2.added)),
+                Ordering::Equal => {
+                    unreachable!("two valid entries with the same epoch")
+                }
+            },
+            (true, false) => Some((entry1.section, entry1.offset, entry1.added)),
+            (false, true) => Some((entry2.section, entry2.offset, entry2.added)),
+            (false, false) => None,
+        }
+    }
+
+    /// Write a table entry to the appropriate slot based on epoch.
+    async fn update_head<B: Blob>(
+        table: &B,
+        table_index: u32,
+        entry1: &Entry,
+        entry2: &Entry,
+        update: Entry,
+    ) -> Result<(), Error> {
+        // Calculate the base offset for this table index
+        let table_offset = Self::table_offset(table_index);
+
+        // Determine which slot to write to based on the provided entries
+        let start = Self::select_write_slot(entry1, entry2, update.epoch);
+
+        // Write the new entry
+        table
+            .write_at(update.encode(), table_offset + start as u64)
+            .await
+            .map_err(Error::Runtime)
+    }
+
     /// Initialize table with given size and sync.
     async fn init_table(blob: &E::Blob, table_size: u32) -> Result<(), Error> {
         let table_len = Self::table_offset(table_size);
@@ -650,49 +690,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         hash & (self.table_size - 1)
     }
 
-    /// Check if the table should be resized based on [RESIZE_THRESHOLD].
+    /// Determine if the table should be resized.
     fn should_resize(&self) -> bool {
         self.resizable as u64 >= self.table_resize_threshold
-    }
-
-    /// Choose the newer valid entry between two table slots.
-    fn select_valid_entry(entry1: &Entry, entry2: &Entry) -> Option<(u64, u32, u8)> {
-        match (
-            !entry1.is_empty() && entry1.is_valid(),
-            !entry2.is_empty() && entry2.is_valid(),
-        ) {
-            (true, true) => match entry1.epoch.cmp(&entry2.epoch) {
-                Ordering::Greater => Some((entry1.section, entry1.offset, entry1.added)),
-                Ordering::Less => Some((entry2.section, entry2.offset, entry2.added)),
-                Ordering::Equal => {
-                    unreachable!("two valid entries with the same epoch")
-                }
-            },
-            (true, false) => Some((entry1.section, entry1.offset, entry1.added)),
-            (false, true) => Some((entry2.section, entry2.offset, entry2.added)),
-            (false, false) => None,
-        }
-    }
-
-    /// Write a table entry to the appropriate slot based on epoch.
-    async fn update_head<B: Blob>(
-        table: &B,
-        table_index: u32,
-        entry1: &Entry,
-        entry2: &Entry,
-        update: Entry,
-    ) -> Result<(), Error> {
-        // Calculate the base offset for this table index
-        let table_offset = Self::table_offset(table_index);
-
-        // Determine which slot to write to based on the provided entries
-        let start = Self::select_write_slot(entry1, entry2, update.epoch);
-
-        // Write the new entry
-        table
-            .write_at(update.encode(), table_offset + start as u64)
-            .await
-            .map_err(Error::Runtime)
     }
 
     /// Determine which journal section to write to based on current journal size.
