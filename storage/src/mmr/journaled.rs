@@ -244,7 +244,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// The returned MMR is always ready for sync operations starting from lower_bound.
     pub async fn init_sync(context: E, cfg: SyncConfig<H::Digest>) -> Result<Self, Error> {
-        let journal = Journal::<E, H::Digest>::init_fresh_at_position(
+        let journal = Journal::<E, H::Digest>::init_sync(
             context.with_label("mmr_journal"),
             JConfig {
                 partition: cfg.config.journal_partition,
@@ -253,6 +253,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
                 buffer_pool: cfg.config.buffer_pool.clone(),
             },
             cfg.lower_bound,
+            cfg.upper_bound,
         )
         .await?;
 
@@ -278,7 +279,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         } else {
             // Get pinned nodes for the lower bound (what we're pruned to)
             let mut pinned_nodes_vec = Vec::new();
-            for pos in Proof::<H::Digest>::nodes_to_pin(journal_size) {
+            for pos in Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound) {
                 let digest =
                     Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
                 pinned_nodes_vec.push(digest);
@@ -296,7 +297,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Ok(Self {
             mem_mmr,
             journal,
-            journal_size: cfg.lower_bound,
+            journal_size,
             metadata,
             pruned_to_pos: cfg.lower_bound,
         })
