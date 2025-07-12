@@ -735,11 +735,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Push table update
         let mut added = head.map(|(_, _, added)| added).unwrap_or(0);
-        let was_below_threshold = added < self.table_resize_frequency;
         added = added.saturating_add(1);
 
         // If we've reached the threshold for resizing, increment the resizable entries
-        if was_below_threshold && added >= self.table_resize_frequency {
+        if added == self.table_resize_frequency {
             self.resizable_entries += 1;
         }
 
