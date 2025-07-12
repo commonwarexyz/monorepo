@@ -823,8 +823,8 @@ pub(crate) mod tests {
             for i in 0..31u64 {
                 let target_op = &target_ops[i as usize];
                 if let Some(key) = target_op.to_key() {
-                    let target_value = target_db.get(&key).await.unwrap();
-                    let synced_value = sync_db.get(&key).await.unwrap();
+                    let target_value = target_db.get(key).await.unwrap();
+                    let synced_value = sync_db.get(key).await.unwrap();
                     assert_eq!(target_value, synced_value);
                 }
             }

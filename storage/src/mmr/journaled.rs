@@ -49,48 +49,24 @@ pub struct Config {
     pub buffer_pool: PoolRef,
 }
 
-/// Configuration for initializing a journaled MMR in preparation for synchronization.
+/// Configuration for initializing a journaled MMR for synchronization.
 ///
-/// This configuration is used by [`Mmr::init_sync`] to initialize an MMR
-/// that can intelligently reuse existing persistent data during synchronization scenarios.
-///
-/// # Smart Reuse Strategy
-///
-/// The smart reuse logic works by examining existing persistent data and applying
-/// one of three strategies based on the relationship between the data size and sync boundaries:
-///
-/// 1. **Fresh Start**: When existing data is too old to be useful
-/// 2. **Prune and Reuse**: When existing data overlaps with the sync range
-/// 3. **Prune and Rewind**: When existing data extends beyond the sync range
-///
-/// # Fields
-///
-/// - `lower_bound`: The pruning boundary - operations below this are considered pruned
-/// - `upper_bound`: The sync boundary - operations above this will be rewound if present
-/// - `pinned_nodes`: Pre-computed nodes required for MMR operations after pruning
+/// Determines how to handle existing persistent data based on sync boundaries:
+/// - **Fresh Start**: Existing data < lower_bound → discard and start fresh
+/// - **Prune and Reuse**: lower_bound ≤ existing data ≤ upper_bound → prune and reuse
+/// - **Prune and Rewind**: existing data > upper_bound → prune and rewind to upper_bound
 pub struct SyncConfig<D: Digest> {
-    /// Base configuration for the MMR (journal, metadata, etc.)
+    /// Base MMR configuration (journal, metadata, etc.)
     pub config: Config,
 
-    /// The lower bound (pruning boundary) - operations below this will be pruned.
-    ///
-    /// This represents the oldest operation that should be retained in the synchronized
-    /// database. Operations with positions less than this value are considered pruned
-    /// and will not be accessible.
+    /// Pruning boundary - operations below this are considered pruned.
     pub lower_bound: u64,
 
-    /// The upper bound (sync boundary) - operations above this will be rewound if present.
-    ///
-    /// This represents the newest operation that should be retained in the synchronized
-    /// database. If existing data contains operations beyond this point, they will be
-    /// removed during initialization.
+    /// Sync boundary - operations above this are rewound if present.
     pub upper_bound: u64,
 
-    /// The pinned nodes to use for the MMR.
-    ///
-    /// These are pre-computed digest values for nodes that are required for MMR operations
-    /// (such as proof generation and root calculation) but would normally be pruned.
-    /// These nodes are typically extracted from the first batch proof during synchronization.
+    /// The pinned nodes the MMR needs at the pruning boundary given by
+    /// `lower_bound`, in the order specified by [Proof::nodes_to_pin].
     pub pinned_nodes: Vec<D>,
 }
 
@@ -259,31 +235,14 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Ok(s)
     }
 
-    /// Initialize an [Mmr] instance for synchronization of a range of operations.
-    /// If this instance's data overlaps with the sync range, we will use it so
-    /// we don't need to re-download and re-process operations that already exist.
+    /// Initialize an MMR for synchronization, reusing existing data if possible.
     ///
-    /// There are 3 scenarios:
+    /// **Returns**: An MMR initialized at `cfg.lower_bound` with smart reuse applied:
+    /// - If no existing data or existing_size < lower_bound → fresh MMR at lower_bound
+    /// - If lower_bound ≤ existing_size ≤ upper_bound → reused MMR pruned to lower_bound  
+    /// - If existing_size > upper_bound → reused MMR pruned to lower_bound, rewound to upper_bound+1
     ///
-    /// 1. **Fresh Start**: If existing data is too old to be useful
-    ///    - Existing MMR data is discarded
-    ///    - New MMR is initialized at the lower bound position
-    ///    - Uses provided pinned nodes for correct MMR structure
-    ///
-    /// 2. **Prune and Reuse**: If existing data overlaps with the sync range
-    ///    - Existing MMR data is pruned to the lower bound
-    ///    - Reuses operations from lower bound to existing size
-    ///    - Avoids re-downloading operations that already exist
-    ///
-    /// 3. **Prune and Rewind**: If existing data extends beyond the sync range
-    ///    - Existing MMR data is pruned to the lower bound
-    ///    - Operations beyond the upper bound are removed
-    ///    - Maintains consistency with the sync target
-    ///
-    /// # Arguments
-    ///
-    /// * `context` - The runtime context for storage, clock, and metrics
-    /// * `cfg` - Configuration containing sync boundaries and pinned nodes
+    /// The returned MMR is always ready for sync operations starting from lower_bound.
     pub async fn init_sync(context: E, cfg: SyncConfig<H::Digest>) -> Result<Self, Error> {
         let journal = Journal::<E, H::Digest>::init_sync(
             context.with_label("mmr_journal"),
@@ -1187,7 +1146,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_smart_reuse_basic_initialization() {
+    fn test_smart_reuse_basic() {
         const PRUNING_BOUNDARY: u64 = 7;
         const TOTAL_OPERATIONS: usize = 10;
 
@@ -1250,7 +1209,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_smart_reuse_fully_pruned_initialization() {
+    fn test_smart_reuse_fully_pruned() {
         const TOTAL_OPERATIONS: usize = 5;
 
         let executor = deterministic::Runner::default();
@@ -1560,7 +1519,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_smart_reuse_with_existing_journal_data() {
+    fn test_smart_reuse_existing_data() {
         const INITIAL_OPERATIONS: usize = 20;
         const PRUNING_BOUNDARY: u64 = 10;
 
@@ -1735,12 +1694,7 @@ mod tests {
         });
     }
 
-    /// Comprehensive test demonstrating all three smart reuse scenarios.
-    ///
-    /// This test validates that the smart reuse logic correctly handles:
-    /// 1. Fresh Start: When existing data is too old to be useful
-    /// 2. Prune and Reuse: When existing data overlaps with the sync range
-    /// 3. Prune and Rewind: When existing data extends beyond the sync range
+    /// Test all three smart reuse scenarios: fresh start, prune and reuse, prune and rewind.
     #[test_traced]
     fn test_mmr_init_smart_reuse() {
         const INITIAL_OPERATIONS: u64 = 50;
@@ -1956,12 +1910,7 @@ mod tests {
         });
     }
 
-    /// Test smart reuse edge cases and boundary conditions.
-    ///
-    /// This test validates that the smart reuse logic correctly handles:
-    /// - Exact boundary conditions (existing_size == lower_bound, existing_size == upper_bound)
-    /// - Empty initial data
-    /// - Single operation scenarios
+    /// Test smart reuse edge cases: boundary conditions, empty data, and single operations.
     #[test_traced]
     fn test_smart_reuse_edge_cases() {
         const BOUNDARY_LOWER: u64 = 10;

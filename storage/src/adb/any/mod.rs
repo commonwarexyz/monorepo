@@ -79,17 +79,14 @@ pub struct SyncConfig<E: RStorage + Metrics, K: Array, V: Array, T: Translator, 
     /// Database configuration.
     pub db_config: Config<T>,
 
-    /// The [Any]'s log of operations.
-    /// This log is expected to be pruned to the lower_bound boundary
-    /// and contain all subsequent operations up to upper_bound.
+    /// Log of operations from lower_bound to upper_bound.
+    /// Reports `lower_bound` operations as pruned.
     pub log: Journal<E, Operation<K, V>>,
 
-    /// The lower bound of operations (pruning boundary, inclusive).
-    /// Operations below this will be considered pruned/inactive.
+    /// Pruning boundary - operations below this are considered pruned.
     pub lower_bound: u64,
 
-    /// The upper bound of operations (inclusive).
-    /// Operations above this will not be included in the sync.
+    /// Sync boundary - operations above this are not included.
     pub upper_bound: u64,
 
     /// The pinned nodes the MMR needs at the pruning boundary given by
@@ -201,8 +198,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(db)
     }
 
-    /// Initialize an [Any] database in a pruned state.
-    /// Removes all existing persisted data and applies the state given in `cfg`.
+    /// Initialize a database from data received during a sync.
     pub(super) async fn init_synced(
         context: E,
         cfg: SyncConfig<E, K, V, T, H::Digest>,

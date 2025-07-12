@@ -241,38 +241,12 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         })
     }
 
-    /// Initialize a new [Journal] instance optimized for synchronization scenarios.
+    /// Initialize a journal for synchronization, reusing existing data if possible.
     ///
-    /// This method implements intelligent reuse of existing persistent data, making it ideal for
-    /// synchronization scenarios where you want to avoid re-downloading data that already exists
-    /// locally.
-    ///
-    /// # Arguments
-    /// * `context` - The storage context
-    /// * `cfg` - Configuration for the journal
-    /// * `lower_bound` - The pruning boundary (operations below this will be pruned)
-    /// * `upper_bound` - The sync boundary (operations above this will be rewound if present)
-    ///
-    /// # Sync Behavior
-    ///
-    /// The method inspects existing persistent data and applies one of three strategies:
-    ///
-    /// 1. **Fresh Start**: If `persisted_size < lower_bound`
-    ///    - Existing data is stale and cannot be reused
-    ///    - Erase all persisted data and start fresh from `lower_bound`
-    ///    - Creates a new journal initialized at the lower bound position
-    ///
-    /// 2. **Prune and Reuse**: If `lower_bound ≤ persisted_size ≤ upper_bound`
-    ///    - Existing data is within the sync range and can be reused
-    ///    - Prune operations below `lower_bound`
-    ///    - Keep operations from `lower_bound` to `persisted_size`
-    ///    - This avoids re-downloading operations that already exist locally
-    ///
-    /// 3. **Prune and Rewind**: If `persisted_size > upper_bound`
-    ///    - Existing data extends beyond the sync range
-    ///    - Prune operations below `lower_bound`
-    ///    - Rewind operations above `upper_bound` (keeping `lower_bound` to `upper_bound`)
-    ///    - This handles cases where local data is ahead of the sync target
+    /// **Returns**: A journal ready for sync operations based on existing data:
+    /// - If no existing data or existing_size < lower_bound → fresh journal starting at lower_bound
+    /// - If lower_bound ≤ existing_size ≤ upper_bound → existing journal pruned to lower_bound
+    /// - If existing_size > upper_bound → existing journal pruned to lower_bound, rewound to upper_bound+1
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config,
@@ -336,21 +310,9 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
     /// Initialize a fresh journal at the specified position.
     ///
-    /// This creates a new journal that appears to have `position` items, but without any actual
-    /// data. This is useful for initializing a journal in a pruned state where earlier operations
-    /// have been discarded.
-    ///
-    /// # Arguments
-    /// * `context` - The storage context
-    /// * `cfg` - Configuration for the journal
-    /// * `position` - The starting position for the journal (operations 0 to position-1 are considered pruned)
-    ///
-    /// # Implementation Details
-    ///
-    /// The journal is initialized with dummy data up to the specified position:
-    /// - Calculates which blob should be the tail based on the position
-    /// - Creates the tail blob with the appropriate size to reflect the position
-    /// - No actual data is written, only size is set to maintain position consistency
+    /// **Returns**: A journal that appears to have `position` items without actual data.
+    /// Operations 0 to position-1 are considered pruned. Creates the appropriate blob
+    /// structure with correct size but no real content.
     async fn init_fresh_at_position(context: E, cfg: Config, position: u64) -> Result<Self, Error> {
         // Remove all existing blobs to ensure clean state
         match context.scan(&cfg.partition).await {
@@ -1635,7 +1597,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_smart_reuse_fresh_journal_initialization() {
+    fn test_smart_reuse_fresh_journal() {
         const ITEMS_PER_BLOB: u64 = 5;
         const WRITE_BUFFER: usize = 1024;
 
@@ -1955,7 +1917,7 @@ mod tests {
 
     /// Test that init_sync maintains Journal invariants and append behavior works correctly
     #[test_traced]
-    fn test_smart_reuse_invariants_and_append() {
+    fn test_smart_reuse_append_behavior() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -2184,7 +2146,7 @@ mod tests {
 
     /// Test all three cases of the re-using existing data logic
     #[test_traced]
-    fn test_init_pruned_smart_reuse_comprehensive() {
+    fn test_smart_reuse_all_strategies() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // === Case 1: persisted_size < lower_bound → Erase and start fresh ===
