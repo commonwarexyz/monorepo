@@ -485,7 +485,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         adb::any::{
-            sync::sync,
+            sync::{resolver::tests::FailResolver, sync},
             test::{apply_ops, create_test_db, create_test_ops},
         },
         translator,
@@ -797,6 +797,10 @@ pub(crate) mod tests {
             let target_hash = target_db.root(&mut hasher);
             let lower_bound_ops = target_db.oldest_retained_loc().unwrap();
             let upper_bound_ops = target_db.op_count() - 1;
+            // sync_db should never ask the resolver for operations
+            // because it is already complete. Use a resolver that always fails
+            // to ensure that it's not being used.
+            let resolver = FailResolver::<Digest, Digest, Digest>::new();
             let config = Config {
                 db_config: sync_config, // Use same config to access same partitions
                 fetch_batch_size: NZU64!(10),
@@ -804,7 +808,7 @@ pub(crate) mod tests {
                 lower_bound_ops,
                 upper_bound_ops,
                 context: context.clone(),
-                resolver: &target_db,
+                resolver,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
             };
