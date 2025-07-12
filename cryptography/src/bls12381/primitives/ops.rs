@@ -499,8 +499,18 @@ where
         .collect::<Vec<_>>();
     let weights = compute_weights(indices)?;
 
-    // Build a thread pool with the specified concurrency
+    // If concurrency is not required, recover signatures sequentially
     let concurrency = std::cmp::min(concurrency, prepared_evals.len());
+    if concurrency == 1 {
+        return prepared_evals
+            .iter()
+            .map(|evals| {
+                threshold_signature_recover_with_weights::<V, _>(&weights, evals.iter().cloned())
+            })
+            .collect();
+    }
+
+    // Build a thread pool with the specified concurrency
     let pool = ThreadPoolBuilder::new()
         .num_threads(concurrency)
         .build()
