@@ -931,6 +931,66 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_insert_during_resize() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                journal_partition: "test_journal".into(),
+                journal_compression: None,
+                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                table_partition: "test_table".into(),
+                table_initial_size: 2,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 1, // Process one at a time
+                table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
+                codec_config: (),
+            };
+            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Insert keys to trigger resize
+            freezer.put(test_key("key0"), 0).await.unwrap();
+            freezer.put(test_key("key1"), 1).await.unwrap();
+            freezer.sync().await.unwrap(); // should start resize
+
+            // Verify resize started
+            assert!(freezer.resizing().is_some());
+
+            // Insert during resize
+            freezer.put(test_key("key2"), 2).await.unwrap();
+            freezer.put(test_key("key3"), 3).await.unwrap();
+            freezer.sync().await.unwrap();
+
+            // Verify resize completed
+            assert!(freezer.resizing().is_none());
+
+            // More inserts
+            freezer.put(test_key("key4"), 4).await.unwrap();
+            freezer.put(test_key("key5"), 5).await.unwrap();
+            freezer.sync().await.unwrap();
+
+            // Another resize should've started
+            assert!(freezer.resizing().is_some());
+
+            // Verify all can be retrieved during resize
+            for i in 0..6 {
+                let key = test_key(&format!("key{i}"));
+                assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(i));
+            }
+
+            // Sync until resize completes
+            while freezer.resizing().is_some() {
+                freezer.sync().await.unwrap();
+            }
+
+            // Ensure no buckets are considered resizable
+            assert_eq!(freezer.resizable(), 0);
+        });
+    }
+
     fn test_operations_and_restart(num_keys: usize) -> String {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();

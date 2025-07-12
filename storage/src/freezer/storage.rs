@@ -153,7 +153,7 @@ struct Entry {
     section: u64,
     // Offset in the section where this slot was written
     offset: u32,
-    // Number of items added to this bucket since last resize
+    // Number of items added to this entry since last resize
     added: u8,
     // CRC of (epoch | section | offset | added)
     crc: u32,
@@ -676,15 +676,15 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Compute the table index for a given key.
     ///
-    /// As the table doubles in size during a resize, each existing bucket splits into two:
+    /// As the table doubles in size during a resize, each existing entry splits into two:
     /// one at the original index and another at a new index (original index + previous table size).
     ///
     /// For example, with an initial table size of 4 (2^2):
-    /// - Initially: uses 2 bits of the hash, mapping to buckets 0, 1, 2, 3.
-    /// - After resizing to 8: uses 3 bits, bucket 0 splits into indices 0 and 4.
-    /// - After resizing to 16: uses 4 bits, bucket 0 splits into indices 0 and 8, and so on.
+    /// - Initially: uses 2 bits of the hash, mapping to entries 0, 1, 2, 3.
+    /// - After resizing to 8: uses 3 bits, entry 0 splits into indices 0 and 4.
+    /// - After resizing to 16: uses 4 bits, entry 0 splits into indices 0 and 8, and so on.
     ///
-    /// To determine the appropriate bucket, we AND the key's hash with the current table size.
+    /// To determine the appropriate entry, we AND the key's hash with the current table size.
     fn table_index(&self, key: &K) -> u32 {
         let hash = crc32fast::hash(key.as_ref());
         hash & (self.table_size - 1)
@@ -731,7 +731,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Append entry to the variable journal
         let (offset, _) = self.journal.append(self.current_section, entry).await?;
 
-        // Update the number of items added to the bucket.
+        // Update the number of items added to the entry.
         //
         // We use `saturating_add` to handle overflow (when the table is at max size) gracefully.
         let mut added = head.map(|(_, _, added)| added).unwrap_or(0);
@@ -747,7 +747,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let new_entry = Entry::new(self.next_epoch, self.current_section, offset, added);
         Self::update_head(&self.table, table_index, &entry1, &entry2, new_entry).await?;
 
-        // If we're mid-resize and this bucket has already been processed, update the new position too
+        // If we're mid-resize and this entry has already been processed, update the new position too
         if let Some(resize_progress) = self.resize_progress {
             if table_index < resize_progress {
                 // If the previous entry crossed the threshold, so did this one
@@ -755,7 +755,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                     self.resizable += 1;
                 }
 
-                // This bucket has been processed, so we need to update the new position as well.
+                // This entry has been processed, so we need to update the new position as well.
                 //
                 // The entries are still identical to the old ones, so we don't need to read them again.
                 let new_table_index = self.table_size + table_index;
@@ -827,7 +827,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         }
     }
 
-    /// Resize the table by doubling its size and split each bucket into two.
+    /// Resize the table by doubling its size and split each entry into two.
     async fn start_resize(&mut self) -> Result<(), Error> {
         self.resizes.inc();
 
@@ -923,6 +923,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         }
 
         Ok(())
+    }
+
+    /// Get the current progress of the resize operation.
+    ///
+    /// Returns `None` if the [Freezer] is not resizing.
+    pub fn resizing(&self) -> Option<u32> {
+        self.resize_progress
+    }
+
+    /// Get the number of resizable entries.
+    pub fn resizable(&self) -> u32 {
+        self.resizable
     }
 
     /// Sync all pending data in [Freezer].
