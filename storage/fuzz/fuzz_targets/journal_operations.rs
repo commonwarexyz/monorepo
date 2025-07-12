@@ -3,14 +3,18 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::hash;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
-use commonware_storage::journal::fixed::{
-    Config as FixedConfig, Config as VariableConfig, Journal as FixedJournal,
-    Journal as VariableJournal,
+use commonware_storage::journal::{
+    fixed::{
+        Config as FixedConfig, Config as VariableConfig, Journal as FixedJournal,
+        Journal as VariableJournal,
+    },
+    Error,
 };
 use futures::{pin_mut, StreamExt};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_REPLAY_BUF: usize = 2048;
+const MAX_WRITE_BUF: usize = 2048;
 
 fn bounded_non_zero(u: &mut Unstructured<'_>) -> Result<usize> {
     let v = u.int_in_range(1..=MAX_REPLAY_BUF)?;
@@ -41,7 +45,6 @@ enum JournalOperation {
     },
     Close,
     Destroy,
-    // Edge case operations
     AppendMany {
         count: u8,
     },
@@ -71,13 +74,13 @@ fn fuzz(input: FuzzInput) {
             JournalType::Fixed => FixedConfig {
                 partition: "fixed_journal_operations_fuzz_test".to_string(),
                 items_per_blob: 3,
-                write_buffer: 512,
+                write_buffer: MAX_WRITE_BUF,
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             JournalType::Variable => VariableConfig {
                 partition: "variable_journal_operations_fuzz_test".to_string(),
                 items_per_blob: 3,
-                write_buffer: 512,
+                write_buffer: MAX_WRITE_BUF,
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         };
@@ -100,14 +103,14 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Read { pos } => {
-                    // Only read valid positions that exist in the journal
-                    if *pos < journal_size {
+                    if *pos >= oldest_retained_pos && *pos < journal_size {
                         journal.read(*pos).await.unwrap();
                     }
                 }
 
                 JournalOperation::Size => {
-                    let _size = journal.size().await.unwrap();
+                    let size = journal.size().await.unwrap();
+                    assert_eq!(journal_size, size, "unexpected size");
                 }
 
                 JournalOperation::Sync => {
@@ -115,7 +118,6 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Rewind { size } => {
-                    // Only rewind to valid positions within current journal size and after oldest retained position
                     if *size <= journal_size && *size >= oldest_retained_pos {
                         journal.rewind(*size).await.unwrap();
                         journal_size = *size;
@@ -127,28 +129,33 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Prune { min_pos } => {
-                    // Only prune positions within current journal size
                     if *min_pos <= journal_size {
                         journal.prune(*min_pos).await.unwrap();
-                        // Update oldest retained position based on actual pruning
                         oldest_retained_pos =
                             journal.oldest_retained_pos().await.unwrap().unwrap_or(0);
                     }
                 }
 
                 JournalOperation::Replay { buffer, start_pos } => {
-                    // Test replay functionality - panic on any replay failures
-                    let start_pos = start_pos % (journal_size + 1);
-                    let stream = journal.replay(*buffer, start_pos).await.unwrap();
-                    pin_mut!(stream);
-                    // Consume first few items to test stream - panic on stream errors
-                    for _ in 0..3 {
-                        match stream.next().await {
-                            Some(result) => {
-                                result.unwrap();
+                    match journal.replay(*buffer, *start_pos).await {
+                        Ok(stream) => {
+                            pin_mut!(stream);
+                            // Consume first few items to test stream - panic on stream errors
+                            for _ in 0..3 {
+                                match stream.next().await {
+                                    Some(result) => {
+                                        result.unwrap();
+                                    }
+                                    None => break,
+                                }
                             }
-                            None => break,
                         }
+                        Err(Error::InvalidItem(pos)) => {
+                            if pos != *start_pos {
+                                panic!("invalid item error: expected {start_pos} found {pos}",);
+                            }
+                        }
+                        Err(e) => panic!("unexpected replay error: {e:?}"),
                     }
                 }
 
@@ -163,7 +170,6 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::AppendMany { count } => {
-                    // Append multiple items to stress test blob transitions
                     for _ in 0..*count {
                         let digest = hash(&next_value.to_be_bytes());
                         journal.append(digest).await.unwrap();
@@ -173,7 +179,6 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::MultipleSync => {
-                    // Test multiple rapid syncs
                     journal.sync().await.unwrap();
                     journal.sync().await.unwrap();
                     journal.sync().await.unwrap();

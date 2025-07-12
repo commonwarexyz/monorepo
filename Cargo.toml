@@ -16,6 +16,7 @@ members = [
     "examples/chat",
     "examples/flood",
     "examples/log",
+    "examples/sync",
     "examples/vrf",
 
     # Fuzz builds
@@ -28,19 +29,19 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-commonware-broadcast = { version = "0.0.54", path = "broadcast" }
-commonware-codec = { version = "0.0.54", path = "codec" }
-commonware-collector = { version = "0.0.54", path = "collector" }
-commonware-consensus = { version = "0.0.54", path = "consensus" }
-commonware-cryptography = { version = "0.0.54", path = "cryptography" }
-commonware-deployer = { version = "0.0.54", path = "deployer", default-features = false }
-commonware-macros = { version = "0.0.54", path = "macros" }
-commonware-p2p = { version = "0.0.54", path = "p2p" }
-commonware-resolver = { version = "0.0.54", path = "resolver" }
-commonware-runtime = { version = "0.0.54", path = "runtime" }
-commonware-storage = { version = "0.0.54", path = "storage" }
-commonware-stream = { version = "0.0.54", path = "stream" }
-commonware-utils = { version = "0.0.54", path = "utils" }
+commonware-broadcast = { version = "0.0.55", path = "broadcast" }
+commonware-codec = { version = "0.0.55", path = "codec" }
+commonware-collector = { version = "0.0.55", path = "collector" }
+commonware-consensus = { version = "0.0.55", path = "consensus" }
+commonware-cryptography = { version = "0.0.55", path = "cryptography" }
+commonware-deployer = { version = "0.0.55", path = "deployer", default-features = false }
+commonware-macros = { version = "0.0.55", path = "macros" }
+commonware-p2p = { version = "0.0.55", path = "p2p" }
+commonware-resolver = { version = "0.0.55", path = "resolver" }
+commonware-runtime = { version = "0.0.55", path = "runtime" }
+commonware-storage = { version = "0.0.55", path = "storage" }
+commonware-stream = { version = "0.0.55", path = "stream" }
+commonware-utils = { version = "0.0.55", path = "utils" }
 thiserror = "2.0.12"
 bytes = "1.7.1"
 sha2 = "0.10.8"

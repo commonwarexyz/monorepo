@@ -13,8 +13,8 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::fmt;
 
-mod client;
-mod resolver;
+pub mod client;
+pub mod resolver;
 
 /// Synchronization errors
 #[derive(Debug, thiserror::Error)]
@@ -43,6 +43,9 @@ pub enum Error {
     /// Maximum retries exceeded
     #[error("Maximum retries exceeded")]
     MaxRetriesExceeded,
+    /// Resolver error
+    #[error("Resolver error: {0:?}")]
+    Resolver(Box<dyn fmt::Debug + Send + Sync>),
 }
 
 /// Synchronizes a database by fetching, verifying, and applying operations from a remote source.
@@ -56,7 +59,6 @@ pub enum Error {
 //
 // TODO(#1213) Handle existing state: https://github.com/commonwarexyz/monorepo/issues/1213
 // TODO(#1214) Parallelize operation fetching: https://github.com/commonwarexyz/monorepo/issues/1214
-// TODO(#1215) Add example: https://github.com/commonwarexyz/monorepo/issues/1215
 pub async fn sync<E, K, V, H, T, R>(
     config: Config<E, K, V, H, T, R>,
 ) -> Result<Any<E, K, V, H, T>, Error>
