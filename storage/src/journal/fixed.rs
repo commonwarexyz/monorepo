@@ -263,7 +263,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                     existing_journal.destroy().await?;
                 } else {
                     let last_existing_loc = existing_size - 1;
-                    if existing_size < lower_bound {
+                    if last_existing_loc < lower_bound {
                         // Strategy 1: Fresh Start
                         // Existing data is stale and cannot be reused
                         debug!(

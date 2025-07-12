@@ -791,6 +791,9 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
             sync_db.commit().await.unwrap();
 
+            target_db.sync().await.unwrap();
+            sync_db.sync().await.unwrap();
+
             // Close sync_db
             sync_db.close().await.unwrap();
 
