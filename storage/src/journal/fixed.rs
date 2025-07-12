@@ -283,39 +283,45 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         match Self::init(context.clone(), cfg.clone()).await {
             Ok(mut existing_journal) => {
                 let existing_size = existing_journal.size().await?;
-                let last_existing_loc = existing_size - 1;
-                if existing_size < lower_bound {
-                    // Strategy 1: Fresh Start
-                    // Existing data is stale and cannot be reused
-                    debug!(
-                        existing_size,
-                        lower_bound,
-                        "Existing journal data is stale (size < lower_bound), starting fresh"
-                    );
+                if existing_size == 0 {
+                    // Empty journal - destroy and create fresh
+                    debug!("Existing journal is empty, starting fresh");
                     existing_journal.destroy().await?;
-                } else if last_existing_loc <= upper_bound {
-                    // Strategy 2: Prune and Reuse
-                    // Existing data is within sync range, prune to lower bound and reuse
-                    debug!(
-                        existing_size,
-                        lower_bound,
-                        upper_bound,
-                        "Existing journal data is within sync range, pruning to lower bound and reusing"
-                    );
-                    existing_journal.prune(lower_bound).await?;
-                    return Ok(existing_journal);
                 } else {
-                    // Strategy 3: Prune and Rewind
-                    // Existing data exceeds sync range, prune to lower bound and rewind to upper bound
-                    debug!(
-                        existing_size,
-                        lower_bound,
-                        upper_bound,
-                        "Existing journal data exceeds sync range, pruning to lower bound and rewinding to upper bound"
-                    );
-                    existing_journal.prune(lower_bound).await?;
-                    existing_journal.rewind(upper_bound + 1).await?; // +1 because upper_bound is inclusive
-                    return Ok(existing_journal);
+                    let last_existing_loc = existing_size - 1;
+                    if existing_size < lower_bound {
+                        // Strategy 1: Fresh Start
+                        // Existing data is stale and cannot be reused
+                        debug!(
+                            existing_size,
+                            lower_bound,
+                            "Existing journal data is stale (size < lower_bound), starting fresh"
+                        );
+                        existing_journal.destroy().await?;
+                    } else if last_existing_loc <= upper_bound {
+                        // Strategy 2: Prune and Reuse
+                        // Existing data is within sync range, prune to lower bound and reuse
+                        debug!(
+                            existing_size,
+                            lower_bound,
+                            upper_bound,
+                            "Existing journal data is within sync range, pruning to lower bound and reusing"
+                        );
+                        existing_journal.prune(lower_bound).await?;
+                        return Ok(existing_journal);
+                    } else {
+                        // Strategy 3: Prune and Rewind
+                        // Existing data exceeds sync range, prune to lower bound and rewind to upper bound
+                        debug!(
+                            existing_size,
+                            lower_bound,
+                            upper_bound,
+                            "Existing journal data exceeds sync range, pruning to lower bound and rewinding to upper bound"
+                        );
+                        existing_journal.prune(lower_bound).await?;
+                        existing_journal.rewind(upper_bound + 1).await?; // +1 because upper_bound is inclusive
+                        return Ok(existing_journal);
+                    }
                 }
             }
             Err(_) => {

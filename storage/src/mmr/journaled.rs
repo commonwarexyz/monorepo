@@ -336,7 +336,19 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             pool: cfg.config.thread_pool,
         });
 
-        let journal_size = journal.size().await?;
+        // Set journal_size to match the MMR's logical size after smart reuse
+        // In fresh start: journal contains positions 0..cfg.lower_bound (all pruned)
+        // In prune and reuse: journal has been pruned but contains reused data
+        // In prune and rewind: journal has been pruned and rewound
+        let actual_journal_size = journal.size().await?;
+        let journal_size = if actual_journal_size <= cfg.lower_bound {
+            // Fresh start or fully pruned case - journal_size should be the boundary
+            cfg.lower_bound
+        } else {
+            // Reuse or rewind case - journal_size should match the actual journal size
+            // since the MMR will need to be aware of what's already in the journal
+            actual_journal_size
+        };
         Ok(Self {
             mem_mmr,
             journal,
@@ -1604,7 +1616,7 @@ mod tests {
             // Verify the MMR was properly initialized with sync
             assert_eq!(reused_mmr.size(), PRUNING_BOUNDARY);
             assert_eq!(reused_mmr.pruned_to_pos(), PRUNING_BOUNDARY);
-            assert_eq!(reused_mmr.journal_size, initial_size);
+            assert_eq!(reused_mmr.journal_size, initial_size); // Should be initial_size in reuse case
 
             // The journal should have been reused and pruned
             let journal_size = reused_mmr.journal.size().await.unwrap();
@@ -2050,7 +2062,7 @@ mod tests {
                 // Verify prune and reuse behavior (not fresh start)
                 assert_eq!(boundary_mmr.size(), BOUNDARY_LOWER);
                 assert_eq!(boundary_mmr.pruned_to_pos(), BOUNDARY_LOWER);
-                assert_eq!(boundary_mmr.journal_size, initial_size); // Journal was reused
+                assert_eq!(boundary_mmr.journal_size, initial_size); // Should be initial_size in reuse case
 
                 boundary_mmr.destroy().await.unwrap();
             }
