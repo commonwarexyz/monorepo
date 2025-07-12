@@ -925,7 +925,7 @@ mod tests {
 
             // Verify metrics show resize operations occurred
             let buffer = context.encode();
-            assert!(buffer.contains("resizes_total 9"));
+            assert!(buffer.contains("resizes_total 8"), "{}", buffer);
         });
     }
 

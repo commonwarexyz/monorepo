@@ -332,7 +332,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     /// Recover a single table entry and update tracking.
     async fn recover_entry(
         blob: &E::Blob,
-        entry: &Entry,
+        entry: &mut Entry,
         entry_offset: u64,
         max_valid_epoch: Option<u64>,
         max_epoch: &mut u64,
@@ -350,6 +350,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 entry_epoch = entry.epoch,
                 "found invalid table entry"
             );
+            *entry = Entry::new(0, 0, 0, 0);
             let zero_buf = vec![0u8; Entry::SIZE];
             blob.write_at(zero_buf, entry_offset).await?;
             Ok(true)
@@ -392,38 +393,34 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             // Read both entries from the buffer
             let mut buf = [0u8; Entry::FULL_SIZE];
             reader.read_exact(&mut buf, Entry::FULL_SIZE).await?;
-            let (entry1, entry2) = Self::parse_entries(&buf)?;
+            let (mut entry1, mut entry2) = Self::parse_entries(&buf)?;
 
             // Check both entries
-            let entry1_modified = Self::recover_entry(
+            let entry1_cleared = Self::recover_entry(
                 blob,
-                &entry1,
+                &mut entry1,
                 offset,
                 max_valid_epoch,
                 &mut max_epoch,
                 &mut max_section,
             )
             .await?;
-            let entry2_modified = Self::recover_entry(
+            let entry2_cleared = Self::recover_entry(
                 blob,
-                &entry2,
+                &mut entry2,
                 offset + Entry::SIZE as u64,
                 max_valid_epoch,
                 &mut max_epoch,
                 &mut max_section,
             )
             .await?;
+            modified |= entry1_cleared || entry2_cleared;
 
-            modified |= entry1_modified || entry2_modified;
-
-            // Count this bucket if either entry has reached the resize frequency
-            // (we only count once per bucket, not per entry)
-            if (!entry1.is_empty() && entry1.is_valid() && entry1.added >= table_resize_frequency)
-                || (!entry2.is_empty()
-                    && entry2.is_valid()
-                    && entry2.added >= table_resize_frequency)
-            {
-                resizable_entries += 1;
+            // If the latest entry has reached the resize frequency, increment the resizable entries
+            if let Some((_, _, added)) = Self::select_valid_entry(&entry1, &entry2) {
+                if added >= table_resize_frequency {
+                    resizable_entries += 1;
+                }
             }
         }
 
@@ -658,7 +655,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 
     /// Choose the newer valid entry between two table slots.
-    fn select_valid_entry(&self, entry1: &Entry, entry2: &Entry) -> Option<(u64, u32, u8)> {
+    fn select_valid_entry(entry1: &Entry, entry2: &Entry) -> Option<(u64, u32, u8)> {
         match (
             !entry1.is_empty() && entry1.is_valid(),
             !entry2.is_empty() && entry2.is_valid(),
@@ -721,7 +718,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Get head of the chain from table
         let table_index = self.table_index(&key);
         let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
-        let head = self.select_valid_entry(&entry1, &entry2);
+        let head = Self::select_valid_entry(&entry1, &entry2);
 
         // Create new head of the chain
         let entry = Record::new(
@@ -791,7 +788,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Get head of the chain from table
         let table_index = self.table_index(key);
         let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
-        let Some((mut section, mut offset, _)) = self.select_valid_entry(&entry1, &entry2) else {
+        let Some((mut section, mut offset, _)) = Self::select_valid_entry(&entry1, &entry2) else {
             return Ok(None);
         };
 
@@ -891,22 +888,14 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             // Parse the two slots
             let (entry1, entry2) = Self::parse_entries(entry_buf)?;
 
+            // Get the current head
+            let (section, offset, added) =
+                Self::select_valid_entry(&entry1, &entry2).unwrap_or((0, 0, 0));
+
             // If the entry was over the threshold, decrement the resizable entries
-            if (!entry1.is_empty()
-                && entry1.is_valid()
-                && entry1.added >= self.table_resize_frequency)
-                || (!entry2.is_empty()
-                    && entry2.is_valid()
-                    && entry2.added >= self.table_resize_frequency)
-            {
+            if added >= self.table_resize_frequency {
                 self.resizable_entries -= 1;
             }
-
-            // Get the current head
-            let (section, offset) = self
-                .select_valid_entry(&entry1, &entry2)
-                .map(|(s, o, _)| (s, o))
-                .unwrap_or((0, 0));
 
             // Rewrite the entries
             let reset_entry = Entry::new(self.next_epoch, section, offset, 0);
