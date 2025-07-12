@@ -299,7 +299,6 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         match Self::init(context.clone(), cfg.clone()).await {
             Ok(mut existing_journal) => {
                 let existing_size = existing_journal.size().await?;
-
                 if existing_size < lower_bound {
                     // Strategy 1: Fresh Start
                     // Existing data is stale and cannot be reused

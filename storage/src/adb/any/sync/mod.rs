@@ -68,5 +68,9 @@ where
     T: Translator,
     R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
-    Client::new(config).await?.sync().await
+    let client = Client::new(config).await?;
+    match client {
+        Client::Done { db } => Ok(db),
+        _ => client.sync().await,
+    }
 }

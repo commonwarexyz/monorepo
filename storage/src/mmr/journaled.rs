@@ -259,16 +259,11 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         Ok(s)
     }
 
-    /// Initialize a new [Mmr] instance optimized for synchronization scenarios.
+    /// Initialize an [Mmr] instance for synchronization of a range of operations.
+    /// If this instance's data overlaps with the sync range, we will use it so
+    /// we don't need to re-download and re-process operations that already exist.
     ///
-    /// This method provides intelligent reuse of existing persistent MMR data, making it
-    /// ideal for synchronization scenarios where you want to avoid re-downloading and
-    /// re-processing operations that already exist locally.
-    ///
-    /// # Sync Behavior
-    ///
-    /// The method leverages the underlying journal's sync capabilities to handle
-    /// three distinct scenarios:
+    /// There are 3 scenarios:
     ///
     /// 1. **Fresh Start**: If existing data is too old to be useful
     ///    - Existing MMR data is discarded
@@ -289,27 +284,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// * `context` - The runtime context for storage, clock, and metrics
     /// * `cfg` - Configuration containing sync boundaries and pinned nodes
-    ///
-    /// # Returns
-    ///
-    /// A properly initialized MMR instance ready for synchronization operations.
-    /// The MMR will be in a state consistent with the provided boundaries and pinned nodes.
-    ///
-    /// # Example Usage
-    ///
-    /// ```rust,ignore
-    /// // Initialize MMR for syncing operations 1000-2000
-    /// let sync_config = SyncConfig {
-    ///     config: base_config,
-    ///     lower_bound: 1000,  // Prune operations < 1000
-    ///     upper_bound: 2000,  // Rewind operations > 2000
-    ///     pinned_nodes: extracted_nodes,
-    /// };
-    /// let mmr = Mmr::init_sync(context, sync_config).await?;
-    /// ```
     pub async fn init_sync(context: E, cfg: SyncConfig<H::Digest>) -> Result<Self, Error> {
-        // The journal's init_sync will handle the reuse logic automatically
-        // It will check for existing useful data and reuse, rewind, or create fresh as appropriate
         let journal = Journal::<E, H::Digest>::init_sync(
             context.with_label("mmr_journal"),
             JConfig {
@@ -337,21 +312,34 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         metadata.sync().await.map_err(Error::MetadataError)?;
 
         // Create the MMR in a fully pruned state starting from the lower_bound
-        // The journal may have reused or rewound data, but the MMR always starts
-        // from the lower_bound as specified in the sync config
+        // Everything before cfg.lower_bound is considered pruned
         let journal_size = journal.size().await?;
+        let has_pinned_nodes = !cfg.pinned_nodes.is_empty();
+
+        // Set up pinned nodes if not provided
+        let pinned_nodes_vec = if has_pinned_nodes {
+            cfg.pinned_nodes
+        } else {
+            // Get pinned nodes for the lower bound (what we're pruned to)
+            let mut pinned_nodes_vec = Vec::new();
+            for pos in Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound) {
+                let digest =
+                    Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+                pinned_nodes_vec.push(digest);
+            }
+            pinned_nodes_vec
+        };
 
         let mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
-            pruned_to_pos: cfg.lower_bound,
-            pinned_nodes: cfg.pinned_nodes,
+            pruned_to_pos: cfg.lower_bound, // Lower bound is what's pruned
+            pinned_nodes: pinned_nodes_vec,
             pool: cfg.config.thread_pool,
         });
-
         Ok(Self {
             mem_mmr,
             journal,
-            journal_size,
+            journal_size, // Use actual journal size to match reused data
             metadata,
             pruned_to_pos: cfg.lower_bound,
         })

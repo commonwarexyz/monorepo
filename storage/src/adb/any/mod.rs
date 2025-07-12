@@ -207,7 +207,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         context: E,
         cfg: SyncConfig<E, K, V, T, H::Digest>,
     ) -> Result<Self, Error> {
-        // Use the MMR's init_sync method to properly handle the pruned state with pinned nodes
         let mut mmr = Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
@@ -234,7 +233,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             mmr.add_batched(&mut hasher, &digest).await?;
             if i % cfg.apply_batch_size as u64 == 0 {
                 // Periodically sync the MMR to avoid memory bloat.
-                // Since the first value i takes is `cfg.pruned_to_loc`, the first sync
+                // Since the first value i takes is `cfg.lower_bound`, the first sync
                 // may occur before `apply_batch_size` operations are applied. This is fine.
                 mmr.sync(&mut hasher).await?;
             }

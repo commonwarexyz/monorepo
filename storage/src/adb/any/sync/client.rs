@@ -185,7 +185,7 @@ where
             });
         }
 
-        // Initialize the log journal with sync capabilities
+        // Initialize the operations journal
         let log = Journal::<E, Operation<K, V>>::init_sync(
             config.context.clone().with_label("log"),
             JConfig {
@@ -200,6 +200,31 @@ where
         .await
         .map_err(adb::Error::JournalError)
         .map_err(Error::Adb)?;
+
+        let log_size = log
+            .size()
+            .await
+            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+        if log_size == config.upper_bound_ops + 1 {
+            // Sync is already complete - the log already has all needed operations
+            // Build the database immediately without fetching more operations
+            let db = adb::any::Any::init_synced(
+                config.context.clone(),
+                SyncConfig {
+                    db_config: config.db_config.clone(),
+                    log,
+                    lower_bound: config.lower_bound_ops,
+                    upper_bound: config.upper_bound_ops,
+                    pinned_nodes: vec![], // No pinned nodes needed since we're using existing data
+                    apply_batch_size: config.apply_batch_size,
+                },
+            )
+            .await
+            .map_err(Error::Adb)?;
+
+            return Ok(Client::Done { db });
+        }
 
         Ok(Client::FetchData {
             metrics: Metrics::new(config.context.clone()),
@@ -285,7 +310,6 @@ where
                     "Received operations from resolver"
                 );
 
-                // Verify the proof is valid over the given operations
                 let proof_valid = {
                     let _timer = metrics.proof_verification_duration.timer();
                     adb::any::Any::<E, K, V, H, T>::verify_proof(
@@ -309,14 +333,26 @@ where
                     });
                 }
 
-                // Install pinned nodes on first successful batch.
-                // We need pinned nodes if we don't have them yet and we're starting from the lower bound
-                if log_size == config.lower_bound_ops {
-                    let start_pos = leaf_num_to_pos(log_size);
-                    let end_pos = leaf_num_to_pos(log_size + operations_len - 1);
-                    let Ok(new_pinned_nodes) = proof.extract_pinned_nodes(start_pos, end_pos)
+                // Install pinned nodes on first successful batch if we don't have them yet
+                if pinned_nodes.is_none() {
+                    let GetOperationsResult {
+                        proof: pinned_proof,
+                        ..
+                    } = config
+                        .resolver
+                        .get_operations(
+                            config.upper_bound_ops + 1,  // target size
+                            config.lower_bound_ops,      // start at pruning boundary
+                            NonZeroU64::new(1).unwrap(), // minimal batch to get the proof
+                        )
+                        .await?;
+
+                    let start_pos = leaf_num_to_pos(config.lower_bound_ops);
+                    let end_pos = leaf_num_to_pos(config.lower_bound_ops); // single operation
+                    let Ok(new_pinned_nodes) =
+                        pinned_proof.extract_pinned_nodes(start_pos, end_pos)
                     else {
-                        warn!("Failed to extract pinned nodes, retrying");
+                        warn!("Failed to extract pinned nodes for pruning boundary, retrying");
                         metrics.invalid_batches_received.inc();
                         return Ok(Client::FetchData {
                             config,
@@ -325,6 +361,7 @@ where
                             metrics,
                         });
                     };
+
                     pinned_nodes = Some(new_pinned_nodes);
                 }
 
@@ -669,6 +706,131 @@ pub(crate) mod tests {
                 synced_db.get(final_op.to_key().unwrap()).await.unwrap(),
                 None
             );
+        });
+    }
+
+    #[test]
+    fn test_sync_data_use_existing_db() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let target_ops = create_test_ops(50);
+
+            // Create two databases
+            let mut target_db = create_test_db(context.clone()).await;
+            let sync_db_config = create_test_config(1000);
+            let mut sync_db = adb::any::Any::init(context.clone(), sync_db_config.clone())
+                .await
+                .unwrap();
+
+            // Apply the same operations to both databases
+            let common_ops = target_ops[0..10].to_vec();
+            target_db = apply_ops(target_db, common_ops.clone()).await;
+            sync_db = apply_ops(sync_db, common_ops).await;
+            target_db.commit().await.unwrap();
+            sync_db.commit().await.unwrap();
+
+            // Close sync_db
+            sync_db.close().await.unwrap();
+
+            // Add one more operation (and commit) to target database
+            let more_ops = target_ops[10..11].to_vec(); // Just operation 10
+            target_db = apply_ops(target_db, more_ops).await;
+            target_db.commit().await.unwrap();
+            let mut hasher = create_test_hasher();
+            let target_hash = target_db.root(&mut hasher);
+            let lower_bound_ops = target_db.oldest_retained_loc().unwrap();
+            let upper_bound_ops = target_db.op_count() - 1; // Up to the last operation
+
+            // Reopen sync_db
+            let config = Config {
+                db_config: sync_db_config, // Use same config as before
+                fetch_batch_size: NZU64!(10),
+                target_hash,
+                lower_bound_ops,
+                upper_bound_ops,
+                context: context.clone(),
+                resolver: &target_db,
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+            };
+
+            let synced_db = sync(config).await.unwrap();
+
+            // Verify synced state
+            assert_eq!(synced_db.op_count(), upper_bound_ops + 1);
+            assert_eq!(synced_db.oldest_retained_loc(), Some(lower_bound_ops));
+            assert_eq!(synced_db.root(&mut hasher), target_hash);
+
+            synced_db.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test edge case where existing database exactly matches the sync target
+    #[test]
+    fn test_sync_exact_match() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let target_ops = create_test_ops(50);
+
+            // Create two databases
+            let target_config = create_test_config(context.next_u64());
+            let mut target_db = adb::any::Any::init(context.clone(), target_config)
+                .await
+                .unwrap();
+            let sync_config = create_test_config(context.next_u64());
+            let mut sync_db = adb::any::Any::init(context.clone(), sync_config.clone())
+                .await
+                .unwrap();
+
+            // Apply the same operations to both databases
+            target_db = apply_ops(target_db, target_ops.clone()).await;
+            sync_db = apply_ops(sync_db, target_ops.clone()).await;
+            target_db.commit().await.unwrap();
+            sync_db.commit().await.unwrap();
+
+            // Close sync_db
+            sync_db.close().await.unwrap();
+
+            // Reopen sync_db
+            let mut hasher = create_test_hasher();
+            let target_hash = target_db.root(&mut hasher);
+            let lower_bound_ops = 0;
+            let upper_bound_ops = target_db.op_count() - 1;
+            let config = Config {
+                db_config: sync_config, // Use same config to access same partitions
+                fetch_batch_size: NZU64!(10),
+                target_hash,
+                lower_bound_ops,
+                upper_bound_ops,
+                context: context.clone(),
+                resolver: &target_db,
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+            };
+            let sync_db = sync(config).await.unwrap();
+
+            // Verify data matches
+            assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
+            assert_eq!(sync_db.op_count(), target_db.op_count());
+            assert_eq!(
+                sync_db.log.size().await.unwrap(),
+                target_db.log.size().await.unwrap()
+            );
+            assert_eq!(sync_db.oldest_retained_loc(), Some(lower_bound_ops));
+            assert_eq!(sync_db.ops.pruned_to_pos(), lower_bound_ops);
+            assert_eq!(sync_db.root(&mut hasher), target_hash);
+            for i in 0..31u64 {
+                let target_op = &target_ops[i as usize];
+                if let Some(key) = target_op.to_key() {
+                    let target_value = target_db.get(&key).await.unwrap();
+                    let synced_value = sync_db.get(&key).await.unwrap();
+                    assert_eq!(target_value, synced_value);
+                }
+            }
+
+            sync_db.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
         });
     }
 }
