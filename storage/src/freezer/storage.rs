@@ -731,7 +731,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Append entry to the variable journal
         let (offset, _) = self.journal.append(self.current_section, entry).await?;
 
-        // Push table update
+        // Update the number of items added to the bucket.
+        //
+        // We use `saturating_add` to handle overflow (when the table is at max size) gracefully.
         let mut added = head.map(|(_, _, added)| added).unwrap_or(0);
         added = added.saturating_add(1);
 
