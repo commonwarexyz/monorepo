@@ -832,10 +832,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     async fn start_resize(&mut self) -> Result<(), Error> {
         self.resizes.inc();
 
-        // Double the table size
+        // Double the table size (if not already at the max size)
         let old_size = self.table_size;
         let Some(new_size) = old_size.checked_mul(2) else {
-            // If we hit the max table size, just do nothing.
             return Ok(());
         };
         self.table.resize(Self::table_offset(new_size)).await?;
