@@ -273,22 +273,6 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     ///    - Prune operations below `lower_bound`
     ///    - Rewind operations above `upper_bound` (keeping `lower_bound` to `upper_bound`)
     ///    - This handles cases where local data is ahead of the sync target
-    ///
-    /// # Returns
-    ///
-    /// A `Journal` instance ready for use. The journal is not synced to disk before being returned.
-    ///
-    /// # Example Usage
-    ///
-    /// ```rust,ignore
-    /// // Sync operations 100-200 from a remote source
-    /// let journal = Journal::init_sync(
-    ///     context,
-    ///     config,
-    ///     100,  // lower_bound: prune operations < 100
-    ///     200   // upper_bound: rewind operations > 200
-    /// ).await?;
-    /// ```
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config,
@@ -299,6 +283,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         match Self::init(context.clone(), cfg.clone()).await {
             Ok(mut existing_journal) => {
                 let existing_size = existing_journal.size().await?;
+                let last_existing_loc = existing_size - 1;
                 if existing_size < lower_bound {
                     // Strategy 1: Fresh Start
                     // Existing data is stale and cannot be reused
@@ -308,7 +293,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                         "Existing journal data is stale (size < lower_bound), starting fresh"
                     );
                     existing_journal.destroy().await?;
-                } else if existing_size <= upper_bound {
+                } else if last_existing_loc <= upper_bound {
                     // Strategy 2: Prune and Reuse
                     // Existing data is within sync range, prune to lower bound and reuse
                     debug!(

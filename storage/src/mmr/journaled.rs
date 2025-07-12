@@ -312,8 +312,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         metadata.sync().await.map_err(Error::MetadataError)?;
 
         // Create the MMR in a fully pruned state starting from the lower_bound
-        // Everything before cfg.lower_bound is considered pruned
-        let journal_size = journal.size().await?;
+        // Everything before cfg.lower_bound is pruned
         let has_pinned_nodes = !cfg.pinned_nodes.is_empty();
 
         // Set up pinned nodes if not provided
@@ -332,14 +331,16 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         let mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
-            pruned_to_pos: cfg.lower_bound, // Lower bound is what's pruned
+            pruned_to_pos: cfg.lower_bound,
             pinned_nodes: pinned_nodes_vec,
             pool: cfg.config.thread_pool,
         });
+
+        let journal_size = journal.size().await?;
         Ok(Self {
             mem_mmr,
             journal,
-            journal_size, // Use actual journal size to match reused data
+            journal_size,
             metadata,
             pruned_to_pos: cfg.lower_bound,
         })

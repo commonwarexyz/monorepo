@@ -766,7 +766,7 @@ pub(crate) mod tests {
         });
     }
 
-    /// Test edge case where existing database exactly matches the sync target
+    /// Test case where existing database on disk exactly matches the sync target
     #[test]
     fn test_sync_exact_match() {
         let executor = deterministic::Runner::default();
