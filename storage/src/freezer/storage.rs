@@ -712,21 +712,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Push table update
         let mut added = head.map(|(_, _, added)| added).unwrap_or(0);
+        added = added.saturating_add(1);
 
-        // Determine if we should resize the table
-        if added >= self.table_resize_frequency {
-            // We don't need to keep incrementing added because we are already resizing.
-            //
-            // This prevents an overflow of the added field when there are many operations before resize.
-            self.should_resize = true;
-        } else {
-            // If a resize is ongoing and an item has already been rewritten, we still increment added
-            // to ensure we resize again.
-            //
-            // This isn't a perfect solution because an interrupted resize will have reset the added
-            // field to 0 when the incomplete new table is not fully populated but consider it the right
-            // balance between correctness and performance.
-            added = added.checked_add(1).expect("added overflow");
+        // If we've reached the threshold for resizing, increment the resizable entries
+        if added == self.table_resize_frequency {
+            self.resizable_entries += 1;
         }
 
         // Update the old position
