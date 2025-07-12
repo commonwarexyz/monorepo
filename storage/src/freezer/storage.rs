@@ -373,9 +373,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     async fn recover_table(
         blob: &E::Blob,
         table_size: u32,
+        table_resize_frequency: u8,
         max_valid_epoch: Option<u64>,
         table_replay_buffer: usize,
-        table_resize_frequency: u8,
     ) -> Result<(bool, u64, u64, u32), Error> {
         // Create a buffered reader for efficient scanning
         let blob_size = Self::table_offset(table_size);
@@ -548,9 +548,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 let (table_modified, _, _, resizable) = Self::recover_table(
                     &table,
                     checkpoint.table_size,
+                    config.table_resize_frequency,
                     Some(checkpoint.epoch),
                     config.table_replay_buffer,
-                    config.table_resize_frequency,
                 )
                 .await?;
                 if table_modified {
@@ -572,9 +572,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 let (modified, max_epoch, max_section, resizable) = Self::recover_table(
                     &table,
                     table_size,
+                    config.table_resize_frequency,
                     None,
                     config.table_replay_buffer,
-                    config.table_resize_frequency,
                 )
                 .await?;
 
