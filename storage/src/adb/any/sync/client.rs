@@ -826,11 +826,11 @@ pub(crate) mod tests {
                 sync_db.log.size().await.unwrap(),
                 target_db.log.size().await.unwrap()
             );
+            assert_eq!(sync_db.ops.pruned_to_pos(), target_db.ops.pruned_to_pos());
             assert_eq!(
                 sync_db.oldest_retained_loc(),
                 target_db.oldest_retained_loc()
             );
-            assert_eq!(sync_db.ops.pruned_to_pos(), target_db.ops.pruned_to_pos());
             assert_eq!(sync_db.root(&mut hasher), target_hash);
             for i in 0..31u64 {
                 let target_op = &target_ops[i as usize];

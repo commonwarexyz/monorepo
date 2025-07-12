@@ -279,7 +279,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         } else {
             // Get pinned nodes for the lower bound (what we're pruned to)
             let mut pinned_nodes_vec = Vec::new();
-            for pos in Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound) {
+            for pos in Proof::<H::Digest>::nodes_to_pin(journal_size) {
                 let digest =
                     Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
                 pinned_nodes_vec.push(digest);
@@ -289,7 +289,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         let mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
-            pruned_to_pos: cfg.lower_bound,
+            pruned_to_pos: journal_size,
             pinned_nodes: pinned_nodes_vec,
             pool: cfg.config.thread_pool,
         });
@@ -299,7 +299,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             journal,
             journal_size,
             metadata,
-            pruned_to_pos: cfg.lower_bound,
+            pruned_to_pos: journal_size,
         })
     }
 
