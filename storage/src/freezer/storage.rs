@@ -886,6 +886,17 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             // Parse the two slots
             let (entry1, entry2) = Self::parse_entries(entry_buf)?;
 
+            // If the entry was over the threshold, decrement the resizable entries
+            if (!entry1.is_empty()
+                && entry1.is_valid()
+                && entry1.added >= self.table_resize_frequency)
+                || (!entry2.is_empty()
+                    && entry2.is_valid()
+                    && entry2.added >= self.table_resize_frequency)
+            {
+                self.resizable_entries -= 1;
+            }
+
             // Get the current head
             let (section, offset) = self
                 .select_valid_entry(&entry1, &entry2)
@@ -908,7 +919,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             // Resize complete
             self.table_size = old_size * 2;
             self.resize_progress = None;
-            self.resizable_entries = 0; // Reset the counter after resize
             debug!(
                 old = old_size,
                 new = self.table_size,
