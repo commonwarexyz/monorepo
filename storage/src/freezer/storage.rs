@@ -941,8 +941,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     ///
     /// If the table needs to be resized, the resize will begin during this sync.
     /// The resize operation is performed incrementally across multiple sync calls
-    /// to avoid latency spikes. Each sync will process up to `table_resize_chunk_size`
-    /// entries until the resize is complete.
+    /// to avoid a large latency spike (or unexpected long latency for [Freezer::put]).
+    /// Each sync will process up to `table_resize_chunk_size` entries until the resize
+    /// is complete.
     pub async fn sync(&mut self) -> Result<Checkpoint, Error> {
         // Sync all modified journal sections
         let mut updates = Vec::with_capacity(self.modified_sections.len());
