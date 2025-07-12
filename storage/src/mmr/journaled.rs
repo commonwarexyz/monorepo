@@ -270,17 +270,16 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         metadata.put(prune_key, cfg.lower_bound.to_be_bytes().into());
         metadata.sync().await.map_err(Error::MetadataError)?;
 
-        // Create the MMR in a fully pruned state starting from the lower_bound
-        // Everything before cfg.lower_bound is pruned
-        let has_pinned_nodes = !cfg.pinned_nodes.is_empty();
+        let journal_size = journal.size().await?;
+        assert!(journal_size <= cfg.upper_bound + 1);
 
         // Set up pinned nodes if not provided
-        let pinned_nodes_vec = if has_pinned_nodes {
+        let pinned_nodes_vec = if !cfg.pinned_nodes.is_empty() {
             cfg.pinned_nodes
         } else {
             // Get pinned nodes for the lower bound (what we're pruned to)
             let mut pinned_nodes_vec = Vec::new();
-            for pos in Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound) {
+            for pos in Proof::<H::Digest>::nodes_to_pin(journal_size) {
                 let digest =
                     Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
                 pinned_nodes_vec.push(digest);
@@ -290,13 +289,11 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         let mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
-            pruned_to_pos: cfg.lower_bound,
+            pruned_to_pos: journal_size,
             pinned_nodes: pinned_nodes_vec,
             pool: cfg.config.thread_pool,
         });
 
-        let journal_size = journal.size().await?;
-        assert!(journal_size <= cfg.upper_bound + 1);
         Ok(Self {
             mem_mmr,
             journal,
