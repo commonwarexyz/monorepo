@@ -367,11 +367,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Validate and clean invalid table entries for a given epoch.
     ///
-    /// Returns (modified, max_epoch, max_section, resizable_entries) where:
+    /// Returns (modified, max_epoch, max_section, resizable) where:
     /// - modified: whether any entries were cleaned
     /// - max_epoch: the maximum valid epoch found
     /// - max_section: the section corresponding to `max_epoch`
-    /// - resizable_entries: the number of entries that can be resized
+    /// - resizable: the number of entries that can be resized
     async fn recover_table(
         blob: &E::Blob,
         table_size: u32,
