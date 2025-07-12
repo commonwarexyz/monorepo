@@ -299,7 +299,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             journal,
             journal_size,
             metadata,
-            pruned_to_pos: journal_size,
+            pruned_to_pos: cfg.lower_bound,
         })
     }
 

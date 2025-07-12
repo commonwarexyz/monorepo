@@ -150,29 +150,6 @@ pub enum UpdateResult {
     Updated(u64, u64),
 }
 
-/// Calculate the expected MMR size for a given number of operations.
-/// This is used to determine the upper bound for sync operations.
-fn calculate_mmr_size(num_operations: u64) -> u64 {
-    if num_operations == 0 {
-        return 0;
-    }
-
-    let mut size = 0u64;
-    let mut remaining = num_operations;
-
-    while remaining > 0 {
-        // Find largest power of 2 <= remaining
-        let height = 63 - remaining.leading_zeros();
-        let subtree_leaves = 1u64 << height;
-        let subtree_size = (2 * subtree_leaves) - 1;
-
-        size += subtree_size;
-        remaining -= subtree_leaves;
-    }
-
-    size
-}
-
 impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator>
     Any<E, K, V, H, T>
 {
@@ -238,7 +215,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                     buffer_pool: cfg.db_config.buffer_pool.clone(),
                 },
                 lower_bound: leaf_num_to_pos(cfg.lower_bound),
-                upper_bound: calculate_mmr_size(cfg.upper_bound + 1),
+                upper_bound: leaf_num_to_pos(cfg.upper_bound + 1) - 1,
                 pinned_nodes: cfg.pinned_nodes,
             },
         )

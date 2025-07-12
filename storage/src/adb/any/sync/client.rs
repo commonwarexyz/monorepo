@@ -773,7 +773,7 @@ pub(crate) mod tests {
     fn test_sync_use_existing_db_exact_match() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let target_ops = create_test_ops(50);
+            let target_ops = create_test_ops(1_000);
 
             // Create two databases
             let target_config = create_test_config(context.next_u64());
