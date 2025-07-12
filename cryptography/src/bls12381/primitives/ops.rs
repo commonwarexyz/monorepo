@@ -500,6 +500,7 @@ where
     let weights = compute_weights(indices)?;
 
     // Build a thread pool with the specified concurrency
+    let concurrency = std::cmp::min(concurrency, prepared_evals.len());
     let pool = ThreadPoolBuilder::new()
         .num_threads(concurrency)
         .build()
