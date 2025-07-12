@@ -9,6 +9,10 @@ use prometheus_client::metrics::counter::Counter;
 use std::{cmp::Ordering, collections::BTreeSet, marker::PhantomData, ops::Deref};
 use tracing::debug;
 
+/// The percentage of table entries that must reach `table_resize_frequency`
+/// before a resize is triggered.
+const RESIZE_THRESHOLD: u64 = 50;
+
 /// Location of an item in the [Freezer].
 ///
 /// This can be used to directly access the data for a given
@@ -287,7 +291,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
 
     // Sections with pending table updates to be synced
     modified_sections: BTreeSet<u64>,
-    should_resize: bool,
+    resizable_entries: u32,
     resize_progress: Option<u32>,
 
     // Metrics
@@ -361,16 +365,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Validate and clean invalid table entries for a given epoch.
     ///
-    /// Returns (modified, max_epoch, max_section) where:
+    /// Returns (modified, max_epoch, max_section, resizable_entries) where:
     /// - modified: whether any entries were cleaned
-    /// - max_epoch: the maximum valid epoch found (if max_valid_epoch is None)
-    /// - max_section: the section corresponding to max_epoch
+    /// - max_epoch: the maximum valid epoch found
+    /// - max_section: the section corresponding to `max_epoch`
+    /// - resizable_entries: the number of entries that can be resized
     async fn recover_table(
         blob: &E::Blob,
         table_size: u32,
+        table_resize_frequency: u8,
         max_valid_epoch: Option<u64>,
         table_replay_buffer: usize,
-    ) -> Result<(bool, u64, u64), Error> {
+    ) -> Result<(bool, u64, u64, u32), Error> {
         // Create a buffered reader for efficient scanning
         let blob_size = Self::table_offset(table_size);
         let mut reader = buffer::Read::new(blob.clone(), blob_size, table_replay_buffer);
@@ -379,6 +385,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let mut modified = false;
         let mut max_epoch = 0u64;
         let mut max_section = 0u64;
+        let mut resizable_entries = 0u32;
         for table_index in 0..table_size {
             let offset = Self::table_offset(table_index);
 
@@ -408,9 +415,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             .await?;
 
             modified |= entry1_modified || entry2_modified;
+
+            // Count this bucket if either entry has reached the resize frequency
+            // (we only count once per bucket, not per entry)
+            if (!entry1.is_empty() && entry1.is_valid() && entry1.added >= table_resize_frequency)
+                || (!entry2.is_empty()
+                    && entry2.is_valid()
+                    && entry2.added >= table_resize_frequency)
+            {
+                resizable_entries += 1;
+            }
         }
 
-        Ok((modified, max_epoch, max_section))
+        Ok((modified, max_epoch, max_section, resizable_entries))
     }
 
     /// Determine the write slot for a table entry based on current entries and epoch.
@@ -478,14 +495,17 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             .await?;
 
         // Determine checkpoint based on initialization scenario
-        let checkpoint = match (table_len, checkpoint) {
+        let (checkpoint, resizable_entries) = match (table_len, checkpoint) {
             // New table with no data
             (0, None) => {
                 Self::init_table(&table, config.table_initial_size).await?;
-                Checkpoint {
-                    table_size: config.table_initial_size,
-                    ..Default::default()
-                }
+                (
+                    Checkpoint {
+                        table_size: config.table_initial_size,
+                        ..Default::default()
+                    },
+                    0,
+                )
             }
 
             // New table with explicit checkpoint (must be empty)
@@ -496,10 +516,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 assert_eq!(checkpoint.table_size, 0);
 
                 Self::init_table(&table, config.table_initial_size).await?;
-                Checkpoint {
-                    table_size: config.table_initial_size,
-                    ..Default::default()
-                }
+                (
+                    Checkpoint {
+                        table_size: config.table_initial_size,
+                        ..Default::default()
+                    },
+                    0,
+                )
             }
 
             // Existing table with checkpoint
@@ -522,9 +545,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 };
 
                 // Validate and clean invalid entries
-                let (table_modified, _, _) = Self::recover_table(
+                let (table_modified, _, _, resizable) = Self::recover_table(
                     &table,
                     checkpoint.table_size,
+                    config.table_resize_frequency,
                     Some(checkpoint.epoch),
                     config.table_replay_buffer,
                 )
@@ -538,28 +562,36 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                     table.sync().await?;
                 }
 
-                checkpoint
+                (checkpoint, resizable)
             }
 
             // Existing table without checkpoint
             (_, None) => {
                 // Find max epoch/section and clean invalid entries in a single pass
                 let table_size = (table_len / Entry::FULL_SIZE as u64) as u32;
-                let (modified, max_epoch, max_section) =
-                    Self::recover_table(&table, table_size, None, config.table_replay_buffer)
-                        .await?;
+                let (modified, max_epoch, max_section, resizable) = Self::recover_table(
+                    &table,
+                    table_size,
+                    config.table_resize_frequency,
+                    None,
+                    config.table_replay_buffer,
+                )
+                .await?;
 
                 // Sync table if needed
                 if modified {
                     table.sync().await?;
                 }
 
-                Checkpoint {
-                    epoch: max_epoch,
-                    section: max_section,
-                    size: journal.size(max_section).await?,
-                    table_size,
-                }
+                (
+                    Checkpoint {
+                        epoch: max_epoch,
+                        section: max_section,
+                        size: journal.size(max_section).await?,
+                        table_size,
+                    },
+                    resizable,
+                )
             }
         };
 
@@ -593,7 +625,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             current_section: checkpoint.section,
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
             modified_sections: BTreeSet::new(),
-            should_resize: false,
+            resizable_entries,
             resize_progress: None,
             puts,
             gets,
@@ -617,6 +649,12 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     fn table_index(&self, key: &K) -> u32 {
         let hash = crc32fast::hash(key.as_ref());
         hash & (self.table_size - 1)
+    }
+
+    /// Check if the table should be resized based on [RESIZE_THRESHOLD].
+    fn should_resize(&self) -> bool {
+        let threshold_buckets = (self.table_size as u64 * RESIZE_THRESHOLD) / 100;
+        self.resizable_entries as u64 >= threshold_buckets
     }
 
     /// Choose the newer valid entry between two table slots.
@@ -697,21 +735,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Push table update
         let mut added = head.map(|(_, _, added)| added).unwrap_or(0);
+        added = added.saturating_add(1);
 
-        // Determine if we should resize the table
-        if added >= self.table_resize_frequency {
-            // We don't need to keep incrementing added because we are already resizing.
-            //
-            // This prevents an overflow of the added field when there are many operations before resize.
-            self.should_resize = true;
-        } else {
-            // If a resize is ongoing and an item has already been rewritten, we still increment added
-            // to ensure we resize again.
-            //
-            // This isn't a perfect solution because an interrupted resize will have reset the added
-            // field to 0 when the incomplete new table is not fully populated but consider it the right
-            // balance between correctness and performance.
-            added = added.checked_add(1).expect("added overflow");
+        // If we've reached the threshold for resizing, increment the resizable entries
+        if added == self.table_resize_frequency {
+            self.resizable_entries += 1;
         }
 
         // Update the old position
@@ -722,6 +750,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // If we're mid-resize and this bucket has already been processed, update the new position too
         if let Some(resize_progress) = self.resize_progress {
             if table_index < resize_progress {
+                // If the previous entry crossed the threshold, so did this one
+                if added == self.table_resize_frequency {
+                    self.resizable_entries += 1;
+                }
+
                 // This bucket has been processed, so we need to update the new position
                 let new_table_index = self.table_size + table_index;
                 let (new_entry1, new_entry2) =
@@ -804,9 +837,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     async fn start_resize(&mut self) -> Result<(), Error> {
         self.resizes.inc();
 
-        // Double the table size
+        // Double the table size (if not already at the max size)
         let old_size = self.table_size;
-        let new_size = old_size.checked_mul(2).expect("table size overflow");
+        let Some(new_size) = old_size.checked_mul(2) else {
+            return Ok(());
+        };
         self.table.resize(Self::table_offset(new_size)).await?;
 
         // Start the resize
@@ -856,6 +891,17 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             // Parse the two slots
             let (entry1, entry2) = Self::parse_entries(entry_buf)?;
 
+            // If the entry was over the threshold, decrement the resizable entries
+            if (!entry1.is_empty()
+                && entry1.is_valid()
+                && entry1.added >= self.table_resize_frequency)
+                || (!entry2.is_empty()
+                    && entry2.is_valid()
+                    && entry2.added >= self.table_resize_frequency)
+            {
+                self.resizable_entries -= 1;
+            }
+
             // Get the current head
             let (section, offset) = self
                 .select_valid_entry(&entry1, &entry2)
@@ -878,7 +924,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             // Resize complete
             self.table_size = old_size * 2;
             self.resize_progress = None;
-            self.should_resize = false;
             debug!(
                 old = old_size,
                 new = self.table_size,
@@ -909,7 +954,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         self.modified_sections.clear();
 
         // Start a resize (if needed)
-        if self.should_resize && self.resize_progress.is_none() {
+        if self.should_resize() && self.resize_progress.is_none() {
             self.start_resize().await?;
         }
 
