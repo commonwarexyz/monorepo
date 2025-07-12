@@ -98,7 +98,8 @@
 //!
 //! New entries are prepended to the chain, becoming the new head. During lookup, the chain
 //! is traversed until a matching key is found. The `added` field in the table entry tracks
-//! insertions since the last resize, triggering table growth when it exceeds `table_resize_frequency`.
+//! insertions since the last resize, triggering table growth when 50% of entries have had
+//! `table_resize_frequency` items added (since the last resize).
 //!
 //! # Extendible Hashing
 //!
@@ -227,7 +228,8 @@ pub struct Config<C> {
     /// The initial number of items in the table.
     pub table_initial_size: u32,
 
-    /// The number of items added to an table entry before the table is resized.
+    /// The number of items that must be added to 50% of table entries since the last resize before
+    /// the table is resized again.
     pub table_resize_frequency: u8,
 
     /// The number of items to move during each resize operation (many may be required to complete a resize).
