@@ -11,7 +11,7 @@ use tracing::debug;
 
 /// The percentage of table entries that must reach `table_resize_frequency`
 /// before a resize is triggered.
-const RESIZE_THRESHOLD: u32 = 50;
+const RESIZE_THRESHOLD: u64 = 50;
 
 /// Location of an item in the [Freezer].
 ///
@@ -651,10 +651,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         hash & (self.table_size - 1)
     }
 
-    /// Check if the table should be resized based on the threshold.
+    /// Check if the table should be resized based on RESIZE_THRESHOLD.
     fn should_resize(&self) -> bool {
-        // Calculate if RESIZE_THRESHOLD percent of buckets have reached the resize frequency
-        let threshold_buckets = (self.table_size as u64 * RESIZE_THRESHOLD as u64) / 100;
+        let threshold_buckets = (self.table_size as u64 * RESIZE_THRESHOLD) / 100;
         self.resizable_entries as u64 >= threshold_buckets
     }
 
