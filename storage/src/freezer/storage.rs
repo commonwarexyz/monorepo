@@ -387,7 +387,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let mut modified = false;
         let mut max_epoch = 0u64;
         let mut max_section = 0u64;
-        let mut resizable_entries = 0u32;
+        let mut resizable = 0u32;
         for table_index in 0..table_size {
             let offset = Self::table_offset(table_index);
 
@@ -420,12 +420,12 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             // If the latest entry has reached the resize frequency, increment the resizable entries
             if let Some((_, _, added)) = Self::select_valid_entry(&entry1, &entry2) {
                 if added >= table_resize_frequency {
-                    resizable_entries += 1;
+                    resizable += 1;
                 }
             }
         }
 
-        Ok((modified, max_epoch, max_section, resizable_entries))
+        Ok((modified, max_epoch, max_section, resizable))
     }
 
     /// Determine the write slot for a table entry based on current entries and epoch.
