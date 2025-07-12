@@ -715,7 +715,7 @@ pub(crate) mod tests {
     fn test_sync_use_existing_db_partial() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let target_ops = create_test_ops(50);
+            let target_ops = create_test_ops(1000);
 
             // Create two databases
             let mut target_db = create_test_db(context.clone()).await;
@@ -725,7 +725,7 @@ pub(crate) mod tests {
                 .unwrap();
 
             // Apply the same operations to both databases
-            let common_ops = target_ops[0..10].to_vec();
+            let common_ops = target_ops[0..999].to_vec();
             target_db = apply_ops(target_db, common_ops.clone()).await;
             sync_db = apply_ops(sync_db, common_ops).await;
             target_db.commit().await.unwrap();
@@ -735,7 +735,7 @@ pub(crate) mod tests {
             sync_db.close().await.unwrap();
 
             // Add one more operation (and commit) to target database
-            let more_ops = target_ops[10..11].to_vec(); // Just operation 10
+            let more_ops = target_ops[999..1000].to_vec();
             target_db = apply_ops(target_db, more_ops).await;
             target_db.commit().await.unwrap();
             let mut hasher = create_test_hasher();
