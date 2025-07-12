@@ -753,19 +753,13 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                     self.resizable += 1;
                 }
 
-                // This bucket has been processed, so we need to update the new position
+                // This bucket has been processed, so we need to update the new position as well.
+                //
+                // The entries are still identical to the old ones, so we don't need to read them again.
                 let new_table_index = self.table_size + table_index;
-                let (new_entry1, new_entry2) =
-                    Self::read_table(&self.table, new_table_index).await?;
                 let new_entry = Entry::new(self.next_epoch, self.current_section, offset, added);
-                Self::update_head(
-                    &self.table,
-                    new_table_index,
-                    &new_entry1,
-                    &new_entry2,
-                    new_entry,
-                )
-                .await?;
+                Self::update_head(&self.table, new_table_index, &entry1, &entry2, new_entry)
+                    .await?;
             }
         }
 
