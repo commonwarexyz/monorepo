@@ -750,6 +750,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // If we're mid-resize and this bucket has already been processed, update the new position too
         if let Some(resize_progress) = self.resize_progress {
             if table_index < resize_progress {
+                // If the previous entry crossed the threshold, so did this one
+                if added == self.table_resize_frequency {
+                    self.resizable_entries += 1;
+                }
+
                 // This bucket has been processed, so we need to update the new position
                 let new_table_index = self.table_size + table_index;
                 let (new_entry1, new_entry2) =
