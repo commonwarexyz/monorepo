@@ -223,20 +223,18 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         .map_err(Error::MmrError)?;
 
         let mut hasher = Standard::<H>::new();
-        let initial_journal_size = mmr
-            .get_actual_journal_size()
-            .await
-            .map_err(Error::MmrError)?;
-        let has_existing_journal_data = initial_journal_size > 0;
-
-        for i in cfg.lower_bound..cfg.log.size().await? {
-            let op = cfg.log.read(i).await?;
-            let digest = Self::op_digest(&mut hasher, &op);
-            mmr.add_batched(&mut hasher, &digest).await?;
-            if i % cfg.apply_batch_size as u64 == 0 && !has_existing_journal_data {
-                // Only sync periodically if there's no existing journal data
-                // If there's existing data, we'll sync at the end after setting journal_size correctly
-                mmr.sync(&mut hasher).await?;
+        let mmr_size = mmr.size();
+        let target_mmr_size = leaf_num_to_pos(cfg.upper_bound);
+        if mmr_size < target_mmr_size {
+            for i in cfg.lower_bound..cfg.log.size().await? {
+                let op = cfg.log.read(i).await?;
+                let digest = Self::op_digest(&mut hasher, &op);
+                mmr.add_batched(&mut hasher, &digest).await?;
+                if i % cfg.apply_batch_size as u64 == 0 {
+                    // Only sync periodically if there's no existing journal data
+                    // If there's existing data, we'll sync at the end after setting journal_size correctly
+                    mmr.sync(&mut hasher).await?;
+                }
             }
         }
 

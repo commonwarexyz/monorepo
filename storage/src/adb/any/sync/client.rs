@@ -795,7 +795,7 @@ pub(crate) mod tests {
             // Reopen sync_db
             let mut hasher = create_test_hasher();
             let target_hash = target_db.root(&mut hasher);
-            let lower_bound_ops = 0;
+            let lower_bound_ops = target_db.oldest_retained_loc().unwrap();
             let upper_bound_ops = target_db.op_count() - 1;
             let config = Config {
                 db_config: sync_config, // Use same config to access same partitions
@@ -817,8 +817,11 @@ pub(crate) mod tests {
                 sync_db.log.size().await.unwrap(),
                 target_db.log.size().await.unwrap()
             );
-            assert_eq!(sync_db.oldest_retained_loc(), Some(lower_bound_ops));
-            assert_eq!(sync_db.ops.pruned_to_pos(), lower_bound_ops);
+            assert_eq!(
+                sync_db.oldest_retained_loc(),
+                target_db.oldest_retained_loc()
+            );
+            assert_eq!(sync_db.ops.pruned_to_pos(), target_db.ops.pruned_to_pos());
             assert_eq!(sync_db.root(&mut hasher), target_hash);
             for i in 0..31u64 {
                 let target_op = &target_ops[i as usize];

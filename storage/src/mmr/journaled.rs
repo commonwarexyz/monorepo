@@ -670,11 +670,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Don't actually prune the journal to simulate failure
         Ok(())
     }
-
-    /// Get the actual journal size (for sync scenarios)
-    pub(crate) async fn get_actual_journal_size(&self) -> Result<u64, Error> {
-        self.journal.size().await.map_err(Error::JournalError)
-    }
 }
 
 #[cfg(test)]
