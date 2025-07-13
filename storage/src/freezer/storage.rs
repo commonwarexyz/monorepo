@@ -429,24 +429,24 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 
     /// Determine the write offset for a table entry based on current entries and epoch.
-    fn compute_write_offset(entry1: &Entry, entry2: &Entry, epoch: u64) -> usize {
+    fn compute_write_offset(entry1: &Entry, entry2: &Entry, epoch: u64) -> u64 {
         // If either entry matches the current epoch, overwrite it
         if !entry1.is_empty() && entry1.epoch == epoch {
             return 0;
         }
         if !entry2.is_empty() && entry2.epoch == epoch {
-            return Entry::SIZE;
+            return Entry::SIZE as u64;
         }
 
         // Otherwise, write to the older slot (or empty slot)
         match (entry1.is_empty(), entry2.is_empty()) {
-            (true, _) => 0,           // First slot is empty
-            (_, true) => Entry::SIZE, // Second slot is empty
+            (true, _) => 0,                  // First slot is empty
+            (_, true) => Entry::SIZE as u64, // Second slot is empty
             (false, false) => {
                 if entry1.epoch < entry2.epoch {
                     0
                 } else {
-                    Entry::SIZE
+                    Entry::SIZE as u64
                 }
             }
         }
@@ -487,7 +487,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         // Write the new entry
         table
-            .write_at(update.encode(), table_offset + start as u64)
+            .write_at(update.encode(), table_offset + start)
             .await
             .map_err(Error::Runtime)
     }
