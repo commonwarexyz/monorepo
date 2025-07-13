@@ -3,7 +3,7 @@
 use super::{
     metrics,
     safe_tip::SafeTip,
-    types::{Ack, Activity, Epoch, Error, Index, Item, PeerAck},
+    types::{Ack, Activity, Epoch, Error, Index, Item, TipAck},
     Config,
 };
 use crate::{Automaton, Monitor, Reporter, ThresholdSupervisor};
@@ -335,7 +335,7 @@ impl<
                         }
                     };
                     let mut guard = self.metrics.acks.guard(Status::Invalid);
-                    let PeerAck { ack, tip } = match msg {
+                    let TipAck { ack, tip } = match msg {
                         Ok(peer_ack) => peer_ack,
                         Err(err) => {
                             warn!(?err, ?sender, "ack decode failed, blocking peer");
@@ -404,7 +404,7 @@ impl<
         &mut self,
         index: Index,
         digest: D,
-        sender: &mut WrappedSender<NetS, PeerAck<V, D>>,
+        sender: &mut WrappedSender<NetS, TipAck<V, D>>,
     ) -> Result<(), Error> {
         // Entry must be `Pending::Unverified`, or return early
         if !matches!(self.pending.get(&index), Some(Pending::Unverified(_))) {
@@ -517,7 +517,7 @@ impl<
     async fn handle_rebroadcast(
         &mut self,
         index: Index,
-        sender: &mut WrappedSender<NetS, PeerAck<V, D>>,
+        sender: &mut WrappedSender<NetS, TipAck<V, D>>,
     ) -> Result<(), Error> {
         let Some(Pending::Verified(digest, acks)) = self.pending.get(&index) else {
             // The index may already be confirmed; continue silently if so
@@ -653,12 +653,12 @@ impl<
     async fn broadcast(
         &mut self,
         ack: Ack<V, D>,
-        sender: &mut WrappedSender<NetS, PeerAck<V, D>>,
+        sender: &mut WrappedSender<NetS, TipAck<V, D>>,
     ) -> Result<(), Error> {
         sender
             .send(
                 Recipients::All,
-                PeerAck { ack, tip: self.tip },
+                TipAck { ack, tip: self.tip },
                 self.priority_acks,
             )
             .await

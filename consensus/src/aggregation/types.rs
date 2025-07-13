@@ -205,34 +205,34 @@ impl<V: Variant, D: Digest> EncodeSize for Ack<V, D> {
 /// Message exchanged between peers containing an acknowledgment and tip information.
 /// This combines a validator's partial signature with their view of consensus progress.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct PeerAck<V: Variant, D: Digest> {
-    /// The peer's acknowledgement (partial signature) for an item.
-    pub ack: Ack<V, D>,
-
+pub struct TipAck<V: Variant, D: Digest> {
     /// The peer's local view of the tip (the lowest index that is not yet confirmed).
     pub tip: Index,
+
+    /// The peer's acknowledgement (partial signature) for an item.
+    pub ack: Ack<V, D>,
 }
 
-impl<V: Variant, D: Digest> Write for PeerAck<V, D> {
+impl<V: Variant, D: Digest> Write for TipAck<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.ack.write(writer);
         UInt(self.tip).write(writer);
+        self.ack.write(writer);
     }
 }
 
-impl<V: Variant, D: Digest> Read for PeerAck<V, D> {
+impl<V: Variant, D: Digest> Read for TipAck<V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let ack = Ack::<V, D>::read(reader)?;
         let tip = UInt::read(reader)?.into();
-        Ok(Self { ack, tip })
+        let ack = Ack::<V, D>::read(reader)?;
+        Ok(Self { tip, ack })
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for PeerAck<V, D> {
+impl<V: Variant, D: Digest> EncodeSize for TipAck<V, D> {
     fn encode_size(&self) -> usize {
-        self.ack.encode_size() + UInt(self.tip).encode_size()
+        UInt(self.tip).encode_size() + self.ack.encode_size()
     }
 }
 
@@ -343,10 +343,10 @@ mod tests {
         let restored_ack: Ack<MinSig, sha256::Digest> = Ack::decode(ack.encode()).unwrap();
         assert_eq!(ack, restored_ack);
 
-        // Test PeerAck codec
-        let peer_ack = PeerAck { ack, tip: 42 };
-        let restored: PeerAck<MinSig, sha256::Digest> = PeerAck::decode(peer_ack.encode()).unwrap();
-        assert_eq!(peer_ack, restored);
+        // Test TipAck codec
+        let tip_ack = TipAck { ack, tip: 42 };
+        let restored: TipAck<MinSig, sha256::Digest> = TipAck::decode(tip_ack.encode()).unwrap();
+        assert_eq!(tip_ack, restored);
 
         // Test Activity codec - Ack variant
         let activity_ack = Activity::Ack(Ack::sign(namespace, 1, &shares[0], item.clone()));
