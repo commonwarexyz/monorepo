@@ -8,6 +8,9 @@
 //! data but not the output of said transactions during consensus, agreement must be achieved asynchronously
 //! over the output of consensus to support state sync and client balance proofs.
 //!
+//! _For applications that want to collect threshold signatures over concurrent, sequencer-driven broadcast,
+//! _check out [crate::ordered_broadcast]._
+//!
 //! # Architecture
 //!
 //! The core of the module is the [Engine]. It manages the agreement process by:
