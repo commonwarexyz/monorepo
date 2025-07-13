@@ -418,7 +418,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             modified |= entry1_cleared || entry2_cleared;
 
             // If the latest entry has reached the resize frequency, increment the resizable entries
-            if let Some((_, _, added)) = Self::select_valid_entry(&entry1, &entry2) {
+            if let Some((_, _, added)) = Self::read_latest_entry(&entry1, &entry2) {
                 if added >= table_resize_frequency {
                     resizable += 1;
                 }
@@ -452,8 +452,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         }
     }
 
-    /// Choose the newer valid entry between two table slots.
-    fn select_valid_entry(entry1: &Entry, entry2: &Entry) -> Option<(u64, u32, u8)> {
+    /// Read the latest valid entry from two table slots.
+    fn read_latest_entry(entry1: &Entry, entry2: &Entry) -> Option<(u64, u32, u8)> {
         match (
             !entry1.is_empty() && entry1.is_valid(),
             !entry2.is_empty() && entry2.is_valid(),
@@ -719,7 +719,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Get head of the chain from table
         let table_index = self.table_index(&key);
         let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
-        let head = Self::select_valid_entry(&entry1, &entry2);
+        let head = Self::read_latest_entry(&entry1, &entry2);
 
         // Create new head of the chain
         let entry = Record::new(
@@ -785,7 +785,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Get head of the chain from table
         let table_index = self.table_index(key);
         let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
-        let Some((mut section, mut offset, _)) = Self::select_valid_entry(&entry1, &entry2) else {
+        let Some((mut section, mut offset, _)) = Self::read_latest_entry(&entry1, &entry2) else {
             return Ok(None);
         };
 
@@ -887,7 +887,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
             // Get the current head
             let (section, offset, added) =
-                Self::select_valid_entry(&entry1, &entry2).unwrap_or((0, 0, 0));
+                Self::read_latest_entry(&entry1, &entry2).unwrap_or((0, 0, 0));
 
             // If the entry was over the threshold, decrement the resizable entries
             if added >= self.table_resize_frequency {
