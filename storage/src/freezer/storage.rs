@@ -299,6 +299,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: Codec> {
     puts: Counter,
     gets: Counter,
     unnecessary_reads: Counter,
+    unnecessary_writes: Counter,
     resizes: Counter,
 
     // Phantom data to satisfy the compiler about generic types
@@ -637,6 +638,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let puts = Counter::default();
         let gets = Counter::default();
         let unnecessary_reads = Counter::default();
+        let unnecessary_writes = Counter::default();
         let resizes = Counter::default();
         context.register("puts", "number of put operations", puts.clone());
         context.register("gets", "number of get operations", gets.clone());
@@ -644,6 +646,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             "unnecessary_reads",
             "number of unnecessary reads performed during key lookups",
             unnecessary_reads.clone(),
+        );
+        context.register(
+            "unnecessary_writes",
+            "number of unnecessary writes performed during resize",
+            unnecessary_writes.clone(),
         );
         context.register(
             "resizes",
@@ -669,6 +676,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             puts,
             gets,
             unnecessary_reads,
+            unnecessary_writes,
             resizes,
             _phantom: PhantomData,
         })
@@ -750,6 +758,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // If we're mid-resize and this entry has already been processed, update the new position too
         if let Some(resize_progress) = self.resize_progress {
             if table_index < resize_progress {
+                self.unnecessary_writes.inc();
+
                 // If the previous entry crossed the threshold, so did this one
                 if added == self.table_resize_frequency {
                     self.resizable += 1;

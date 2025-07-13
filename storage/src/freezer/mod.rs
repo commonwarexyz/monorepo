@@ -959,13 +959,20 @@ mod tests {
             // Verify resize started
             assert!(freezer.resizing().is_some());
 
-            // Insert during resize
+            // Insert during resize (to first entry)
             freezer.put(test_key("key2"), 2).await.unwrap();
+            assert!(context.encode().contains("unnecessary_writes_total 1"));
+            assert_eq!(freezer.resizable(), 3);
+
+            // Insert another key (to unmodified entry)
             freezer.put(test_key("key3"), 3).await.unwrap();
-            freezer.sync().await.unwrap();
+            assert!(context.encode().contains("unnecessary_writes_total 1"));
+            assert_eq!(freezer.resizable(), 3);
 
             // Verify resize completed
+            freezer.sync().await.unwrap();
             assert!(freezer.resizing().is_none());
+            assert_eq!(freezer.resizable(), 2);
 
             // More inserts
             freezer.put(test_key("key4"), 4).await.unwrap();
