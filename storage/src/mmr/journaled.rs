@@ -273,8 +273,9 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         let journal_size = journal.size().await?;
         assert!(journal_size <= cfg.upper_bound + 1);
 
+        let pinned_nodes_empty = cfg.pinned_nodes.is_empty();
         // Set up pinned nodes if not provided
-        let pinned_nodes_vec = if !cfg.pinned_nodes.is_empty() {
+        let pinned_nodes_vec = if !pinned_nodes_empty {
             cfg.pinned_nodes
         } else {
             // Get pinned nodes for the lower bound (what we're pruned to)
@@ -287,12 +288,22 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             pinned_nodes_vec
         };
 
-        let mem_mmr = MemMmr::init(MemConfig {
+        let mut mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
             pruned_to_pos: journal_size,
             pinned_nodes: pinned_nodes_vec,
             pool: cfg.config.thread_pool,
         });
+
+        if cfg.lower_bound < journal_size {
+            let mut additional_pinned_nodes = HashMap::new();
+            for pos in Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound) {
+                let digest =
+                    Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+                additional_pinned_nodes.insert(pos, digest);
+            }
+            mem_mmr.add_pinned_nodes(additional_pinned_nodes);
+        }
 
         Ok(Self {
             mem_mmr,
