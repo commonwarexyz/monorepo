@@ -925,18 +925,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         Ok(())
     }
 
-    /// Get the current progress of the resize operation.
-    ///
-    /// Returns `None` if the [Freezer] is not resizing.
-    pub fn resizing(&self) -> Option<u32> {
-        self.resize_progress
-    }
-
-    /// Get the number of resizable entries.
-    pub fn resizable(&self) -> u32 {
-        self.resizable
-    }
-
     /// Sync all pending data in [Freezer].
     ///
     /// If the table needs to be resized, the resize will begin during this sync.
@@ -1004,5 +992,19 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         self.context.remove(&self.table_partition, None).await?;
 
         Ok(())
+    }
+
+    /// Get the current progress of the resize operation.
+    ///
+    /// Returns `None` if the [Freezer] is not resizing.
+    #[cfg(test)]
+    pub fn resizing(&self) -> Option<u32> {
+        self.resize_progress
+    }
+
+    /// Get the number of resizable entries.
+    #[cfg(test)]
+    pub fn resizable(&self) -> u32 {
+        self.resizable
     }
 }
