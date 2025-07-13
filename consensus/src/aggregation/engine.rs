@@ -505,11 +505,16 @@ impl<
 
         // Increase the tip if needed
         if index == self.tip {
-            let mut new_tip = index.checked_add(1).expect("tip overflow");
-            while self.confirmed.contains_key(&new_tip) {
-                new_tip = new_tip.checked_add(1).expect("tip overflow");
+            // Compute the next tip
+            let mut new_tip = index.saturating_add(1);
+            while self.confirmed.contains_key(&new_tip) && new_tip < Index::MAX {
+                new_tip = new_tip.saturating_add(1);
             }
-            self.fast_forward_tip(new_tip).await;
+
+            // If the next tip is larger, try to fast-forward the tip (may not be possible)
+            if new_tip > self.tip {
+                self.fast_forward_tip(new_tip).await;
+            }
         }
     }
 
@@ -675,12 +680,12 @@ impl<
         let max_pending = self
             .pending
             .last_key_value()
-            .map(|(k, _)| k.checked_add(1).expect("max_pending overflow"))
+            .map(|(k, _)| k.saturating_add(1))
             .unwrap_or_default();
         let max_confirmed = self
             .confirmed
             .last_key_value()
-            .map(|(k, _)| k.checked_add(1).expect("max_confirmed overflow"))
+            .map(|(k, _)| k.saturating_add(1))
             .unwrap_or_default();
         max(self.tip, max(max_pending, max_confirmed))
     }
