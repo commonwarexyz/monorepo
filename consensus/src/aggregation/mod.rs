@@ -18,10 +18,10 @@
 //! - Tracking agreement progress and notifying the application layer
 //!
 //! The engine interacts with four main components:
-//! - [Automaton](crate::Automaton): Provides external hashes
-//! - [Reporter](crate::Reporter): Receives agreement confirmations
-//! - [Monitor](crate::Monitor): Tracks epoch transitions
-//! - [ThresholdSupervisor](crate::ThresholdSupervisor): Manages validator sets and network identities
+//! - [crate::Automaton]: Provides external hashes
+//! - [crate::Reporter]: Receives agreement confirmations
+//! - [crate::Monitor]: Tracks epoch transitions
+//! - [crate::ThresholdSupervisor]: Manages validator sets and network identities
 //!
 //! # Design Decisions
 //!

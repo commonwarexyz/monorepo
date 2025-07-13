@@ -5,7 +5,7 @@ use commonware_p2p::Blocker;
 use commonware_utils::{Array, NonZeroDuration};
 use std::num::{NonZeroU64, NonZeroUsize};
 
-/// Configuration for the [Engine](super::Engine).
+/// Configuration for the [super::Engine].
 pub struct Config<
     P: Array,
     V: Variant,
