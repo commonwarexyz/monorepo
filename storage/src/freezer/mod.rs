@@ -122,12 +122,12 @@
 //! ```
 //!
 //! When the table doubles in size:
-//! 1. Each bucket at index `i` splits into two buckets: `i` and `i + old_size`
+//! 1. Each entry at index `i` splits into two entries: `i` and `i + old_size`
 //! 2. The existing chain head is copied to both locations with `added=0`
-//! 3. Future insertions will naturally distribute between the two buckets based on their hash
+//! 3. Future insertions will naturally distribute between the two entries based on their hash
 //!
 //! This approach ensures that entries inserted before a resize remain discoverable after the resize,
-//! as the lookup algorithm checks the appropriate bucket based on the current table size. As more and more
+//! as the lookup algorithm checks the appropriate entry based on the current table size. As more and more
 //! items are added (and resizes occur), the latency for fetching old data will increase logarithmically
 //! (with the number of items stored).
 //!
@@ -195,16 +195,6 @@ pub enum Error {
     Journal(#[from] crate::journal::Error),
     #[error("codec error: {0}")]
     Codec(#[from] commonware_codec::Error),
-    #[error("invalid key length: expected {expected}, got {actual}")]
-    InvalidKeyLength { expected: usize, actual: usize },
-    #[error("invalid value length: expected {expected}, got {actual}")]
-    InvalidValueLength { expected: usize, actual: usize },
-    #[error("bucket corrupted at offset {0}")]
-    BucketCorrupted(u64),
-    #[error("directory corrupted")]
-    DirectoryCorrupted,
-    #[error("checksum mismatch: expected {expected:08x}, got {actual:08x}")]
-    ChecksumMismatch { expected: u32, actual: u32 },
 }
 
 /// Configuration for [Freezer].
@@ -874,7 +864,7 @@ mod tests {
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: 2, // Very small initial size to force multiple resizes
-                table_resize_frequency: 2, // Resize after 2 items per bucket
+                table_resize_frequency: 2, // Resize after 2 items per entry
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
                 codec_config: (),
@@ -993,7 +983,7 @@ mod tests {
                 freezer.sync().await.unwrap();
             }
 
-            // Ensure no buckets are considered resizable
+            // Ensure no entries are considered resizable
             assert_eq!(freezer.resizable(), 0);
         });
     }
@@ -1053,7 +1043,7 @@ mod tests {
                 freezer.sync().await.unwrap();
             }
 
-            // Ensure no buckets are considered resizable
+            // Ensure no entries are considered resizable
             assert_eq!(freezer.resizable(), 0);
         });
     }
