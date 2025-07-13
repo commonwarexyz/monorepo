@@ -428,8 +428,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         Ok((modified, max_epoch, max_section, resizable))
     }
 
-    /// Determine the write slot for a table entry based on current entries and epoch.
-    fn select_write_slot(entry1: &Entry, entry2: &Entry, epoch: u64) -> usize {
+    /// Determine the write offset for a table entry based on current entries and epoch.
+    fn compute_write_offset(entry1: &Entry, entry2: &Entry, epoch: u64) -> usize {
         // If either entry matches the current epoch, overwrite it
         if !entry1.is_empty() && entry1.epoch == epoch {
             return 0;
@@ -483,7 +483,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let table_offset = Self::table_offset(table_index);
 
         // Determine which slot to write to based on the provided entries
-        let start = Self::select_write_slot(entry1, entry2, update.epoch);
+        let start = Self::compute_write_offset(entry1, entry2, update.epoch);
 
         // Write the new entry
         table
@@ -847,7 +847,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Write a pair of entries to a buffer, replacing one slot with the new entry.
     fn rewrite_entries(buf: &mut Vec<u8>, entry1: &Entry, entry2: &Entry, new_entry: &Entry) {
-        if Self::select_write_slot(entry1, entry2, new_entry.epoch) == 0 {
+        if Self::compute_write_offset(entry1, entry2, new_entry.epoch) == 0 {
             buf.extend_from_slice(&new_entry.encode());
             buf.extend_from_slice(&entry2.encode());
         } else {
