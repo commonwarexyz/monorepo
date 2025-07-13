@@ -505,9 +505,9 @@ impl<
 
         // Increase the tip if needed
         if index == self.tip {
-            let mut new_tip = index.checked_add(1).unwrap();
+            let mut new_tip = index.checked_add(1).expect("tip overflow");
             while self.confirmed.contains_key(&new_tip) {
-                new_tip = new_tip.checked_add(1).unwrap();
+                new_tip = new_tip.checked_add(1).expect("tip overflow");
             }
             self.fast_forward_tip(new_tip).await;
         }
@@ -675,12 +675,12 @@ impl<
         let max_pending = self
             .pending
             .last_key_value()
-            .map(|(k, _)| k.checked_add(1).unwrap())
+            .map(|(k, _)| k.checked_add(1).expect("max_pending overflow"))
             .unwrap_or_default();
         let max_confirmed = self
             .confirmed
             .last_key_value()
-            .map(|(k, _)| k.checked_add(1).unwrap())
+            .map(|(k, _)| k.checked_add(1).expect("max_confirmed overflow"))
             .unwrap_or_default();
         max(self.tip, max(max_pending, max_confirmed))
     }
@@ -728,8 +728,8 @@ impl<
             .await
             .expect("replay failed");
         pin_mut!(stream);
-        while let Some(msg_result) = stream.next().await {
-            let (_, _, _, activity) = msg_result.unwrap();
+        while let Some(msg) = stream.next().await {
+            let (_, _, _, activity) = msg.expect("replay failed");
             match activity {
                 Activity::Tip(index) => {
                     tip = max(tip, index);
