@@ -3,10 +3,10 @@
 use super::{
     metrics,
     safe_tip::SafeTip,
-    types::{Ack, Activity, Epoch, Error, Index, Item},
+    types::{Ack, Activity, Epoch, Error, Index, Item, PeerAck},
     Config,
 };
-use crate::{aggregation::wire::PeerAck, Automaton, Monitor, Reporter, ThresholdSupervisor};
+use crate::{Automaton, Monitor, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, ops::threshold_signature_recover, poly, variant::Variant},
     Digest, PublicKey,

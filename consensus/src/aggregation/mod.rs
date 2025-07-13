@@ -39,7 +39,6 @@
 //! appropriate recovery strategies.
 
 pub mod types;
-pub mod wire;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
