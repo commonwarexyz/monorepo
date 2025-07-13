@@ -567,10 +567,13 @@ mod tests {
         unclean_shutdown::<MinSig>();
     }
 
-    fn slow_and_lossy_links<V: Variant>() {
+    fn slow_and_lossy_links<V: Variant>(seed: u64) -> String {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
-        let runner = deterministic::Runner::timed(Duration::from_secs(120));
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(120)));
+        let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
@@ -609,13 +612,33 @@ mod tests {
             );
 
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
-        });
+
+            context.auditor().state()
+        })
     }
 
     #[test_traced]
     fn test_slow_and_lossy_links() {
-        slow_and_lossy_links::<MinPk>();
-        slow_and_lossy_links::<MinSig>();
+        slow_and_lossy_links::<MinPk>(0);
+        slow_and_lossy_links::<MinSig>(0);
+    }
+
+    #[test_traced]
+    fn test_determinism() {
+        // We use slow and lossy links as the deterministic test
+        // because it is the most complex test.
+        for seed in 1..6 {
+            let pk_state_1 = slow_and_lossy_links::<MinPk>(seed);
+            let pk_state_2 = slow_and_lossy_links::<MinPk>(seed);
+            assert_eq!(pk_state_1, pk_state_2);
+
+            let sig_state_1 = slow_and_lossy_links::<MinSig>(seed);
+            let sig_state_2 = slow_and_lossy_links::<MinSig>(seed);
+            assert_eq!(sig_state_1, sig_state_2);
+
+            // Sanity check that different types can't be identical.
+            assert_ne!(pk_state_1, sig_state_1);
+        }
     }
 
     fn one_offline<V: Variant>() {
