@@ -1,24 +1,24 @@
-//! Recover threshold signatures to represent agreement over an ordered sequence of items.
+//! Recover threshold signatures over an externally synchronized sequencer of items.
 //!
 //! This module allows a dynamic set of participants to collectively produce threshold signatures
 //! for any ordered sequence of items.
 //!
-//! A primary use case for this is to allow blockchain validators to agree on a series of digests,
-//! such as state roots. Some chains may finalize transaction data but not execute the transactions
-//! during consensus. This module enables validators to come to cryptographically-proven agreement
-//! on the state root, which is necessary to support features like state sync.
+//! The primary use case for this primitive is to allow blockchain validators to agree on a series
+//! of state roots emitted from an opaque consensus process. Because some chains may finalize transaction
+//! data but not the output of said transactions during consensus, agreement must be achieved asynchronously
+//! over the output of consensus to support state sync and client balance proofs.
 //!
 //! # Architecture
 //!
 //! The core of the module is the [Engine]. It manages the agreement process by:
-//! - Requesting external hashes
-//! - Signing hashes with partial BLS signatures
+//! - Requesting externally synchronized [commonware_cryptography::Digest]s
+//! - Signing said digests with BLS [commonware_cryptography::bls12381::primitives::poly::PartialSignature]
 //! - Multicasting partial signatures to other validators
-//! - Recovering sufficient partial signatures into threshold signatures
-//! - Tracking agreement progress and notifying the application layer
+//! - Recovering [commonware_cryptography::bls12381::primitives::poly::Signature]s from a quorum of partial signatures
+//! - Monitoring recovery progress and notifying the application layer of recoveries
 //!
 //! The engine interacts with four main components:
-//! - [crate::Automaton]: Provides external hashes
+//! - [crate::Automaton]: Provides external digests
 //! - [crate::Reporter]: Receives agreement confirmations
 //! - [crate::Monitor]: Tracks epoch transitions
 //! - [crate::ThresholdSupervisor]: Manages validator sets and network identities
