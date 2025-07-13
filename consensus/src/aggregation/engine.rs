@@ -669,7 +669,7 @@ impl<
         Ok(())
     }
 
-    /// Returns the next index that we should request the digest for. This is the minimum index for
+    /// Returns the next index that we should process. This is the minimum index for
     /// which we do not have a digest or an outstanding request to the automaton for the digest.
     fn next(&self) -> Index {
         let max_pending = self
