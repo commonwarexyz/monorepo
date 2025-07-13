@@ -3,10 +3,10 @@
 use super::{
     metrics,
     safe_tip::SafeTip,
-    types::{Ack, Activity, Epoch, Error, Index, Item},
+    types::{Ack, Activity, Epoch, Error, Index, Item, TipAck},
     Config,
 };
-use crate::{aggregation::wire::PeerAck, Automaton, Monitor, Reporter, ThresholdSupervisor};
+use crate::{Automaton, Monitor, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, ops::threshold_signature_recover, poly, variant::Variant},
     Digest, PublicKey,
@@ -136,7 +136,7 @@ pub struct Engine<
     // ---------- Journal ----------
     /// Journal for storing acks signed by this node.
     journal: Option<Journal<E, Activity<V, D>>>,
-    partition: String,
+    journal_partition: String,
     journal_write_buffer: usize,
     journal_replay_buffer: usize,
     journal_heights_per_section: u64,
@@ -196,7 +196,7 @@ impl<
             rebroadcast_timeout: cfg.rebroadcast_timeout.into(),
             rebroadcast_deadlines: PrioritySet::new(),
             journal: None,
-            partition: cfg.partition,
+            journal_partition: cfg.journal_partition,
             journal_write_buffer: cfg.journal_write_buffer.into(),
             journal_replay_buffer: cfg.journal_replay_buffer.into(),
             journal_heights_per_section: cfg.journal_heights_per_section.into(),
@@ -231,7 +231,7 @@ impl<
 
         // Initialize Journal
         let journal_cfg = JConfig {
-            partition: self.partition.clone(),
+            partition: self.journal_partition.clone(),
             compression: self.journal_compression,
             codec_config: (),
             write_buffer: self.journal_write_buffer,
@@ -335,7 +335,7 @@ impl<
                         }
                     };
                     let mut guard = self.metrics.acks.guard(Status::Invalid);
-                    let PeerAck { ack, tip } = match msg {
+                    let TipAck { ack, tip } = match msg {
                         Ok(peer_ack) => peer_ack,
                         Err(err) => {
                             warn!(?err, ?sender, "ack decode failed, blocking peer");
@@ -404,7 +404,7 @@ impl<
         &mut self,
         index: Index,
         digest: D,
-        sender: &mut WrappedSender<NetS, PeerAck<V, D>>,
+        sender: &mut WrappedSender<NetS, TipAck<V, D>>,
     ) -> Result<(), Error> {
         // Entry must be `Pending::Unverified`, or return early
         if !matches!(self.pending.get(&index), Some(Pending::Unverified(_))) {
@@ -412,7 +412,7 @@ impl<
         };
 
         // Move the entry to `Pending::Verified`
-        let Some(Pending::Unverified(epoch_map)) = self.pending.remove(&index) else {
+        let Some(Pending::Unverified(acks)) = self.pending.remove(&index) else {
             panic!("Pending::Unverified entry not found");
         };
         self.pending
@@ -420,9 +420,9 @@ impl<
 
         // Handle each `ack` as if it was received over the network. This inserts the values into
         // the new map, and may form a threshold signature if enough acks are present.
-        for acks in epoch_map.values() {
-            for ack in acks.values() {
-                let _ = self.handle_ack(ack).await; // Ignore any errors (e.g. invalid signature)
+        for epoch_acks in acks.values() {
+            for epoch_ack in epoch_acks.values() {
+                let _ = self.handle_ack(epoch_ack).await; // Ignore any errors (e.g. invalid signature)
             }
             // Break early if a threshold signature was formed
             if self.confirmed.contains_key(&index) {
@@ -505,11 +505,16 @@ impl<
 
         // Increase the tip if needed
         if index == self.tip {
-            let mut new_tip = index.checked_add(1).unwrap();
-            while self.confirmed.contains_key(&new_tip) {
-                new_tip = new_tip.checked_add(1).unwrap();
+            // Compute the next tip
+            let mut new_tip = index.saturating_add(1);
+            while self.confirmed.contains_key(&new_tip) && new_tip < Index::MAX {
+                new_tip = new_tip.saturating_add(1);
             }
-            self.fast_forward_tip(new_tip).await;
+
+            // If the next tip is larger, try to fast-forward the tip (may not be possible)
+            if new_tip > self.tip {
+                self.fast_forward_tip(new_tip).await;
+            }
         }
     }
 
@@ -517,7 +522,7 @@ impl<
     async fn handle_rebroadcast(
         &mut self,
         index: Index,
-        sender: &mut WrappedSender<NetS, PeerAck<V, D>>,
+        sender: &mut WrappedSender<NetS, TipAck<V, D>>,
     ) -> Result<(), Error> {
         let Some(Pending::Verified(digest, acks)) = self.pending.get(&index) else {
             // The index may already be confirmed; continue silently if so
@@ -653,12 +658,12 @@ impl<
     async fn broadcast(
         &mut self,
         ack: Ack<V, D>,
-        sender: &mut WrappedSender<NetS, PeerAck<V, D>>,
+        sender: &mut WrappedSender<NetS, TipAck<V, D>>,
     ) -> Result<(), Error> {
         sender
             .send(
                 Recipients::All,
-                PeerAck { ack, tip: self.tip },
+                TipAck { ack, tip: self.tip },
                 self.priority_acks,
             )
             .await
@@ -669,18 +674,18 @@ impl<
         Ok(())
     }
 
-    /// Returns the next index that we should request the digest for. This is the minimum index for
+    /// Returns the next index that we should process. This is the minimum index for
     /// which we do not have a digest or an outstanding request to the automaton for the digest.
     fn next(&self) -> Index {
         let max_pending = self
             .pending
             .last_key_value()
-            .map(|(k, _)| k.checked_add(1).unwrap())
+            .map(|(k, _)| k.saturating_add(1))
             .unwrap_or_default();
         let max_confirmed = self
             .confirmed
             .last_key_value()
-            .map(|(k, _)| k.checked_add(1).unwrap())
+            .map(|(k, _)| k.saturating_add(1))
             .unwrap_or_default();
         max(self.tip, max(max_pending, max_confirmed))
     }
@@ -728,8 +733,8 @@ impl<
             .await
             .expect("replay failed");
         pin_mut!(stream);
-        while let Some(msg_result) = stream.next().await {
-            let (_, _, _, activity) = msg_result.unwrap();
+        while let Some(msg) = stream.next().await {
+            let (_, _, _, activity) = msg.expect("replay failed");
             match activity {
                 Activity::Tip(index) => {
                     tip = max(tip, index);

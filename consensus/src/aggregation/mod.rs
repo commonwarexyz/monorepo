@@ -1,27 +1,30 @@
-//! Recover threshold signatures to represent agreement over an ordered sequence of items.
+//! Recover threshold signatures over an externally synchronized sequencer of items.
 //!
 //! This module allows a dynamic set of participants to collectively produce threshold signatures
 //! for any ordered sequence of items.
 //!
-//! A primary use case for this is to allow blockchain validators to agree on a series of digests,
-//! such as state roots. Some chains may finalize transaction data but not execute the transactions
-//! during consensus. This module enables validators to come to cryptographically-proven agreement
-//! on the state root, which is necessary to support features like state sync.
+//! The primary use case for this primitive is to allow blockchain validators to agree on a series
+//! of state roots emitted from an opaque consensus process. Because some chains may finalize transaction
+//! data but not the output of said transactions during consensus, agreement must be achieved asynchronously
+//! over the output of consensus to support state sync and client balance proofs.
+//!
+//! _For applications that want to collect threshold signatures over concurrent, sequencer-driven broadcast,
+//! _check out [crate::ordered_broadcast]._
 //!
 //! # Architecture
 //!
 //! The core of the module is the [Engine]. It manages the agreement process by:
-//! - Requesting external hashes
-//! - Signing hashes with partial BLS signatures
+//! - Requesting externally synchronized [commonware_cryptography::Digest]s
+//! - Signing said digests with BLS [commonware_cryptography::bls12381::primitives::poly::PartialSignature]
 //! - Multicasting partial signatures to other validators
-//! - Recovering sufficient partial signatures into threshold signatures
-//! - Tracking agreement progress and notifying the application layer
+//! - Recovering [commonware_cryptography::bls12381::primitives::poly::Signature]s from a quorum of partial signatures
+//! - Monitoring recovery progress and notifying the application layer of recoveries
 //!
 //! The engine interacts with four main components:
-//! - [Automaton](crate::Automaton): Provides external hashes
-//! - [Reporter](crate::Reporter): Receives agreement confirmations
-//! - [Monitor](crate::Monitor): Tracks epoch transitions
-//! - [ThresholdSupervisor](crate::ThresholdSupervisor): Manages validator sets and network identities
+//! - [crate::Automaton]: Provides external digests
+//! - [crate::Reporter]: Receives agreement confirmations
+//! - [crate::Monitor]: Tracks epoch transitions
+//! - [crate::ThresholdSupervisor]: Manages validator sets and network identities
 //!
 //! # Design Decisions
 //!
@@ -39,7 +42,6 @@
 //! appropriate recovery strategies.
 
 pub mod types;
-pub mod wire;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
@@ -222,7 +224,7 @@ mod tests {
                     rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_timeout),
                     epoch_bounds: (1, 1),
                     window: std::num::NonZeroU64::new(10).unwrap(),
-                    partition: format!("aggregation/{validator}/"),
+                    journal_partition: format!("aggregation/{validator}"),
                     journal_write_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
                     journal_replay_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
                     journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
@@ -431,7 +433,7 @@ mod tests {
                                 epoch_bounds: (1, 1),
                                 window: std::num::NonZeroU64::new(10).unwrap(),
                                 // Use validator-specific partition for journal recovery
-                                partition: format!("unclean_shutdown_test/{validator}/"),
+                                journal_partition: format!("unclean_shutdown_test/{validator}"),
                                 journal_write_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
                                 journal_replay_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
                                 journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),

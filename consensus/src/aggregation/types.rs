@@ -202,6 +202,40 @@ impl<V: Variant, D: Digest> EncodeSize for Ack<V, D> {
     }
 }
 
+/// Message exchanged between peers containing an acknowledgment and tip information.
+/// This combines a validator's partial signature with their view of consensus progress.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TipAck<V: Variant, D: Digest> {
+    /// The peer's local view of the tip (the lowest index that is not yet confirmed).
+    pub tip: Index,
+
+    /// The peer's acknowledgement (partial signature) for an item.
+    pub ack: Ack<V, D>,
+}
+
+impl<V: Variant, D: Digest> Write for TipAck<V, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        UInt(self.tip).write(writer);
+        self.ack.write(writer);
+    }
+}
+
+impl<V: Variant, D: Digest> Read for TipAck<V, D> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let tip = UInt::read(reader)?.into();
+        let ack = Ack::<V, D>::read(reader)?;
+        Ok(Self { tip, ack })
+    }
+}
+
+impl<V: Variant, D: Digest> EncodeSize for TipAck<V, D> {
+    fn encode_size(&self) -> usize {
+        UInt(self.tip).encode_size() + self.ack.encode_size()
+    }
+}
+
 /// Used as [Reporter::Activity](crate::Reporter::Activity) to report activities that occur during
 /// aggregation. Also used to journal events that are needed to initialize the aggregation engine
 /// when the node restarts.
@@ -288,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn test_codec_serialization() {
+    fn test_codec() {
         let namespace = b"test";
         let mut context = deterministic::Context::default();
         let (public, shares) = ops::generate_shares::<_, MinSig>(&mut context, None, 4, 3);
@@ -308,6 +342,11 @@ mod tests {
 
         let restored_ack: Ack<MinSig, sha256::Digest> = Ack::decode(ack.encode()).unwrap();
         assert_eq!(ack, restored_ack);
+
+        // Test TipAck codec
+        let tip_ack = TipAck { ack, tip: 42 };
+        let restored: TipAck<MinSig, sha256::Digest> = TipAck::decode(tip_ack.encode()).unwrap();
+        assert_eq!(tip_ack, restored);
 
         // Test Activity codec - Ack variant
         let activity_ack = Activity::Ack(Ack::sign(namespace, 1, &shares[0], item.clone()));

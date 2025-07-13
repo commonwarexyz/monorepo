@@ -5,7 +5,7 @@ use commonware_p2p::Blocker;
 use commonware_utils::{Array, NonZeroDuration};
 use std::num::{NonZeroU64, NonZeroUsize};
 
-/// Configuration for the [Engine](super::Engine).
+/// Configuration for the [super::Engine].
 pub struct Config<
     P: Array,
     V: Variant,
@@ -24,10 +24,10 @@ pub struct Config<
     /// Also manages the cryptographic partial share if the engine is a validator.
     pub validators: TSu,
 
-    /// Proposes and verifies digests.
+    /// Proposes and verifies [Digest]s.
     pub automaton: A,
 
-    /// Notified when a chunk receives a threshold of acks.
+    /// Notified when a chunk receives a threshold of [super::types::Ack]s.
     pub reporter: Z,
 
     /// Blocker for the network.
@@ -54,11 +54,11 @@ pub struct Config<
     /// all others are pruned or rejected.
     pub epoch_bounds: (u64, u64),
 
-    /// The concurrent number of chunks to process.
+    /// The number of chunks to process concurrently.
     pub window: NonZeroU64,
 
-    /// Partition for the journal.
-    pub partition: String,
+    /// Partition for the [commonware_storage::journal::variable::Journal].
+    pub journal_partition: String,
 
     /// The size of the write buffer to use for each blob in the journal.
     pub journal_write_buffer: NonZeroUsize,

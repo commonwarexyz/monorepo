@@ -5,13 +5,13 @@ use commonware_runtime::{
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
 use std::sync::Arc;
 
-/// Metrics for the [Engine](super::Engine)
+/// Metrics for the [super::Engine].
 pub struct Metrics<E: RuntimeMetrics + Clock> {
     /// Lowest index without a threshold signature
     pub tip: Gauge,
     /// Number of digests returned by the automaton by status
     pub digest: status::Counter,
-    /// Number of [Ack](super::types::Ack) messages processed by status
+    /// Number of [super::types::Ack] messages processed by status
     pub acks: status::Counter,
     /// Number of threshold signatures produced
     pub threshold: Counter,
