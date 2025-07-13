@@ -221,7 +221,7 @@ mod tests {
                     rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_timeout),
                     epoch_bounds: (1, 1),
                     window: std::num::NonZeroU64::new(10).unwrap(),
-                    partition: format!("aggregation/{validator}/"),
+                    journal_partition: format!("aggregation/{validator}"),
                     journal_write_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
                     journal_replay_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
                     journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
@@ -430,7 +430,7 @@ mod tests {
                                 epoch_bounds: (1, 1),
                                 window: std::num::NonZeroU64::new(10).unwrap(),
                                 // Use validator-specific partition for journal recovery
-                                partition: format!("unclean_shutdown_test/{validator}/"),
+                                journal_partition: format!("unclean_shutdown_test/{validator}"),
                                 journal_write_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
                                 journal_replay_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
                                 journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),

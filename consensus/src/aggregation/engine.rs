@@ -136,7 +136,7 @@ pub struct Engine<
     // ---------- Journal ----------
     /// Journal for storing acks signed by this node.
     journal: Option<Journal<E, Activity<V, D>>>,
-    partition: String,
+    journal_partition: String,
     journal_write_buffer: usize,
     journal_replay_buffer: usize,
     journal_heights_per_section: u64,
@@ -196,7 +196,7 @@ impl<
             rebroadcast_timeout: cfg.rebroadcast_timeout.into(),
             rebroadcast_deadlines: PrioritySet::new(),
             journal: None,
-            partition: cfg.partition,
+            journal_partition: cfg.journal_partition,
             journal_write_buffer: cfg.journal_write_buffer.into(),
             journal_replay_buffer: cfg.journal_replay_buffer.into(),
             journal_heights_per_section: cfg.journal_heights_per_section.into(),
@@ -231,7 +231,7 @@ impl<
 
         // Initialize Journal
         let journal_cfg = JConfig {
-            partition: self.partition.clone(),
+            partition: self.journal_partition.clone(),
             compression: self.journal_compression,
             codec_config: (),
             write_buffer: self.journal_write_buffer,
