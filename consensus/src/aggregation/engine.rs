@@ -412,7 +412,7 @@ impl<
         };
 
         // Move the entry to `Pending::Verified`
-        let Some(Pending::Unverified(epoch_map)) = self.pending.remove(&index) else {
+        let Some(Pending::Unverified(acks)) = self.pending.remove(&index) else {
             panic!("Pending::Unverified entry not found");
         };
         self.pending
@@ -420,9 +420,9 @@ impl<
 
         // Handle each `ack` as if it was received over the network. This inserts the values into
         // the new map, and may form a threshold signature if enough acks are present.
-        for acks in epoch_map.values() {
-            for ack in acks.values() {
-                let _ = self.handle_ack(ack).await; // Ignore any errors (e.g. invalid signature)
+        for epoch_acks in acks.values() {
+            for epoch_ack in epoch_acks.values() {
+                let _ = self.handle_ack(epoch_ack).await; // Ignore any errors (e.g. invalid signature)
             }
             // Break early if a threshold signature was formed
             if self.confirmed.contains_key(&index) {
