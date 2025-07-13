@@ -473,8 +473,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     }
 
     /// Write a table entry to the appropriate slot based on epoch.
-    async fn update_head<B: Blob>(
-        table: &B,
+    async fn update_head(
+        table: &E::Blob,
         table_index: u32,
         entry1: &Entry,
         entry2: &Entry,
