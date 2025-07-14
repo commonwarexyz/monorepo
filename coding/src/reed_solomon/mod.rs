@@ -202,6 +202,9 @@ pub fn decode<H: Hasher>(
 
     // Encode recovered data
     let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::Rs)?;
+    for (_, shard) in &provided_originals {
+        encoder.add_original_shard(shard).map_err(Error::Rs)?;
+    }
     for (_, shard) in decoding.restored_original_iter() {
         encoder.add_original_shard(shard).map_err(Error::Rs)?;
     }
