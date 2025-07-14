@@ -41,7 +41,7 @@
 //! ```
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, Read, ReadRangeExt, Write};
 use commonware_cryptography::Hasher;
 use thiserror::Error;
 
@@ -307,8 +307,8 @@ mod tests {
             );
 
             // Serialize and deserialize the proof
-            let serialized = proof.encode();
-            let deserialized = Proof::<Sha256>::decode(&serialized).unwrap();
+            let mut serialized = proof.encode();
+            let deserialized = Proof::<Sha256>::decode(&mut serialized).unwrap();
             assert!(
                 deserialized
                     .verify(&mut hasher, leaf, i as u32, &root)
@@ -709,11 +709,11 @@ mod tests {
 
         // Generate a valid proof for leaf at index 1.
         let proof = tree.proof(1).unwrap();
-        let mut serialized = proof.serialize();
+        let mut serialized = proof.encode();
 
         // Truncate one byte.
-        serialized.pop();
-        assert!(Proof::<Sha256>::deserialize(&serialized).is_err());
+        serialized.truncate(serialized.len() - 1);
+        assert!(Proof::<Sha256>::decode(&mut serialized).is_err());
     }
 
     #[test]
@@ -735,7 +735,7 @@ mod tests {
 
         // Append an extra byte.
         serialized.extend_from_slice(&[0u8]);
-        assert!(Proof::<Sha256>::decode(&serialized).is_err());
+        assert!(Proof::<Sha256>::decode(&mut serialized).is_err());
     }
 
     #[test]
