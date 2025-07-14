@@ -87,18 +87,17 @@
 //! use commonware_coding::reed_solomon::{encode, decode};
 //! use commonware_cryptography::Sha256;
 //!
-//! // Some data to encode.
+//! // Generate data to encode
 //! let data = b"Hello, world! This is a test of Reed-Solomon encoding.";
 //!
-//! // Configuration: 7 total chunks, with a minimum of 4 required for decoding.
+//! // Configure the encoder to generate 7 total chunks, with a minimum of 4 required for decoding
 //! let total = 7u16;
 //! let min = 4u16;
 //!
-//! // 1. Encode the data.
+//! // Encode the data
 //! let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
 //!
-//! // We now have 7 chunks. We only need 4 to decode. Let's pick a few,
-//! // including a mix of original and recovery shards.
+//! // Pick a few chunks to recover from (a mix of original and recovery shards)
 //! let some_chunks = vec![
 //!     chunks[0].clone(), // original
 //!     chunks[2].clone(), // original
@@ -106,10 +105,10 @@
 //!     chunks[6].clone(), // recovery
 //! ];
 //!
-//! // 2. Decode the data from the subset of chunks.
+//! // Decode the data from the subset of chunks
 //! let decoded_data = decode::<Sha256>(total, min, &root, some_chunks).unwrap();
 //!
-//! // 3. Verify that the decoded data matches the original data.
+//! // Verify that the decoded data matches the original data
 //! assert_eq!(decoded_data, data);
 //! ```
 
