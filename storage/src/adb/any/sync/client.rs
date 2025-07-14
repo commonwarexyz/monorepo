@@ -185,7 +185,8 @@ where
             });
         }
 
-        // Initialize the operations journal
+        // Initialize the operations journal. If we have existing persisted data in the target
+        // range, `log` will contain that data.
         let log = Journal::<E, Operation<K, V>>::init_sync(
             config.context.clone().with_label("log"),
             JConfig {
@@ -201,14 +202,15 @@ where
         .map_err(adb::Error::JournalError)
         .map_err(Error::Adb)?;
 
+        // Check how many operations are already in the log.
         let log_size = log
             .size()
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
         if log_size == config.upper_bound_ops + 1 {
-            // Sync is already complete - the log already has all needed operations
-            // Build the database immediately without fetching more operations
+            // We already have all the operations we need in the log.
+            // Build the database immediately without fetching more operations.
             let db = adb::any::Any::init_synced(
                 config.context.clone(),
                 SyncConfig {
@@ -216,7 +218,7 @@ where
                     log,
                     lower_bound: config.lower_bound_ops,
                     upper_bound: config.upper_bound_ops,
-                    pinned_nodes: vec![], // No pinned nodes needed since we're using existing data
+                    pinned_nodes: vec![],
                     apply_batch_size: config.apply_batch_size,
                 },
             )
@@ -486,7 +488,7 @@ pub(crate) mod tests {
     use test_case::test_case;
 
     type TestHash = Sha256;
-    type TestTranslator = translator::EightCap;
+    type TestTranslator = translator::TwoCap;
 
     const PAGE_SIZE: usize = 111;
     const PAGE_CACHE_SIZE: usize = 5;
@@ -697,8 +699,10 @@ pub(crate) mod tests {
         });
     }
 
+    // Test syncing where the sync client has some but not all of the operations in the target
+    // database.
     #[test]
-    fn test_sync_use_existing_db_partial() {
+    fn test_sync_use_existing_db_partial_match() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let target_ops = create_test_ops(1000);
@@ -720,7 +724,7 @@ pub(crate) mod tests {
             // Close sync_db
             sync_db.close().await.unwrap();
 
-            // Add one more operation (and commit) to target database
+            // Add one more operation and commit the target database.
             let more_ops = target_ops[999..1000].to_vec();
             target_db = apply_ops(target_db, more_ops).await;
             target_db.commit().await.unwrap();
@@ -729,7 +733,7 @@ pub(crate) mod tests {
             let lower_bound_ops = target_db.oldest_retained_loc().unwrap();
             let upper_bound_ops = target_db.op_count() - 1; // Up to the last operation
 
-            // Reopen sync_db
+            // Reopen the sync database.
             let config = Config {
                 db_config: sync_db_config, // Use same config as before
                 fetch_batch_size: NZU64!(10),
@@ -746,6 +750,15 @@ pub(crate) mod tests {
 
             // Verify synced state
             assert_eq!(synced_db.op_count(), upper_bound_ops + 1);
+            assert_eq!(
+                synced_db.log.size().await.unwrap(),
+                target_db.log.size().await.unwrap()
+            );
+            assert_eq!(synced_db.ops.pruned_to_pos(), target_db.ops.pruned_to_pos());
+            assert_eq!(
+                synced_db.inactivity_floor_loc,
+                target_db.inactivity_floor_loc
+            );
             assert_eq!(synced_db.oldest_retained_loc(), Some(lower_bound_ops));
             assert_eq!(synced_db.root(&mut hasher), target_hash);
 

@@ -79,14 +79,14 @@ pub struct SyncConfig<E: RStorage + Metrics, K: Array, V: Array, T: Translator, 
     /// Database configuration.
     pub db_config: Config<T>,
 
-    /// Log of operations from lower_bound to upper_bound.
+    /// The [Any]'s log of operations. It has elements from `lower_bound` to `upper_bound`, inclusive.
     /// Reports `lower_bound` as its pruning boundary (oldest retained operation index).
     pub log: Journal<E, Operation<K, V>>,
 
-    /// Pruning boundary - operations below this are considered pruned.
+    /// Sync lower boundary (inclusive) - operations below this index are pruned.
     pub lower_bound: u64,
 
-    /// Sync boundary - operations above this are not synced.
+    /// Sync upper boundary (inclusive) - operations above this index are not synced.
     pub upper_bound: u64,
 
     /// The pinned nodes the MMR needs at the pruning boundary given by
@@ -198,7 +198,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(db)
     }
 
-    /// Initialize a database from data received during a sync.
+    /// Initialize an [Any] from data received during a sync.
     pub(super) async fn init_synced(
         context: E,
         cfg: SyncConfig<E, K, V, T, H::Digest>,
@@ -222,7 +222,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         .await
         .map_err(Error::MmrError)?;
 
-        let mmr_ops = leaf_pos_to_num(mmr.size()).unwrap();
+        // Convert MMR size to number of operations.
+        let Some(mmr_ops) = leaf_pos_to_num(mmr.size()) else {
+            return Err(Error::MmrError(crate::mmr::Error::InvalidSize(mmr.size())));
+        };
         let mut hasher = Standard::<H>::new();
         let log_size = cfg.log.size().await?;
         for i in mmr_ops..log_size {
@@ -230,11 +233,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             let digest = Self::op_digest(&mut hasher, &op);
             mmr.add_batched(&mut hasher, &digest).await?;
             if i % cfg.apply_batch_size as u64 == 0 {
-                // Only sync periodically if there's no existing journal data
-                // If there's existing data, we'll sync at the end after setting journal_size correctly
+                // Periodically sync the MMR to avoid memory bloat.
+                // Since the first value i takes may not be a multiple of `cfg.apply_batch_size`,
+                // the first sync may occur before `apply_batch_size` operations are applied.
+                // This is fine.
                 mmr.sync(&mut hasher).await?;
             }
-            mmr.sync(&mut hasher).await?;
         }
 
         let mut snapshot = Index::init(
@@ -835,7 +839,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         mmr::{hasher::Standard, mem::Mmr as MemMmr},
-        translator::{EightCap, TwoCap},
+        translator::TwoCap,
     };
     use commonware_codec::{DecodeExt, FixedSize};
     use commonware_cryptography::{hash, sha256::Digest, Digest as _, Hasher as CHasher, Sha256};
@@ -880,7 +884,7 @@ pub(super) mod test {
             .unwrap()
     }
 
-    fn create_test_config(seed: u64) -> Config<EightCap> {
+    fn create_test_config(seed: u64) -> Config<TwoCap> {
         Config {
             mmr_journal_partition: format!("mmr_journal_{seed}"),
             mmr_metadata_partition: format!("mmr_metadata_{seed}"),
@@ -889,21 +893,17 @@ pub(super) mod test {
             log_journal_partition: format!("log_journal_{seed}"),
             log_items_per_blob: 1024,
             log_write_buffer: 64,
-            translator: EightCap,
+            translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// Create a test database with unique partition names
-    pub(crate) async fn create_test_db(
-        mut context: Context,
-    ) -> Any<Context, Digest, Digest, Sha256, EightCap> {
+    pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
         let config = create_test_config(seed);
-        Any::<Context, Digest, Digest, Sha256, EightCap>::init(context, config)
-            .await
-            .unwrap()
+        AnyTest::init(context, config).await.unwrap()
     }
 
     /// Create n random operations. Some portion of the updates are deletes.
@@ -926,10 +926,7 @@ pub(super) mod test {
     }
 
     /// Applies the given operations to the database.
-    pub(crate) async fn apply_ops(
-        mut db: Any<Context, Digest, Digest, Sha256, EightCap>,
-        ops: Vec<Operation<Digest, Digest>>,
-    ) -> Any<Context, Digest, Digest, Sha256, EightCap> {
+    pub(crate) async fn apply_ops(mut db: AnyTest, ops: Vec<Operation<Digest, Digest>>) -> AnyTest {
         for op in ops {
             match op {
                 Operation::Update(key, value) => {
@@ -1485,9 +1482,10 @@ pub(super) mod test {
         });
     }
 
-    /// Test init_synced where the target state is empty and unpruned.
+    /// Test `init_synced` with an empty source database (nothing persisted) syncing to
+    /// an empty target database.
     #[test_traced("WARN")]
-    pub fn test_any_db_init_synced_empty() {
+    pub fn test_any_db_init_synced_empty_to_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let log = Journal::<Context, Operation<Digest, Digest>>::init(
@@ -1539,9 +1537,10 @@ pub(super) mod test {
         });
     }
 
-    /// Test with non-empty source database
+    /// Test `init_synced` with an empty source database (nothing persisted) syncing to
+    /// a non-empty target database.
     #[test]
-    fn test_any_db_init_synced_nonempty() {
+    fn test_any_db_init_synced_empty_to_nonempty() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate a source database
@@ -1636,9 +1635,10 @@ pub(super) mod test {
         });
     }
 
-    /// Test init_synced with different pruning boundaries
+    /// Test `init_synced` with an empty source database syncing to a non-empty target database
+    /// with different pruning boundaries.
     #[test]
-    fn test_any_db_init_synced_different_pruning_boundaries() {
+    fn test_any_db_init_synced_empty_to_nonempty_different_pruning_boundaries() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate a source database
@@ -1683,7 +1683,7 @@ pub(super) mod test {
                     .map(|node| node.as_ref().unwrap().unwrap())
                     .collect::<Vec<_>>();
 
-                let db: Any<Context, Digest, Digest, Sha256, EightCap> = Any::init_synced(
+                let db: AnyTest = Any::init_synced(
                     context.clone(),
                     SyncConfig {
                         db_config: create_test_config(context.next_u64()),
@@ -1731,6 +1731,160 @@ pub(super) mod test {
         });
     }
 
+    // Test `init_synced` where the database has some but not all of the operations in the target
+    // database.
+    #[test]
+    fn test_any_db_init_synced_nonempty_to_nonempty_partial_match() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate two databases.
+            let mut target_db = create_test_db(context.clone()).await;
+            let sync_db_config = create_test_config(context.next_u64());
+            let mut sync_db: AnyTest = Any::init(context.clone(), sync_db_config).await.unwrap();
+            let original_ops = create_test_ops(100);
+            target_db = apply_ops(target_db, original_ops.clone()).await;
+            target_db.commit().await.unwrap();
+            sync_db = apply_ops(sync_db, original_ops.clone()).await;
+            sync_db.commit().await.unwrap();
+
+            // Close the sync db
+            sync_db.close().await.unwrap();
+
+            // Add 5 more operations to the target db
+            let more_ops = create_test_ops(5);
+            target_db = apply_ops(target_db, more_ops.clone()).await;
+            target_db.commit().await.unwrap();
+
+            // Capture target db state for comparison
+            let target_db_mmr_size = target_db.ops.size();
+            let target_db_log_size = target_db.log.size().await.unwrap();
+            let target_db_op_count = target_db.op_count();
+            let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc;
+            let target_db_oldest_retained_loc = target_db.oldest_retained_loc();
+            let target_db_pruned_to_pos = target_db.ops.pruned_to_pos();
+
+            let sync_lower_bound = target_db.oldest_retained_loc().unwrap();
+            let sync_upper_bound = target_db.op_count() - 1;
+
+            let pinned_nodes_map = target_db.ops.get_pinned_nodes();
+            let pinned_nodes = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(sync_lower_bound))
+                .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
+                .collect::<Vec<_>>();
+
+            let mut hasher = Standard::<Sha256>::new();
+            let target_hash = target_db.root(&mut hasher);
+
+            let AnyTest {
+                ops,
+                log,
+                inactivity_floor_loc: _,
+                snapshot: _,
+                uncommitted_ops: _,
+                hasher: _,
+            } = target_db;
+
+            let db = Any::init_synced(
+                context.clone(),
+                SyncConfig {
+                    db_config: create_test_config(context.next_u64()),
+                    log,
+                    lower_bound: sync_lower_bound,
+                    upper_bound: sync_upper_bound,
+                    pinned_nodes,
+                    apply_batch_size: 1024,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.op_count(), target_db_op_count);
+            assert_eq!(db.inactivity_floor_loc, target_db_inactivity_floor_loc);
+
+            // Verify the root hash matches the target
+            assert_eq!(db.root(&mut hasher), target_hash);
+
+            // Verify state matches the source operations
+            let mut expected_kvs = HashMap::new();
+            let mut deleted_keys = HashSet::new();
+            for op in &original_ops {
+                if let Operation::Update(key, value) = op {
+                    expected_kvs.insert(*key, *value);
+                    deleted_keys.remove(key);
+                } else if let Operation::Deleted(key) = op {
+                    expected_kvs.remove(key);
+                    deleted_keys.insert(*key);
+                }
+            }
+            for (key, value) in expected_kvs {
+                let synced_value = db.get(&key).await.unwrap().unwrap();
+                assert_eq!(synced_value, value);
+            }
+            // Verify that deleted keys are absent
+            for key in deleted_keys {
+                assert!(db.get(&key).await.unwrap().is_none(),);
+            }
+            assert_eq!(db.op_count(), target_db_op_count);
+            assert_eq!(db.inactivity_floor_loc, target_db_inactivity_floor_loc);
+            assert_eq!(db.oldest_retained_loc(), target_db_oldest_retained_loc);
+            assert_eq!(db.ops.size(), target_db_mmr_size);
+            assert_eq!(db.ops.pruned_to_pos(), target_db_pruned_to_pos);
+            assert_eq!(db.log.size().await.unwrap(), target_db_log_size);
+            db.destroy().await.unwrap();
+            ops.destroy().await.unwrap();
+        });
+    }
+
+    // Test `init_synced` where the database has all of the operations in the target range.
+    #[test]
+    fn test_any_db_init_synced_nonempty_to_nonempty_exact_match() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let target_db_config = create_test_config(context.next_u64());
+            let mut target_db = Any::init(context.clone(), target_db_config.clone())
+                .await
+                .unwrap();
+            let original_ops = create_test_ops(100);
+            target_db = apply_ops(target_db, original_ops.clone()).await;
+            target_db.commit().await.unwrap();
+
+            let sync_lower_bound = target_db.oldest_retained_loc().unwrap();
+            let sync_upper_bound = target_db.op_count() - 1;
+            let target_db_mmr_size = target_db.ops.size();
+            let target_db_log_size = target_db.log.size().await.unwrap();
+            let target_db_op_count = target_db.op_count();
+            let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc;
+            let target_db_oldest_retained_loc = target_db.oldest_retained_loc();
+            let target_db_pruned_to_pos = target_db.ops.pruned_to_pos();
+
+            let AnyTest { ops, log, .. } = target_db;
+
+            // When we re-open the database, the MMR is closed and the log is opened.
+            let mut hasher = Standard::<Sha256>::new();
+            ops.close(&mut hasher).await.unwrap();
+
+            let db: AnyTest = Any::init_synced(
+                context.clone(),
+                SyncConfig {
+                    db_config: target_db_config,
+                    log,
+                    lower_bound: sync_lower_bound,
+                    upper_bound: sync_upper_bound,
+                    pinned_nodes: vec![],
+                    apply_batch_size: 1024,
+                },
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(db.op_count(), target_db_op_count);
+            assert_eq!(db.inactivity_floor_loc, target_db_inactivity_floor_loc);
+            assert_eq!(db.oldest_retained_loc(), target_db_oldest_retained_loc);
+            assert_eq!(db.ops.size(), target_db_mmr_size);
+            assert_eq!(db.ops.pruned_to_pos(), target_db_pruned_to_pos);
+            assert_eq!(db.log.size().await.unwrap(), target_db_log_size);
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test]
     fn test_any_db_historical_proof_basic() {
         let executor = deterministic::Runner::default();
@@ -1752,7 +1906,7 @@ pub(super) mod test {
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
             assert_eq!(historical_ops, ops[5..15]);
-            assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
+            assert!(AnyTest::verify_proof(
                 &mut hasher,
                 &historical_proof,
                 5,
@@ -1773,7 +1927,7 @@ pub(super) mod test {
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
+            assert!(AnyTest::verify_proof(
                 &mut hasher,
                 &historical_proof,
                 5,
@@ -1808,7 +1962,7 @@ pub(super) mod test {
             single_db.sync().await.unwrap();
             let single_root = single_db.root(&mut hasher);
 
-            assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
+            assert!(AnyTest::verify_proof(
                 &mut hasher,
                 &single_proof,
                 0,
@@ -1869,7 +2023,7 @@ pub(super) mod test {
 
                 // Verify proof against reference root
                 let ref_root = ref_db.root(&mut hasher);
-                assert!(Any::<Context, _, _, _, EightCap>::verify_proof(
+                assert!(AnyTest::verify_proof(
                     &mut hasher,
                     &historical_proof,
                     start_loc,
@@ -1971,7 +2125,7 @@ pub(super) mod test {
                 let mut proof = proof.clone();
                 proof.digests[0] = hash(b"invalid");
                 let root_hash = db.root(&mut hasher);
-                assert!(!Any::<Context, _, _, _, EightCap>::verify_proof(
+                assert!(!AnyTest::verify_proof(
                     &mut hasher,
                     &proof,
                     0,
@@ -1983,7 +2137,7 @@ pub(super) mod test {
                 let mut proof = proof.clone();
                 proof.digests.push(hash(b"invalid"));
                 let root_hash = db.root(&mut hasher);
-                assert!(!Any::<Context, _, _, _, EightCap>::verify_proof(
+                assert!(!AnyTest::verify_proof(
                     &mut hasher,
                     &proof,
                     0,
@@ -1997,7 +2151,7 @@ pub(super) mod test {
                 let mut ops = ops.clone();
                 ops[0] = Operation::Update(hash(b"key1"), hash(b"value1"));
                 let root_hash = db.root(&mut hasher);
-                assert!(!Any::<Context, _, _, _, EightCap>::verify_proof(
+                assert!(!AnyTest::verify_proof(
                     &mut hasher,
                     &proof,
                     0,
@@ -2009,7 +2163,7 @@ pub(super) mod test {
                 let mut ops = ops.clone();
                 ops.push(Operation::Update(hash(b"key1"), hash(b"value1")));
                 let root_hash = db.root(&mut hasher);
-                assert!(!Any::<Context, _, _, _, EightCap>::verify_proof(
+                assert!(!AnyTest::verify_proof(
                     &mut hasher,
                     &proof,
                     0,
@@ -2021,7 +2175,7 @@ pub(super) mod test {
             // Changing the start location should cause verification to fail
             {
                 let root_hash = db.root(&mut hasher);
-                assert!(!Any::<Context, _, _, _, EightCap>::verify_proof(
+                assert!(!AnyTest::verify_proof(
                     &mut hasher,
                     &proof,
                     1,
@@ -2032,7 +2186,7 @@ pub(super) mod test {
 
             // Changing the root hash should cause verification to fail
             {
-                assert!(!Any::<Context, _, _, _, EightCap>::verify_proof(
+                assert!(!AnyTest::verify_proof(
                     &mut hasher,
                     &proof,
                     0,
@@ -2046,7 +2200,7 @@ pub(super) mod test {
                 let mut proof = proof.clone();
                 proof.size = 100;
                 let root_hash = db.root(&mut hasher);
-                assert!(!Any::<Context, _, _, _, EightCap>::verify_proof(
+                assert!(!AnyTest::verify_proof(
                     &mut hasher,
                     &proof,
                     0,
