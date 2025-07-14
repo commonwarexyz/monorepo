@@ -267,7 +267,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     ) -> Result<Self, Error> {
         let mut journal = Self::init(context.clone(), cfg.clone()).await?;
         let journal_size = journal.size().await?;
-        if journal_size < lower_bound + 1 {
+        if journal_size <= lower_bound {
             debug!(
                 journal_size,
                 lower_bound, "Existing journal data is stale, re-initializing in pruned state"
@@ -296,7 +296,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         }
     }
 
-    /// Initialize a new [Journal] instance in an pruned state at a given size.
+    /// Initialize a new [Journal] instance in a pruned state at a given size.
     ///
     /// # Arguments
     /// * `context` - The storage context
