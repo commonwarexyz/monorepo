@@ -28,7 +28,7 @@ fn benchmark_decode(c: &mut Criterion) {
 
                             // Select min random chunks
                             let mut shuffled = Vec::with_capacity(min as usize);
-                            let mut indices: Vec<u32> = (0..chunks).collect();
+                            let mut indices: Vec<u16> = (0..chunks).collect();
                             indices.shuffle(&mut sampler);
                             for &i in indices.iter().take(min as usize) {
                                 shuffled.push(proofs[i as usize].clone());

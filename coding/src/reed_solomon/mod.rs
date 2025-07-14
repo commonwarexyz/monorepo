@@ -23,14 +23,14 @@ pub enum Error {
 /// A chunk of data that has been encoded using Reed-Solomon and a Binary Merkle Tree.
 #[derive(Clone)]
 pub struct Chunk<H: Hasher> {
-    pub index: u32,
+    pub index: u16,
     pub shard: Vec<u8>,
     pub proof: bmt::Proof<H>,
 }
 
 impl<H: Hasher> Chunk<H> {
     /// Creates a new chunk from the given shard and proof.
-    pub fn new(index: u32, shard: Vec<u8>, proof: bmt::Proof<H>) -> Self {
+    pub fn new(index: u16, shard: Vec<u8>, proof: bmt::Proof<H>) -> Self {
         Self {
             index,
             shard,
@@ -47,7 +47,7 @@ impl<H: Hasher> Chunk<H> {
 
         // Verify proof
         self.proof
-            .verify(&mut hasher, &shard_digest, self.index, root)
+            .verify(&mut hasher, &shard_digest, self.index as u32, root)
             .is_ok()
     }
 }
@@ -65,7 +65,7 @@ impl<H: Hasher> Read for Chunk<H> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let index = u32::read(reader)?;
+        let index = u16::read(reader)?;
         let shard = Vec::<u8>::read_range(reader, ..=*cfg)?;
         let proof = bmt::Proof::<H>::read(reader)?;
         Ok(Self {
@@ -122,8 +122,8 @@ fn extract_data(shards: Vec<Vec<u8>>) -> Vec<u8> {
 }
 
 pub fn encode<H: Hasher>(
-    total: u32,
-    min: u32,
+    total: u16,
+    min: u16,
     data: Vec<u8>,
 ) -> Result<(H::Digest, Vec<Chunk<H>>), Error> {
     // Validate parameters
@@ -168,15 +168,15 @@ pub fn encode<H: Hasher>(
     let mut chunks = Vec::with_capacity(n);
     for (i, shard) in shards.into_iter().enumerate() {
         let proof = tree.proof(i as u32).map_err(|_| Error::InvalidProof)?;
-        chunks.push(Chunk::new(i as u32, shard, proof));
+        chunks.push(Chunk::new(i as u16, shard, proof));
     }
 
     Ok((root, chunks))
 }
 
 pub fn decode<H: Hasher>(
-    total: u32,
-    min: u32,
+    total: u16,
+    min: u16,
     root: &H::Digest,
     chunks: Vec<Chunk<H>>,
 ) -> Result<Vec<u8>, Error> {
@@ -275,8 +275,8 @@ mod tests {
     #[test]
     fn test_basic() {
         let data = b"Hello, Reed-Solomon!";
-        let total = 7u32;
-        let min = 4u32;
+        let total = 7u16;
+        let min = 4u16;
 
         // Encode the data
         let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
@@ -291,8 +291,8 @@ mod tests {
     #[test]
     fn test_moderate() {
         let data = b"Testing with more pieces than minimum";
-        let total = 10u32;
-        let min = 4u32;
+        let total = 10u16;
+        let min = 4u16;
 
         // Encode the data
         let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
@@ -306,8 +306,8 @@ mod tests {
     #[test]
     fn test_recovery() {
         let data = b"Testing recovery pieces";
-        let total = 8u32;
-        let min = 3u32;
+        let total = 8u16;
+        let min = 3u16;
 
         // Encode the data
         let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
@@ -327,8 +327,8 @@ mod tests {
     #[test]
     fn test_not_enough_pieces() {
         let data = b"Test insufficient pieces";
-        let total = 6u32;
-        let min = 4u32;
+        let total = 6u16;
+        let min = 4u16;
 
         // Encode data
         let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
@@ -344,8 +344,8 @@ mod tests {
     #[test]
     fn test_duplicate_index() {
         let data = b"Test duplicate detection";
-        let total = 5u32;
-        let min = 3u32;
+        let total = 5u16;
+        let min = 3u16;
 
         // Encode data
         let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
@@ -379,8 +379,8 @@ mod tests {
     #[test]
     fn test_empty_data() {
         let data = b"";
-        let total = 100u32;
-        let min = 30u32;
+        let total = 100u16;
+        let min = 30u16;
 
         // Encode data
         let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
@@ -394,8 +394,8 @@ mod tests {
     #[test]
     fn test_large_data() {
         let data = vec![42u8; 1000]; // 1KB of data
-        let total = 7u32;
-        let min = 4u32;
+        let total = 7u16;
+        let min = 4u16;
 
         // Encode data
         let (root, chunks) = encode::<Sha256>(total, min, data.clone()).unwrap();
@@ -409,8 +409,8 @@ mod tests {
     #[test]
     fn test_malicious_root_detection() {
         let data = b"Original data that should be protected";
-        let total = 7u32;
-        let min = 4u32;
+        let total = 7u16;
+        let min = 4u16;
 
         // Encode data correctly to get valid chunks
         let (_correct_root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
@@ -431,8 +431,8 @@ mod tests {
     #[test]
     fn test_manipulated_chunk_detection() {
         let data = b"Data integrity must be maintained";
-        let total = 6u32;
-        let min = 3u32;
+        let total = 6u16;
+        let min = 3u16;
 
         // Encode data
         let (root, mut chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
@@ -450,8 +450,8 @@ mod tests {
     #[test]
     fn test_inconsistent_shards() {
         let data = b"Test data for malicious encoding";
-        let total = 5u32;
-        let min = 3u32;
+        let total = 5u16;
+        let min = 3u16;
         let m = total - min;
 
         // Compute original data encoding
@@ -494,7 +494,7 @@ mod tests {
         for &i in &selected_indices {
             let merkle_proof = malicious_tree.proof(i as u32).unwrap();
             let shard = malicious_shards[i].clone();
-            let chunk = Chunk::new(i as u32, shard, merkle_proof);
+            let chunk = Chunk::new(i as u16, shard, merkle_proof);
             pieces.push(chunk);
         }
 
