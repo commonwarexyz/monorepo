@@ -531,4 +531,83 @@ mod tests {
         // This proves that any tampering with fragment data is immediately detected
         // by Merkle proof validation, providing strong integrity guarantees
     }
+
+    #[test]
+    fn test_malicious_encoder_inconsistent_shards() {
+        let data = b"Test data for malicious encoding";
+        let total_pieces = 5;
+        let min_pieces = 3;
+
+        // Compute shard_size
+        let mut extended_data = Vec::new();
+        extended_data.extend_from_slice(&(data.len() as u64).to_be_bytes());
+        extended_data.extend_from_slice(data);
+
+        let mut shard_size = (extended_data.len() + min_pieces - 1) / min_pieces;
+        if shard_size % 2 != 0 {
+            shard_size += 1;
+        }
+
+        let padded_len = shard_size * min_pieces;
+        extended_data.resize(padded_len, 0);
+
+        // Create original shards
+        let mut original_shards = Vec::with_capacity(min_pieces);
+        for i in 0..min_pieces {
+            let start = i * shard_size;
+            original_shards.push(extended_data[start..start + shard_size].to_vec());
+        }
+
+        // RS encoding
+        let m = total_pieces - min_pieces;
+        let mut encoder = ReedSolomonEncoder::new(min_pieces, m, shard_size).unwrap();
+        for shard in &original_shards {
+            encoder.add_original_shard(shard).unwrap();
+        }
+        let recovery_result = encoder.encode().unwrap();
+        let mut recovery_shards: Vec<Vec<u8>> = recovery_result
+            .recovery_iter()
+            .map(|s| s.to_vec())
+            .collect();
+
+        // Tamper with one recovery shard
+        if !recovery_shards[0].is_empty() {
+            recovery_shards[0][0] ^= 0xFF;
+        }
+
+        // Build malicious shards
+        let mut malicious_shards = original_shards.clone();
+        malicious_shards.extend(recovery_shards);
+
+        // Build malicious tree
+        let mut builder = Builder::<Sha256>::new(total_pieces);
+        for shard in &malicious_shards {
+            let mut hasher = Sha256::new();
+            hasher.update(shard);
+            builder.add(&hasher.finalize());
+        }
+        let malicious_tree = builder.build();
+        let malicious_root = malicious_tree.root();
+
+        // Generate proofs for min_pieces pieces, including the tampered recovery
+        let selected_indices = vec![0, 1, 3]; // originals 0,1 and recovery 0 (index 3)
+        let mut pieces = Vec::new();
+        for &i in &selected_indices {
+            let merkle_proof = malicious_tree.proof(i as u32).unwrap();
+            let shard = malicious_shards[i].clone();
+            let proof_data = (shard, merkle_proof.siblings);
+            let encoded = proof_data.encode();
+            pieces.push((i, encoded.to_vec()));
+        }
+
+        // Attempt decode
+        let result = decode(
+            &malicious_root,
+            &pieces,
+            total_pieces,
+            min_pieces,
+            shard_size,
+        );
+        assert!(matches!(result, Err(CodingError::Inconsistent)));
+    }
 }
