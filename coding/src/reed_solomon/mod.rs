@@ -135,6 +135,8 @@ pub enum Error {
     DuplicateIndex(u16),
     #[error("invalid data length: {0}")]
     InvalidDataLength(usize),
+    #[error("invalid index: {0}")]
+    InvalidIndex(u16),
 }
 
 /// Data that has been encoded using a Reed-Solomon coder and inserted into a [bmt].
@@ -349,10 +351,14 @@ pub fn decode<H: Hasher>(
     let mut provided_recoveries: Vec<(usize, Vec<u8>)> = Vec::new();
     for chunk in chunks {
         // Check for duplicate index
-        if seen.contains(&chunk.index) {
-            return Err(Error::DuplicateIndex(chunk.index));
+        let index = chunk.index;
+        if index >= total {
+            return Err(Error::InvalidIndex(index));
         }
-        seen.insert(chunk.index);
+        if seen.contains(&index) {
+            return Err(Error::DuplicateIndex(index));
+        }
+        seen.insert(index);
 
         // Verify Merkle proof
         if !chunk.verify(root) {
@@ -360,10 +366,10 @@ pub fn decode<H: Hasher>(
         }
 
         // Add to provided shards
-        if chunk.index < min {
-            provided_originals.push((chunk.index as usize, chunk.shard));
+        if index < min {
+            provided_originals.push((index as usize, chunk.shard));
         } else {
-            provided_recoveries.push((chunk.index as usize - k, chunk.shard));
+            provided_recoveries.push((index as usize - k, chunk.shard));
         }
     }
 
@@ -659,5 +665,47 @@ mod tests {
         // Fail to decode
         let result = decode::<Sha256>(total, min, &malicious_root, pieces);
         assert!(matches!(result, Err(Error::Inconsistent)));
+    }
+
+    #[test]
+    fn test_odd_shard_len() {
+        let data = b"a";
+        let total = 3u16;
+        let min = 2u16;
+
+        // Encode the data
+        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
+
+        // Use a mix of original and recovery pieces
+        let pieces: Vec<_> = vec![
+            chunks[0].clone(), // original
+            chunks[2].clone(), // recovery
+        ];
+
+        // Try to decode with a mix of original and recovery pieces
+        let decoded = decode::<Sha256>(total, min, &root, pieces).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_invalid_index() {
+        let data = b"Testing recovery pieces";
+        let total = 8u16;
+        let min = 3u16;
+
+        // Encode the data
+        let (root, mut chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
+
+        // Use a mix of original and recovery pieces
+        chunks[1].index = 8;
+        let pieces: Vec<_> = vec![
+            chunks[0].clone(), // original
+            chunks[1].clone(), // recovery with invalid index
+            chunks[6].clone(), // recovery
+        ];
+
+        // Fail to decode
+        let result = decode::<Sha256>(total, min, &root, pieces);
+        assert!(matches!(result, Err(Error::InvalidIndex(8))));
     }
 }
