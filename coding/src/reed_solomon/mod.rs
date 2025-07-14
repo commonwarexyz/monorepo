@@ -1,12 +1,11 @@
 //! Reed-Solomon coding.
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{Decode, Encode, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
-use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use commonware_codec::{Encode, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_cryptography::Hasher;
 use commonware_storage::bmt::{self, Builder};
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
 use std::collections::HashSet;
-use std::convert::TryInto;
 
 #[derive(Debug)]
 pub enum Error {
@@ -82,12 +81,10 @@ impl<H: Hasher> EncodeSize for Chunk<H> {
     }
 }
 
-/// Encodes the input data into total_pieces proofs using Reed-Solomon and a Binary Merkle Tree.
-/// Returns the Merkle root and a vector of encoded proofs (one per piece).
 pub fn encode<H: Hasher>(
     total: u32,
     min: u32,
-    mut data: Vec<u8>,
+    data: Vec<u8>,
 ) -> Result<(H::Digest, Vec<Chunk<H>>), Error> {
     // Validate parameters
     assert!(total > min);
@@ -95,6 +92,9 @@ pub fn encode<H: Hasher>(
     let n = total as usize;
     let k = min as usize;
     let m = n - k;
+
+    // Encode data
+    let mut data = data.encode().to_vec();
 
     // Compute shard_len (must be even)
     let mut shard_len = data.len().div_ceil(k);
@@ -148,14 +148,11 @@ pub fn encode<H: Hasher>(
     Ok((root, chunks))
 }
 
-/// Decodes the original data from at least min_pieces assembled pieces with valid Merkle proofs.
-/// Verifies consistency with the provided root and checks if the original encoding was correct.
-/// Requires total_pieces, min_pieces, and shard_size (assumed known or derivable in context).
 pub fn decode<H: Hasher>(
     total: u32,
     min: u32,
     root: &H::Digest,
-    chunks: &[Chunk<H>],
+    chunks: Vec<Chunk<H>>,
 ) -> Result<Vec<u8>, Error> {
     // Validate parameters
     assert!(total > min);
@@ -168,7 +165,7 @@ pub fn decode<H: Hasher>(
     }
 
     // Verify chunks
-    let mut shard_len = chunks[0].shard.len();
+    let shard_len = chunks[0].shard.len();
     let mut seen = HashSet::new();
     let mut provided_originals: Vec<(usize, Vec<u8>)> = Vec::new();
     let mut provided_recoveries: Vec<(usize, Vec<u8>)> = Vec::new();
@@ -235,19 +232,11 @@ pub fn decode<H: Hasher>(
     }
 
     // Extract original data
-    let mut data_buf = Vec::new();
+    let mut data = Vec::new();
     for shard in shards.into_iter().take(k) {
-        data_buf.extend(shard);
+        data.extend(shard);
     }
-    let len = u64::from_be_bytes(
-        data_buf[0..8]
-            .try_into()
-            .map_err(|_| Error::InvalidDataLength)?,
-    ) as usize;
-    if len + 8 > data_buf.len() {
-        return Err(Error::InvalidDataLength);
-    }
-    Ok(data_buf[8..8 + len].to_vec())
+    Ok(Vec::<u8>::read_range(&mut data.as_slice(), ..).expect("decoding failed"))
 }
 
 #[cfg(test)]
