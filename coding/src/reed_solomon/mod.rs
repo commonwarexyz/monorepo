@@ -1,4 +1,4 @@
-//! Reed-Solomon coding.
+//! TBA
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
