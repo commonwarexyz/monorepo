@@ -2,7 +2,7 @@
 name = "commonware-coding"
 edition = "2021"
 publish = true
-version = "0.0.55"
+version = "0.0.56"
 license = "MIT OR Apache-2.0"
 description = "Encode data to enable recovery from a subset of fragments."
 readme = "README.md"
