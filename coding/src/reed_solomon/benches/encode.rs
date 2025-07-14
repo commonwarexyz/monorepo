@@ -1,5 +1,5 @@
 use commonware_coding::reed_solomon::encode;
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 fn benchmark_encode(c: &mut Criterion) {
