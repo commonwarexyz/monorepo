@@ -1,4 +1,85 @@
 //! A Reed-Solomon coder that emits [Chunk]s that can be proven against a [bmt].
+//!
+//! # Behavior
+//!
+//! The encoder takes input data, splits it into `k` data shards, and generates `m` recovery
+//! shards using [Reed-Solomon encoding](https://en.wikipedia.org/wiki/Reed%E2%80%93Solomon_error_correction).
+//! All `n = k + m` shards are then used to build a [bmt], producing a single root hash. Each shard
+//! is packaged as a [Chunk] containing the shard data, its index, and a Merkle proof against the [bmt] root.
+//!
+//! ## Encoding
+//!
+//! ```text
+//!               +--------------------------------------+
+//!               |         Original Data (Bytes)        |
+//!               +--------------------------------------+
+//!                                  |
+//!                                  v
+//!               +--------------------------------------+
+//!               | [Length Prefix | Original Data...]   |
+//!               +--------------------------------------+
+//!                                  |
+//!                                  v
+//!              +----------+ +----------+    +-----------+
+//!              |  Shard 0 | |  Shard 1 | .. | Shard k-1 |  (Data Shards)
+//!              +----------+ +----------+    +-----------+
+//!                     |            |             |
+//!                     |            |             |
+//!                     +------------+-------------+
+//!                                  |
+//!                                  v
+//!                        +------------------+
+//!                        | Reed-Solomon     |
+//!                        | Encoder (k, m)   |
+//!                        +------------------+
+//!                                  |
+//!                                  v
+//!              +----------+ +----------+    +-----------+
+//!              |  Shard k | | Shard k+1| .. | Shard n-1 |  (Recovery Shards)
+//!              +----------+ +----------+    +-----------+
+//! ```
+//!
+//! ## Merkle Tree Construction
+//!
+//! All `n` shards (data and recovery) are hashed and used as leaves to build a [bmt].
+//!
+//! ```text
+//! Shards:    [Shard 0, Shard 1, ..., Shard n-1]
+//!             |        |              |
+//!             v        v              v
+//! Hashes:    [H(S_0), H(S_1), ..., H(S_n-1)]
+//!             \       / \       /
+//!              \     /   \     /
+//!               +---+     +---+
+//!                 |         |
+//!                 \         /
+//!                  \       /
+//!                   +-----+
+//!                      |
+//!                      v
+//!                +----------+
+//!                |   Root   |
+//!                +----------+
+//! ```
+//!
+//! The final output is the [bmt] root and a set of `n` [Chunk]s.
+//!
+//! `(Root, [Chunk 0, Chunk 1, ..., Chunk n-1])`
+//!
+//! Each [Chunk] contains:
+//! - `shard`: The shard data (original or recovery).
+//! - `index`: The shard's original index (0 to n-1).
+//! - `proof`: A Merkle proof of the shard's inclusion in the [bmt].
+//!
+//! ## Decoding and Verification
+//!
+//! The decoder requires any `k` [Chunk]s to reconstruct the original data.
+//! 1. Each [Chunk]'s Merkle proof is verified against the [bmt] root.
+//! 2. The shards from the valid [Chunk]s are used to reconstruct the original `k` data shards.
+//! 3. To ensure consistency, the recovered data shards are re-encoded, and a new [bmt] root is
+//!    generated. This new root MUST match the original [bmt] root. This prevents attacks where
+//!    an adversary provides a valid set of chunks that decode to different data.
+//! 4. If the roots match, the original data is extracted from the reconstructed data shards.
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
