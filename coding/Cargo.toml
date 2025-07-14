@@ -1,0 +1,20 @@
+[package]
+name = "commonware-coding"
+edition = "2021"
+publish = true
+version = "0.0.55"
+license = "MIT OR Apache-2.0"
+description = "TBA"
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/coding"
+documentation = "https://docs.rs/commonware-coding"
+
+[dependencies]
+commonware-codec = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-storage = { workspace = true }
+
+
+[lib]
+bench = false
