@@ -44,7 +44,7 @@
 //!
 //! # State Sync
 //!
-//! [Journal::init_sync] allows for initializing a journal for use in state sync.
+//! `Journal::init_sync` allows for initializing a journal for use in state sync.
 //! When opened in this mode, we attempt to populate the journal within the given range
 //! with persisted data.
 //! If the journal is empty, we create a fresh journal at the specified position.
