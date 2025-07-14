@@ -774,8 +774,7 @@ pub(crate) mod tests {
                 assert_eq!(expected_op, synced_op);
             }
 
-            for i in 0..ORIGINAL_DB_OPS {
-                let target_op = &original_ops[i as usize];
+            for target_op in &original_ops {
                 if let Some(key) = target_op.to_key() {
                     let target_value = target_db.get(key).await.unwrap();
                     let synced_value = sync_db.get(key).await.unwrap();
@@ -784,8 +783,8 @@ pub(crate) mod tests {
             }
             // Verify the last operation is present
             let last_key = last_op[0].to_key().unwrap();
-            let last_value = last_op[0].to_value().unwrap().clone();
-            assert_eq!(sync_db.get(&last_key).await.unwrap(), Some(last_value));
+            let last_value = *last_op[0].to_value().unwrap();
+            assert_eq!(sync_db.get(last_key).await.unwrap(), Some(last_value));
 
             sync_db.destroy().await.unwrap();
             target_db.destroy().await.unwrap();
@@ -862,8 +861,7 @@ pub(crate) mod tests {
             assert_eq!(sync_db.root(&mut hasher), target_hash);
 
             // Verify state matches for sample operations
-            for i in 0..NUM_OPS {
-                let target_op = &target_ops[i as usize];
+            for target_op in &target_ops {
                 if let Some(key) = target_op.to_key() {
                     let target_value = target_db.get(key).await.unwrap();
                     let synced_value = sync_db.get(key).await.unwrap();
