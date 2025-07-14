@@ -118,52 +118,17 @@ fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
 }
 
 fn extract_data(shards: Vec<Vec<u8>>) -> Vec<u8> {
-    let mut current_shard = 0;
-    let mut offset = 0;
-
-    // Read length prefix (8 bytes in little-endian)
-    let mut length_bytes = [0u8; u64::SIZE];
-    for i in 0..u64::SIZE {
-        // Find next available byte
-        while current_shard < shards.len() && offset >= shards[current_shard].len() {
-            current_shard += 1;
-            offset = 0;
-        }
-
-        if current_shard >= shards.len() {
-            return Vec::new(); // Not enough data
-        }
-
-        length_bytes[i] = shards[current_shard][offset];
-        offset += 1;
+    // Concatenate shards
+    let mut data = Vec::with_capacity(shards.len() * shards[0].len());
+    for shard in shards {
+        data.extend_from_slice(&shard);
     }
 
-    let original_len = u64::from_le_bytes(length_bytes) as usize;
+    // Read length prefix
+    let data_len = u64::from_be_bytes(data[..u64::SIZE].try_into().unwrap()) as usize;
 
-    // Read the actual data
-    let mut result = Vec::with_capacity(original_len);
-    let mut remaining = original_len;
-
-    while remaining > 0 && current_shard < shards.len() {
-        // Find next available byte
-        while current_shard < shards.len() && offset >= shards[current_shard].len() {
-            current_shard += 1;
-            offset = 0;
-        }
-
-        if current_shard >= shards.len() {
-            break; // Not enough data
-        }
-
-        let available = shards[current_shard].len() - offset;
-        let to_copy = available.min(remaining);
-
-        result.extend_from_slice(&shards[current_shard][offset..offset + to_copy]);
-        offset += to_copy;
-        remaining -= to_copy;
-    }
-
-    result
+    // Return data
+    data[u64::SIZE..data_len + u64::SIZE].to_vec()
 }
 
 pub fn encode<H: Hasher>(
