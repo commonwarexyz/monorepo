@@ -23,18 +23,23 @@ pub enum Error {
 
 /// A chunk of data that has been encoded using Reed-Solomon and a Binary Merkle Tree.
 pub struct Chunk<H: Hasher> {
+    pub index: u32,
     pub shard: Vec<u8>,
     pub proof: bmt::Proof<H>,
 }
 
 impl<H: Hasher> Chunk<H> {
     /// Creates a new chunk from the given shard and proof.
-    pub fn new(shard: Vec<u8>, proof: bmt::Proof<H>) -> Self {
-        Self { shard, proof }
+    pub fn new(index: u32, shard: Vec<u8>, proof: bmt::Proof<H>) -> Self {
+        Self {
+            index,
+            shard,
+            proof,
+        }
     }
 
     /// Verifies the chunk against the given root and index.
-    pub fn verify(&self, root: &H::Digest, index: u32) -> bool {
+    pub fn verify(&self, root: &H::Digest) -> bool {
         // Compute shard digest
         let mut hasher = H::new();
         hasher.update(&self.shard);
@@ -42,13 +47,14 @@ impl<H: Hasher> Chunk<H> {
 
         // Verify proof
         self.proof
-            .verify(&mut hasher, &shard_digest, index, root)
+            .verify(&mut hasher, &shard_digest, self.index, root)
             .is_ok()
     }
 }
 
 impl<H: Hasher> Write for Chunk<H> {
     fn write(&self, writer: &mut impl BufMut) {
+        self.index.write(writer);
         self.shard.write(writer);
         self.proof.write(writer);
     }
@@ -59,30 +65,35 @@ impl<H: Hasher> Read for Chunk<H> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let index = u32::read(reader)?;
         let shard = Vec::<u8>::read_range(reader, ..=*cfg)?;
         let proof = bmt::Proof::<H>::read(reader)?;
-        Ok(Self { shard, proof })
+        Ok(Self {
+            index,
+            shard,
+            proof,
+        })
     }
 }
 
 impl<H: Hasher> EncodeSize for Chunk<H> {
     fn encode_size(&self) -> usize {
-        self.shard.encode_size() + self.proof.encode_size()
+        self.index.encode_size() + self.shard.encode_size() + self.proof.encode_size()
     }
 }
 
 /// Encodes the input data into total_pieces proofs using Reed-Solomon and a Binary Merkle Tree.
 /// Returns the Merkle root and a vector of encoded proofs (one per piece).
 pub fn encode<H: Hasher>(
-    total: usize,
-    min: usize,
+    total: u32,
+    min: u32,
     mut data: Vec<u8>,
 ) -> Result<(H::Digest, Vec<Chunk<H>>), Error> {
     // Validate parameters
     assert!(total > min);
     assert!(min > 0);
-    let n = total;
-    let k = min;
+    let n = total as usize;
+    let k = min as usize;
     let m = n - k;
 
     // Compute shard_len (must be even)
@@ -131,7 +142,7 @@ pub fn encode<H: Hasher>(
     let mut chunks = Vec::with_capacity(n);
     for (i, shard) in shards.into_iter().enumerate() {
         let proof = tree.proof(i as u32).map_err(|_| Error::InvalidProof)?;
-        chunks.push(Chunk::new(shard, proof));
+        chunks.push(Chunk::new(i as u32, shard, proof));
     }
 
     Ok((root, chunks))
@@ -140,135 +151,101 @@ pub fn encode<H: Hasher>(
 /// Decodes the original data from at least min_pieces assembled pieces with valid Merkle proofs.
 /// Verifies consistency with the provided root and checks if the original encoding was correct.
 /// Requires total_pieces, min_pieces, and shard_size (assumed known or derivable in context).
-pub fn decode(
-    root: &Root,
-    pieces: &[(usize, Proof)],
-    total_pieces: usize,
-    min_pieces: usize,
-    shard_size: usize,
-) -> Result<Vec<u8>, CodingError> {
-    let n = total_pieces;
-    let k = min_pieces;
+pub fn decode<H: Hasher>(
+    total: u32,
+    min: u32,
+    root: &H::Digest,
+    chunks: &[Chunk<H>],
+) -> Result<Vec<u8>, Error> {
+    // Validate parameters
+    assert!(total > min);
+    assert!(min > 0);
+    let n = total as usize;
+    let k = min as usize;
     let m = n - k;
-    if pieces.len() < k {
-        return Err(CodingError::NotEnoughPieces);
+    if chunks.len() < k {
+        return Err(Error::NotEnoughPieces);
     }
 
+    // Verify chunks
+    let mut shard_len = chunks[0].shard.len();
     let mut seen = HashSet::new();
     let mut provided_originals: Vec<(usize, Vec<u8>)> = Vec::new();
     let mut provided_recoveries: Vec<(usize, Vec<u8>)> = Vec::new();
-
-    for &(index, ref encoded) in pieces {
-        if index >= n || seen.contains(&index) {
-            return Err(CodingError::DuplicateIndex);
+    for chunk in chunks {
+        // Check for duplicate index
+        if seen.contains(&chunk.index) {
+            return Err(Error::DuplicateIndex);
         }
-        seen.insert(index);
+        seen.insert(chunk.index);
 
-        let (shard, merkle_proof): (Vec<u8>, Vec<Digest>) = <(Vec<u8>, Vec<Digest>)>::decode_cfg(
-            &encoded[..],
-            &(((..).into(), ()), ((..).into(), ())),
-        )
-        .map_err(|_| CodingError::CodecError)?;
-        if shard.len() != shard_size {
-            return Err(CodingError::InvalidShardSize);
-        }
-        if !merkle_verify(root, index, &shard, &merkle_proof) {
-            return Err(CodingError::InvalidProof);
+        // Verify Merkle proof
+        if !chunk.verify(root) {
+            return Err(Error::InvalidProof);
         }
 
-        if index < k {
-            provided_originals.push((index, shard));
+        // Add to provided shards
+        if chunk.index < min {
+            provided_originals.push((chunk.index as usize, chunk.shard));
         } else {
-            provided_recoveries.push((index - k, shard));
+            provided_recoveries.push((chunk.index as usize - k, chunk.shard));
         }
     }
 
-    // Decode originals - use correct API (original_count, recovery_count, shard_length)
-    let mut decoder = ReedSolomonDecoder::new(k, m, shard_size).map_err(CodingError::RsError)?;
+    // Decode original data
+    let mut decoder = ReedSolomonDecoder::new(k, m, shard_len).map_err(Error::Rs)?;
     for (idx, ref shard) in &provided_originals {
-        decoder
-            .add_original_shard(*idx, shard)
-            .map_err(CodingError::RsError)?;
+        decoder.add_original_shard(*idx, shard).map_err(Error::Rs)?;
     }
     for (idx, ref shard) in &provided_recoveries {
-        decoder
-            .add_recovery_shard(*idx, shard)
-            .map_err(CodingError::RsError)?;
+        decoder.add_recovery_shard(*idx, shard).map_err(Error::Rs)?;
     }
-    let decode_result = decoder.decode().map_err(CodingError::RsError)?;
+    let decoding = decoder.decode().map_err(Error::Rs)?;
 
-    // Build full originals, checking consistency
-    let mut full_originals = vec![None; k];
-    for (idx, shard) in provided_originals {
-        full_originals[idx] = Some(shard);
+    // Encode recovered data
+    let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::Rs)?;
+    for (_, shard) in decoding.restored_original_iter() {
+        encoder.add_original_shard(shard).map_err(Error::Rs)?;
     }
-    for (idx, shard) in decode_result.restored_original_iter() {
-        let idx_usize = idx;
-        if let Some(ref existing) = full_originals[idx_usize] {
-            if existing != &shard.to_vec() {
-                return Err(CodingError::Inconsistent);
-            }
-        } else {
-            full_originals[idx_usize] = Some(shard.to_vec());
-        }
-    }
-    if full_originals.iter().any(|o| o.is_none()) {
-        return Err(CodingError::Inconsistent);
-    }
-    let full_originals = full_originals
-        .into_iter()
-        .map(|o| o.unwrap())
-        .collect::<Vec<_>>();
-
-    // Re-encode to check parities
-    let mut encoder = ReedSolomonEncoder::new(k, m, shard_size).map_err(CodingError::RsError)?;
-    for shard in &full_originals {
-        encoder
-            .add_original_shard(shard)
-            .map_err(CodingError::RsError)?;
-    }
-    let computed_recoveries_result = encoder.encode().map_err(CodingError::RsError)?;
-    let computed_recoveries: Vec<Vec<u8>> = computed_recoveries_result
+    let encoding = encoder.encode().map_err(Error::Rs)?;
+    let recovery_shards: Vec<Vec<u8>> = encoding
         .recovery_iter()
         .map(|shard| shard.to_vec())
         .collect();
+    let mut shards = decoding
+        .restored_original_iter()
+        .map(|(_, shard)| shard.to_vec())
+        .collect::<Vec<_>>();
+    shards.extend(recovery_shards);
 
-    for (idx, shard) in provided_recoveries {
-        if computed_recoveries[idx] != shard {
-            return Err(CodingError::Inconsistent);
-        }
-    }
-
-    // Reconstruct full shards and verify Merkle root
-    let mut full_shards = full_originals;
-    full_shards.extend(computed_recoveries);
-
-    // Build tree to verify root
-    let mut builder = Builder::<Sha256>::new(n);
-    for shard in &full_shards {
+    // Build Merkle tree
+    let mut builder = Builder::<H>::new(n);
+    let mut hasher = H::new();
+    for shard in &shards {
         builder.add(&{
-            let mut hasher = Sha256::new();
             hasher.update(shard);
             hasher.finalize()
         });
     }
     let computed_tree = builder.build();
+
+    // Confirm root is consistent
     if computed_tree.root() != *root {
-        return Err(CodingError::Inconsistent); // Original encoding incorrect
+        return Err(Error::Inconsistent);
     }
 
     // Extract original data
     let mut data_buf = Vec::new();
-    for shard in full_shards.into_iter().take(k) {
+    for shard in shards.into_iter().take(k) {
         data_buf.extend(shard);
     }
     let len = u64::from_be_bytes(
         data_buf[0..8]
             .try_into()
-            .map_err(|_| CodingError::InvalidDataLength)?,
+            .map_err(|_| Error::InvalidDataLength)?,
     ) as usize;
     if len + 8 > data_buf.len() {
-        return Err(CodingError::InvalidDataLength);
+        return Err(Error::InvalidDataLength);
     }
     Ok(data_buf[8..8 + len].to_vec())
 }
