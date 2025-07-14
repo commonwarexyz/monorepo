@@ -200,7 +200,20 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(db)
     }
 
-    /// Initialize an [Any] from data received during a sync.
+    /// Returns an [Any] initialized from sync data in `cfg` for use in state sync.
+    ///
+    /// # Behavior
+    ///
+    /// This method handles different initialization scenarios based on existing data:
+    /// - If the MMR journal is empty, it creates a fresh MMR from the provided `pinned_nodes`
+    /// - If the MMR journal has data but is incomplete (< `upper_bound`), missing operations
+    ///   from the log are applied to bring it up to the target state
+    /// - If the MMR journal has data beyond the `upper_bound`, it is rewound to match the sync target
+    ///
+    /// # Returns
+    ///
+    /// An [Any] db populated with the state from `cfg.lower_bound` to `cfg.upper_bound`, inclusive.
+    /// The pruning boundary is set to `cfg.lower_bound`.
     pub(super) async fn init_synced(
         context: E,
         cfg: SyncConfig<E, K, V, T, H::Digest>,
