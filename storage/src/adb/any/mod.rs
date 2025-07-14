@@ -1520,7 +1520,7 @@ pub(super) mod test {
             .unwrap();
             let sync_config: SyncConfig<Context, Digest, Digest, TwoCap, Digest> = SyncConfig {
                 db_config: any_db_config("sync_basic"),
-                lower_bound: 0, // No pruning
+                lower_bound: 0,
                 upper_bound: 0,
                 pinned_nodes: None,
                 log,

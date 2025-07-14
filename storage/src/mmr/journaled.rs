@@ -302,6 +302,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         });
 
         if cfg.lower_bound < journal_size {
+            // We need to add the pinned nodes required for proving at the given pruning boundary.
             let mut additional_pinned_nodes = HashMap::new();
             for pos in Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound) {
                 let digest =

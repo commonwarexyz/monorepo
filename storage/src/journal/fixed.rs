@@ -1584,329 +1584,288 @@ mod tests {
         });
     }
 
-    /// Test that `init_sync` properly reuses existing journal data when beneficial
-    #[test_traced]
-    fn test_init_sync_existing_data() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "test_reuse".into(),
-                items_per_blob: 5,
-                write_buffer: 1024,
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
-
-            // Create an initial journal with 15 operations
-            let mut initial_journal =
-                Journal::<Context, Digest>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
-
-            for i in 0..15 {
-                initial_journal.append(test_digest(i)).await.unwrap();
-            }
-            initial_journal.sync().await.unwrap();
-            assert_eq!(initial_journal.size().await.unwrap(), 15);
-            initial_journal.close().await.unwrap();
-
-            {
-                let reused_journal = Journal::<Context, Digest>::init_sync(
-                    context.clone(),
-                    cfg.clone(),
-                    10, // Prune to position 10, existing data has 15 operations
-                    1000,
-                )
-                .await
-                .expect("Failed to init with reuse");
-
-                // Should have operations 10-14 remaining after pruning
-                let reused_size = reused_journal.size().await.unwrap();
-                assert!(
-                    reused_size >= 10,
-                    "Journal should have been pruned to at least position 10"
-                );
-
-                // Verify we can read operations that should still exist
-                for i in 10..15 {
-                    let result = reused_journal.read(i).await;
-                    assert!(result.is_ok());
-                }
-
-                // Verify operations before pruning boundary are gone
-                for i in 0..10 {
-                    let result = reused_journal.read(i).await;
-                    assert!(matches!(result, Err(Error::ItemPruned(_))),);
-                }
-                reused_journal.destroy().await.unwrap();
-            }
-
-            // Test case 2: init_sync with boundary >= existing data should create fresh
-            // First recreate the initial journal
-            let mut initial_journal =
-                Journal::<Context, Digest>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
-            for i in 0..15 {
-                initial_journal.append(test_digest(i)).await.unwrap();
-            }
-            initial_journal.sync().await.unwrap();
-            initial_journal.close().await.unwrap();
-
-            let fresh_journal = Journal::<Context, Digest>::init_sync(
-                context.clone(),
-                cfg.clone(),
-                20, // Prune to position 20, existing data only has 15 operations
-                1000,
-            )
-            .await
-            .expect("Failed to init fresh");
-
-            assert_eq!(fresh_journal.size().await.unwrap(), 20);
-
-            // Should be in pruned state - no operations should be readable
-            assert_eq!(fresh_journal.oldest_retained_pos().await.unwrap(), None);
-
-            fresh_journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test that init_sync works correctly when no existing journal exists
+    /// Test `init_sync` when there is no existing data on disk.
     #[test_traced]
     fn test_init_sync_no_existing_data() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_fresh".into(),
-                items_per_blob: 3,
+                partition: "test_fresh_start".into(),
+                items_per_blob: 5,
                 write_buffer: 1024,
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
-            // Call init_sync on a non-existent partition
-            let fresh_journal =
-                Journal::<Context, Digest>::init_sync(context.clone(), cfg.clone(), 7, 1000)
-                    .await
-                    .expect("Failed to init fresh journal");
+            // Initialize journal with sync boundaries when no existing data exists
+            let lower_bound = 10;
+            let upper_bound = 25;
+            let sync_journal = Journal::<Context, Digest>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound,
+                upper_bound,
+            )
+            .await
+            .expect("Failed to initialize journal with sync boundaries");
 
-            assert_eq!(fresh_journal.size().await.unwrap(), 7);
-            assert_eq!(fresh_journal.oldest_retained_pos().await.unwrap(), Some(6));
+            // Verify the journal is initialized at the lower bound
+            assert_eq!(sync_journal.size().await.unwrap(), lower_bound);
+            assert_eq!(sync_journal.oldest_retained_pos().await.unwrap(), None);
 
-            fresh_journal.destroy().await.unwrap();
+            // Verify the journal structure matches expected state
+            // With items_per_blob=5 and lower_bound=10, we expect:
+            // - Tail blob at index 2 (10 / 5 = 2)
+            // - No historical blobs (all operations are "pruned")
+            assert_eq!(sync_journal.blobs.len(), 0);
+            assert_eq!(sync_journal.tail_index, 2);
+
+            // Verify that operations can be appended starting from the sync position
+            let mut sync_journal = sync_journal;
+            let append_pos = sync_journal.append(test_digest(100)).await.unwrap();
+            assert_eq!(append_pos, lower_bound);
+
+            // Verify we can read the appended operation
+            let read_value = sync_journal.read(append_pos).await.unwrap();
+            assert_eq!(read_value, test_digest(100));
+
+            // Verify that reads before the lower bound return ItemPruned
+            for i in 0..lower_bound {
+                let result = sync_journal.read(i).await;
+                assert!(matches!(result, Err(Error::ItemPruned(_))),);
+            }
+
+            sync_journal.destroy().await.unwrap();
         });
     }
 
-    /// Test that init_sync reuse behavior is consistent with operations after reuse
+    /// Test `init_sync` when there is existing data that overlaps with the sync target range.
+    /// This tests the "prune and reuse" scenario where existing data partially overlaps with sync boundaries.
     #[test_traced]
-    fn test_init_sync_reuse_and_append() {
+    fn test_init_sync_existing_data_overlap() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_reuse_append".into(),
+                partition: "test_overlap".into(),
                 items_per_blob: 4,
                 write_buffer: 1024,
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
-            // Create initial journal with 12 operations
+            // Create initial journal with 20 operations
+            let mut journal = Journal::<Context, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to create initial journal");
+
+            for i in 0..20 {
+                journal.append(test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            let journal_size = journal.size().await.unwrap();
+            assert_eq!(journal_size, 20);
+            journal.close().await.unwrap();
+
+            // Initialize with sync boundaries that overlap with existing data
+            // Lower bound: 8 (prune operations 0-7)
+            // Upper bound: 30 (beyond existing data, so existing data should be kept)
+            let lower_bound = 8;
+            let upper_bound = 30;
+            let mut journal = Journal::<Context, Digest>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound,
+                upper_bound,
+            )
+            .await
+            .expect("Failed to initialize journal with overlap");
+
+            // Verify the journal size matches the original (no rewind needed)
+            assert_eq!(journal.size().await.unwrap(), journal_size);
+
+            // Verify the journal has been pruned to the lower bound
+            assert_eq!(
+                journal.oldest_retained_pos().await.unwrap(),
+                Some(lower_bound)
+            );
+
+            // Verify operations before the lower bound are pruned
+            for i in 0..lower_bound {
+                let result = journal.read(i).await;
+                assert!(matches!(result, Err(Error::ItemPruned(_))),);
+            }
+
+            // Verify operations from lower bound to original size are still readable
+            for i in lower_bound..journal_size {
+                let result = journal.read(i).await;
+                assert!(result.is_ok());
+                assert_eq!(result.unwrap(), test_digest(i),);
+            }
+
+            // Verify that new operations can be appended
+            let append_pos = journal.append(test_digest(999)).await.unwrap();
+            assert_eq!(append_pos, journal_size);
+
+            // Verify the appended operation is readable
+            let read_value = journal.read(append_pos).await.unwrap();
+            assert_eq!(read_value, test_digest(999));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` when existing data exactly matches the sync target range.
+    /// This tests the "prune only" scenario where existing data fits within sync boundaries.
+    #[test_traced]
+    fn test_init_sync_existing_data_exact_match() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_exact_match".into(),
+                items_per_blob: 3,
+                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            // Create initial journal with 20 operations (0-19)
+            let mut journal = Journal::<Context, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to create initial journal");
+
+            for i in 0..20 {
+                journal.append(test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            let initial_size = journal.size().await.unwrap();
+            assert_eq!(initial_size, 20);
+            journal.close().await.unwrap();
+
+            // Initialize with sync boundaries that exactly match existing data
+            // Lower bound: 6 (prune operations 0-5, aligns with blob boundary)
+            // Upper bound: 19 (existing data ends at 19, so no rewinding needed)
+            let lower_bound = 6;
+            let upper_bound = 19;
+            let mut journal = Journal::<Context, Digest>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound,
+                upper_bound,
+            )
+            .await
+            .expect("Failed to initialize journal with exact match");
+
+            // Verify the journal size remains the same (no rewinding needed)
+            assert_eq!(journal.size().await.unwrap(), initial_size);
+
+            // Verify the journal has been pruned to the lower bound
+            assert_eq!(
+                journal.oldest_retained_pos().await.unwrap(),
+                Some(lower_bound)
+            );
+
+            // Verify operations before the lower bound are pruned
+            for i in 0..lower_bound {
+                let result = journal.read(i).await;
+                assert!(matches!(result, Err(Error::ItemPruned(_))),);
+            }
+
+            // Verify operations from lower bound to end of existing data are readable
+            for i in lower_bound..initial_size {
+                let result = journal.read(i).await;
+                assert!(result.is_ok(),);
+                assert_eq!(result.unwrap(), test_digest(i),);
+            }
+
+            // Verify that new operations can be appended from the existing size
+            let append_pos = journal.append(test_digest(888)).await.unwrap();
+            assert_eq!(append_pos, initial_size);
+
+            // Verify the appended operation is readable
+            let read_value = journal.read(append_pos).await.unwrap();
+            assert_eq!(read_value, test_digest(888));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` when existing data exceeds the sync target range.
+    /// This tests the "prune and rewind" scenario where existing data goes beyond the upper bound.
+    #[test_traced]
+    fn test_init_sync_existing_data_with_rewind() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_rewind".into(),
+                items_per_blob: 4,
+                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            // Create initial journal with 30 operations (0-29)
             let mut initial_journal =
                 Journal::<Context, Digest>::init(context.clone(), cfg.clone())
                     .await
                     .expect("Failed to create initial journal");
 
-            for i in 0..12 {
+            for i in 0..30 {
                 initial_journal.append(test_digest(i)).await.unwrap();
             }
             initial_journal.sync().await.unwrap();
+            let initial_size = initial_journal.size().await.unwrap();
+            assert_eq!(initial_size, 30);
             initial_journal.close().await.unwrap();
 
-            // Reuse with pruning to position 8
-            let mut reused_journal =
-                Journal::<Context, Digest>::init_sync(context.clone(), cfg.clone(), 8, 1000)
-                    .await
-                    .expect("Failed to init with reuse");
+            // Initialize with sync boundaries that require both pruning and rewinding
+            // Lower bound: 8 (prune operations 0-7)
+            // Upper bound: 22 (rewind operations 23-29)
+            let lower_bound = 8;
+            let upper_bound = 22;
+            let expected_final_size = upper_bound + 1; // upper_bound is inclusive
+            let sync_journal = Journal::<Context, Digest>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound,
+                upper_bound,
+            )
+            .await
+            .expect("Failed to initialize journal with rewind");
 
-            // Journal should be properly pruned and ready for new operations
-            let size_after_reuse = reused_journal.size().await.unwrap();
-            assert!(size_after_reuse >= 8);
+            // Verify the journal has been rewound to the upper bound + 1
+            assert_eq!(sync_journal.size().await.unwrap(), expected_final_size);
 
-            // Should be able to append new operations
-            let new_pos = reused_journal.append(test_digest(100)).await.unwrap();
-            assert_eq!(new_pos, size_after_reuse);
+            // Verify the journal has been pruned to the lower bound
+            assert_eq!(
+                sync_journal.oldest_retained_pos().await.unwrap(),
+                Some(lower_bound)
+            );
 
-            // Should be able to read the new operation
-            let read_back = reused_journal.read(new_pos).await.unwrap();
-            assert_eq!(read_back, test_digest(100));
-
-            reused_journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test all three cases of the re-using existing data logic
-    #[test_traced]
-    fn test_smart_reuse_all_strategies() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // === Case 1: persisted_size < lower_bound → Erase and start fresh ===
-            {
-                let cfg = Config {
-                    partition: "test_case1".into(),
-                    items_per_blob: 5,
-                    write_buffer: 1024,
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
-
-                // Create initial journal with 10 operations
-                let mut initial_journal =
-                    Journal::<_, Digest>::init(context.clone().with_label("case1"), cfg.clone())
-                        .await
-                        .unwrap();
-                for i in 0..10 {
-                    initial_journal.append(test_digest(i)).await.unwrap();
-                }
-                initial_journal.sync().await.unwrap();
-                initial_journal.close().await.unwrap();
-
-                // Initialize with lower_bound=15, upper_bound=20
-                // Since persisted_size=10 < lower_bound=15, should erase and start fresh
-                let reused_journal = Journal::<_, Digest>::init_sync(
-                    context.clone().with_label("case1"),
-                    cfg.clone(),
-                    15, // lower_bound
-                    20, // upper_bound
-                )
-                .await
-                .unwrap();
-
-                // Should be initialized fresh at size 15
-                assert_eq!(reused_journal.size().await.unwrap(), 15);
-                assert_eq!(reused_journal.oldest_retained_pos().await.unwrap(), None);
-                reused_journal.destroy().await.unwrap();
+            // Verify operations before the lower bound are pruned
+            for i in 0..lower_bound {
+                let result = sync_journal.read(i).await;
+                assert!(matches!(result, Err(Error::ItemPruned(_))),);
             }
 
-            // === Case 2: lower_bound ≤ persisted_size ≤ upper_bound → Prune and reuse ===
-            {
-                let cfg = Config {
-                    partition: "test_case2".into(),
-                    items_per_blob: 5,
-                    write_buffer: 1024,
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
-
-                // Create initial journal with 25 operations
-                let mut initial_journal =
-                    Journal::<_, Digest>::init(context.clone().with_label("case2"), cfg.clone())
-                        .await
-                        .unwrap();
-                for i in 0..25 {
-                    initial_journal.append(test_digest(i)).await.unwrap();
-                }
-                initial_journal.sync().await.unwrap();
-                initial_journal.close().await.unwrap();
-
-                // Initialize with lower_bound=10, upper_bound=30
-                // Since 10 ≤ persisted_size=25 ≤ 30, should prune to 10 and reuse
-                let reused_journal = Journal::<_, Digest>::init_sync(
-                    context.clone().with_label("case2"),
-                    cfg.clone(),
-                    10, // lower_bound
-                    30, // upper_bound
-                )
-                .await
-                .unwrap();
-
-                // Should be pruned to 10 and reused
-                let size = reused_journal.size().await.unwrap();
-                assert_eq!(size, 25);
-
-                // Should be able to read operations from 10 onwards
-                for i in 10..25 {
-                    let result = reused_journal.read(i).await;
-                    assert!(result.is_ok());
-                }
-
-                // Operations before 10 should be pruned
-                for i in 0..10 {
-                    let result = reused_journal.read(i).await;
-                    assert!(matches!(result, Err(crate::journal::Error::ItemPruned(_))),);
-                }
-
-                reused_journal.destroy().await.unwrap();
+            // Verify operations from lower bound to upper bound (inclusive) are readable
+            for i in lower_bound..expected_final_size {
+                let result = sync_journal.read(i).await;
+                assert!(result.is_ok(),);
+                assert_eq!(result.unwrap(), test_digest(i),);
             }
 
-            // === Case 3: persisted_size > upper_bound → Prune and rewind ===
-            {
-                let cfg = Config {
-                    partition: "test_case3".into(),
-                    items_per_blob: 5,
-                    write_buffer: 1024,
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
-
-                // Create initial journal with 40 operations
-                let mut initial_journal =
-                    Journal::<_, Digest>::init(context.clone().with_label("case3"), cfg.clone())
-                        .await
-                        .unwrap();
-                for i in 0..40 {
-                    initial_journal.append(test_digest(i)).await.unwrap();
-                }
-                initial_journal.sync().await.unwrap();
-                initial_journal.close().await.unwrap();
-
-                // Initialize with lower_bound=10, upper_bound=25
-                // Since persisted_size=40 > upper_bound=25, should prune to 10 and rewind to 26
-                let reused_journal = Journal::<_, Digest>::init_sync(
-                    context.clone().with_label("case3"),
-                    cfg.clone(),
-                    10, // lower_bound
-                    25, // upper_bound
-                )
-                .await
-                .unwrap();
-
-                // Should be pruned to 10 and rewound to 26 (upper_bound + 1)
-                let size = reused_journal.size().await.unwrap();
-                let oldest_retained = reused_journal.oldest_retained_pos().await.unwrap();
-                debug!(
-                    size,
-                    oldest_retained, "Journal state after prune and rewind"
-                );
-                assert_eq!(size, 26,);
-
-                // Should be able to read operations from 10 to 25
-                for i in 10..26 {
-                    let result = reused_journal.read(i).await;
-                    assert!(result.is_ok());
-                }
-
-                // Operations before 10 should be pruned
-                for i in 0..10 {
-                    let result = reused_journal.read(i).await;
-                    assert!(matches!(result, Err(crate::journal::Error::ItemPruned(_))),);
-                }
-
-                // Operations after 25 should not exist
-                for i in 26..40 {
-                    let result = reused_journal.read(i).await;
-                    match result {
-                        Err(Error::InvalidItem(_)) => {
-                            // This is expected
-                        }
-                        Err(Error::ItemPruned(_)) => {
-                            // This is also acceptable since we pruned data
-                        }
-                        Err(Error::Runtime(_)) => {
-                            // This can happen if the blob structure is inconsistent after rewind
-                            // For now, we'll accept this as the rewind did remove the data
-                        }
-                        _ => {
-                            panic!("Operation {i} should not exist after rewind, got {result:?}");
-                        }
-                    }
-                }
-
-                reused_journal.destroy().await.unwrap();
+            // Verify operations beyond the upper bound are not readable (were rewound)
+            for i in expected_final_size..initial_size {
+                let result = sync_journal.read(i).await;
+                assert!(result.is_err(),);
             }
+
+            // Verify that new operations can be appended from the sync position
+            let mut sync_journal = sync_journal;
+            let append_pos = sync_journal.append(test_digest(777)).await.unwrap();
+            assert_eq!(append_pos, expected_final_size);
+
+            // Verify the appended operation is readable
+            let read_value = sync_journal.read(append_pos).await.unwrap();
+            assert_eq!(read_value, test_digest(777));
+
+            sync_journal.destroy().await.unwrap();
         });
     }
 }
