@@ -1,4 +1,5 @@
 use commonware_coding::reed_solomon::encode;
+use commonware_cryptography::Sha256;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
@@ -6,8 +7,8 @@ fn benchmark_encode(c: &mut Criterion) {
     let mut sampler = StdRng::seed_from_u64(0);
     let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
     for data_length in cases.into_iter() {
-        let total_pieces = 7;
-        let min_pieces = 4;
+        let total_pieces = 7u32;
+        let min_pieces = 4u32;
         c.bench_function(
             &format!("{}/data_len={}", module_path!(), data_length),
             |b| {
@@ -18,7 +19,7 @@ fn benchmark_encode(c: &mut Criterion) {
                         data
                     },
                     |data| {
-                        encode(&data, total_pieces, min_pieces).unwrap();
+                        encode::<Sha256>(total_pieces, min_pieces, data).unwrap();
                     },
                     BatchSize::SmallInput,
                 );

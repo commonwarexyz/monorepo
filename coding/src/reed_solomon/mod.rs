@@ -21,6 +21,7 @@ pub enum Error {
 }
 
 /// A chunk of data that has been encoded using Reed-Solomon and a Binary Merkle Tree.
+#[derive(Clone)]
 pub struct Chunk<H: Hasher> {
     pub index: u32,
     pub shard: Vec<u8>,
@@ -241,76 +242,65 @@ pub fn decode<H: Hasher>(
 
 #[cfg(test)]
 mod tests {
+    use commonware_cryptography::Sha256;
+
     use super::*;
 
     #[test]
-    fn test_encode_decode_basic() {
+    fn test_basic() {
         let data = b"Hello, Reed-Solomon!";
-        let total_pieces = 7;
-        let min_pieces = 4;
+        let total_pieces = 7usize;
+        let min_pieces = 4usize;
 
         // Encode the data
-        let (root, proofs) = encode(data, total_pieces, min_pieces).unwrap();
+        let (root, proofs) =
+            encode::<Sha256>(total_pieces as u32, min_pieces as u32, data.to_vec()).unwrap();
         assert_eq!(proofs.len(), total_pieces);
 
         // Try to decode with exactly min_pieces
-        let pieces: Vec<_> = (0..min_pieces).map(|i| (i, proofs[i].clone())).collect();
-
-        // We need to determine shard_size for decoding
-        // This is a limitation of the current API - in practice, this would be known
-        let extended_len = 8 + data.len(); // 8 bytes for length prefix
-        let mut shard_size = extended_len.div_ceil(min_pieces);
-        if shard_size % 2 != 0 {
-            shard_size += 1;
-        }
-
-        let decoded = decode(&root, &pieces, total_pieces, min_pieces, shard_size).unwrap();
+        let minimal = proofs.into_iter().take(min_pieces).collect();
+        let decoded =
+            decode::<Sha256>(total_pieces as u32, min_pieces as u32, &root, minimal).unwrap();
         assert_eq!(decoded, data);
     }
 
     #[test]
-    fn test_decode_with_more_pieces() {
+    fn test_moderate() {
         let data = b"Testing with more pieces than minimum";
-        let total_pieces = 10;
-        let min_pieces = 4;
+        let total_pieces = 10usize;
+        let min_pieces = 4usize;
 
-        let (root, proofs) = encode(data, total_pieces, min_pieces).unwrap();
+        // Encode the data
+        let (root, proofs) =
+            encode::<Sha256>(total_pieces as u32, min_pieces as u32, data.to_vec()).unwrap();
 
-        // Use 6 pieces (more than minimum)
-        let pieces: Vec<_> = (0..6).map(|i| (i, proofs[i].clone())).collect();
-
-        let extended_len = 8 + data.len();
-        let mut shard_size = extended_len.div_ceil(min_pieces);
-        if shard_size % 2 != 0 {
-            shard_size += 1;
-        }
-
-        let decoded = decode(&root, &pieces, total_pieces, min_pieces, shard_size).unwrap();
+        // Try to decode with min_pieces
+        let minimal = proofs.into_iter().take(min_pieces).collect();
+        let decoded =
+            decode::<Sha256>(total_pieces as u32, min_pieces as u32, &root, minimal).unwrap();
         assert_eq!(decoded, data);
     }
 
     #[test]
-    fn test_decode_with_recovery_pieces() {
+    fn test_recovery() {
         let data = b"Testing recovery pieces";
-        let total_pieces = 8;
-        let min_pieces = 3;
+        let total_pieces = 8usize;
+        let min_pieces = 3usize;
 
-        let (root, proofs) = encode(data, total_pieces, min_pieces).unwrap();
+        // Encode the data
+        let (root, proofs) =
+            encode::<Sha256>(total_pieces as u32, min_pieces as u32, data.to_vec()).unwrap();
 
         // Use a mix of original and recovery pieces
         let pieces: Vec<_> = vec![
-            (0, proofs[0].clone()), // original
-            (4, proofs[4].clone()), // recovery
-            (6, proofs[6].clone()), // recovery
+            proofs[0].clone(), // original
+            proofs[4].clone(), // recovery
+            proofs[6].clone(), // recovery
         ];
 
-        let extended_len = 8 + data.len();
-        let mut shard_size = extended_len.div_ceil(min_pieces);
-        if shard_size % 2 != 0 {
-            shard_size += 1;
-        }
-
-        let decoded = decode(&root, &pieces, total_pieces, min_pieces, shard_size).unwrap();
+        // Try to decode with a mix of original and recovery pieces
+        let decoded =
+            decode::<Sha256>(total_pieces as u32, min_pieces as u32, &root, pieces).unwrap();
         assert_eq!(decoded, data);
     }
 
