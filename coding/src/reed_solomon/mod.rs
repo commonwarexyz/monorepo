@@ -710,4 +710,38 @@ mod tests {
         let result = decode::<Sha256>(total, min, &root, pieces);
         assert!(matches!(result, Err(Error::InvalidIndex(8))));
     }
+
+    #[test]
+    fn test_max_chunks() {
+        let data = vec![42u8; 1000]; // 1KB of data
+        let total = u16::MAX;
+        let min = u16::MAX / 2;
+
+        // Encode data
+        let (root, chunks) = encode::<Sha256>(total, min, data.clone()).unwrap();
+
+        // Try to decode with min
+        let minimal = chunks.into_iter().take(min as usize).collect();
+        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_too_many_chunks() {
+        let data = vec![42u8; 1000]; // 1KB of data
+        let total = u16::MAX;
+        let min = u16::MAX / 2 - 1;
+
+        // Encode data
+        let result = encode::<Sha256>(total, min, data.clone());
+        assert!(matches!(
+            result,
+            Err(Error::ReedSolomon(
+                reed_solomon_simd::Error::UnsupportedShardCount {
+                    original_count: _,
+                    recovery_count: _,
+                }
+            ))
+        ));
+    }
 }
