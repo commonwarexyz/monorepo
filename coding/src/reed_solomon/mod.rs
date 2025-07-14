@@ -219,8 +219,6 @@ pub fn decode<H: Hasher>(
         .recovery_iter()
         .map(|shard| shard.to_vec())
         .collect();
-
-    // Combine all shards (originals + recovery) for Merkle tree
     shards.extend(recovery_shards);
 
     // Build Merkle tree
