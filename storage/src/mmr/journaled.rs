@@ -1406,4 +1406,155 @@ mod tests {
             assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == mmr_size-1 && start_loc == mmr_size));
         });
     }
+
+    // Test `init_sync` when there is no persisted data.
+    #[test_traced]
+    fn test_journaled_mmr_init_sync_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Test fresh start scenario with completely new MMR (no existing data)
+            let sync_cfg = SyncConfig::<Digest> {
+                config: test_config(),
+                lower_bound: 0,
+                upper_bound: 100,
+                pinned_nodes: None,
+            };
+
+            let sync_mmr = Mmr::<_, Sha256>::init_sync(context.clone(), sync_cfg)
+                .await
+                .unwrap();
+
+            // Should be fresh MMR starting empty
+            assert_eq!(sync_mmr.size(), 0);
+            assert_eq!(sync_mmr.pruned_to_pos(), 0);
+            assert_eq!(sync_mmr.oldest_retained_pos(), None);
+
+            // Should be able to add new elements
+            let mut sync_mmr = sync_mmr;
+            let new_element = test_digest(999);
+            sync_mmr.add(&mut hasher, &new_element).await.unwrap();
+
+            // Root should be computable
+            let _root = sync_mmr.root(&mut hasher);
+
+            sync_mmr.destroy().await.unwrap();
+        });
+    }
+
+    // Test `init_sync` where the persisted MMR's persisted nodes match the sync boundaries.
+    #[test_traced]
+    fn test_journaled_mmr_init_sync_nonempty_exact_match() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Create initial MMR with elements.
+            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                .await
+                .unwrap();
+            for i in 0..50 {
+                mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+            }
+            mmr.sync(&mut hasher).await.unwrap();
+            let original_size = mmr.size();
+            let original_root = mmr.root(&mut hasher);
+
+            // Sync with lower_bound ≤ existing_size ≤ upper_bound should reuse data
+            let lower_bound = mmr.pruned_to_pos();
+            let upper_bound = mmr.size() - 1;
+            let mut expected_nodes = HashMap::new();
+            for i in lower_bound..=upper_bound {
+                expected_nodes.insert(i, mmr.get_node(i).await.unwrap().unwrap());
+            }
+            let sync_cfg = SyncConfig::<Digest> {
+                config: test_config(),
+                lower_bound,
+                upper_bound,
+                pinned_nodes: None,
+            };
+
+            mmr.close(&mut hasher).await.unwrap();
+
+            let sync_mmr = Mmr::<_, Sha256>::init_sync(context.clone(), sync_cfg)
+                .await
+                .unwrap();
+
+            // Should have existing data in the sync range.
+            assert_eq!(sync_mmr.size(), original_size);
+            assert_eq!(sync_mmr.pruned_to_pos(), lower_bound);
+            assert_eq!(sync_mmr.oldest_retained_pos(), Some(lower_bound));
+            assert_eq!(sync_mmr.root(&mut hasher), original_root);
+            for i in lower_bound..=upper_bound {
+                assert_eq!(
+                    sync_mmr.get_node(i).await.unwrap(),
+                    expected_nodes.get(&i).cloned()
+                );
+            }
+
+            sync_mmr.destroy().await.unwrap();
+        });
+    }
+
+    // Test `init_sync` where the persisted MMR's data partially overlaps with the sync boundaries.
+    #[test_traced]
+    fn test_journaled_mmr_init_sync_partial_overlap() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Create initial MMR with elements.
+            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+                .await
+                .unwrap();
+            for i in 0..30 {
+                mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+            }
+            mmr.sync(&mut hasher).await.unwrap();
+            mmr.prune_to_pos(&mut hasher, 10).await.unwrap();
+
+            let original_size = mmr.size();
+            let original_root = mmr.root(&mut hasher);
+            let original_pruned_to = mmr.pruned_to_pos();
+
+            // Sync with boundaries that extend beyond existing data (partial overlap).
+            let lower_bound = original_pruned_to;
+            let upper_bound = original_size + 10; // Extend beyond existing data
+
+            let mut expected_nodes = HashMap::new();
+            for i in lower_bound..original_size {
+                expected_nodes.insert(i, mmr.get_node(i).await.unwrap().unwrap());
+            }
+
+            let sync_cfg = SyncConfig::<Digest> {
+                config: test_config(),
+                lower_bound,
+                upper_bound,
+                pinned_nodes: None,
+            };
+
+            mmr.close(&mut hasher).await.unwrap();
+
+            let sync_mmr = Mmr::<_, Sha256>::init_sync(context.clone(), sync_cfg)
+                .await
+                .unwrap();
+
+            // Should have existing data in the overlapping range.
+            assert_eq!(sync_mmr.size(), original_size);
+            assert_eq!(sync_mmr.pruned_to_pos(), lower_bound);
+            assert_eq!(sync_mmr.oldest_retained_pos(), Some(lower_bound));
+            assert_eq!(sync_mmr.root(&mut hasher), original_root);
+
+            // Check that existing nodes are preserved in the overlapping range.
+            for i in lower_bound..original_size {
+                assert_eq!(
+                    sync_mmr.get_node(i).await.unwrap(),
+                    expected_nodes.get(&i).cloned()
+                );
+            }
+
+            sync_mmr.destroy().await.unwrap();
+        });
+    }
 }
