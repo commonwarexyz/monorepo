@@ -185,8 +185,8 @@ where
             });
         }
 
-        // Initialize the operations journal. If we have existing persisted data in the target
-        // range, `log` will contain that data.
+        // Initialize the operations journal.
+        // It may have data in the target range.
         let log = Journal::<E, Operation<K, V>>::init_sync(
             config.context.clone().with_label("log"),
             JConfig {

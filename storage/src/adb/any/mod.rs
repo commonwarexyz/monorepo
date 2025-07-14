@@ -243,6 +243,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let Some(mmr_ops) = leaf_pos_to_num(mmr.size()) else {
             return Err(Error::MmrError(crate::mmr::Error::InvalidSize(mmr.size())));
         };
+
+        // Apply the missing operations from the log to the MMR.
         let mut hasher = Standard::<H>::new();
         let log_size = cfg.log.size().await?;
         for i in mmr_ops..log_size {
@@ -258,11 +260,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             }
         }
 
+        // Build the snapshot from the log.
         let mut snapshot = Index::init(
             context.with_label("snapshot"),
             cfg.db_config.translator.clone(),
         );
-
         Any::<E, K, V, H, T>::build_snapshot_from_log::<0 /* UNUSED_N */>(
             cfg.lower_bound,
             &cfg.log,
@@ -1558,11 +1560,12 @@ pub(super) mod test {
     /// a non-empty target database.
     #[test]
     fn test_any_db_init_synced_empty_to_nonempty() {
+        const NUM_OPS: usize = 100;
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate a source database
             let mut source_db = create_test_db(context.clone()).await;
-            let ops = create_test_ops(100);
+            let ops = create_test_ops(NUM_OPS);
             source_db = apply_ops(source_db, ops.clone()).await;
             source_db.commit().await.unwrap();
 
@@ -1579,7 +1582,7 @@ pub(super) mod test {
             let mut hasher = Standard::<Sha256>::new();
             let target_hash = source_db.root(&mut hasher);
 
-            // Create log
+            // Create log with operations
             let mut log = Journal::<_, Operation<Digest, Digest>>::init_sync(
                 context.clone().with_label("ops_log"),
                 JConfig {
@@ -1716,7 +1719,7 @@ pub(super) mod test {
                 .await
                 .unwrap();
 
-                // Verify database state properties
+                // Verify database state
                 let expected_op_count = upper_bound + 1; // +1 because op_count is total number of ops
                 assert_eq!(db.log.size().await.unwrap(), expected_op_count);
                 assert_eq!(db.ops.size(), leaf_num_to_pos(expected_op_count));
@@ -1755,13 +1758,15 @@ pub(super) mod test {
     // database.
     #[test]
     fn test_any_db_init_synced_nonempty_to_nonempty_partial_match() {
+        const NUM_OPS: usize = 100;
+        const NUM_ADDITIONAL_OPS: usize = 5;
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate two databases.
             let mut target_db = create_test_db(context.clone()).await;
             let sync_db_config = create_test_config(context.next_u64());
             let mut sync_db: AnyTest = Any::init(context.clone(), sync_db_config).await.unwrap();
-            let original_ops = create_test_ops(100);
+            let original_ops = create_test_ops(NUM_OPS);
             target_db = apply_ops(target_db, original_ops.clone()).await;
             target_db.commit().await.unwrap();
             sync_db = apply_ops(sync_db, original_ops.clone()).await;
@@ -1770,8 +1775,8 @@ pub(super) mod test {
             // Close the sync db
             sync_db.close().await.unwrap();
 
-            // Add 5 more operations to the target db
-            let more_ops = create_test_ops(5);
+            // Add one more operation to the target db
+            let more_ops = create_test_ops(NUM_ADDITIONAL_OPS);
             target_db = apply_ops(target_db, more_ops.clone()).await;
             target_db.commit().await.unwrap();
 
@@ -1794,14 +1799,7 @@ pub(super) mod test {
             let mut hasher = Standard::<Sha256>::new();
             let target_hash = target_db.root(&mut hasher);
 
-            let AnyTest {
-                ops,
-                log,
-                inactivity_floor_loc: _,
-                snapshot: _,
-                uncommitted_ops: _,
-                hasher: _,
-            } = target_db;
+            let AnyTest { ops, log, .. } = target_db;
 
             let db = Any::init_synced(
                 context.clone(),
@@ -1859,24 +1857,22 @@ pub(super) mod test {
     fn test_any_db_init_synced_nonempty_to_nonempty_exact_match() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let target_db_config = create_test_config(context.next_u64());
-            let mut target_db = Any::init(context.clone(), target_db_config.clone())
-                .await
-                .unwrap();
-            let original_ops = create_test_ops(100);
-            target_db = apply_ops(target_db, original_ops.clone()).await;
-            target_db.commit().await.unwrap();
+            let db_config = create_test_config(context.next_u64());
+            let mut db = Any::init(context.clone(), db_config.clone()).await.unwrap();
+            let ops = create_test_ops(100);
+            db = apply_ops(db, ops.clone()).await;
+            db.commit().await.unwrap();
 
-            let sync_lower_bound = target_db.oldest_retained_loc().unwrap();
-            let sync_upper_bound = target_db.op_count() - 1;
-            let target_db_op_count = target_db.op_count();
-            let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc;
-            let target_db_oldest_retained_loc = target_db.oldest_retained_loc();
-            let target_db_log_size = target_db.log.size().await.unwrap();
-            let target_db_mmr_size = target_db.ops.size();
-            let target_db_pruned_to_pos = target_db.ops.pruned_to_pos();
+            let sync_lower_bound = db.oldest_retained_loc().unwrap();
+            let sync_upper_bound = db.op_count() - 1;
+            let target_db_op_count = db.op_count();
+            let target_db_inactivity_floor_loc = db.inactivity_floor_loc;
+            let target_db_oldest_retained_loc = db.oldest_retained_loc();
+            let target_db_log_size = db.log.size().await.unwrap();
+            let target_db_mmr_size = db.ops.size();
+            let target_db_pruned_to_pos = db.ops.pruned_to_pos();
 
-            let AnyTest { ops, log, .. } = target_db;
+            let AnyTest { ops, log, .. } = db;
 
             // When we re-open the database, the MMR is closed and the log is opened.
             let mut hasher = Standard::<Sha256>::new();
@@ -1885,7 +1881,7 @@ pub(super) mod test {
             let db: AnyTest = Any::init_synced(
                 context.clone(),
                 SyncConfig {
-                    db_config: target_db_config,
+                    db_config,
                     log,
                     lower_bound: sync_lower_bound,
                     upper_bound: sync_upper_bound,

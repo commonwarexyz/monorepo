@@ -345,8 +345,6 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         );
 
         let tail = Append::new(tail_blob, 0, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
-
-        // Set the tail size to reflect the position (without writing actual data)
         if tail_items > 0 {
             tail.resize(tail_size).await.map_err(Error::Runtime)?;
         }
@@ -1586,401 +1584,9 @@ mod tests {
         });
     }
 
+    /// Test that `init_sync` properly reuses existing journal data when beneficial
     #[test_traced]
-    fn test_smart_reuse_fresh_journal() {
-        const ITEMS_PER_BLOB: u64 = 5;
-        const WRITE_BUFFER: usize = 1024;
-
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Test Case 1: Initialize at position 0 (empty journal)
-            {
-                let cfg = Config {
-                    partition: "test_smart_reuse_position_0".into(),
-                    items_per_blob: ITEMS_PER_BLOB,
-                    write_buffer: WRITE_BUFFER,
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
-
-                let synced_journal =
-                    Journal::<Context, Digest>::init_sync(context.clone(), cfg.clone(), 0, 1000)
-                        .await
-                        .expect("Failed to init sync at position 0");
-
-                // Verify the synced journal state
-                assert_eq!(synced_journal.size().await.unwrap(), 0);
-                assert_eq!(synced_journal.oldest_retained_pos().await.unwrap(), None);
-                // Empty journal should have no blobs in map, only tail at index 0
-                assert_eq!(synced_journal.blobs.len(), 0);
-                assert_eq!(synced_journal.tail_index, 0);
-                assert_eq!(synced_journal.tail.size().await, 0);
-
-                synced_journal.destroy().await.unwrap();
-            }
-
-            // Test Case 2: Initialize in the middle of first blob
-            {
-                const STARTING_POSITION: u64 = 3;
-
-                let cfg = Config {
-                    partition: "test_smart_reuse_position_3".into(),
-                    items_per_blob: ITEMS_PER_BLOB,
-                    write_buffer: WRITE_BUFFER,
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
-
-                let synced_journal = Journal::<Context, Digest>::init_sync(
-                    context.clone(),
-                    cfg.clone(),
-                    STARTING_POSITION,
-                    1000,
-                )
-                .await
-                .expect("Failed to init sync at position 3");
-
-                // Verify the synced journal matches expected state
-                assert_eq!(synced_journal.size().await.unwrap(), STARTING_POSITION);
-                assert_eq!(synced_journal.oldest_retained_pos().await.unwrap(), Some(0));
-                // no blobs created for pruned range, partial data in tail at index 0
-                assert_eq!(synced_journal.blobs.len(), 0);
-                assert_eq!(synced_journal.tail_index, 0);
-                assert_eq!(
-                    synced_journal.tail.size().await,
-                    STARTING_POSITION * Journal::<Context, Digest>::CHUNK_SIZE_U64
-                );
-
-                synced_journal.destroy().await.unwrap();
-            }
-
-            // Test Case 3: Initialize exactly at blob boundary
-            {
-                let cfg = Config {
-                    partition: "test_smart_reuse_at_boundary".into(),
-                    items_per_blob: ITEMS_PER_BLOB,
-                    write_buffer: WRITE_BUFFER,
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
-
-                let synced_journal = Journal::<Context, Digest>::init_sync(
-                    context.clone(),
-                    cfg.clone(),
-                    ITEMS_PER_BLOB, // Exactly one full blob
-                    1000,
-                )
-                .await
-                .expect("Failed to init sync at blob boundary");
-
-                // Verify the synced journal has correct state
-                assert_eq!(synced_journal.size().await.unwrap(), ITEMS_PER_BLOB);
-                assert_eq!(synced_journal.oldest_retained_pos().await.unwrap(), None);
-                // Boundary case: no blobs created for pruned range, empty tail at next index
-                assert_eq!(synced_journal.blobs.len(), 0);
-                assert_eq!(synced_journal.tail_index, 1);
-                assert_eq!(synced_journal.tail.size().await, 0);
-
-                synced_journal.destroy().await.unwrap();
-            }
-
-            // Test Case 4: Initialize spanning multiple blobs
-            {
-                const MULTI_BLOB_POSITION: u64 = 14; // 2 full blobs + 4 items in third blob
-
-                let cfg = Config {
-                    partition: "test_smart_reuse_multi_blob".into(),
-                    items_per_blob: ITEMS_PER_BLOB,
-                    write_buffer: WRITE_BUFFER,
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
-
-                let synced_journal = Journal::<Context, Digest>::init_sync(
-                    context.clone(),
-                    cfg.clone(),
-                    MULTI_BLOB_POSITION,
-                    1000,
-                )
-                .await
-                .expect("Failed to init sync spanning multiple blobs");
-
-                // Verify the synced journal state
-                assert_eq!(synced_journal.size().await.unwrap(), MULTI_BLOB_POSITION);
-                assert_eq!(
-                    synced_journal.oldest_retained_pos().await.unwrap(),
-                    Some(10)
-                );
-                // Multi-blob case: no blobs created for pruned range, partial data in tail at index 2
-                assert_eq!(synced_journal.blobs.len(), 0);
-                assert_eq!(synced_journal.tail_index, 2);
-                assert_eq!(
-                    synced_journal.tail.size().await,
-                    4 * Journal::<Context, Digest>::CHUNK_SIZE_U64
-                );
-
-                synced_journal.destroy().await.unwrap();
-            }
-
-            // Test Case 5: Test operations after initializin
-            {
-                const STARTING_POSITION: u64 = 7;
-                const OPERATIONS_PER_BLOB: u64 = 3;
-
-                let cfg = Config {
-                    partition: "test_smart_reuse_operations".into(),
-                    items_per_blob: OPERATIONS_PER_BLOB,
-                    write_buffer: WRITE_BUFFER,
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                };
-
-                // Initialize journal with sync
-                let mut synced_journal = Journal::<Context, Digest>::init_sync(
-                    context.clone(),
-                    cfg.clone(),
-                    STARTING_POSITION,
-                    1000,
-                )
-                .await
-                .expect("Failed to init sync");
-
-                // Verify initial synced state
-                assert_eq!(synced_journal.size().await.unwrap(), STARTING_POSITION);
-                assert_eq!(synced_journal.oldest_retained_pos().await.unwrap(), Some(6));
-                // Multi-blob case: no blobs created for pruned range, partial data in tail at index 2
-                assert_eq!(synced_journal.blobs.len(), 0);
-                assert_eq!(synced_journal.tail_index, 2);
-                assert_eq!(
-                    synced_journal.tail.size().await,
-                    Journal::<Context, Digest>::CHUNK_SIZE_U64
-                );
-
-                // Test that operations work normally after initialization
-                let pos = synced_journal.append(test_digest(100)).await.unwrap();
-                assert_eq!(pos, 7);
-                assert_eq!(synced_journal.size().await.unwrap(), 8);
-
-                let pos = synced_journal.append(test_digest(101)).await.unwrap();
-                assert_eq!(pos, 8);
-                assert_eq!(synced_journal.size().await.unwrap(), 9);
-
-                // Fill the current blob
-                let pos = synced_journal.append(test_digest(102)).await.unwrap();
-                assert_eq!(pos, 9);
-                assert_eq!(synced_journal.size().await.unwrap(), 10);
-
-                // Verify blob creation after filling
-                assert_eq!(synced_journal.blobs.len(), 1);
-                assert!(synced_journal.blobs.contains_key(&2)); // Only the filled tail blob is now in blobs map
-
-                // Verify we can read the items we added
-                let item = synced_journal.read(7).await.unwrap();
-                assert_eq!(item, test_digest(100));
-
-                let item = synced_journal.read(8).await.unwrap();
-                assert_eq!(item, test_digest(101));
-
-                let item = synced_journal.read(9).await.unwrap();
-                assert_eq!(item, test_digest(102));
-
-                // Note: In init_sync, positions 0-6 are initialized with dummy data
-                // The read() method doesn't distinguish between real and dummy data, so these
-                // positions would return dummy data that shouldn't be used in practice
-
-                synced_journal.destroy().await.unwrap();
-            }
-        });
-    }
-
-    // /// Test that init_with_pruned_state properly cleans up existing blobs.
-    // #[test_traced]
-    // fn test_pruned_state_cleanup_existing_blobs() {
-    //     let executor = deterministic::Runner::default();
-    //     executor.start(|context| async move {
-    //         let cfg = Config {
-    //             partition: "test_cleanup".into(),
-    //             items_per_blob: 3,
-    //             write_buffer: 1024,
-    //             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-    //         };
-
-    //         // First, create a normal journal with some data
-    //         let mut original_journal =
-    //             Journal::<Context, Digest>::init(context.clone(), cfg.clone())
-    //                 .await
-    //                 .expect("Failed to init original journal");
-
-    //         // Add some items to create multiple blobs
-    //         for i in 0..10 {
-    //             original_journal.append(test_digest(i)).await.unwrap();
-    //         }
-    //         original_journal.sync().await.unwrap();
-
-    //         // Verify we have multiple blobs
-    //         assert!(original_journal.blobs.len() > 1);
-    //         let original_blob_count = original_journal.blobs.len();
-    //         let original_size = original_journal.size().await.unwrap();
-    //         original_journal.close().await.unwrap();
-
-    //         // Verify blobs exist in storage
-    //         let stored_blobs = context.scan(&cfg.partition).await.unwrap();
-    //         assert_eq!(stored_blobs.len(), original_blob_count + 1); // +1 for the tail blob
-
-    //         // Now initialize with pruned state - this should clean up all existing blobs
-    //         let pruned_journal = Journal::<Context, Digest>::init_pruned(
-    //             context.clone(),
-    //             cfg.clone(),
-    //             5,
-    //             original_size,
-    //         )
-    //         .await
-    //         .expect("Failed to init with pruned state");
-
-    //         // Should have only the blobs needed for the pruned state
-    //         // For num_pruned=5, items_per_blob=3: tail_index=1, tail_items=2
-    //         assert_eq!(pruned_journal.blobs.len(), 2);
-    //         assert_eq!(pruned_journal.tail_index, original_blob_count as u64);
-
-    //         // Verify old blobs are gone from storage
-    //         let stored_blobs_after = context.scan(&cfg.partition).await.unwrap();
-    //         assert_eq!(stored_blobs_after.len(), 1); // Only blob 1 (tail with partial data)
-
-    //         pruned_journal.destroy().await.unwrap();
-    //     });
-    // }
-
-    #[test_traced]
-    fn test_smart_reuse_replay() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "test_smart_reuse_replay".into(),
-                items_per_blob: 4,
-                write_buffer: 1024,
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
-
-            // Initialize journa
-            let mut journal = Journal::<Context, Digest>::init_sync(
-                context.clone(),
-                cfg.clone(),
-                6, // 1 full blob + 2 items in second blob
-                1000,
-            )
-            .await
-            .expect("Failed to init sync");
-
-            // Add some actual data to the journal
-            journal.append(test_digest(100)).await.unwrap(); // position 6
-            journal.append(test_digest(101)).await.unwrap(); // position 7
-            journal.append(test_digest(102)).await.unwrap(); // position 8
-            journal.sync().await.unwrap();
-
-            // Test replay from the beginning of retained data
-            {
-                let stream = journal.replay(1024, 4).await.unwrap(); // Start from position 4 (first retained)
-                pin_mut!(stream);
-
-                let mut items = Vec::new();
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok((pos, item)) => {
-                            items.push((pos, item));
-                        }
-                        Err(err) => {
-                            // Expected for positions 4-5 since they don't have actual data
-                            // but positions 6-8 should work
-                            if items.len() < 3 {
-                                continue; // Skip expected errors for positions without data
-                            }
-                            panic!("Unexpected error during replay: {err}");
-                        }
-                    }
-                }
-
-                // Should have successfully read the items we actually added
-                assert_eq!(items.len(), 3);
-                assert_eq!(items[0], (6, test_digest(100)));
-                assert_eq!(items[1], (7, test_digest(101)));
-                assert_eq!(items[2], (8, test_digest(102)));
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test that init_sync maintains Journal invariants and append behavior works correctly
-    #[test_traced]
-    fn test_smart_reuse_append_behavior() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "test_smart_reuse_invariants".into(),
-                items_per_blob: 3,
-                write_buffer: 1024,
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
-
-            // Test case: init_sync with 7 operations (2 full blobs + 1 item in tail)
-            let mut journal =
-                Journal::<Context, Digest>::init_sync(context.clone(), cfg.clone(), 7, 1000)
-                    .await
-                    .expect("Failed to init sync");
-
-            // Verify Journal invariants
-            // 1. blobs contains only full blobs, never the tail
-            // With the new implementation, no blobs are created for pruned range
-            assert_eq!(journal.blobs.len(), 0);
-            assert!(!journal.blobs.contains_key(&2)); // tail should not be in blobs
-
-            // 2. tail is always the most recent blob
-            assert_eq!(journal.tail_index, 2);
-
-            // 3. size calculation is correct
-            assert_eq!(journal.size().await.unwrap(), 7);
-
-            // 4. tail has room for more items (should have 1 item, can hold 3)
-            assert_eq!(
-                journal.tail.size().await,
-                Journal::<Context, Digest>::CHUNK_SIZE_U64
-            );
-
-            // 5. oldest_blob_index should return tail_index when no blobs exist
-            assert_eq!(journal.oldest_blob_index(), 2);
-
-            // Test append behavior - next operation should be at position 7
-            let pos = journal.append(test_digest(100)).await.unwrap();
-            assert_eq!(pos, 7);
-            assert_eq!(journal.size().await.unwrap(), 8);
-
-            // Append another operation
-            let pos = journal.append(test_digest(101)).await.unwrap();
-            assert_eq!(pos, 8);
-            assert_eq!(journal.size().await.unwrap(), 9);
-
-            // Fill the current blob (tail should move to next index)
-            let pos = journal.append(test_digest(102)).await.unwrap();
-            assert_eq!(pos, 9);
-            assert_eq!(journal.size().await.unwrap(), 10);
-
-            // Now tail should have moved to index 3, and blob 2 should be in blobs map
-            assert_eq!(journal.tail_index, 3);
-            assert_eq!(journal.blobs.len(), 1); // Only blob 2 (the filled tail) is in blobs map
-            assert!(journal.blobs.contains_key(&2)); // previous tail should be in blobs now
-
-            // Verify we can read the operations we just appended
-            let item = journal.read(7).await.unwrap();
-            assert_eq!(item, test_digest(100));
-
-            let item = journal.read(8).await.unwrap();
-            assert_eq!(item, test_digest(101));
-
-            let item = journal.read(9).await.unwrap();
-            assert_eq!(item, test_digest(102));
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Test that init_pruned properly reuses existing journal data when beneficial
-    #[test_traced]
-    fn test_init_pruned_reuse_existing_data() {
+    fn test_init_sync_existing_data() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -2003,37 +1609,38 @@ mod tests {
             assert_eq!(initial_journal.size().await.unwrap(), 15);
             initial_journal.close().await.unwrap();
 
-            // Test case 1: init_pruned with boundary < existing data should reuse
-            let reused_journal = Journal::<Context, Digest>::init_sync(
-                context.clone(),
-                cfg.clone(),
-                10, // Prune to position 10, existing data has 15 operations
-                1000,
-            )
-            .await
-            .expect("Failed to init with reuse");
+            {
+                let reused_journal = Journal::<Context, Digest>::init_sync(
+                    context.clone(),
+                    cfg.clone(),
+                    10, // Prune to position 10, existing data has 15 operations
+                    1000,
+                )
+                .await
+                .expect("Failed to init with reuse");
 
-            // Should have operations 10-14 remaining after pruning
-            let reused_size = reused_journal.size().await.unwrap();
-            assert!(
-                reused_size >= 10,
-                "Journal should have been pruned to at least position 10"
-            );
+                // Should have operations 10-14 remaining after pruning
+                let reused_size = reused_journal.size().await.unwrap();
+                assert!(
+                    reused_size >= 10,
+                    "Journal should have been pruned to at least position 10"
+                );
 
-            // Verify we can read operations that should still exist
-            for i in 10..15 {
-                let result = reused_journal.read(i).await;
-                assert!(result.is_ok());
+                // Verify we can read operations that should still exist
+                for i in 10..15 {
+                    let result = reused_journal.read(i).await;
+                    assert!(result.is_ok());
+                }
+
+                // Verify operations before pruning boundary are gone
+                for i in 0..10 {
+                    let result = reused_journal.read(i).await;
+                    assert!(matches!(result, Err(Error::ItemPruned(_))),);
+                }
+                reused_journal.destroy().await.unwrap();
             }
 
-            // Verify operations before pruning boundary are gone
-            for i in 0..10 {
-                let result = reused_journal.read(i).await;
-                assert!(matches!(result, Err(Error::ItemPruned(_))),);
-            }
-            reused_journal.destroy().await.unwrap();
-
-            // Test case 2: init_pruned with boundary >= existing data should create fresh
+            // Test case 2: init_sync with boundary >= existing data should create fresh
             // First recreate the initial journal
             let mut initial_journal =
                 Journal::<Context, Digest>::init(context.clone(), cfg.clone())
@@ -2065,7 +1672,7 @@ mod tests {
 
     /// Test that init_sync works correctly when no existing journal exists
     #[test_traced]
-    fn test_init_pruned_no_existing_data() {
+    fn test_init_sync_no_existing_data() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -2090,7 +1697,7 @@ mod tests {
 
     /// Test that init_sync reuse behavior is consistent with operations after reuse
     #[test_traced]
-    fn test_init_pruned_reuse_and_append() {
+    fn test_init_sync_reuse_and_append() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
