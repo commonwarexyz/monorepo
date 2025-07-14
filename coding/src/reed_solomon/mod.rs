@@ -1,4 +1,4 @@
-//! TBA
+//! A Reed-Solomon coder that emits [Chunk]s that can be proven against a [bmt].
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
