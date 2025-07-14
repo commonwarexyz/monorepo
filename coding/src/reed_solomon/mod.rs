@@ -1,8 +1,9 @@
 //! Reed-Solomon coding.
 
-use commonware_codec::{Decode, Encode};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Decode, Encode, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use commonware_storage::bmt::Builder;
+use commonware_storage::bmt::{self, Builder};
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
 use std::collections::HashSet;
 use std::convert::TryInto;
@@ -18,6 +19,55 @@ pub enum CodingError {
     DuplicateIndex,
     InvalidShardSize,
     InvalidDataLength,
+}
+
+pub struct Chunk<H: Hasher> {
+    pub shard: Vec<u8>,
+    pub proof: bmt::Proof<H>,
+}
+
+impl<H: Hasher> Chunk<H> {
+    /// Creates a new chunk from the given shard and proof.
+    pub fn new(shard: Vec<u8>, proof: bmt::Proof<H>) -> Self {
+        Self { shard, proof }
+    }
+
+    /// Verifies the chunk against the given root and index.
+    pub fn verify(&self, root: &H::Digest, index: u32) -> bool {
+        // Compute shard digest
+        let mut hasher = H::new();
+        hasher.update(&self.shard);
+        let shard_digest = hasher.finalize();
+
+        // Verify proof
+        self.proof
+            .verify(&mut hasher, &shard_digest, index, root)
+            .is_ok()
+    }
+}
+
+impl<H: Hasher> Write for Chunk<H> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.shard.write(writer);
+        self.proof.write(writer);
+    }
+}
+
+impl<H: Hasher> Read for Chunk<H> {
+    /// The maximum size of the shard.
+    type Cfg = usize;
+
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let shard = Vec::<u8>::read_range(reader, ..=*cfg)?;
+        let proof = bmt::Proof::<H>::read(reader)?;
+        Ok(Self { shard, proof })
+    }
+}
+
+impl<H: Hasher> EncodeSize for Chunk<H> {
+    fn encode_size(&self) -> usize {
+        self.shard.encode_size() + self.proof.encode_size()
+    }
 }
 
 pub type Root = Digest;

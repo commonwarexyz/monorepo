@@ -1042,6 +1042,7 @@ dependencies = [
 name = "commonware-coding"
 version = "0.0.55"
 dependencies = [
+ "bytes",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-storage",
