@@ -83,52 +83,42 @@ impl<H: Hasher> EncodeSize for Chunk<H> {
 }
 
 fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
-    // Compute shard_len (must be even)
-    let prefixed_len = u64::SIZE + data.len();
+    // Compute shard length
+    let data_len = data.len();
+    let prefixed_len = u32::SIZE + data_len;
     let mut shard_len = prefixed_len.div_ceil(k);
     if shard_len % 2 != 0 {
         shard_len += 1;
     }
 
-    // Create shards
-    let mut shards = Vec::with_capacity(k + m); // prepare for recovery shards
-    let length_bytes = (data.len() as u64).to_be_bytes();
-    let mut length_offset = 0;
-    let mut data_offset = 0;
+    // Prepare data
+    let length_bytes = (data_len as u32).to_be_bytes();
+    let mut src = length_bytes.into_iter().chain(data);
+    let mut shards = Vec::with_capacity(k + m); // assume recovery shards will be added later
     for _ in 0..k {
-        // Fill shard with length prefix first (if any remaining)
         let mut shard = Vec::with_capacity(shard_len);
-        while length_offset < u64::SIZE && shard.len() < shard_len {
-            shard.push(length_bytes[length_offset]);
-            length_offset += 1;
+        for _ in 0..shard_len {
+            shard.push(src.next().unwrap_or(0));
         }
-
-        // Fill remaining space with data
-        while data_offset < data.len() && shard.len() < shard_len {
-            shard.push(data[data_offset]);
-            data_offset += 1;
-        }
-
-        // Pad with zeros if needed
-        shard.resize(shard_len, 0);
         shards.push(shard);
     }
-
     shards
 }
 
 fn extract_data(shards: Vec<Vec<u8>>) -> Vec<u8> {
     // Concatenate shards
-    let mut data = Vec::with_capacity(shards.len() * shards[0].len());
-    for shard in shards {
-        data.extend_from_slice(&shard);
-    }
+    let mut data = shards.into_iter().flatten();
 
-    // Read length prefix
-    let data_len = u64::from_be_bytes(data[..u64::SIZE].try_into().unwrap()) as usize;
+    // Extract length prefix
+    let data_len = (&mut data)
+        .take(u32::SIZE)
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("insufficient data");
+    let data_len = u32::from_be_bytes(data_len) as usize;
 
-    // Return data
-    data[u64::SIZE..data_len + u64::SIZE].to_vec()
+    // Extract data
+    data.take(data_len).collect()
 }
 
 pub fn encode<H: Hasher>(
@@ -137,6 +127,7 @@ pub fn encode<H: Hasher>(
     data: Vec<u8>,
 ) -> Result<(H::Digest, Vec<Chunk<H>>), Error> {
     // Validate parameters
+    assert!(data.len() <= u32::MAX as usize);
     assert!(total > min);
     assert!(min > 0);
     let n = total as usize;
