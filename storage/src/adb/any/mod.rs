@@ -91,7 +91,9 @@ pub struct SyncConfig<E: RStorage + Metrics, K: Array, V: Array, T: Translator, 
 
     /// The pinned nodes the MMR needs at the pruning boundary given by
     /// `lower_bound`, in the order specified by [Proof::nodes_to_pin].
-    pub pinned_nodes: Vec<D>,
+    /// If `None`, the pinned nodes will be computed from the MMR's journal and metadata,
+    /// which are expected to have the necessary pinned nodes.
+    pub pinned_nodes: Option<Vec<D>>,
 
     /// The maximum number of operations to keep in memory
     /// before committing the database while applying operations.
@@ -1503,7 +1505,7 @@ pub(super) mod test {
                 db_config: any_db_config("sync_basic"),
                 lower_bound: 0, // No pruning
                 upper_bound: 0,
-                pinned_nodes: vec![],
+                pinned_nodes: None,
                 log,
                 apply_batch_size: 1024,
             };
@@ -1590,7 +1592,7 @@ pub(super) mod test {
                     log,
                     lower_bound: lower_bound_ops,
                     upper_bound: upper_bound_ops,
-                    pinned_nodes,
+                    pinned_nodes: Some(pinned_nodes),
                     apply_batch_size: 1024,
                 },
             )
@@ -1690,7 +1692,7 @@ pub(super) mod test {
                         log,
                         lower_bound,
                         upper_bound,
-                        pinned_nodes,
+                        pinned_nodes: Some(pinned_nodes),
                         apply_batch_size: 1024,
                     },
                 )
@@ -1790,7 +1792,7 @@ pub(super) mod test {
                     log,
                     lower_bound: sync_lower_bound,
                     upper_bound: sync_upper_bound,
-                    pinned_nodes,
+                    pinned_nodes: Some(pinned_nodes),
                     apply_batch_size: 1024,
                 },
             )
@@ -1868,7 +1870,7 @@ pub(super) mod test {
                     log,
                     lower_bound: sync_lower_bound,
                     upper_bound: sync_upper_bound,
-                    pinned_nodes: vec![],
+                    pinned_nodes: None,
                     apply_batch_size: 1024,
                 },
             )

@@ -67,7 +67,9 @@ pub struct SyncConfig<D: Digest> {
 
     /// The pinned nodes the MMR needs at the pruning boundary given by
     /// `lower_bound`, in the order specified by [Proof::nodes_to_pin].
-    pub pinned_nodes: Vec<D>,
+    /// If `None`, the pinned nodes will be computed from the journal and metadata,
+    /// which are expected to have the necessary pinned nodes.
+    pub pinned_nodes: Option<Vec<D>>,
 }
 
 /// A MMR backed by a fixed-item-length journal.
@@ -278,10 +280,9 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         let journal_size = journal.size().await?;
         assert!(journal_size <= cfg.upper_bound + 1);
 
-        let pinned_nodes_empty = cfg.pinned_nodes.is_empty();
         // Set up pinned nodes if not provided
-        let pinned_nodes = if !pinned_nodes_empty {
-            cfg.pinned_nodes
+        let pinned_nodes = if let Some(pinned_nodes) = cfg.pinned_nodes {
+            pinned_nodes
         } else {
             // Get pinned nodes for the lower bound (what we're pruned to)
             let mut pinned_nodes = Vec::new();

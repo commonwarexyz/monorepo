@@ -218,7 +218,7 @@ where
                     log,
                     lower_bound: config.lower_bound_ops,
                     upper_bound: config.upper_bound_ops,
-                    pinned_nodes: vec![],
+                    pinned_nodes: None,
                     apply_batch_size: config.apply_batch_size,
                 },
             )
@@ -415,7 +415,7 @@ where
                             log,
                             lower_bound: config.lower_bound_ops,
                             upper_bound: config.upper_bound_ops,
-                            pinned_nodes: pinned_nodes.unwrap(),
+                            pinned_nodes,
                             apply_batch_size: config.apply_batch_size,
                         },
                     )
