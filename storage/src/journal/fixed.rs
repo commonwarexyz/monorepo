@@ -31,7 +31,7 @@
 //! All `Blobs` in a given `partition` are kept open during the lifetime of `Journal`. You can limit
 //! the number of open blobs by using a higher number of `items_per_blob` or pruning old items.
 //!
-//! # Sync
+//! # Persistence
 //!
 //! Data written to `Journal` may not be immediately persisted to `Storage`. It is up to the caller
 //! to determine when to force pending data to be written to `Storage` using the `sync` method. When
@@ -42,11 +42,14 @@
 //! The `prune` method allows the `Journal` to prune blobs consisting entirely of items prior to a
 //! given point in history.
 //!
-//! # Re-using Existing Data
+//! # State Sync
 //!
-//! The `init_sync` method provides intelligent reuse of existing persistent data during
-//! initialization. This is particularly useful for synchronization scenarios where you want to avoid
-//! re-downloading data that already exists locally.
+//! [Journal::init_sync] allows for initializing a journal for use in state sync.
+//! When opened in this mode, we attempt to populate the journal within the given range
+//! with persisted data.
+//! If the journal is empty, we create a fresh journal at the specified position.
+//! If the journal is not empty, we prune the journal to the specified lower bound and rewind to
+//! the specified upper bound.
 //!
 //! # Replay
 //!
@@ -241,12 +244,12 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         })
     }
 
-    /// Initialize a journal for synchronization, reusing existing data if possible.
+    /// Initialize a [Journal] for synchronization, reusing existing data if possible.
     ///
-    /// **Returns**: A journal ready for sync operations based on existing data:
+    /// **Returns**: A [Journal] ready for sync operations based on existing data:
     /// - If no existing data or existing_size < lower_bound → fresh journal starting at lower_bound
     /// - If lower_bound ≤ existing_size ≤ upper_bound → existing journal pruned to lower_bound
-    /// - If existing_size > upper_bound → existing journal pruned to lower_bound, rewound to upper_bound+1
+    /// - If existing_size > upper_bound → existing journal pruned to lower_bound, rewound to upper_bound+1.
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config,
@@ -305,47 +308,31 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         }
 
         // Create fresh journal starting from lower_bound
-        Self::init_fresh_at_position(context, cfg, lower_bound).await
+        Self::init_empty_at_size(context, cfg, lower_bound).await
     }
 
     /// Initialize a fresh journal at the specified position.
     ///
-    /// **Returns**: A journal that appears to have `position` items without actual data.
-    /// Operations 0 to position-1 are considered pruned. Creates the appropriate blob
-    /// structure with correct size but no real content.
-    pub(crate) async fn init_fresh_at_position(
+    /// # Invariants
+    ///
+    /// - The directory given by `cfg.partition` is empty.
+    ///
+    /// **Returns**: A journal that appears to have `size` items without actual data.
+    /// Operations 0 to size-1 are considered pruned.
+    /// Creates the appropriate blob structure with correct size but no real content.
+    pub(crate) async fn init_empty_at_size(
         context: E,
         cfg: Config,
-        position: u64,
+        size: u64,
     ) -> Result<Self, Error> {
-        // Remove all existing blobs to ensure clean state
-        match context.scan(&cfg.partition).await {
-            Ok(blobs) => {
-                for blob_name in blobs {
-                    context
-                        .remove(&cfg.partition, Some(&blob_name))
-                        .await
-                        .map_err(Error::Runtime)?;
-                    debug!(
-                        blob_name = hex(&blob_name),
-                        "Removed existing blob during fresh initialization"
-                    );
-                }
-            }
-            Err(RError::PartitionMissing(_)) => {
-                // Partition doesn't exist, which is fine
-            }
-            Err(err) => return Err(Error::Runtime(err)),
-        }
-
         // Calculate the tail blob index and number of items in the tail
-        let tail_index = position / cfg.items_per_blob;
-        let tail_items = position % cfg.items_per_blob;
+        let tail_index = size / cfg.items_per_blob;
+        let tail_items = size % cfg.items_per_blob;
         let tail_size = tail_items * Self::CHUNK_SIZE_U64;
 
         debug!(
-            position,
-            tail_index, tail_items, tail_size, "Initializing fresh journal at position"
+            size,
+            tail_index, tail_items, tail_size, "Initializing fresh journal at size"
         );
 
         // Create the tail blob with the correct size to reflect the position

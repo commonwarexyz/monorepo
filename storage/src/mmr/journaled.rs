@@ -237,12 +237,20 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
     /// Initialize an MMR for synchronization, reusing existing data if possible.
     ///
-    /// **Returns**: An MMR initialized at `cfg.lower_bound` with smart reuse applied:
-    /// - If no existing data or existing_size < lower_bound → fresh MMR at lower_bound
-    /// - If lower_bound ≤ existing_size ≤ upper_bound → reused MMR pruned to lower_bound  
-    /// - If existing_size > upper_bound → reused MMR pruned to lower_bound, rewound to upper_bound+1
+    /// Handles three sync scenarios based on existing journal data vs. the given sync boundaries.
     ///
-    /// The returned MMR is always ready for sync operations starting from lower_bound.
+    /// 1. **Fresh Start**: existing_size < lower_bound
+    ///    - Deletes existing data (if any)
+    ///    - Creates new [Journal] with pruning boundary and size `lower_bound`
+    ///
+    /// 2. **Prune and Reuse**: lower_bound ≤ existing_size ≤ upper_bound  
+    ///    - Sets in-memory MMR size to `existing_size`
+    ///    - Prunes the journal to `lower_bound`
+    ///
+    /// 3. **Prune and Rewind**: existing_size > upper_bound
+    ///    - Rewinds the journal to size `upper_bound+1`
+    ///    - Sets in-memory MMR size to `upper_bound+1`
+    ///    - Prunes the journal to `lower_bound`
     pub async fn init_sync(context: E, cfg: SyncConfig<H::Digest>) -> Result<Self, Error> {
         let journal = Journal::<E, H::Digest>::init_sync(
             context.with_label("mmr_journal"),
@@ -257,17 +265,14 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         )
         .await?;
 
-        // Always recreate metadata to ensure consistency with the provided config
-        // Even if we reused a journal, the metadata should match the new sync state
+        // Update the metadata with the new pruning boundary.
         let metadata_cfg = MConfig {
             partition: cfg.config.metadata_partition,
             codec_config: ((0..).into(), ()),
         };
         let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
-
-        // Store the pruning boundary in metadata
-        let prune_key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
-        metadata.put(prune_key, cfg.lower_bound.to_be_bytes().into());
+        let pruning_boundary_key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
+        metadata.put(pruning_boundary_key, cfg.lower_bound.to_be_bytes().into());
         metadata.sync().await.map_err(Error::MetadataError)?;
 
         let journal_size = journal.size().await?;
@@ -275,23 +280,23 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         let pinned_nodes_empty = cfg.pinned_nodes.is_empty();
         // Set up pinned nodes if not provided
-        let pinned_nodes_vec = if !pinned_nodes_empty {
+        let pinned_nodes = if !pinned_nodes_empty {
             cfg.pinned_nodes
         } else {
             // Get pinned nodes for the lower bound (what we're pruned to)
-            let mut pinned_nodes_vec = Vec::new();
+            let mut pinned_nodes = Vec::new();
             for pos in Proof::<H::Digest>::nodes_to_pin(journal_size) {
                 let digest =
                     Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
-                pinned_nodes_vec.push(digest);
+                pinned_nodes.push(digest);
             }
-            pinned_nodes_vec
+            pinned_nodes
         };
 
         let mut mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
             pruned_to_pos: journal_size,
-            pinned_nodes: pinned_nodes_vec,
+            pinned_nodes,
             pool: cfg.config.thread_pool,
         });
 
