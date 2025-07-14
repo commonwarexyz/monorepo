@@ -256,59 +256,35 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         lower_bound: u64,
         upper_bound: u64,
     ) -> Result<Self, Error> {
-        // Attempt to read existing journal data to determine reuse strategy
-        match Self::init(context.clone(), cfg.clone()).await {
-            Ok(mut existing_journal) => {
-                let existing_size = existing_journal.size().await?;
-                if existing_size == 0 {
-                    // Empty journal - destroy and create fresh
-                    debug!("Existing journal is empty, starting fresh");
-                    existing_journal.destroy().await?;
-                } else {
-                    let last_existing_loc = existing_size - 1;
-                    if last_existing_loc < lower_bound {
-                        // Strategy 1: Fresh Start
-                        // Existing data is stale and cannot be reused
-                        debug!(
-                            existing_size,
-                            lower_bound,
-                            "Existing journal data is stale (size < lower_bound), starting fresh"
-                        );
-                        existing_journal.destroy().await?;
-                    } else if last_existing_loc <= upper_bound {
-                        // Strategy 2: Prune and Reuse
-                        // Existing data is within sync range, prune to lower bound and reuse
-                        debug!(
-                            existing_size,
-                            lower_bound,
-                            upper_bound,
-                            "Existing journal data is within sync range, pruning to lower bound and reusing"
-                        );
-                        existing_journal.prune(lower_bound).await?;
-                        return Ok(existing_journal);
-                    } else {
-                        // Strategy 3: Prune and Rewind
-                        // Existing data exceeds sync range, prune to lower bound and rewind to upper bound
-                        debug!(
-                            existing_size,
-                            lower_bound,
-                            upper_bound,
-                            "Existing journal data exceeds sync range, pruning to lower bound and rewinding to upper bound"
-                        );
-                        existing_journal.prune(lower_bound).await?;
-                        existing_journal.rewind(upper_bound + 1).await?; // +1 because upper_bound is inclusive
-                        return Ok(existing_journal);
-                    }
-                }
-            }
-            Err(_) => {
-                // No existing journal found or failed to load, will create fresh
-                debug!("No existing journal found or failed to load, creating fresh");
-            }
+        let mut journal = Self::init(context.clone(), cfg.clone()).await?;
+        let journal_size = journal.size().await?;
+        if journal_size < lower_bound + 1 {
+            debug!(
+                journal_size,
+                lower_bound, "Existing journal data is stale, re-initializing in pruned state"
+            );
+            journal.destroy().await?;
+            Self::init_empty_at_size(context, cfg, lower_bound).await
+        } else if journal_size <= upper_bound + 1 {
+            debug!(
+                journal_size,
+                lower_bound,
+                upper_bound,
+                "Existing journal data within sync range, pruning to lower bound"
+            );
+            journal.prune(lower_bound).await?;
+            Ok(journal)
+        } else {
+            debug!(
+                journal_size,
+                lower_bound,
+                upper_bound,
+                "Existing journal data exceeds sync range, pruning to lower bound and rewinding to upper bound"
+            );
+            journal.prune(lower_bound).await?;
+            journal.rewind(upper_bound + 1).await?; // +1 because upper_bound is inclusive
+            Ok(journal)
         }
-
-        // Create fresh journal starting from lower_bound
-        Self::init_empty_at_size(context, cfg, lower_bound).await
     }
 
     /// Initialize a fresh journal at the specified position.
