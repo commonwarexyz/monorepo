@@ -92,6 +92,7 @@ impl<H: Hasher> EncodeSize for Chunk<H> {
     }
 }
 
+/// Prepare data for encoding.
 fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
     // Compute shard length
     let data_len = data.len();
@@ -115,9 +116,10 @@ fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
     shards
 }
 
-fn extract_data(shards: Vec<Vec<u8>>) -> Vec<u8> {
+/// Extract data from encoded shards.
+fn extract_data(shards: Vec<Vec<u8>>, k: usize) -> Vec<u8> {
     // Concatenate shards
-    let mut data = shards.into_iter().flatten();
+    let mut data = shards.into_iter().take(k).flatten();
 
     // Extract length prefix
     let data_len = (&mut data)
@@ -131,6 +133,18 @@ fn extract_data(shards: Vec<Vec<u8>>) -> Vec<u8> {
     data.take(data_len).collect()
 }
 
+/// Encode data using a Reed-Solomon coder and insert it into a [bmt].
+///
+/// # Parameters
+///
+/// - `total`: The total number of chunks to generate.
+/// - `min`: The minimum number of chunks required to decode the data.
+/// - `data`: The data to encode.
+///
+/// # Returns
+///
+/// - `root`: The root of the [bmt].
+/// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
 pub fn encode<H: Hasher>(
     total: u16,
     min: u16,
@@ -188,6 +202,18 @@ pub fn encode<H: Hasher>(
     Ok((root, chunks))
 }
 
+/// Decode data from a set of [Chunk]s.
+///
+/// # Parameters
+///
+/// - `total`: The total number of chunks to generate.
+/// - `min`: The minimum number of chunks required to decode the data.
+/// - `root`: The root of the [bmt].
+/// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
+///
+/// # Returns
+///
+/// - `data`: The decoded data.
 pub fn decode<H: Hasher>(
     total: u16,
     min: u16,
@@ -284,7 +310,7 @@ pub fn decode<H: Hasher>(
     }
 
     // Extract original data
-    Ok(extract_data(shards))
+    Ok(extract_data(shards, k))
 }
 
 #[cfg(test)]
