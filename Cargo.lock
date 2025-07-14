@@ -1039,6 +1039,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-coding"
+version = "0.0.55"
+dependencies = [
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-storage",
+]
+
+[[package]]
 name = "commonware-collector"
 version = "0.0.55"
 dependencies = [

@@ -1,0 +1,1 @@
+//! Reed-Solomon coding.
