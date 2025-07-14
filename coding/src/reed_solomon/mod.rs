@@ -92,7 +92,7 @@ fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
 
     // Create shards
     let mut shards = Vec::with_capacity(k + m); // prepare for recovery shards
-    let length_bytes = (data.len() as u64).to_le_bytes();
+    let length_bytes = (data.len() as u64).to_be_bytes();
     let mut length_offset = 0;
     let mut data_offset = 0;
     for _ in 0..k {
