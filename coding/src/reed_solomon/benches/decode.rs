@@ -19,7 +19,7 @@ fn benchmark_decode(c: &mut Criterion) {
 
                         // Compute shard_size
                         let extended_len = 8 + data_length;
-                        let mut shard_size = (extended_len + min_pieces - 1) / min_pieces;
+                        let mut shard_size = extended_len.div_ceil(min_pieces);
                         if shard_size % 2 != 0 {
                             shard_size += 1;
                         }

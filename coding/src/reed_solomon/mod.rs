@@ -63,7 +63,7 @@ pub fn encode(
     extended_data.extend_from_slice(data);
 
     // Compute shard_size (even)
-    let mut shard_size = (extended_data.len() + k - 1) / k;
+    let mut shard_size = extended_data.len().div_ceil(k);
     if shard_size % 2 != 0 {
         shard_size += 1;
     }
@@ -110,12 +110,11 @@ pub fn encode(
 
     // Generate encoded proofs
     let mut proofs = Vec::with_capacity(n);
-    for i in 0..n {
+    for (i, shard) in all_shards.into_iter().enumerate() {
         let merkle_proof = tree
             .proof(i as u32)
             .map_err(|_| CodingError::InvalidProof)?;
-        let shard = &all_shards[i];
-        let proof_data = (shard.clone(), merkle_proof.siblings);
+        let proof_data = (shard, merkle_proof.siblings);
         let encoded = proof_data.encode();
         proofs.push(encoded.to_vec());
     }
@@ -279,11 +278,10 @@ mod tests {
         // We need to determine shard_size for decoding
         // This is a limitation of the current API - in practice, this would be known
         let extended_len = 8 + data.len(); // 8 bytes for length prefix
-        let shard_size = if (extended_len + min_pieces - 1) / min_pieces % 2 == 0 {
-            (extended_len + min_pieces - 1) / min_pieces
-        } else {
-            (extended_len + min_pieces - 1) / min_pieces + 1
-        };
+        let mut shard_size = extended_len.div_ceil(min_pieces);
+        if shard_size % 2 != 0 {
+            shard_size += 1;
+        }
 
         let decoded = decode(&root, &pieces, total_pieces, min_pieces, shard_size).unwrap();
         assert_eq!(decoded, data);
@@ -301,11 +299,10 @@ mod tests {
         let pieces: Vec<_> = (0..6).map(|i| (i, proofs[i].clone())).collect();
 
         let extended_len = 8 + data.len();
-        let shard_size = if (extended_len + min_pieces - 1) / min_pieces % 2 == 0 {
-            (extended_len + min_pieces - 1) / min_pieces
-        } else {
-            (extended_len + min_pieces - 1) / min_pieces + 1
-        };
+        let mut shard_size = extended_len.div_ceil(min_pieces);
+        if shard_size % 2 != 0 {
+            shard_size += 1;
+        }
 
         let decoded = decode(&root, &pieces, total_pieces, min_pieces, shard_size).unwrap();
         assert_eq!(decoded, data);
@@ -327,11 +324,10 @@ mod tests {
         ];
 
         let extended_len = 8 + data.len();
-        let shard_size = if (extended_len + min_pieces - 1) / min_pieces % 2 == 0 {
-            (extended_len + min_pieces - 1) / min_pieces
-        } else {
-            (extended_len + min_pieces - 1) / min_pieces + 1
-        };
+        let mut shard_size = extended_len.div_ceil(min_pieces);
+        if shard_size % 2 != 0 {
+            shard_size += 1;
+        }
 
         let decoded = decode(&root, &pieces, total_pieces, min_pieces, shard_size).unwrap();
         assert_eq!(decoded, data);
@@ -349,11 +345,10 @@ mod tests {
         let pieces: Vec<_> = (0..2).map(|i| (i, proofs[i].clone())).collect();
 
         let extended_len = 8 + data.len();
-        let shard_size = if (extended_len + min_pieces - 1) / min_pieces % 2 == 0 {
-            (extended_len + min_pieces - 1) / min_pieces
-        } else {
-            (extended_len + min_pieces - 1) / min_pieces + 1
-        };
+        let mut shard_size = extended_len.div_ceil(min_pieces);
+        if shard_size % 2 != 0 {
+            shard_size += 1;
+        }
 
         let result = decode(&root, &pieces, total_pieces, min_pieces, shard_size);
         assert!(matches!(result, Err(CodingError::NotEnoughPieces)));
@@ -375,11 +370,10 @@ mod tests {
         ];
 
         let extended_len = 8 + data.len();
-        let shard_size = if (extended_len + min_pieces - 1) / min_pieces % 2 == 0 {
-            (extended_len + min_pieces - 1) / min_pieces
-        } else {
-            (extended_len + min_pieces - 1) / min_pieces + 1
-        };
+        let mut shard_size = extended_len.div_ceil(min_pieces);
+        if shard_size % 2 != 0 {
+            shard_size += 1;
+        }
 
         let result = decode(&root, &pieces, total_pieces, min_pieces, shard_size);
         assert!(matches!(result, Err(CodingError::DuplicateIndex)));
@@ -412,12 +406,11 @@ mod tests {
 
         let pieces: Vec<_> = (0..min_pieces).map(|i| (i, proofs[i].clone())).collect();
 
-        let extended_len = 8; // Just the length prefix
-        let shard_size = if (extended_len + min_pieces - 1) / min_pieces % 2 == 0 {
-            (extended_len + min_pieces - 1) / min_pieces
-        } else {
-            (extended_len + min_pieces - 1) / min_pieces + 1
-        };
+        let extended_len = 8usize; // Just the length prefix
+        let mut shard_size = extended_len.div_ceil(min_pieces);
+        if shard_size % 2 != 0 {
+            shard_size += 1;
+        }
 
         let decoded = decode(&root, &pieces, total_pieces, min_pieces, shard_size).unwrap();
         assert_eq!(decoded, data);
@@ -434,11 +427,10 @@ mod tests {
         let pieces: Vec<_> = (0..min_pieces).map(|i| (i, proofs[i].clone())).collect();
 
         let extended_len = 8 + data.len();
-        let shard_size = if (extended_len + min_pieces - 1) / min_pieces % 2 == 0 {
-            (extended_len + min_pieces - 1) / min_pieces
-        } else {
-            (extended_len + min_pieces - 1) / min_pieces + 1
-        };
+        let mut shard_size = extended_len.div_ceil(min_pieces);
+        if shard_size % 2 != 0 {
+            shard_size += 1;
+        }
 
         let decoded = decode(&root, &pieces, total_pieces, min_pieces, shard_size).unwrap();
         assert_eq!(decoded, data);
@@ -466,11 +458,10 @@ mod tests {
         let pieces: Vec<_> = (0..min_pieces).map(|i| (i, proofs[i].clone())).collect();
 
         let extended_len = 8 + data.len();
-        let shard_size = if (extended_len + min_pieces - 1) / min_pieces % 2 == 0 {
-            (extended_len + min_pieces - 1) / min_pieces
-        } else {
-            (extended_len + min_pieces - 1) / min_pieces + 1
-        };
+        let mut shard_size = extended_len.div_ceil(min_pieces);
+        if shard_size % 2 != 0 {
+            shard_size += 1;
+        }
 
         // Attempt to decode with malicious root - this should fail
         let result = decode(
@@ -518,11 +509,10 @@ mod tests {
         let pieces: Vec<_> = (0..min_pieces).map(|i| (i, proofs[i].clone())).collect();
 
         let extended_len = 8 + data.len();
-        let shard_size = if (extended_len + min_pieces - 1) / min_pieces % 2 == 0 {
-            (extended_len + min_pieces - 1) / min_pieces
-        } else {
-            (extended_len + min_pieces - 1) / min_pieces + 1
-        };
+        let mut shard_size = extended_len.div_ceil(min_pieces);
+        if shard_size % 2 != 0 {
+            shard_size += 1;
+        }
 
         // The tampered piece will fail at Merkle proof verification first
         let result = decode(&root, &pieces, total_pieces, min_pieces, shard_size);
@@ -543,7 +533,7 @@ mod tests {
         extended_data.extend_from_slice(&(data.len() as u64).to_be_bytes());
         extended_data.extend_from_slice(data);
 
-        let mut shard_size = (extended_data.len() + min_pieces - 1) / min_pieces;
+        let mut shard_size = extended_data.len().div_ceil(min_pieces);
         if shard_size % 2 != 0 {
             shard_size += 1;
         }
