@@ -75,8 +75,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "bls12381_primitive_threshold_operations"
-path = "fuzz_targets/bls12381_primitive_threshold_operations.rs"
+name = "bls12381_threshold_operations"
+path = "fuzz_targets/bls12381_threshold_operations.rs"
 test = false
 doc = false
 bench = false

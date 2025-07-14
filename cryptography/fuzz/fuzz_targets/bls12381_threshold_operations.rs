@@ -11,6 +11,8 @@ use commonware_cryptography::bls12381::primitives::{
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
 
+type Message = (Option<Vec<u8>>, Vec<u8>);
+
 enum FuzzOperation {
     PartialSignProofOfPossessionMinPk {
         public: Poly<G1>,
@@ -395,9 +397,8 @@ fn arbitrary_messages(
     u: &mut Unstructured,
     min: usize,
     max: usize,
-) -> Result<Vec<(Option<Vec<u8>>, Vec<u8>)>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len)
+) -> Result<Vec<Message>, arbitrary::Error> {
+    (0..u.int_in_range(min..=max)?)
         .map(|_| {
             Ok((
                 arbitrary_optional_bytes(u, 50)?,
@@ -644,12 +645,12 @@ fn fuzz(op: FuzzOperation) {
             namespace,
             message,
         } => {
-            let public_keys: Vec<G1> = pending.iter().map(|(_, pk, _)| pk.clone()).collect();
+            let public_keys: Vec<G1> = pending.iter().map(|(_, pk, _)| *pk).collect();
             let partials: Vec<Eval<G2>> = pending
                 .iter()
                 .map(|(idx, _, sig)| Eval {
                     index: *idx,
-                    value: sig.clone(),
+                    value: *sig,
                 })
                 .collect();
             let _ = partial_verify_multiple_public_keys_precomputed::<MinPk, _>(
@@ -665,12 +666,12 @@ fn fuzz(op: FuzzOperation) {
             namespace,
             message,
         } => {
-            let public_keys: Vec<G2> = pending.iter().map(|(_, pk, _)| pk.clone()).collect();
+            let public_keys: Vec<G2> = pending.iter().map(|(_, pk, _)| *pk).collect();
             let partials: Vec<Eval<G1>> = pending
                 .iter()
                 .map(|(idx, _, sig)| Eval {
                     index: *idx,
-                    value: sig.clone(),
+                    value: *sig,
                 })
                 .collect();
             let _ = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(

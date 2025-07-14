@@ -9,18 +9,20 @@ use commonware_cryptography::bls12381::primitives::{
 };
 use libfuzzer_sys::fuzz_target;
 
+type Message = (Option<Vec<u8>>, Vec<u8>);
+
 #[derive(Debug)]
 enum FuzzOperation {
-    AggregatePublicKeysMinPk {
+    PublicKeysMinPk {
         public_keys: Vec<G1>,
     },
-    AggregatePublicKeysMinSig {
+    PublicKeysMinSig {
         public_keys: Vec<G2>,
     },
-    AggregateSignaturesMinPk {
+    SignaturesMinPk {
         signatures: Vec<G2>,
     },
-    AggregateSignaturesMinSig {
+    SignaturesMinSig {
         signatures: Vec<G1>,
     },
     AggregateVerifyMultiplePublicKeysMinPk {
@@ -54,16 +56,16 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
         let choice = u.int_in_range(0..=7)?;
 
         match choice {
-            0 => Ok(FuzzOperation::AggregatePublicKeysMinPk {
+            0 => Ok(FuzzOperation::PublicKeysMinPk {
                 public_keys: arbitrary_vec_g1(u, 0, 20)?,
             }),
-            1 => Ok(FuzzOperation::AggregatePublicKeysMinSig {
+            1 => Ok(FuzzOperation::PublicKeysMinSig {
                 public_keys: arbitrary_vec_g2(u, 0, 20)?,
             }),
-            2 => Ok(FuzzOperation::AggregateSignaturesMinPk {
+            2 => Ok(FuzzOperation::SignaturesMinPk {
                 signatures: arbitrary_vec_g2(u, 0, 20)?,
             }),
-            3 => Ok(FuzzOperation::AggregateSignaturesMinSig {
+            3 => Ok(FuzzOperation::SignaturesMinSig {
                 signatures: arbitrary_vec_g1(u, 0, 20)?,
             }),
             4 => Ok(FuzzOperation::AggregateVerifyMultiplePublicKeysMinPk {
@@ -90,7 +92,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 signature: arbitrary_g1(u)?,
                 concurrency: u.int_in_range(1..=8)?,
             }),
-            _ => Ok(FuzzOperation::AggregatePublicKeysMinPk {
+            _ => Ok(FuzzOperation::PublicKeysMinPk {
                 public_keys: Vec::new(),
             }),
         }
@@ -143,9 +145,8 @@ fn arbitrary_messages(
     u: &mut Unstructured,
     min: usize,
     max: usize,
-) -> Result<Vec<(Option<Vec<u8>>, Vec<u8>)>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len)
+) -> Result<Vec<Message>, arbitrary::Error> {
+    (0..u.int_in_range(min..=max)?)
         .map(|_| {
             Ok((
                 arbitrary_optional_bytes(u, 50)?,
@@ -177,25 +178,25 @@ fn arbitrary_bytes(
 
 fn fuzz(op: FuzzOperation) {
     match op {
-        FuzzOperation::AggregatePublicKeysMinPk { public_keys } => {
+        FuzzOperation::PublicKeysMinPk { public_keys } => {
             if !public_keys.is_empty() {
                 let _result = aggregate_public_keys::<MinPk, _>(&public_keys);
             }
         }
 
-        FuzzOperation::AggregatePublicKeysMinSig { public_keys } => {
+        FuzzOperation::PublicKeysMinSig { public_keys } => {
             if !public_keys.is_empty() {
                 let _result = aggregate_public_keys::<MinSig, _>(&public_keys);
             }
         }
 
-        FuzzOperation::AggregateSignaturesMinPk { signatures } => {
+        FuzzOperation::SignaturesMinPk { signatures } => {
             if !signatures.is_empty() {
                 let _result = aggregate_signatures::<MinPk, _>(&signatures);
             }
         }
 
-        FuzzOperation::AggregateSignaturesMinSig { signatures } => {
+        FuzzOperation::SignaturesMinSig { signatures } => {
             if !signatures.is_empty() {
                 let _result = aggregate_signatures::<MinSig, _>(&signatures);
             }
