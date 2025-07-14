@@ -533,7 +533,7 @@ fn arbitrary_bytes(
     u.bytes(len).map(|b| b.to_vec())
 }
 
-fn execute_operation(op: FuzzOperation) {
+fn fuzz(op: FuzzOperation) {
     match op {
         FuzzOperation::ScalarArithmetic { mut a, b } => {
             let mut a_clone = a.clone();
@@ -863,6 +863,6 @@ fn execute_operation(op: FuzzOperation) {
 
 fuzz_target!(|ops: Vec<FuzzOperation>| {
     for op in ops {
-        execute_operation(op);
+        fuzz(op);
     }
 });
