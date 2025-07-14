@@ -4,7 +4,7 @@ edition = "2021"
 publish = true
 version = "0.0.55"
 license = "MIT OR Apache-2.0"
-description = "Efficient erasure coding using Reed-Solomon, Binary Merkle Trees, and commonware-codec"
+description = "TBA"
 readme = "README.md"
 homepage = "https://commonware.xyz"
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/coding"
@@ -17,7 +17,6 @@ commonware-storage = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 reed-solomon-simd = "3.0.1"
-
 
 [lib]
 bench = false
