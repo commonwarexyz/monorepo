@@ -9,9 +9,9 @@ use std::collections::HashSet;
 use std::convert::TryInto;
 
 #[derive(Debug)]
-pub enum CodingError {
+pub enum Error {
     InvalidParameters,
-    RsError(RsError),
+    Rs(RsError),
     CodecError,
     Inconsistent,
     InvalidProof,
@@ -21,6 +21,7 @@ pub enum CodingError {
     InvalidDataLength,
 }
 
+/// A chunk of data that has been encoded using Reed-Solomon and a Binary Merkle Tree.
 pub struct Chunk<H: Hasher> {
     pub shard: Vec<u8>,
     pub proof: bmt::Proof<H>,
@@ -70,87 +71,55 @@ impl<H: Hasher> EncodeSize for Chunk<H> {
     }
 }
 
-pub type Root = Digest;
-pub type Proof = Vec<u8>;
-
-/// Verifies a merkle proof against the given root
-fn merkle_verify(root: &Root, index: usize, shard: &[u8], merkle_proof: &[Digest]) -> bool {
-    // Create a tree from the proof to verify
-    let mut hasher = Sha256::new();
-
-    // Recreate the proof structure that BMT expects
-    let proof = commonware_storage::bmt::Proof::<Sha256> {
-        siblings: merkle_proof.to_vec(),
-    };
-
-    // Convert shard to digest format (BMT handles position hashing internally)
-    hasher.update(shard);
-    let shard_digest = hasher.finalize();
-
-    // Verify the proof
-    proof
-        .verify(&mut hasher, &shard_digest, index as u32, root)
-        .is_ok()
-}
-
 /// Encodes the input data into total_pieces proofs using Reed-Solomon and a Binary Merkle Tree.
 /// Returns the Merkle root and a vector of encoded proofs (one per piece).
-pub fn encode(
-    data: &[u8],
-    total_pieces: usize,
-    min_pieces: usize,
-) -> Result<(Root, Vec<Proof>), CodingError> {
-    if total_pieces <= min_pieces || min_pieces == 0 {
-        return Err(CodingError::InvalidParameters);
-    }
-    let n = total_pieces;
-    let k = min_pieces;
+pub fn encode<H: Hasher>(
+    total: usize,
+    min: usize,
+    mut data: Vec<u8>,
+) -> Result<(H::Digest, Vec<Chunk<H>>), Error> {
+    // Validate parameters
+    assert!(total > min);
+    assert!(min > 0);
+    let n = total;
+    let k = min;
     let m = n - k;
 
-    // Prepend length for recovery
-    let mut extended_data = Vec::new();
-    extended_data.extend_from_slice(&(data.len() as u64).to_be_bytes());
-    extended_data.extend_from_slice(data);
-
-    // Compute shard_size (even)
-    let mut shard_size = extended_data.len().div_ceil(k);
-    if shard_size % 2 != 0 {
-        shard_size += 1;
+    // Compute shard_len (must be even)
+    let mut shard_len = data.len().div_ceil(k);
+    if shard_len % 2 != 0 {
+        shard_len += 1;
     }
 
     // Pad data
-    let padded_len = shard_size * k;
-    extended_data.resize(padded_len, 0);
+    let padded_len = shard_len * k;
+    data.resize(padded_len, 0);
 
     // Create original shards
+    let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::Rs)?;
     let mut original_shards = Vec::with_capacity(k);
     for i in 0..k {
-        let start = i * shard_size;
-        original_shards.push(extended_data[start..start + shard_size].to_vec());
+        let start = i * shard_len;
+        original_shards.push(data[start..start + shard_len].to_vec());
     }
-
-    // RS encoding - use correct API (original_count, recovery_count, shard_length)
-    let mut encoder = ReedSolomonEncoder::new(k, m, shard_size).map_err(CodingError::RsError)?;
     for shard in &original_shards {
-        encoder
-            .add_original_shard(shard)
-            .map_err(CodingError::RsError)?;
+        encoder.add_original_shard(shard).map_err(Error::Rs)?;
     }
-    let recovery_result = encoder.encode().map_err(CodingError::RsError)?;
-    let recovery_shards: Vec<Vec<u8>> = recovery_result
+    let mut shards = original_shards;
+
+    // Compute recovery shards
+    let encoding = encoder.encode().map_err(Error::Rs)?;
+    let recovery_shards: Vec<Vec<u8>> = encoding
         .recovery_iter()
         .map(|shard| shard.to_vec())
         .collect();
+    shards.extend(recovery_shards);
 
-    // All shards
-    let mut all_shards = original_shards;
-    all_shards.extend(recovery_shards);
-
-    // Build Merkle tree using BMT Builder
-    let mut builder = Builder::<Sha256>::new(n);
-    for shard in &all_shards {
+    // Build Merkle tree
+    let mut builder = Builder::<H>::new(n);
+    let mut hasher = H::new();
+    for shard in &shards {
         builder.add(&{
-            let mut hasher = Sha256::new();
             hasher.update(shard);
             hasher.finalize()
         });
@@ -158,18 +127,14 @@ pub fn encode(
     let tree = builder.build();
     let root = tree.root();
 
-    // Generate encoded proofs
-    let mut proofs = Vec::with_capacity(n);
-    for (i, shard) in all_shards.into_iter().enumerate() {
-        let merkle_proof = tree
-            .proof(i as u32)
-            .map_err(|_| CodingError::InvalidProof)?;
-        let proof_data = (shard, merkle_proof.siblings);
-        let encoded = proof_data.encode();
-        proofs.push(encoded.to_vec());
+    // Generate chunks
+    let mut chunks = Vec::with_capacity(n);
+    for (i, shard) in shards.into_iter().enumerate() {
+        let proof = tree.proof(i as u32).map_err(|_| Error::InvalidProof)?;
+        chunks.push(Chunk::new(shard, proof));
     }
 
-    Ok((root, proofs))
+    Ok((root, chunks))
 }
 
 /// Decodes the original data from at least min_pieces assembled pieces with valid Merkle proofs.
