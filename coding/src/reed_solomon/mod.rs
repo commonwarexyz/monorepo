@@ -253,42 +253,42 @@ mod tests {
     #[test]
     fn test_basic() {
         let data = b"Hello, Reed-Solomon!";
-        let total_pieces = 7u32;
-        let min_pieces = 4u32;
+        let total = 7u32;
+        let min = 4u32;
 
         // Encode the data
-        let (root, chunks) = encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
-        assert_eq!(chunks.len(), total_pieces as usize);
+        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
+        assert_eq!(chunks.len(), total as usize);
 
-        // Try to decode with exactly min_pieces (all original shards)
-        let minimal = chunks.into_iter().take(min_pieces as usize).collect();
-        let decoded = decode::<Sha256>(total_pieces, min_pieces, &root, minimal).unwrap();
+        // Try to decode with exactly min (all original shards)
+        let minimal = chunks.into_iter().take(min as usize).collect();
+        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
         assert_eq!(decoded, data);
     }
 
     #[test]
     fn test_moderate() {
         let data = b"Testing with more pieces than minimum";
-        let total_pieces = 10u32;
-        let min_pieces = 4u32;
+        let total = 10u32;
+        let min = 4u32;
 
         // Encode the data
-        let (root, chunks) = encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
+        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
 
-        // Try to decode with min_pieces (all original shards)
-        let minimal = chunks.into_iter().take(min_pieces as usize).collect();
-        let decoded = decode::<Sha256>(total_pieces, min_pieces, &root, minimal).unwrap();
+        // Try to decode with min (all original shards)
+        let minimal = chunks.into_iter().take(min as usize).collect();
+        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
         assert_eq!(decoded, data);
     }
 
     #[test]
     fn test_recovery() {
         let data = b"Testing recovery pieces";
-        let total_pieces = 8u32;
-        let min_pieces = 3u32;
+        let total = 8u32;
+        let min = 3u32;
 
         // Encode the data
-        let (root, chunks) = encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
+        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
 
         // Use a mix of original and recovery pieces
         let pieces: Vec<_> = vec![
@@ -298,79 +298,89 @@ mod tests {
         ];
 
         // Try to decode with a mix of original and recovery pieces
-        let decoded = decode::<Sha256>(total_pieces, min_pieces, &root, pieces).unwrap();
+        let decoded = decode::<Sha256>(total, min, &root, pieces).unwrap();
         assert_eq!(decoded, data);
     }
 
     #[test]
     fn test_not_enough_pieces() {
         let data = b"Test insufficient pieces";
-        let total_pieces = 6u32;
-        let min_pieces = 4u32;
+        let total = 6u32;
+        let min = 4u32;
 
-        let (root, chunks) = encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
+        // Encode data
+        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
 
-        // Try with fewer than min_pieces
+        // Try with fewer than min
         let pieces: Vec<_> = chunks.into_iter().take(2).collect();
 
-        let result = decode::<Sha256>(total_pieces, min_pieces, &root, pieces);
+        // Fail to decode
+        let result = decode::<Sha256>(total, min, &root, pieces);
         assert!(matches!(result, Err(Error::NotEnoughPieces)));
     }
 
     #[test]
     fn test_duplicate_index() {
         let data = b"Test duplicate detection";
-        let total_pieces = 5u32;
-        let min_pieces = 3u32;
+        let total = 5u32;
+        let min = 3u32;
 
-        let (root, chunks) = encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
+        // Encode data
+        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
 
         // Include duplicate index by cloning the first chunk
         let pieces = vec![chunks[0].clone(), chunks[0].clone(), chunks[1].clone()];
 
-        let result = decode::<Sha256>(total_pieces, min_pieces, &root, pieces);
+        // Fail to decode
+        let result = decode::<Sha256>(total, min, &root, pieces);
         assert!(matches!(result, Err(Error::DuplicateIndex)));
     }
 
     #[test]
-    fn test_invalid_parameters() {
+    #[should_panic(expected = "assertion failed: total > min")]
+    fn test_invalid_total() {
         let data = b"Test parameter validation";
 
-        // total_pieces <= min_pieces should panic due to assert
-        // We'll test this with total_pieces == min_pieces
-        let result = std::panic::catch_unwind(|| encode::<Sha256>(3, 3, data.to_vec()));
-        assert!(result.is_err());
+        // total <= min should panic
+        encode::<Sha256>(3, 3, data.to_vec()).unwrap();
+    }
 
-        // min_pieces = 0 should panic due to assert
-        let result = std::panic::catch_unwind(|| encode::<Sha256>(5, 0, data.to_vec()));
-        assert!(result.is_err());
+    #[test]
+    #[should_panic(expected = "assertion failed: min > 0")]
+    fn test_invalid_min() {
+        let data = b"Test parameter validation";
+
+        // min = 0 should panic
+        encode::<Sha256>(5, 0, data.to_vec()).unwrap();
     }
 
     #[test]
     fn test_empty_data() {
         let data = b"";
-        let total_pieces = 4u32;
-        let min_pieces = 2u32;
+        let total = 4u32;
+        let min = 2u32;
 
-        let (root, chunks) = encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
+        // Encode data
+        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
 
-        let pieces: Vec<_> = chunks.into_iter().take(min_pieces as usize).collect();
-
-        let decoded = decode::<Sha256>(total_pieces, min_pieces, &root, pieces).unwrap();
+        // Try to decode with min
+        let minimal = chunks.into_iter().take(min as usize).collect();
+        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
         assert_eq!(decoded, data);
     }
 
     #[test]
     fn test_large_data() {
         let data = vec![42u8; 1000]; // 1KB of data
-        let total_pieces = 7u32;
-        let min_pieces = 4u32;
+        let total = 7u32;
+        let min = 4u32;
 
-        let (root, chunks) = encode::<Sha256>(total_pieces, min_pieces, data.clone()).unwrap();
+        // Encode data
+        let (root, chunks) = encode::<Sha256>(total, min, data.clone()).unwrap();
 
-        let pieces: Vec<_> = chunks.into_iter().take(min_pieces as usize).collect();
-
-        let decoded = decode::<Sha256>(total_pieces, min_pieces, &root, pieces).unwrap();
+        // Try to decode with min
+        let minimal = chunks.into_iter().take(min as usize).collect();
+        let decoded = decode::<Sha256>(total, min, &root, minimal).unwrap();
         assert_eq!(decoded, data);
     }
 
