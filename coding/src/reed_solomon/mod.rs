@@ -94,30 +94,40 @@ pub fn encode<H: Hasher>(
     let k = min as usize;
     let m = n - k;
 
-    // Encode data
-    let mut data = data.encode().to_vec();
+    // Compute prefix length
+    let original_len = data.len();
+    let prefix_len = (original_len).encode_size();
 
     // Compute shard_len (must be even)
-    let mut shard_len = data.len().div_ceil(k);
+    let total_data_len = prefix_len + original_len;
+    let mut shard_len = total_data_len.div_ceil(k);
     if shard_len % 2 != 0 {
         shard_len += 1;
     }
 
     // Pad data
     let padded_len = shard_len * k;
-    data.resize(padded_len, 0);
 
-    // Create original shards
-    let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::Rs)?;
+    // Build padded data
+    let mut padded = Vec::with_capacity(padded_len);
+    (original_len).write(&mut padded);
+    padded.extend_from_slice(&data);
+    padded.resize(padded_len, 0);
+
+    // Create original shards without copying
     let mut original_shards = Vec::with_capacity(k);
-    for i in 0..k {
-        let start = i * shard_len;
-        original_shards.push(data[start..start + shard_len].to_vec());
+    let mut current = padded;
+    for _ in 0..k {
+        let rest = current.split_off(shard_len.min(current.len()));
+        original_shards.push(current);
+        current = rest;
     }
+
+    // Create encoder
+    let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::Rs)?;
     for shard in &original_shards {
         encoder.add_original_shard(shard).map_err(Error::Rs)?;
     }
-    let mut shards = original_shards;
 
     // Compute recovery shards
     let encoding = encoder.encode().map_err(Error::Rs)?;
@@ -125,6 +135,7 @@ pub fn encode<H: Hasher>(
         .recovery_iter()
         .map(|shard| shard.to_vec())
         .collect();
+    let mut shards = original_shards;
     shards.extend(recovery_shards);
 
     // Build Merkle tree
@@ -219,12 +230,13 @@ pub fn decode<H: Hasher>(
         .recovery_iter()
         .map(|shard| shard.to_vec())
         .collect();
-    shards.extend(recovery_shards);
+    let mut all_shards = shards.clone(); // Clone to keep original for data extraction
+    all_shards.extend(recovery_shards);
 
     // Build Merkle tree
     let mut builder = Builder::<H>::new(n);
     let mut hasher = H::new();
-    for shard in &shards {
+    for shard in &all_shards {
         builder.add(&{
             hasher.update(shard);
             hasher.finalize()
@@ -237,12 +249,54 @@ pub fn decode<H: Hasher>(
         return Err(Error::Inconsistent);
     }
 
-    // Extract original data
-    let mut data = Vec::new();
-    for shard in shards.into_iter().take(k) {
-        data.extend(shard);
+    // Extract original data without full concatenation
+    let mut current_shard = 0;
+    let mut offset = 0;
+    let mut value: u64 = 0;
+    let mut shift = 0;
+    let mut consumed = 0;
+    loop {
+        if current_shard >= k {
+            return Err(Error::CodecError);
+        }
+        if offset >= shards[current_shard].len() {
+            current_shard += 1;
+            offset = 0;
+            continue;
+        }
+        let byte = shards[current_shard][offset];
+        offset += 1;
+        consumed += 1;
+        value |= ((byte & 0x7F) as u64) << shift;
+        shift += 7;
+        if (byte & 0x80) == 0 {
+            break;
+        }
+        if shift >= 35 {
+            return Err(Error::InvalidDataLength);
+        }
     }
-    Ok(Vec::<u8>::read_range(&mut data.as_slice(), ..).expect("decoding failed"))
+    let original_len = value as usize;
+
+    // Now copy original_len bytes starting from current position
+    let mut result = Vec::with_capacity(original_len);
+    let mut to_copy = original_len;
+    while to_copy > 0 {
+        if current_shard >= k {
+            return Err(Error::InvalidDataLength);
+        }
+        if offset >= shards[current_shard].len() {
+            current_shard += 1;
+            offset = 0;
+            continue;
+        }
+        let avail = shards[current_shard].len() - offset;
+        let copy_amount = avail.min(to_copy);
+        result.extend_from_slice(&shards[current_shard][offset..offset + copy_amount]);
+        offset += copy_amount;
+        to_copy -= copy_amount;
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
