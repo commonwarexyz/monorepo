@@ -335,26 +335,13 @@ where
                     });
                 }
 
-                // Install pinned nodes on first successful batch if we don't have them yet
-                if pinned_nodes.is_none() {
-                    let GetOperationsResult {
-                        proof: pinned_proof,
-                        ..
-                    } = config
-                        .resolver
-                        .get_operations(
-                            config.upper_bound_ops + 1,  // target size
-                            config.lower_bound_ops,      // start at pruning boundary
-                            NonZeroU64::new(1).unwrap(), // minimal batch to get the proof
-                        )
-                        .await?;
-
-                    let start_pos = leaf_num_to_pos(config.lower_bound_ops);
-                    let end_pos = leaf_num_to_pos(config.lower_bound_ops); // single operation
-                    let Ok(new_pinned_nodes) =
-                        pinned_proof.extract_pinned_nodes(start_pos, end_pos)
+                // Install pinned nodes on first successful batch.
+                if log_size == config.lower_bound_ops {
+                    let start_pos = leaf_num_to_pos(log_size);
+                    let end_pos = leaf_num_to_pos(log_size + operations_len - 1);
+                    let Ok(new_pinned_nodes) = proof.extract_pinned_nodes(start_pos, end_pos)
                     else {
-                        warn!("Failed to extract pinned nodes for pruning boundary, retrying");
+                        warn!("Failed to extract pinned nodes, retrying");
                         metrics.invalid_batches_received.inc();
                         return Ok(Client::FetchData {
                             config,
@@ -363,7 +350,6 @@ where
                             metrics,
                         });
                     };
-
                     pinned_nodes = Some(new_pinned_nodes);
                 }
 

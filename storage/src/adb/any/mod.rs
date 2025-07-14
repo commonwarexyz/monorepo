@@ -234,6 +234,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 // If there's existing data, we'll sync at the end after setting journal_size correctly
                 mmr.sync(&mut hasher).await?;
             }
+            mmr.sync(&mut hasher).await?;
         }
 
         let mut snapshot = Index::init(
