@@ -44,4 +44,8 @@ fn benchmark_decode(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, benchmark_decode);
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(10);
+    targets = benchmark_decode
+}

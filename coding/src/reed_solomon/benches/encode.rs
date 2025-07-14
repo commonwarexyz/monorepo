@@ -27,4 +27,8 @@ fn benchmark_encode(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, benchmark_encode);
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(10);
+    targets = benchmark_encode
+}
