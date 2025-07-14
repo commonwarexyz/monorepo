@@ -1,4 +1,4 @@
-//! A Reed-Solomon coder that emits [Chunk]s that can be proven against a [bmt].
+//! A SIMD-optimized Reed-Solomon coder that emits [Chunk]s that can be proven against a [bmt].
 //!
 //! # Behavior
 //!
