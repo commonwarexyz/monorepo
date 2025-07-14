@@ -249,161 +249,124 @@ mod tests {
     #[test]
     fn test_basic() {
         let data = b"Hello, Reed-Solomon!";
-        let total_pieces = 7usize;
-        let min_pieces = 4usize;
+        let total_pieces = 7u32;
+        let min_pieces = 4u32;
 
         // Encode the data
-        let (root, proofs) =
-            encode::<Sha256>(total_pieces as u32, min_pieces as u32, data.to_vec()).unwrap();
-        assert_eq!(proofs.len(), total_pieces);
+        let (root, chunks) = encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
+        assert_eq!(chunks.len(), total_pieces as usize);
 
-        // Try to decode with exactly min_pieces
-        let minimal = proofs.into_iter().take(min_pieces).collect();
-        let decoded =
-            decode::<Sha256>(total_pieces as u32, min_pieces as u32, &root, minimal).unwrap();
+        // Try to decode with exactly min_pieces (all original shards)
+        let minimal = chunks.into_iter().take(min_pieces as usize).collect();
+        let decoded = decode::<Sha256>(total_pieces, min_pieces, &root, minimal).unwrap();
         assert_eq!(decoded, data);
     }
 
     #[test]
     fn test_moderate() {
         let data = b"Testing with more pieces than minimum";
-        let total_pieces = 10usize;
-        let min_pieces = 4usize;
+        let total_pieces = 10u32;
+        let min_pieces = 4u32;
 
         // Encode the data
-        let (root, proofs) =
-            encode::<Sha256>(total_pieces as u32, min_pieces as u32, data.to_vec()).unwrap();
+        let (root, chunks) = encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
 
-        // Try to decode with min_pieces
-        let minimal = proofs.into_iter().take(min_pieces).collect();
-        let decoded =
-            decode::<Sha256>(total_pieces as u32, min_pieces as u32, &root, minimal).unwrap();
+        // Try to decode with min_pieces (all original shards)
+        let minimal = chunks.into_iter().take(min_pieces as usize).collect();
+        let decoded = decode::<Sha256>(total_pieces, min_pieces, &root, minimal).unwrap();
         assert_eq!(decoded, data);
     }
 
     #[test]
     fn test_recovery() {
         let data = b"Testing recovery pieces";
-        let total_pieces = 8usize;
-        let min_pieces = 3usize;
+        let total_pieces = 8u32;
+        let min_pieces = 3u32;
 
         // Encode the data
-        let (root, proofs) =
-            encode::<Sha256>(total_pieces as u32, min_pieces as u32, data.to_vec()).unwrap();
+        let (root, chunks) = encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
 
         // Use a mix of original and recovery pieces
         let pieces: Vec<_> = vec![
-            proofs[0].clone(), // original
-            proofs[4].clone(), // recovery
-            proofs[6].clone(), // recovery
+            chunks[0].clone(), // original
+            chunks[4].clone(), // recovery
+            chunks[6].clone(), // recovery
         ];
 
         // Try to decode with a mix of original and recovery pieces
-        let decoded =
-            decode::<Sha256>(total_pieces as u32, min_pieces as u32, &root, pieces).unwrap();
+        let decoded = decode::<Sha256>(total_pieces, min_pieces, &root, pieces).unwrap();
         assert_eq!(decoded, data);
     }
 
     #[test]
     fn test_not_enough_pieces() {
         let data = b"Test insufficient pieces";
-        let total_pieces = 6;
-        let min_pieces = 4;
+        let total_pieces = 6u32;
+        let min_pieces = 4u32;
 
-        let (root, proofs) = encode(data, total_pieces, min_pieces).unwrap();
+        let (root, chunks) = encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
 
         // Try with fewer than min_pieces
-        let pieces: Vec<_> = (0..2).map(|i| (i, proofs[i].clone())).collect();
+        let pieces: Vec<_> = chunks.into_iter().take(2).collect();
 
-        let extended_len = 8 + data.len();
-        let mut shard_size = extended_len.div_ceil(min_pieces);
-        if shard_size % 2 != 0 {
-            shard_size += 1;
-        }
-
-        let result = decode(&root, &pieces, total_pieces, min_pieces, shard_size);
-        assert!(matches!(result, Err(CodingError::NotEnoughPieces)));
+        let result = decode::<Sha256>(total_pieces, min_pieces, &root, pieces);
+        assert!(matches!(result, Err(Error::NotEnoughPieces)));
     }
 
     #[test]
     fn test_duplicate_index() {
         let data = b"Test duplicate detection";
-        let total_pieces = 5;
-        let min_pieces = 3;
+        let total_pieces = 5u32;
+        let min_pieces = 3u32;
 
-        let (root, proofs) = encode(data, total_pieces, min_pieces).unwrap();
+        let (root, chunks) = encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
 
-        // Include duplicate index
-        let pieces: Vec<_> = vec![
-            (0, proofs[0].clone()),
-            (0, proofs[0].clone()), // duplicate
-            (1, proofs[1].clone()),
-        ];
+        // Include duplicate index by cloning the first chunk
+        let pieces = vec![chunks[0].clone(), chunks[0].clone(), chunks[1].clone()];
 
-        let extended_len = 8 + data.len();
-        let mut shard_size = extended_len.div_ceil(min_pieces);
-        if shard_size % 2 != 0 {
-            shard_size += 1;
-        }
-
-        let result = decode(&root, &pieces, total_pieces, min_pieces, shard_size);
-        assert!(matches!(result, Err(CodingError::DuplicateIndex)));
+        let result = decode::<Sha256>(total_pieces, min_pieces, &root, pieces);
+        assert!(matches!(result, Err(Error::DuplicateIndex)));
     }
 
     #[test]
     fn test_invalid_parameters() {
         let data = b"Test parameter validation";
 
-        // total_pieces <= min_pieces
-        assert!(matches!(
-            encode(data, 3, 3),
-            Err(CodingError::InvalidParameters)
-        ));
+        // total_pieces <= min_pieces should panic due to assert
+        // We'll test this with total_pieces == min_pieces
+        let result = std::panic::catch_unwind(|| encode::<Sha256>(3, 3, data.to_vec()));
+        assert!(result.is_err());
 
-        // min_pieces = 0
-        assert!(matches!(
-            encode(data, 5, 0),
-            Err(CodingError::InvalidParameters)
-        ));
+        // min_pieces = 0 should panic due to assert
+        let result = std::panic::catch_unwind(|| encode::<Sha256>(5, 0, data.to_vec()));
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_empty_data() {
         let data = b"";
-        let total_pieces = 4;
-        let min_pieces = 2;
+        let total_pieces = 4u32;
+        let min_pieces = 2u32;
 
-        let (root, proofs) = encode(data, total_pieces, min_pieces).unwrap();
+        let (root, chunks) = encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
 
-        let pieces: Vec<_> = (0..min_pieces).map(|i| (i, proofs[i].clone())).collect();
+        let pieces: Vec<_> = chunks.into_iter().take(min_pieces as usize).collect();
 
-        let extended_len = 8usize; // Just the length prefix
-        let mut shard_size = extended_len.div_ceil(min_pieces);
-        if shard_size % 2 != 0 {
-            shard_size += 1;
-        }
-
-        let decoded = decode(&root, &pieces, total_pieces, min_pieces, shard_size).unwrap();
+        let decoded = decode::<Sha256>(total_pieces, min_pieces, &root, pieces).unwrap();
         assert_eq!(decoded, data);
     }
 
     #[test]
     fn test_large_data() {
         let data = vec![42u8; 1000]; // 1KB of data
-        let total_pieces = 7;
-        let min_pieces = 4;
+        let total_pieces = 7u32;
+        let min_pieces = 4u32;
 
-        let (root, proofs) = encode(&data, total_pieces, min_pieces).unwrap();
+        let (root, chunks) = encode::<Sha256>(total_pieces, min_pieces, data.clone()).unwrap();
 
-        let pieces: Vec<_> = (0..min_pieces).map(|i| (i, proofs[i].clone())).collect();
+        let pieces: Vec<_> = chunks.into_iter().take(min_pieces as usize).collect();
 
-        let extended_len = 8 + data.len();
-        let mut shard_size = extended_len.div_ceil(min_pieces);
-        if shard_size % 2 != 0 {
-            shard_size += 1;
-        }
-
-        let decoded = decode(&root, &pieces, total_pieces, min_pieces, shard_size).unwrap();
+        let decoded = decode::<Sha256>(total_pieces, min_pieces, &root, pieces).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -414,11 +377,12 @@ mod tests {
         // As stated: "if the decoding function outputs ⊥, we can be sure that τ was maliciously constructed"
 
         let data = b"Original data that should be protected";
-        let total_pieces = 7;
-        let min_pieces = 4;
+        let total_pieces = 7u32;
+        let min_pieces = 4u32;
 
-        // Encode data correctly to get valid proofs
-        let (_correct_root, proofs) = encode(data, total_pieces, min_pieces).unwrap();
+        // Encode data correctly to get valid chunks
+        let (_correct_root, chunks) =
+            encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
 
         // Create a malicious/fake root (simulating a malicious encoder)
         let mut hasher = Sha256::new();
@@ -426,25 +390,13 @@ mod tests {
         let malicious_root = hasher.finalize();
 
         // Collect valid pieces (these are legitimate fragments)
-        let pieces: Vec<_> = (0..min_pieces).map(|i| (i, proofs[i].clone())).collect();
-
-        let extended_len = 8 + data.len();
-        let mut shard_size = extended_len.div_ceil(min_pieces);
-        if shard_size % 2 != 0 {
-            shard_size += 1;
-        }
+        let pieces: Vec<_> = chunks.into_iter().take(min_pieces as usize).collect();
 
         // Attempt to decode with malicious root - this should fail
-        let result = decode(
-            &malicious_root,
-            &pieces,
-            total_pieces,
-            min_pieces,
-            shard_size,
-        );
+        let result = decode::<Sha256>(total_pieces, min_pieces, &malicious_root, pieces);
 
         // The decoding function outputs ⊥ (error), proving the root was maliciously constructed
-        assert!(matches!(result, Err(CodingError::InvalidProof)));
+        assert!(matches!(result, Err(Error::InvalidProof)));
 
         // This demonstrates that under collision resistance, any n-2t certified fragments
         // for a maliciously constructed tag τ will be detected as invalid
@@ -456,38 +408,21 @@ mod tests {
         // check during Reed-Solomon verification will detect tampering
 
         let data = b"Data integrity must be maintained";
-        let total_pieces = 6;
-        let min_pieces = 3;
+        let total_pieces = 6u32;
+        let min_pieces = 3u32;
 
-        let (root, mut proofs) = encode(data, total_pieces, min_pieces).unwrap();
+        let (root, mut chunks) = encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
 
-        // Tamper with one of the proofs by modifying the shard data
-        // (while keeping the Merkle proof intact - simulating sophisticated attack)
-        let mut tampered_proof_data: (Vec<u8>, Vec<Digest>) = <(Vec<u8>, Vec<Digest>)>::decode_cfg(
-            &proofs[1][..],
-            &(((..).into(), ()), ((..).into(), ())),
-        )
-        .unwrap();
-
-        // Modify the shard data
-        if !tampered_proof_data.0.is_empty() {
-            tampered_proof_data.0[0] ^= 0xFF; // Flip bits in first byte
+        // Tamper with one of the chunks by modifying the shard data
+        if !chunks[1].shard.is_empty() {
+            chunks[1].shard[0] ^= 0xFF; // Flip bits in first byte
         }
 
-        // Re-encode the tampered proof
-        proofs[1] = tampered_proof_data.encode().to_vec();
-
-        let pieces: Vec<_> = (0..min_pieces).map(|i| (i, proofs[i].clone())).collect();
-
-        let extended_len = 8 + data.len();
-        let mut shard_size = extended_len.div_ceil(min_pieces);
-        if shard_size % 2 != 0 {
-            shard_size += 1;
-        }
+        let pieces: Vec<_> = chunks.into_iter().take(min_pieces as usize).collect();
 
         // The tampered piece will fail at Merkle proof verification first
-        let result = decode(&root, &pieces, total_pieces, min_pieces, shard_size);
-        assert!(matches!(result, Err(CodingError::InvalidProof)));
+        let result = decode::<Sha256>(total_pieces, min_pieces, &root, pieces);
+        assert!(matches!(result, Err(Error::InvalidProof)));
 
         // This proves that any tampering with fragment data is immediately detected
         // by Merkle proof validation, providing strong integrity guarantees
@@ -496,32 +431,32 @@ mod tests {
     #[test]
     fn test_malicious_encoder_inconsistent_shards() {
         let data = b"Test data for malicious encoding";
-        let total_pieces = 5;
-        let min_pieces = 3;
+        let total_pieces = 5u32;
+        let min_pieces = 3u32;
 
-        // Compute shard_size
-        let mut extended_data = Vec::new();
-        extended_data.extend_from_slice(&(data.len() as u64).to_be_bytes());
-        extended_data.extend_from_slice(data);
+        // First encode properly to get the correct structure
+        let (_, chunks) = encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
 
-        let mut shard_size = extended_data.len().div_ceil(min_pieces);
-        if shard_size % 2 != 0 {
-            shard_size += 1;
-        }
+        // Get the shard size from the first chunk
+        let shard_size = chunks[0].shard.len();
 
-        let padded_len = shard_size * min_pieces;
+        // Compute original data encoding
+        let mut extended_data = data.to_vec().encode().to_vec();
+
+        let padded_len = shard_size * min_pieces as usize;
         extended_data.resize(padded_len, 0);
 
         // Create original shards
-        let mut original_shards = Vec::with_capacity(min_pieces);
-        for i in 0..min_pieces {
+        let mut original_shards = Vec::with_capacity(min_pieces as usize);
+        for i in 0..min_pieces as usize {
             let start = i * shard_size;
             original_shards.push(extended_data[start..start + shard_size].to_vec());
         }
 
         // RS encoding
         let m = total_pieces - min_pieces;
-        let mut encoder = ReedSolomonEncoder::new(min_pieces, m, shard_size).unwrap();
+        let mut encoder =
+            ReedSolomonEncoder::new(min_pieces as usize, m as usize, shard_size).unwrap();
         for shard in &original_shards {
             encoder.add_original_shard(shard).unwrap();
         }
@@ -541,7 +476,7 @@ mod tests {
         malicious_shards.extend(recovery_shards);
 
         // Build malicious tree
-        let mut builder = Builder::<Sha256>::new(total_pieces);
+        let mut builder = Builder::<Sha256>::new(total_pieces as usize);
         for shard in &malicious_shards {
             let mut hasher = Sha256::new();
             hasher.update(shard);
@@ -550,25 +485,19 @@ mod tests {
         let malicious_tree = builder.build();
         let malicious_root = malicious_tree.root();
 
-        // Generate proofs for min_pieces pieces, including the tampered recovery
+        // Generate chunks for min_pieces pieces, including the tampered recovery
         let selected_indices = vec![0, 1, 3]; // originals 0,1 and recovery 0 (index 3)
         let mut pieces = Vec::new();
         for &i in &selected_indices {
             let merkle_proof = malicious_tree.proof(i as u32).unwrap();
             let shard = malicious_shards[i].clone();
-            let proof_data = (shard, merkle_proof.siblings);
-            let encoded = proof_data.encode();
-            pieces.push((i, encoded.to_vec()));
+            let chunk = Chunk::new(i as u32, shard, merkle_proof);
+            pieces.push(chunk);
         }
 
-        // Attempt decode
-        let result = decode(
-            &malicious_root,
-            &pieces,
-            total_pieces,
-            min_pieces,
-            shard_size,
-        );
-        assert!(matches!(result, Err(CodingError::Inconsistent)));
+        // Attempt decode - should fail due to inconsistency
+        let result = decode::<Sha256>(total_pieces, min_pieces, &malicious_root, pieces);
+        // The tampered recovery shard should cause the consistency check to fail
+        assert!(matches!(result, Err(Error::Inconsistent)));
     }
 }
