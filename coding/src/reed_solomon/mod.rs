@@ -386,17 +386,12 @@ mod tests {
 
     #[test]
     fn test_malicious_root_detection() {
-        // This test demonstrates the security property that under collision resistance
-        // of the hash function, maliciously constructed roots will be detected.
-        // As stated: "if the decoding function outputs ⊥, we can be sure that τ was maliciously constructed"
-
         let data = b"Original data that should be protected";
-        let total_pieces = 7u32;
-        let min_pieces = 4u32;
+        let total = 7u32;
+        let min = 4u32;
 
         // Encode data correctly to get valid chunks
-        let (_correct_root, chunks) =
-            encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
+        let (_correct_root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
 
         // Create a malicious/fake root (simulating a malicious encoder)
         let mut hasher = Sha256::new();
@@ -404,73 +399,57 @@ mod tests {
         let malicious_root = hasher.finalize();
 
         // Collect valid pieces (these are legitimate fragments)
-        let pieces: Vec<_> = chunks.into_iter().take(min_pieces as usize).collect();
+        let minimal = chunks.into_iter().take(min as usize).collect();
 
-        // Attempt to decode with malicious root - this should fail
-        let result = decode::<Sha256>(total_pieces, min_pieces, &malicious_root, pieces);
-
-        // The decoding function outputs ⊥ (error), proving the root was maliciously constructed
+        // Attempt to decode with malicious root
+        let result = decode::<Sha256>(total, min, &malicious_root, minimal);
         assert!(matches!(result, Err(Error::InvalidProof)));
-
-        // This demonstrates that under collision resistance, any n-2t certified fragments
-        // for a maliciously constructed tag τ will be detected as invalid
     }
 
     #[test]
-    fn test_consistency_verification_detects_tampering() {
-        // This test shows that even if initial Merkle proofs pass, the consistency
-        // check during Reed-Solomon verification will detect tampering
-
+    fn test_manipulated_chunk_detection() {
         let data = b"Data integrity must be maintained";
-        let total_pieces = 6u32;
-        let min_pieces = 3u32;
+        let total = 6u32;
+        let min = 3u32;
 
-        let (root, mut chunks) = encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
+        // Encode data
+        let (root, mut chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
 
         // Tamper with one of the chunks by modifying the shard data
         if !chunks[1].shard.is_empty() {
             chunks[1].shard[0] ^= 0xFF; // Flip bits in first byte
         }
 
-        let pieces: Vec<_> = chunks.into_iter().take(min_pieces as usize).collect();
-
-        // The tampered piece will fail at Merkle proof verification first
-        let result = decode::<Sha256>(total_pieces, min_pieces, &root, pieces);
+        // Try to decode with the tampered chunk
+        let result = decode::<Sha256>(total, min, &root, chunks);
         assert!(matches!(result, Err(Error::InvalidProof)));
-
-        // This proves that any tampering with fragment data is immediately detected
-        // by Merkle proof validation, providing strong integrity guarantees
     }
 
     #[test]
-    fn test_malicious_encoder_inconsistent_shards() {
+    fn test_inconsistent_shards() {
         let data = b"Test data for malicious encoding";
-        let total_pieces = 5u32;
-        let min_pieces = 3u32;
+        let total = 5u32;
+        let min = 3u32;
 
-        // First encode properly to get the correct structure
-        let (_, chunks) = encode::<Sha256>(total_pieces, min_pieces, data.to_vec()).unwrap();
-
-        // Get the shard size from the first chunk
-        let shard_size = chunks[0].shard.len();
+        // Encode data
+        let (_, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
 
         // Compute original data encoding
+        let shard_size = chunks[0].shard.len();
         let mut extended_data = data.to_vec().encode().to_vec();
-
-        let padded_len = shard_size * min_pieces as usize;
+        let padded_len = shard_size * min as usize;
         extended_data.resize(padded_len, 0);
 
         // Create original shards
-        let mut original_shards = Vec::with_capacity(min_pieces as usize);
-        for i in 0..min_pieces as usize {
+        let mut original_shards = Vec::with_capacity(min as usize);
+        for i in 0..min as usize {
             let start = i * shard_size;
             original_shards.push(extended_data[start..start + shard_size].to_vec());
         }
 
-        // RS encoding
-        let m = total_pieces - min_pieces;
-        let mut encoder =
-            ReedSolomonEncoder::new(min_pieces as usize, m as usize, shard_size).unwrap();
+        // Re-encode the data
+        let m = total - min;
+        let mut encoder = ReedSolomonEncoder::new(min as usize, m as usize, shard_size).unwrap();
         for shard in &original_shards {
             encoder.add_original_shard(shard).unwrap();
         }
@@ -490,7 +469,7 @@ mod tests {
         malicious_shards.extend(recovery_shards);
 
         // Build malicious tree
-        let mut builder = Builder::<Sha256>::new(total_pieces as usize);
+        let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &malicious_shards {
             let mut hasher = Sha256::new();
             hasher.update(shard);
@@ -499,7 +478,7 @@ mod tests {
         let malicious_tree = builder.build();
         let malicious_root = malicious_tree.root();
 
-        // Generate chunks for min_pieces pieces, including the tampered recovery
+        // Generate chunks for min pieces, including the tampered recovery
         let selected_indices = vec![0, 1, 3]; // originals 0,1 and recovery 0 (index 3)
         let mut pieces = Vec::new();
         for &i in &selected_indices {
@@ -509,9 +488,8 @@ mod tests {
             pieces.push(chunk);
         }
 
-        // Attempt decode - should fail due to inconsistency
-        let result = decode::<Sha256>(total_pieces, min_pieces, &malicious_root, pieces);
-        // The tampered recovery shard should cause the consistency check to fail
+        // Fail to decode
+        let result = decode::<Sha256>(total, min, &malicious_root, pieces);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 }
