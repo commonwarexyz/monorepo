@@ -1049,6 +1049,7 @@ dependencies = [
  "criterion",
  "rand",
  "reed-solomon-simd",
+ "thiserror 2.0.12",
 ]
 
 [[package]]
