@@ -1800,18 +1800,17 @@ mod tests {
             };
 
             // Create initial journal with 30 operations (0-29)
-            let mut initial_journal =
-                Journal::<Context, Digest>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
+            let mut journal = Journal::<Context, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to create initial journal");
 
             for i in 0..30 {
-                initial_journal.append(test_digest(i)).await.unwrap();
+                journal.append(test_digest(i)).await.unwrap();
             }
-            initial_journal.sync().await.unwrap();
-            let initial_size = initial_journal.size().await.unwrap();
+            journal.sync().await.unwrap();
+            let initial_size = journal.size().await.unwrap();
             assert_eq!(initial_size, 30);
-            initial_journal.close().await.unwrap();
+            journal.close().await.unwrap();
 
             // Initialize with sync boundaries that require both pruning and rewinding
             // Lower bound: 8 (prune operations 0-7)
@@ -1819,7 +1818,7 @@ mod tests {
             let lower_bound = 8;
             let upper_bound = 22;
             let expected_final_size = upper_bound + 1; // upper_bound is inclusive
-            let sync_journal = Journal::<Context, Digest>::init_sync(
+            let mut journal = Journal::<Context, Digest>::init_sync(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -1829,43 +1828,42 @@ mod tests {
             .expect("Failed to initialize journal with rewind");
 
             // Verify the journal has been rewound to the upper bound + 1
-            assert_eq!(sync_journal.size().await.unwrap(), expected_final_size);
+            assert_eq!(journal.size().await.unwrap(), expected_final_size);
 
             // Verify the journal has been pruned to the lower bound
             assert_eq!(
-                sync_journal.oldest_retained_pos().await.unwrap(),
+                journal.oldest_retained_pos().await.unwrap(),
                 Some(lower_bound)
             );
 
             // Verify operations before the lower bound are pruned
             for i in 0..lower_bound {
-                let result = sync_journal.read(i).await;
+                let result = journal.read(i).await;
                 assert!(matches!(result, Err(Error::ItemPruned(_))),);
             }
 
             // Verify operations from lower bound to upper bound (inclusive) are readable
             for i in lower_bound..expected_final_size {
-                let result = sync_journal.read(i).await;
+                let result = journal.read(i).await;
                 assert!(result.is_ok(),);
                 assert_eq!(result.unwrap(), test_digest(i),);
             }
 
             // Verify operations beyond the upper bound are not readable (were rewound)
             for i in expected_final_size..initial_size {
-                let result = sync_journal.read(i).await;
+                let result = journal.read(i).await;
                 assert!(result.is_err(),);
             }
 
             // Verify that new operations can be appended from the sync position
-            let mut sync_journal = sync_journal;
-            let append_pos = sync_journal.append(test_digest(777)).await.unwrap();
+            let append_pos = journal.append(test_digest(777)).await.unwrap();
             assert_eq!(append_pos, expected_final_size);
 
             // Verify the appended operation is readable
-            let read_value = sync_journal.read(append_pos).await.unwrap();
+            let read_value = journal.read(append_pos).await.unwrap();
             assert_eq!(read_value, test_digest(777));
 
-            sync_journal.destroy().await.unwrap();
+            journal.destroy().await.unwrap();
         });
     }
 }
