@@ -388,8 +388,8 @@ mod tests {
     #[test]
     fn test_empty_data() {
         let data = b"";
-        let total = 4u32;
-        let min = 2u32;
+        let total = 100u32;
+        let min = 30u32;
 
         // Encode data
         let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
