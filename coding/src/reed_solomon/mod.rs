@@ -1,7 +1,7 @@
 //! Reed-Solomon coding.
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Hasher;
 use commonware_storage::bmt::{self, Builder};
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
@@ -94,38 +94,32 @@ pub fn encode<H: Hasher>(
     let k = min as usize;
     let m = n - k;
 
-    // Compute prefix length
-    let original_len = data.len();
-    let prefix_len = (original_len).encode_size();
-
     // Compute shard_len (must be even)
-    let total_data_len = prefix_len + original_len;
-    let mut shard_len = total_data_len.div_ceil(k);
+    let prefixed_len = u64::SIZE + data.len();
+    let mut shard_len = prefixed_len.div_ceil(k);
     if shard_len % 2 != 0 {
         shard_len += 1;
     }
 
     // Pad data
     let padded_len = shard_len * k;
-
-    // Build padded data
     let mut padded = Vec::with_capacity(padded_len);
-    (original_len).write(&mut padded);
+    (data.len() as u64).write(&mut padded);
     padded.extend_from_slice(&data);
     padded.resize(padded_len, 0);
 
-    // Create original shards without copying
-    let mut original_shards = Vec::with_capacity(k);
+    // Create shards
+    let mut shards = Vec::with_capacity(n);
     let mut current = padded;
-    for _ in 0..k {
+    for _ in 0..n {
         let rest = current.split_off(shard_len.min(current.len()));
-        original_shards.push(current);
+        shards.push(current);
         current = rest;
     }
 
     // Create encoder
     let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::Rs)?;
-    for shard in &original_shards {
+    for shard in &shards {
         encoder.add_original_shard(shard).map_err(Error::Rs)?;
     }
 
@@ -135,7 +129,6 @@ pub fn encode<H: Hasher>(
         .recovery_iter()
         .map(|shard| shard.to_vec())
         .collect();
-    let mut shards = original_shards;
     shards.extend(recovery_shards);
 
     // Build Merkle tree
