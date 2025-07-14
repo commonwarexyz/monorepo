@@ -40,10 +40,14 @@
 //! assert!(proof.verify(&mut hasher, &digests[1], 1, &root).is_ok());
 //! ```
 
-use bytes::Buf;
-use commonware_codec::{FixedSize, ReadExt};
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Read, ReadRangeExt, Write};
 use commonware_cryptography::Hasher;
 use thiserror::Error;
+
+/// There should never be more than 255 siblings in a proof (would mean the Binary Merkle Tree
+/// has more than 2^255 leaves).
+const MAX_SIBLINGS: usize = u8::MAX as usize;
 
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
 #[derive(Error, Debug)]
@@ -247,53 +251,33 @@ impl<H: Hasher> Proof<H> {
             Err(Error::InvalidProof(computed.to_string(), root.to_string()))
         }
     }
+}
 
-    /// Serializes the proof as the concatenation of each hash.
-    pub fn serialize(&self) -> Vec<u8> {
-        // There should never be more than 255 siblings in a proof (would mean the Binary Merkle Tree
-        // has more than 2^255 leaves).
-        assert!(
-            self.siblings.len() <= u8::MAX as usize,
-            "too many siblings in proof"
-        );
-
-        // Serialize the proof as the concatenation of each hash.
-        let bytes_len = self.siblings.len() * H::Digest::SIZE;
-        let mut bytes = Vec::with_capacity(bytes_len);
-        for hash in &self.siblings {
-            bytes.extend_from_slice(hash.as_ref());
-        }
-        bytes
+impl<H: Hasher> Write for Proof<H> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.siblings.write(writer);
     }
+}
 
-    /// Deserializes a proof from its canonical serialized representation.
-    pub fn deserialize(mut buf: &[u8]) -> Result<Self, Error> {
-        // It is ok to have an empty proof (just means the provided leaf is the root).
+impl<H: Hasher> Read for Proof<H> {
+    type Cfg = ();
 
-        // If the remaining buffer is not a multiple of the hash size, it's invalid.
-        if buf.remaining() % H::Digest::SIZE != 0 {
-            return Err(Error::UnalignedProof);
-        }
-
-        // If the number of siblings is too large, it's invalid.
-        let num_siblings = buf.len() / H::Digest::SIZE;
-        if num_siblings > u8::MAX as usize {
-            return Err(Error::TooManySiblings(num_siblings));
-        }
-
-        // Deserialize the siblings
-        let mut siblings = Vec::with_capacity(num_siblings);
-        for _ in 0..num_siblings {
-            let hash = H::Digest::read(&mut buf).map_err(|_| Error::InvalidDigest)?;
-            siblings.push(hash);
-        }
+    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let siblings = Vec::<H::Digest>::read_range(reader, ..=MAX_SIBLINGS)?;
         Ok(Self { siblings })
+    }
+}
+
+impl<H: Hasher> EncodeSize for Proof<H> {
+    fn encode_size(&self) -> usize {
+        self.siblings.encode_size()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         hash,
         sha256::{Digest, Sha256},
@@ -323,8 +307,8 @@ mod tests {
             );
 
             // Serialize and deserialize the proof
-            let serialized = proof.serialize();
-            let deserialized = Proof::<Sha256>::deserialize(&serialized).unwrap();
+            let mut serialized = proof.encode();
+            let deserialized = Proof::<Sha256>::decode(&mut serialized).unwrap();
             assert!(
                 deserialized
                     .verify(&mut hasher, leaf, i as u32, &root)
@@ -725,11 +709,11 @@ mod tests {
 
         // Generate a valid proof for leaf at index 1.
         let proof = tree.proof(1).unwrap();
-        let mut serialized = proof.serialize();
+        let mut serialized = proof.encode();
 
         // Truncate one byte.
-        serialized.pop();
-        assert!(Proof::<Sha256>::deserialize(&serialized).is_err());
+        serialized.truncate(serialized.len() - 1);
+        assert!(Proof::<Sha256>::decode(&mut serialized).is_err());
     }
 
     #[test]
@@ -747,11 +731,11 @@ mod tests {
 
         // Generate a valid proof for leaf at index 1.
         let proof = tree.proof(1).unwrap();
-        let mut serialized = proof.serialize();
+        let mut serialized = proof.encode();
 
         // Append an extra byte.
-        serialized.push(0u8);
-        assert!(Proof::<Sha256>::deserialize(&serialized).is_err());
+        serialized.extend_from_slice(&[0u8]);
+        assert!(Proof::<Sha256>::decode(&mut serialized).is_err());
     }
 
     #[test]

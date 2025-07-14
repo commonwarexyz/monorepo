@@ -8,6 +8,7 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
+commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-storage = { workspace = true }
