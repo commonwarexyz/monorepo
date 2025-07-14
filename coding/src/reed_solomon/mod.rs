@@ -8,6 +8,7 @@ use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder
 use std::collections::HashSet;
 use thiserror::Error;
 
+/// Errors that can occur when interacting with the Reed-Solomon coder.
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("reed-solomon error: {0}")]
@@ -24,25 +25,30 @@ pub enum Error {
     InvalidDataLength(usize),
 }
 
-/// A chunk of data that has been encoded using Reed-Solomon and a Binary Merkle Tree.
+/// Data that has been encoded using a Reed-Solomon coder and inserted into a [bmt].
 #[derive(Clone)]
 pub struct Chunk<H: Hasher> {
-    pub index: u16,
+    /// The shard of encoded data.
     pub shard: Vec<u8>,
+
+    /// The index of [Chunk] in the original data.
+    pub index: u16,
+
+    /// The proof of the shard in the [bmt] at the given index.
     pub proof: bmt::Proof<H>,
 }
 
 impl<H: Hasher> Chunk<H> {
-    /// Creates a new chunk from the given shard and proof.
-    pub fn new(index: u16, shard: Vec<u8>, proof: bmt::Proof<H>) -> Self {
+    /// Create a new [Chunk] from the given shard, index, and proof.
+    pub fn new(shard: Vec<u8>, index: u16, proof: bmt::Proof<H>) -> Self {
         Self {
-            index,
             shard,
+            index,
             proof,
         }
     }
 
-    /// Verifies the chunk against the given root and index.
+    /// Verify a [Chunk] against the given root.
     pub fn verify(&self, root: &H::Digest) -> bool {
         // Compute shard digest
         let mut hasher = H::new();
@@ -58,8 +64,8 @@ impl<H: Hasher> Chunk<H> {
 
 impl<H: Hasher> Write for Chunk<H> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.index.write(writer);
         self.shard.write(writer);
+        self.index.write(writer);
         self.proof.write(writer);
     }
 }
@@ -69,12 +75,12 @@ impl<H: Hasher> Read for Chunk<H> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let index = u16::read(reader)?;
         let shard = Vec::<u8>::read_range(reader, ..=*cfg)?;
+        let index = u16::read(reader)?;
         let proof = bmt::Proof::<H>::read(reader)?;
         Ok(Self {
-            index,
             shard,
+            index,
             proof,
         })
     }
@@ -82,7 +88,7 @@ impl<H: Hasher> Read for Chunk<H> {
 
 impl<H: Hasher> EncodeSize for Chunk<H> {
     fn encode_size(&self) -> usize {
-        self.index.encode_size() + self.shard.encode_size() + self.proof.encode_size()
+        self.shard.encode_size() + self.index.encode_size() + self.proof.encode_size()
     }
 }
 
@@ -176,7 +182,7 @@ pub fn encode<H: Hasher>(
     let mut chunks = Vec::with_capacity(n);
     for (i, shard) in shards.into_iter().enumerate() {
         let proof = tree.proof(i as u32).map_err(|_| Error::InvalidProof)?;
-        chunks.push(Chunk::new(i as u16, shard, proof));
+        chunks.push(Chunk::new(shard, i as u16, proof));
     }
 
     Ok((root, chunks))
@@ -508,7 +514,7 @@ mod tests {
         for &i in &selected_indices {
             let merkle_proof = malicious_tree.proof(i as u32).unwrap();
             let shard = malicious_shards[i].clone();
-            let chunk = Chunk::new(i as u16, shard, merkle_proof);
+            let chunk = Chunk::new(shard, i as u16, merkle_proof);
             pieces.push(chunk);
         }
 
