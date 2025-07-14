@@ -80,6 +80,38 @@
 //!    generated. This new root MUST match the original [bmt] root. This prevents attacks where
 //!    an adversary provides a valid set of chunks that decode to different data.
 //! 4. If the roots match, the original data is extracted from the reconstructed data shards.
+//!
+//! # Example
+//!
+//! ```rust
+//! use commonware_coding::reed_solomon::{encode, decode};
+//! use commonware_cryptography::Sha256;
+//!
+//! // Some data to encode.
+//! let data = b"Hello, world! This is a test of Reed-Solomon encoding.";
+//!
+//! // Configuration: 7 total chunks, with a minimum of 4 required for decoding.
+//! let total = 7u16;
+//! let min = 4u16;
+//!
+//! // 1. Encode the data.
+//! let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
+//!
+//! // We now have 7 chunks. We only need 4 to decode. Let's pick a few,
+//! // including a mix of original and recovery shards.
+//! let some_chunks = vec![
+//!     chunks[0].clone(), // original
+//!     chunks[2].clone(), // original
+//!     chunks[5].clone(), // recovery
+//!     chunks[6].clone(), // recovery
+//! ];
+//!
+//! // 2. Decode the data from the subset of chunks.
+//! let decoded_data = decode::<Sha256>(total, min, &root, some_chunks).unwrap();
+//!
+//! // 3. Verify that the decoded data matches the original data.
+//! assert_eq!(decoded_data, data);
+//! ```
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
