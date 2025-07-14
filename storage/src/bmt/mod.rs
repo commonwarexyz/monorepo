@@ -45,8 +45,8 @@ use commonware_codec::{EncodeSize, Read, ReadRangeExt, Write};
 use commonware_cryptography::Hasher;
 use thiserror::Error;
 
-// There should never be more than 255 siblings in a proof (would mean the Binary Merkle Tree
-// has more than 2^255 leaves).
+/// There should never be more than 255 siblings in a proof (would mean the Binary Merkle Tree
+/// has more than 2^255 leaves).
 const MAX_SIBLINGS: usize = u8::MAX as usize;
 
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
