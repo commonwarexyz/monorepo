@@ -235,7 +235,8 @@ pub fn decode<H: Hasher>(
     let decoding = decoder.decode().map_err(Error::Rs)?;
 
     // Reconstruct all original shards
-    let mut shards = vec![Vec::new(); n];
+    let mut shards = Vec::with_capacity(n);
+    shards.resize(k, Vec::new());
     for (idx, shard) in provided_originals {
         shards[idx] = shard;
     }
