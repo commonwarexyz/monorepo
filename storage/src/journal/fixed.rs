@@ -246,10 +246,19 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
     /// Initialize a [Journal] for synchronization, reusing existing data if possible.
     ///
-    /// **Returns**: A [Journal] ready for sync operations based on existing data:
-    /// - If no existing data or existing_size < lower_bound → fresh journal starting at lower_bound
-    /// - If lower_bound ≤ existing_size ≤ upper_bound → existing journal pruned to lower_bound
-    /// - If existing_size > upper_bound → existing journal pruned to lower_bound, rewound to upper_bound+1.
+    /// Handles three sync scenarios based on existing journal data vs. the given sync boundaries.
+    ///
+    /// 1. **Fresh Start**: existing_size ≤ lower_bound
+    ///    - Deletes existing data (if any)
+    ///    - Creates new [Journal] pruned to `lower_bound` and size `lower_bound`
+    ///
+    /// 2. **Prune and Reuse**: lower_bound < existing_size ≤ upper_bound + 1
+    ///    - Prunes the journal to `lower_bound`
+    ///    - Reuses existing journal data overlapping with the sync range
+    ///
+    /// 3. **Prune and Rewind**: existing_size > upper_bound + 1
+    ///    - Prunes the journal to `lower_bound`
+    ///    - Rewinds the journal to size `upper_bound + 1`
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config,
@@ -287,15 +296,29 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         }
     }
 
-    /// Initialize a fresh journal at the specified position.
+    /// Initialize a new [Journal] instance in an pruned state at a given size.
+    ///
+    /// # Arguments
+    /// * `context` - The storage context
+    /// * `cfg` - Configuration for the journal
+    /// * `size` - The number of operations that have been pruned.
+    ///
+    /// # Behavior
+    /// - Creates only the tail blob at the index that would contain the operation at `size`
+    /// - Sets the tail blob size to represent the "leftover" operations within that blob.
+    /// - The [Journal] is not `sync`ed before being returned.
     ///
     /// # Invariants
-    ///
     /// - The directory given by `cfg.partition` is empty.
     ///
-    /// **Returns**: A journal that appears to have `size` items without actual data.
-    /// Operations 0 to size-1 are considered pruned.
-    /// Creates the appropriate blob structure with correct size but no real content.
+    /// For example, if `items_per_blob = 10` and `size = 25`:
+    /// - Tail blob index would be 25 / 10 = 2 (third blob, 0-indexed)
+    /// - Tail blob size would be (25 % 10) * CHUNK_SIZE = 5 * CHUNK_SIZE
+    /// - Tail blob is filled with dummy data up to its size -- this shouldn't be read.
+    /// - No blobs are created for indices 0 and 1 (the pruned range)
+    /// - Reading from positions 0-19 will return `ItemPruned` since those blobs don't exist
+    /// - This represents a journal that had operations 0-24, with operations 0-19 pruned,
+    ///   leaving operations 20-24 in tail blob 2.
     pub(crate) async fn init_empty_at_size(
         context: E,
         cfg: Config,
