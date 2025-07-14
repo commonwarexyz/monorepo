@@ -242,9 +242,8 @@ pub fn decode<H: Hasher>(
 
 #[cfg(test)]
 mod tests {
-    use commonware_cryptography::Sha256;
-
     use super::*;
+    use commonware_cryptography::Sha256;
 
     #[test]
     fn test_basic() {
