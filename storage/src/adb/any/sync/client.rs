@@ -336,7 +336,7 @@ where
                 }
 
                 // Install pinned nodes on first successful batch.
-                if log_size == config.lower_bound_ops {
+                if pinned_nodes.is_none() {
                     let start_pos = leaf_num_to_pos(log_size);
                     let end_pos = leaf_num_to_pos(log_size + operations_len - 1);
                     let Ok(new_pinned_nodes) = proof.extract_pinned_nodes(start_pos, end_pos)
