@@ -19,3 +19,12 @@ reed-solomon-simd = "3.0.1"
 
 [lib]
 bench = false
+
+[dev-dependencies]
+criterion = { workspace = true }
+rand = { workspace = true }
+
+[[bench]]
+name = "reed_solomon"
+harness = false
+path = "src/reed_solomon/benches/bench.rs"

@@ -1045,6 +1045,8 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-storage",
+ "criterion",
+ "rand",
  "reed-solomon-simd",
 ]
 
