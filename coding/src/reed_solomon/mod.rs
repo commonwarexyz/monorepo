@@ -1,7 +1,8 @@
 //! Reed-Solomon coding.
 
 use commonware_codec::{Decode, Encode};
-use commonware_storage::bmt as BinaryMerkleTree;
+use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use commonware_storage::bmt::Builder;
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
 use std::collections::HashSet;
 use std::convert::TryInto;
@@ -19,8 +20,28 @@ pub enum CodingError {
     InvalidDataLength,
 }
 
-pub type Root = [u8; 32];
+pub type Root = Digest;
 pub type Proof = Vec<u8>;
+
+/// Verifies a merkle proof against the given root
+fn merkle_verify(root: &Root, index: usize, shard: &[u8], merkle_proof: &[Digest]) -> bool {
+    // Create a tree from the proof to verify
+    let mut hasher = Sha256::new();
+
+    // Recreate the proof structure that BMT expects
+    let proof = commonware_storage::bmt::Proof::<Sha256> {
+        siblings: merkle_proof.to_vec(),
+    };
+
+    // Convert shard to digest format (BMT handles position hashing internally)
+    hasher.update(shard);
+    let shard_digest = hasher.finalize();
+
+    // Verify the proof
+    proof
+        .verify(&mut hasher, &shard_digest, index as u32, root)
+        .is_ok()
+}
 
 /// Encodes the input data into total_pieces proofs using Reed-Solomon and a Binary Merkle Tree.
 /// Returns the Merkle root and a vector of encoded proofs (one per piece).
@@ -58,36 +79,45 @@ pub fn encode(
         original_shards.push(extended_data[start..start + shard_size].to_vec());
     }
 
-    // RS encoding
-    let mut encoder =
-        ReedSolomonEncoder::new(k as u16, m as u16, shard_size).map_err(CodingError::RsError)?;
+    // RS encoding - use correct API (original_count, recovery_count, shard_length)
+    let mut encoder = ReedSolomonEncoder::new(k, m, shard_size).map_err(CodingError::RsError)?;
     for shard in &original_shards {
         encoder
             .add_original_shard(shard)
             .map_err(CodingError::RsError)?;
     }
-    let recovery_shards = encoder
-        .encode()
-        .map_err(CodingError::RsError)?
+    let recovery_result = encoder.encode().map_err(CodingError::RsError)?;
+    let recovery_shards: Vec<Vec<u8>> = recovery_result
         .recovery_iter()
-        .collect::<Vec<_>>();
+        .map(|shard| shard.to_vec())
+        .collect();
 
     // All shards
     let mut all_shards = original_shards;
     all_shards.extend(recovery_shards);
 
-    // Build Merkle tree
-    let tree = BinaryMerkleTree::new(&all_shards);
+    // Build Merkle tree using BMT Builder
+    let mut builder = Builder::<Sha256>::new(n);
+    for shard in &all_shards {
+        builder.add(&{
+            let mut hasher = Sha256::new();
+            hasher.update(shard);
+            hasher.finalize()
+        });
+    }
+    let tree = builder.build();
     let root = tree.root();
 
     // Generate encoded proofs
     let mut proofs = Vec::with_capacity(n);
     for i in 0..n {
-        let merkle_proof = tree.proof(i);
+        let merkle_proof = tree
+            .proof(i as u32)
+            .map_err(|_| CodingError::InvalidProof)?;
         let shard = &all_shards[i];
-        let encoded =
-            encode(&(shard.clone(), merkle_proof)).map_err(|_| CodingError::CodecError)?;
-        proofs.push(encoded);
+        let proof_data = (shard.clone(), merkle_proof.siblings);
+        let encoded = proof_data.encode();
+        proofs.push(encoded.to_vec());
     }
 
     Ok((root, proofs))
@@ -111,8 +141,8 @@ pub fn decode(
     }
 
     let mut seen = HashSet::new();
-    let mut provided_originals: Vec<(u16, Vec<u8>)> = Vec::new();
-    let mut provided_recoveries: Vec<(u16, Vec<u8>)> = Vec::new();
+    let mut provided_originals: Vec<(usize, Vec<u8>)> = Vec::new();
+    let mut provided_recoveries: Vec<(usize, Vec<u8>)> = Vec::new();
 
     for &(index, ref encoded) in pieces {
         if index >= n || seen.contains(&index) {
@@ -120,8 +150,11 @@ pub fn decode(
         }
         seen.insert(index);
 
-        let (shard, merkle_proof): (Vec<u8>, Vec<[u8; 32]>) =
-            decode(encoded).map_err(|_| CodingError::CodecError)?;
+        let (shard, merkle_proof): (Vec<u8>, Vec<Digest>) = <(Vec<u8>, Vec<Digest>)>::decode_cfg(
+            &encoded[..],
+            &(((..).into(), ()), ((..).into(), ())),
+        )
+        .map_err(|_| CodingError::CodecError)?;
         if shard.len() != shard_size {
             return Err(CodingError::InvalidShardSize);
         }
@@ -130,15 +163,14 @@ pub fn decode(
         }
 
         if index < k {
-            provided_originals.push((index as u16, shard));
+            provided_originals.push((index, shard));
         } else {
-            provided_recoveries.push(((index - k) as u16, shard));
+            provided_recoveries.push((index - k, shard));
         }
     }
 
-    // Decode originals
-    let mut decoder =
-        ReedSolomonDecoder::new(k as u16, m as u16, shard_size).map_err(CodingError::RsError)?;
+    // Decode originals - use correct API (original_count, recovery_count, shard_length)
+    let mut decoder = ReedSolomonDecoder::new(k, m, shard_size).map_err(CodingError::RsError)?;
     for (idx, ref shard) in &provided_originals {
         decoder
             .add_original_shard(*idx, shard)
@@ -154,16 +186,16 @@ pub fn decode(
     // Build full originals, checking consistency
     let mut full_originals = vec![None; k];
     for (idx, shard) in provided_originals {
-        full_originals[idx as usize] = Some(shard);
+        full_originals[idx] = Some(shard);
     }
     for (idx, shard) in decode_result.restored_original_iter() {
-        let idx_usize = idx as usize;
-        if let Some(existing) = &full_originals[idx_usize] {
-            if existing != &shard {
+        let idx_usize = idx;
+        if let Some(ref existing) = full_originals[idx_usize] {
+            if existing != &shard.to_vec() {
                 return Err(CodingError::Inconsistent);
             }
         } else {
-            full_originals[idx_usize] = Some(shard);
+            full_originals[idx_usize] = Some(shard.to_vec());
         }
     }
     if full_originals.iter().any(|o| o.is_none()) {
@@ -175,21 +207,20 @@ pub fn decode(
         .collect::<Vec<_>>();
 
     // Re-encode to check parities
-    let mut encoder =
-        ReedSolomonEncoder::new(k as u16, m as u16, shard_size).map_err(CodingError::RsError)?;
+    let mut encoder = ReedSolomonEncoder::new(k, m, shard_size).map_err(CodingError::RsError)?;
     for shard in &full_originals {
         encoder
             .add_original_shard(shard)
             .map_err(CodingError::RsError)?;
     }
-    let computed_recoveries = encoder
-        .encode()
-        .map_err(CodingError::RsError)?
+    let computed_recoveries_result = encoder.encode().map_err(CodingError::RsError)?;
+    let computed_recoveries: Vec<Vec<u8>> = computed_recoveries_result
         .recovery_iter()
-        .collect::<Vec<_>>();
+        .map(|shard| shard.to_vec())
+        .collect();
 
     for (idx, shard) in provided_recoveries {
-        if computed_recoveries[idx as usize] != shard {
+        if computed_recoveries[idx] != shard {
             return Err(CodingError::Inconsistent);
         }
     }
@@ -197,7 +228,17 @@ pub fn decode(
     // Reconstruct full shards and verify Merkle root
     let mut full_shards = full_originals;
     full_shards.extend(computed_recoveries);
-    let computed_tree = BinaryMerkleTree::new(&full_shards);
+
+    // Build tree to verify root
+    let mut builder = Builder::<Sha256>::new(n);
+    for shard in &full_shards {
+        builder.add(&{
+            let mut hasher = Sha256::new();
+            hasher.update(shard);
+            hasher.finalize()
+        });
+    }
+    let computed_tree = builder.build();
     if computed_tree.root() != *root {
         return Err(CodingError::Inconsistent); // Original encoding incorrect
     }
@@ -216,4 +257,190 @@ pub fn decode(
         return Err(CodingError::InvalidDataLength);
     }
     Ok(data_buf[8..8 + len].to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encode_decode_basic() {
+        let data = b"Hello, Reed-Solomon!";
+        let total_pieces = 7;
+        let min_pieces = 4;
+
+        // Encode the data
+        let (root, proofs) = encode(data, total_pieces, min_pieces).unwrap();
+        assert_eq!(proofs.len(), total_pieces);
+
+        // Try to decode with exactly min_pieces
+        let pieces: Vec<_> = (0..min_pieces).map(|i| (i, proofs[i].clone())).collect();
+
+        // We need to determine shard_size for decoding
+        // This is a limitation of the current API - in practice, this would be known
+        let extended_len = 8 + data.len(); // 8 bytes for length prefix
+        let shard_size = if (extended_len + min_pieces - 1) / min_pieces % 2 == 0 {
+            (extended_len + min_pieces - 1) / min_pieces
+        } else {
+            (extended_len + min_pieces - 1) / min_pieces + 1
+        };
+
+        let decoded = decode(&root, &pieces, total_pieces, min_pieces, shard_size).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_decode_with_more_pieces() {
+        let data = b"Testing with more pieces than minimum";
+        let total_pieces = 10;
+        let min_pieces = 4;
+
+        let (root, proofs) = encode(data, total_pieces, min_pieces).unwrap();
+
+        // Use 6 pieces (more than minimum)
+        let pieces: Vec<_> = (0..6).map(|i| (i, proofs[i].clone())).collect();
+
+        let extended_len = 8 + data.len();
+        let shard_size = if (extended_len + min_pieces - 1) / min_pieces % 2 == 0 {
+            (extended_len + min_pieces - 1) / min_pieces
+        } else {
+            (extended_len + min_pieces - 1) / min_pieces + 1
+        };
+
+        let decoded = decode(&root, &pieces, total_pieces, min_pieces, shard_size).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_decode_with_recovery_pieces() {
+        let data = b"Testing recovery pieces";
+        let total_pieces = 8;
+        let min_pieces = 3;
+
+        let (root, proofs) = encode(data, total_pieces, min_pieces).unwrap();
+
+        // Use a mix of original and recovery pieces
+        let pieces: Vec<_> = vec![
+            (0, proofs[0].clone()), // original
+            (4, proofs[4].clone()), // recovery
+            (6, proofs[6].clone()), // recovery
+        ];
+
+        let extended_len = 8 + data.len();
+        let shard_size = if (extended_len + min_pieces - 1) / min_pieces % 2 == 0 {
+            (extended_len + min_pieces - 1) / min_pieces
+        } else {
+            (extended_len + min_pieces - 1) / min_pieces + 1
+        };
+
+        let decoded = decode(&root, &pieces, total_pieces, min_pieces, shard_size).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_not_enough_pieces() {
+        let data = b"Test insufficient pieces";
+        let total_pieces = 6;
+        let min_pieces = 4;
+
+        let (root, proofs) = encode(data, total_pieces, min_pieces).unwrap();
+
+        // Try with fewer than min_pieces
+        let pieces: Vec<_> = (0..2).map(|i| (i, proofs[i].clone())).collect();
+
+        let extended_len = 8 + data.len();
+        let shard_size = if (extended_len + min_pieces - 1) / min_pieces % 2 == 0 {
+            (extended_len + min_pieces - 1) / min_pieces
+        } else {
+            (extended_len + min_pieces - 1) / min_pieces + 1
+        };
+
+        let result = decode(&root, &pieces, total_pieces, min_pieces, shard_size);
+        assert!(matches!(result, Err(CodingError::NotEnoughPieces)));
+    }
+
+    #[test]
+    fn test_duplicate_index() {
+        let data = b"Test duplicate detection";
+        let total_pieces = 5;
+        let min_pieces = 3;
+
+        let (root, proofs) = encode(data, total_pieces, min_pieces).unwrap();
+
+        // Include duplicate index
+        let pieces: Vec<_> = vec![
+            (0, proofs[0].clone()),
+            (0, proofs[0].clone()), // duplicate
+            (1, proofs[1].clone()),
+        ];
+
+        let extended_len = 8 + data.len();
+        let shard_size = if (extended_len + min_pieces - 1) / min_pieces % 2 == 0 {
+            (extended_len + min_pieces - 1) / min_pieces
+        } else {
+            (extended_len + min_pieces - 1) / min_pieces + 1
+        };
+
+        let result = decode(&root, &pieces, total_pieces, min_pieces, shard_size);
+        assert!(matches!(result, Err(CodingError::DuplicateIndex)));
+    }
+
+    #[test]
+    fn test_invalid_parameters() {
+        let data = b"Test parameter validation";
+
+        // total_pieces <= min_pieces
+        assert!(matches!(
+            encode(data, 3, 3),
+            Err(CodingError::InvalidParameters)
+        ));
+
+        // min_pieces = 0
+        assert!(matches!(
+            encode(data, 5, 0),
+            Err(CodingError::InvalidParameters)
+        ));
+    }
+
+    #[test]
+    fn test_empty_data() {
+        let data = b"";
+        let total_pieces = 4;
+        let min_pieces = 2;
+
+        let (root, proofs) = encode(data, total_pieces, min_pieces).unwrap();
+
+        let pieces: Vec<_> = (0..min_pieces).map(|i| (i, proofs[i].clone())).collect();
+
+        let extended_len = 8; // Just the length prefix
+        let shard_size = if (extended_len + min_pieces - 1) / min_pieces % 2 == 0 {
+            (extended_len + min_pieces - 1) / min_pieces
+        } else {
+            (extended_len + min_pieces - 1) / min_pieces + 1
+        };
+
+        let decoded = decode(&root, &pieces, total_pieces, min_pieces, shard_size).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_large_data() {
+        let data = vec![42u8; 1000]; // 1KB of data
+        let total_pieces = 7;
+        let min_pieces = 4;
+
+        let (root, proofs) = encode(&data, total_pieces, min_pieces).unwrap();
+
+        let pieces: Vec<_> = (0..min_pieces).map(|i| (i, proofs[i].clone())).collect();
+
+        let extended_len = 8 + data.len();
+        let shard_size = if (extended_len + min_pieces - 1) / min_pieces % 2 == 0 {
+            (extended_len + min_pieces - 1) / min_pieces
+        } else {
+            (extended_len + min_pieces - 1) / min_pieces + 1
+        };
+
+        let decoded = decode(&root, &pieces, total_pieces, min_pieces, shard_size).unwrap();
+        assert_eq!(decoded, data);
+    }
 }
