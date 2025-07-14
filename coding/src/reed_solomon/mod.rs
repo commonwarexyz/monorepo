@@ -200,12 +200,18 @@ pub fn decode<H: Hasher>(
     }
     let decoding = decoder.decode().map_err(Error::Rs)?;
 
-    // Encode recovered data
-    let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::Rs)?;
-    for (_, shard) in &provided_originals {
-        encoder.add_original_shard(shard).map_err(Error::Rs)?;
+    // Reconstruct all original shards
+    let mut shards = vec![Vec::new(); k];
+    for (idx, shard) in provided_originals {
+        shards[idx] = shard;
     }
-    for (_, shard) in decoding.restored_original_iter() {
+    for (idx, shard) in decoding.restored_original_iter() {
+        shards[idx] = shard.to_vec();
+    }
+
+    // Encode recovered data to get recovery shards
+    let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::Rs)?;
+    for shard in &shards {
         encoder.add_original_shard(shard).map_err(Error::Rs)?;
     }
     let encoding = encoder.encode().map_err(Error::Rs)?;
@@ -213,10 +219,8 @@ pub fn decode<H: Hasher>(
         .recovery_iter()
         .map(|shard| shard.to_vec())
         .collect();
-    let mut shards = decoding
-        .restored_original_iter()
-        .map(|(_, shard)| shard.to_vec())
-        .collect::<Vec<_>>();
+
+    // Combine all shards (originals + recovery) for Merkle tree
     shards.extend(recovery_shards);
 
     // Build Merkle tree
