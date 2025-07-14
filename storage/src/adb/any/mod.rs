@@ -1514,7 +1514,7 @@ pub(super) mod test {
                     .await
                     .unwrap();
 
-            // Verify empty database properties
+            // Verify database state
             assert_eq!(synced_db.op_count(), 0);
             assert_eq!(synced_db.inactivity_floor_loc, 0);
             assert_eq!(synced_db.log.size().await.unwrap(), 0);
@@ -1598,8 +1598,17 @@ pub(super) mod test {
             )
             .await
             .unwrap();
+
+            // Verify database state
             assert_eq!(db.op_count(), upper_bound_ops + 1);
             assert_eq!(db.inactivity_floor_loc, lower_bound_ops);
+            assert_eq!(db.oldest_retained_loc(), Some(lower_bound_ops));
+            assert_eq!(db.ops.size(), source_db.ops.size());
+            assert_eq!(db.ops.pruned_to_pos(), source_db.ops.pruned_to_pos());
+            assert_eq!(
+                db.log.size().await.unwrap(),
+                source_db.log.size().await.unwrap()
+            );
 
             // Verify the root hash matches the target
             assert_eq!(db.root(&mut hasher), target_hash);
@@ -1624,14 +1633,7 @@ pub(super) mod test {
             for key in deleted_keys {
                 assert!(db.get(&key).await.unwrap().is_none(),);
             }
-            assert_eq!(db.op_count(), upper_bound_ops + 1);
-            assert_eq!(db.oldest_retained_loc(), Some(lower_bound_ops));
-            assert_eq!(db.ops.size(), source_db.ops.size());
-            assert_eq!(db.ops.pruned_to_pos(), source_db.ops.pruned_to_pos());
-            assert_eq!(
-                db.log.size().await.unwrap(),
-                source_db.log.size().await.unwrap()
-            );
+
             db.destroy().await.unwrap();
             source_db.destroy().await.unwrap();
         });
@@ -1699,7 +1701,7 @@ pub(super) mod test {
                 .await
                 .unwrap();
 
-                // Verify database state
+                // Verify database state properties
                 let expected_op_count = upper_bound + 1; // +1 because op_count is total number of ops
                 assert_eq!(db.log.size().await.unwrap(), expected_op_count);
                 assert_eq!(db.ops.size(), leaf_num_to_pos(expected_op_count));
@@ -1727,6 +1729,7 @@ pub(super) mod test {
                 for key in deleted_keys {
                     assert!(db.get(&key).await.unwrap().is_none());
                 }
+
                 db.destroy().await.unwrap();
             }
             source_db.destroy().await.unwrap();
@@ -1758,11 +1761,11 @@ pub(super) mod test {
             target_db.commit().await.unwrap();
 
             // Capture target db state for comparison
-            let target_db_mmr_size = target_db.ops.size();
-            let target_db_log_size = target_db.log.size().await.unwrap();
             let target_db_op_count = target_db.op_count();
             let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc;
             let target_db_oldest_retained_loc = target_db.oldest_retained_loc();
+            let target_db_log_size = target_db.log.size().await.unwrap();
+            let target_db_mmr_size = target_db.ops.size();
             let target_db_pruned_to_pos = target_db.ops.pruned_to_pos();
 
             let sync_lower_bound = target_db.oldest_retained_loc().unwrap();
@@ -1798,8 +1801,14 @@ pub(super) mod test {
             )
             .await
             .unwrap();
+
+            // Verify database state
             assert_eq!(db.op_count(), target_db_op_count);
             assert_eq!(db.inactivity_floor_loc, target_db_inactivity_floor_loc);
+            assert_eq!(db.oldest_retained_loc(), target_db_oldest_retained_loc);
+            assert_eq!(db.log.size().await.unwrap(), target_db_log_size);
+            assert_eq!(db.ops.size(), target_db_mmr_size);
+            assert_eq!(db.ops.pruned_to_pos(), target_db_pruned_to_pos);
 
             // Verify the root hash matches the target
             assert_eq!(db.root(&mut hasher), target_hash);
@@ -1824,12 +1833,7 @@ pub(super) mod test {
             for key in deleted_keys {
                 assert!(db.get(&key).await.unwrap().is_none(),);
             }
-            assert_eq!(db.op_count(), target_db_op_count);
-            assert_eq!(db.inactivity_floor_loc, target_db_inactivity_floor_loc);
-            assert_eq!(db.oldest_retained_loc(), target_db_oldest_retained_loc);
-            assert_eq!(db.ops.size(), target_db_mmr_size);
-            assert_eq!(db.ops.pruned_to_pos(), target_db_pruned_to_pos);
-            assert_eq!(db.log.size().await.unwrap(), target_db_log_size);
+
             db.destroy().await.unwrap();
             ops.destroy().await.unwrap();
         });
@@ -1850,11 +1854,11 @@ pub(super) mod test {
 
             let sync_lower_bound = target_db.oldest_retained_loc().unwrap();
             let sync_upper_bound = target_db.op_count() - 1;
-            let target_db_mmr_size = target_db.ops.size();
-            let target_db_log_size = target_db.log.size().await.unwrap();
             let target_db_op_count = target_db.op_count();
             let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc;
             let target_db_oldest_retained_loc = target_db.oldest_retained_loc();
+            let target_db_log_size = target_db.log.size().await.unwrap();
+            let target_db_mmr_size = target_db.ops.size();
             let target_db_pruned_to_pos = target_db.ops.pruned_to_pos();
 
             let AnyTest { ops, log, .. } = target_db;
@@ -1877,12 +1881,14 @@ pub(super) mod test {
             .await
             .unwrap();
 
+            // Verify database state
             assert_eq!(db.op_count(), target_db_op_count);
             assert_eq!(db.inactivity_floor_loc, target_db_inactivity_floor_loc);
             assert_eq!(db.oldest_retained_loc(), target_db_oldest_retained_loc);
+            assert_eq!(db.log.size().await.unwrap(), target_db_log_size);
             assert_eq!(db.ops.size(), target_db_mmr_size);
             assert_eq!(db.ops.pruned_to_pos(), target_db_pruned_to_pos);
-            assert_eq!(db.log.size().await.unwrap(), target_db_log_size);
+
             db.destroy().await.unwrap();
         });
     }
