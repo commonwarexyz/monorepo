@@ -82,6 +82,90 @@ impl<H: Hasher> EncodeSize for Chunk<H> {
     }
 }
 
+fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
+    // Compute shard_len (must be even)
+    let prefixed_len = u64::SIZE + data.len();
+    let mut shard_len = prefixed_len.div_ceil(k);
+    if shard_len % 2 != 0 {
+        shard_len += 1;
+    }
+
+    // Create shards
+    let mut shards = Vec::with_capacity(k + m); // prepare for recovery shards
+    let length_bytes = (data.len() as u64).to_le_bytes();
+    let mut length_offset = 0;
+    let mut data_offset = 0;
+    for _ in 0..k {
+        // Fill shard with length prefix first (if any remaining)
+        let mut shard = Vec::with_capacity(shard_len);
+        while length_offset < u64::SIZE && shard.len() < shard_len {
+            shard.push(length_bytes[length_offset]);
+            length_offset += 1;
+        }
+
+        // Fill remaining space with data
+        while data_offset < data.len() && shard.len() < shard_len {
+            shard.push(data[data_offset]);
+            data_offset += 1;
+        }
+
+        // Pad with zeros if needed
+        shard.resize(shard_len, 0);
+        shards.push(shard);
+    }
+
+    shards
+}
+
+fn extract_data(shards: Vec<Vec<u8>>) -> Vec<u8> {
+    let mut current_shard = 0;
+    let mut offset = 0;
+
+    // Read length prefix (8 bytes in little-endian)
+    let mut length_bytes = [0u8; u64::SIZE];
+    for i in 0..u64::SIZE {
+        // Find next available byte
+        while current_shard < shards.len() && offset >= shards[current_shard].len() {
+            current_shard += 1;
+            offset = 0;
+        }
+
+        if current_shard >= shards.len() {
+            return Vec::new(); // Not enough data
+        }
+
+        length_bytes[i] = shards[current_shard][offset];
+        offset += 1;
+    }
+
+    let original_len = u64::from_le_bytes(length_bytes) as usize;
+
+    // Read the actual data
+    let mut result = Vec::with_capacity(original_len);
+    let mut remaining = original_len;
+
+    while remaining > 0 && current_shard < shards.len() {
+        // Find next available byte
+        while current_shard < shards.len() && offset >= shards[current_shard].len() {
+            current_shard += 1;
+            offset = 0;
+        }
+
+        if current_shard >= shards.len() {
+            break; // Not enough data
+        }
+
+        let available = shards[current_shard].len() - offset;
+        let to_copy = available.min(remaining);
+
+        result.extend_from_slice(&shards[current_shard][offset..offset + to_copy]);
+        offset += to_copy;
+        remaining -= to_copy;
+    }
+
+    result
+}
+
 pub fn encode<H: Hasher>(
     total: u32,
     min: u32,
@@ -94,28 +178,9 @@ pub fn encode<H: Hasher>(
     let k = min as usize;
     let m = n - k;
 
-    // Compute shard_len (must be even)
-    let prefixed_len = u64::SIZE + data.len();
-    let mut shard_len = prefixed_len.div_ceil(k);
-    if shard_len % 2 != 0 {
-        shard_len += 1;
-    }
-
-    // Pad data
-    let padded_len = shard_len * k;
-    let mut padded = Vec::with_capacity(padded_len);
-    (data.len() as u64).write(&mut padded);
-    padded.extend_from_slice(&data);
-    padded.resize(padded_len, 0);
-
-    // Create shards
-    let mut shards = Vec::with_capacity(n);
-    let mut current = padded;
-    for _ in 0..n {
-        let rest = current.split_off(shard_len.min(current.len()));
-        shards.push(current);
-        current = rest;
-    }
+    // Prepare data
+    let mut shards = prepare_data(data, k, m);
+    let shard_len = shards[0].len();
 
     // Create encoder
     let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::Rs)?;
@@ -205,7 +270,7 @@ pub fn decode<H: Hasher>(
     let decoding = decoder.decode().map_err(Error::Rs)?;
 
     // Reconstruct all original shards
-    let mut shards = vec![Vec::new(); k];
+    let mut shards = vec![Vec::new(); n];
     for (idx, shard) in provided_originals {
         shards[idx] = shard;
     }
@@ -215,7 +280,7 @@ pub fn decode<H: Hasher>(
 
     // Encode recovered data to get recovery shards
     let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::Rs)?;
-    for shard in &shards {
+    for shard in shards.iter().take(k) {
         encoder.add_original_shard(shard).map_err(Error::Rs)?;
     }
     let encoding = encoder.encode().map_err(Error::Rs)?;
@@ -223,13 +288,12 @@ pub fn decode<H: Hasher>(
         .recovery_iter()
         .map(|shard| shard.to_vec())
         .collect();
-    let mut all_shards = shards.clone(); // Clone to keep original for data extraction
-    all_shards.extend(recovery_shards);
+    shards.extend(recovery_shards);
 
     // Build Merkle tree
     let mut builder = Builder::<H>::new(n);
     let mut hasher = H::new();
-    for shard in &all_shards {
+    for shard in &shards {
         builder.add(&{
             hasher.update(shard);
             hasher.finalize()
@@ -242,54 +306,8 @@ pub fn decode<H: Hasher>(
         return Err(Error::Inconsistent);
     }
 
-    // Extract original data without full concatenation
-    let mut current_shard = 0;
-    let mut offset = 0;
-    let mut value: u64 = 0;
-    let mut shift = 0;
-    let mut consumed = 0;
-    loop {
-        if current_shard >= k {
-            return Err(Error::CodecError);
-        }
-        if offset >= shards[current_shard].len() {
-            current_shard += 1;
-            offset = 0;
-            continue;
-        }
-        let byte = shards[current_shard][offset];
-        offset += 1;
-        consumed += 1;
-        value |= ((byte & 0x7F) as u64) << shift;
-        shift += 7;
-        if (byte & 0x80) == 0 {
-            break;
-        }
-        if shift >= 35 {
-            return Err(Error::InvalidDataLength);
-        }
-    }
-    let original_len = value as usize;
-
-    // Now copy original_len bytes starting from current position
-    let mut result = Vec::with_capacity(original_len);
-    let mut to_copy = original_len;
-    while to_copy > 0 {
-        if current_shard >= k {
-            return Err(Error::InvalidDataLength);
-        }
-        if offset >= shards[current_shard].len() {
-            current_shard += 1;
-            offset = 0;
-            continue;
-        }
-        let avail = shards[current_shard].len() - offset;
-        let copy_amount = avail.min(to_copy);
-        result.extend_from_slice(&shards[current_shard][offset..offset + copy_amount]);
-        offset += copy_amount;
-        to_copy -= copy_amount;
-    }
-    Ok(result)
+    // Extract original data
+    Ok(extract_data(shards))
 }
 
 #[cfg(test)]
@@ -477,27 +495,15 @@ mod tests {
         let data = b"Test data for malicious encoding";
         let total = 5u32;
         let min = 3u32;
-
-        // Encode data
-        let (_, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
+        let m = total - min;
 
         // Compute original data encoding
-        let shard_size = chunks[0].shard.len();
-        let mut extended_data = data.to_vec().encode().to_vec();
-        let padded_len = shard_size * min as usize;
-        extended_data.resize(padded_len, 0);
-
-        // Create original shards
-        let mut original_shards = Vec::with_capacity(min as usize);
-        for i in 0..min as usize {
-            let start = i * shard_size;
-            original_shards.push(extended_data[start..start + shard_size].to_vec());
-        }
+        let shards = prepare_data(data.to_vec(), min as usize, total as usize - min as usize);
+        let shard_size = shards[0].len();
 
         // Re-encode the data
-        let m = total - min;
         let mut encoder = ReedSolomonEncoder::new(min as usize, m as usize, shard_size).unwrap();
-        for shard in &original_shards {
+        for shard in &shards {
             encoder.add_original_shard(shard).unwrap();
         }
         let recovery_result = encoder.encode().unwrap();
@@ -512,7 +518,7 @@ mod tests {
         }
 
         // Build malicious shards
-        let mut malicious_shards = original_shards.clone();
+        let mut malicious_shards = shards.clone();
         malicious_shards.extend(recovery_shards);
 
         // Build malicious tree
