@@ -1299,6 +1299,7 @@ name = "commonware-storage-fuzz"
 version = "0.0.55"
 dependencies = [
  "arbitrary",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-runtime",
  "commonware-storage",
