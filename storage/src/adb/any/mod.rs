@@ -794,12 +794,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         };
 
         // Calculate the target pruning position: inactivity_floor_loc - pruning_gap
-        let target_prune_loc = if self.inactivity_floor_loc >= self.pruning_gap {
-            self.inactivity_floor_loc - self.pruning_gap
-        } else {
-            0
-        };
-
+        let target_prune_loc = self.inactivity_floor_loc.saturating_sub(self.pruning_gap);
         let pruned_ops = target_prune_loc - oldest_retained_loc;
         if pruned_ops == 0 {
             return Ok(());
