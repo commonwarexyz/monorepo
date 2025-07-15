@@ -468,6 +468,7 @@ where
 pub fn threshold_signature_recover_multiple<'a, V, I>(
     threshold: u32,
     mut many_evals: Vec<I>,
+    concurrency: usize,
 ) -> Result<Vec<V::Signature>, Error>
 where
     V: Variant,
@@ -498,18 +499,37 @@ where
         .collect::<Vec<_>>();
     let weights = compute_weights(indices)?;
 
-    // Recover signatures
-    let mut signatures = Vec::with_capacity(prepared_evals.len());
-    for evals in prepared_evals {
-        let signature = threshold_signature_recover_with_weights::<V, _>(&weights, evals)?;
-        signatures.push(signature);
+    // If concurrency is not required, recover signatures sequentially
+    let concurrency = std::cmp::min(concurrency, prepared_evals.len());
+    if concurrency == 1 {
+        return prepared_evals
+            .iter()
+            .map(|evals| {
+                threshold_signature_recover_with_weights::<V, _>(&weights, evals.iter().cloned())
+            })
+            .collect();
     }
-    Ok(signatures)
+
+    // Build a thread pool with the specified concurrency
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(concurrency)
+        .build()
+        .expect("Unable to build thread pool");
+
+    // Recover signatures
+    pool.install(move || {
+        prepared_evals
+            .par_iter()
+            .map(|evals| {
+                threshold_signature_recover_with_weights::<V, _>(&weights, evals.iter().cloned())
+            })
+            .collect()
+    })
 }
 
 /// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
 ///
-/// This is just a wrapper around `threshold_signature_recover_multiple`.
+/// This is just a wrapper around `threshold_signature_recover_multiple` with concurrency set to 2.
 pub fn threshold_signature_recover_pair<'a, V, I>(
     threshold: u32,
     first: I,
@@ -520,7 +540,7 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
 {
-    let mut sigs = threshold_signature_recover_multiple::<V, _>(threshold, vec![first, second])?;
+    let mut sigs = threshold_signature_recover_multiple::<V, _>(threshold, vec![first, second], 2)?;
     let second_sig = sigs.pop().unwrap();
     let first_sig = sigs.pop().unwrap();
     Ok((first_sig, second_sig))

@@ -98,7 +98,8 @@
 //!
 //! New entries are prepended to the chain, becoming the new head. During lookup, the chain
 //! is traversed until a matching key is found. The `added` field in the table entry tracks
-//! insertions since the last resize, triggering table growth when it exceeds `table_resize_frequency`.
+//! insertions since the last resize, triggering table growth when 50% of entries have had
+//! `table_resize_frequency` items added (since the last resize).
 //!
 //! # Extendible Hashing
 //!
@@ -121,12 +122,12 @@
 //! ```
 //!
 //! When the table doubles in size:
-//! 1. Each bucket at index `i` splits into two buckets: `i` and `i + old_size`
+//! 1. Each entry at index `i` splits into two entries: `i` and `i + old_size`
 //! 2. The existing chain head is copied to both locations with `added=0`
-//! 3. Future insertions will naturally distribute between the two buckets based on their hash
+//! 3. Future insertions will naturally distribute between the two entries based on their hash
 //!
 //! This approach ensures that entries inserted before a resize remain discoverable after the resize,
-//! as the lookup algorithm checks the appropriate bucket based on the current table size. As more and more
+//! as the lookup algorithm checks the appropriate entry based on the current table size. As more and more
 //! items are added (and resizes occur), the latency for fetching old data will increase logarithmically
 //! (with the number of items stored).
 //!
@@ -194,16 +195,6 @@ pub enum Error {
     Journal(#[from] crate::journal::Error),
     #[error("codec error: {0}")]
     Codec(#[from] commonware_codec::Error),
-    #[error("invalid key length: expected {expected}, got {actual}")]
-    InvalidKeyLength { expected: usize, actual: usize },
-    #[error("invalid value length: expected {expected}, got {actual}")]
-    InvalidValueLength { expected: usize, actual: usize },
-    #[error("bucket corrupted at offset {0}")]
-    BucketCorrupted(u64),
-    #[error("directory corrupted")]
-    DirectoryCorrupted,
-    #[error("checksum mismatch: expected {expected:08x}, got {actual:08x}")]
-    ChecksumMismatch { expected: u32, actual: u32 },
 }
 
 /// Configuration for [Freezer].
@@ -227,7 +218,8 @@ pub struct Config<C> {
     /// The initial number of items in the table.
     pub table_initial_size: u32,
 
-    /// The number of items added to an table entry before the table is resized.
+    /// The number of items that must be added to 50% of table entries since the last resize before
+    /// the table is resized again.
     pub table_resize_frequency: u8,
 
     /// The number of items to move during each resize operation (many may be required to complete a resize).
@@ -872,7 +864,7 @@ mod tests {
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: 2, // Very small initial size to force multiple resizes
-                table_resize_frequency: 2, // Resize after 2 items per bucket
+                table_resize_frequency: 2, // Resize after 2 items per entry
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
                 table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
                 codec_config: (),
@@ -925,7 +917,134 @@ mod tests {
 
             // Verify metrics show resize operations occurred
             let buffer = context.encode();
-            assert!(buffer.contains("resizes_total 9"));
+            assert!(buffer.contains("resizes_total 8"), "{}", buffer);
+        });
+    }
+
+    #[test_traced]
+    fn test_insert_during_resize() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                journal_partition: "test_journal".into(),
+                journal_compression: None,
+                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                table_partition: "test_table".into(),
+                table_initial_size: 2,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 1, // Process one at a time
+                table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
+                codec_config: (),
+            };
+            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Insert keys to trigger resize
+            freezer.put(test_key("key0"), 0).await.unwrap();
+            freezer.put(test_key("key1"), 1).await.unwrap();
+            freezer.sync().await.unwrap(); // should start resize
+
+            // Verify resize started
+            assert!(freezer.resizing().is_some());
+
+            // Insert during resize (to first entry)
+            freezer.put(test_key("key2"), 2).await.unwrap();
+            assert!(context.encode().contains("unnecessary_writes_total 1"));
+            assert_eq!(freezer.resizable(), 3);
+
+            // Insert another key (to unmodified entry)
+            freezer.put(test_key("key3"), 3).await.unwrap();
+            assert!(context.encode().contains("unnecessary_writes_total 1"));
+            assert_eq!(freezer.resizable(), 3);
+
+            // Verify resize completed
+            freezer.sync().await.unwrap();
+            assert!(freezer.resizing().is_none());
+            assert_eq!(freezer.resizable(), 2);
+
+            // More inserts
+            freezer.put(test_key("key4"), 4).await.unwrap();
+            freezer.put(test_key("key5"), 5).await.unwrap();
+            freezer.sync().await.unwrap();
+
+            // Another resize should've started
+            assert!(freezer.resizing().is_some());
+
+            // Verify all can be retrieved during resize
+            for i in 0..6 {
+                let key = test_key(&format!("key{i}"));
+                assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(i));
+            }
+
+            // Sync until resize completes
+            while freezer.resizing().is_some() {
+                freezer.sync().await.unwrap();
+            }
+
+            // Ensure no entries are considered resizable
+            assert_eq!(freezer.resizable(), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_resize_after_startup() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                journal_partition: "test_journal".into(),
+                journal_compression: None,
+                journal_write_buffer: DEFAULT_JOURNAL_WRITE_BUFFER,
+                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                table_partition: "test_table".into(),
+                table_initial_size: 2,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 1, // Process one at a time
+                table_replay_buffer: DEFAULT_TABLE_REPLAY_BUFFER,
+                codec_config: (),
+            };
+
+            // Create freezer and then shutdown uncleanly
+            let checkpoint = {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
+                        .await
+                        .unwrap();
+
+                // Insert keys to trigger resize
+                freezer.put(test_key("key0"), 0).await.unwrap();
+                freezer.put(test_key("key1"), 1).await.unwrap();
+                let checkpoint = freezer.sync().await.unwrap();
+
+                // Verify resize started
+                assert!(freezer.resizing().is_some());
+
+                checkpoint
+            };
+
+            // Reopen freezer
+            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+                context.clone(),
+                cfg.clone(),
+                Some(checkpoint),
+            )
+            .await
+            .unwrap();
+            assert_eq!(freezer.resizable(), 1);
+
+            // Verify resize starts immediately (1 key will have 0 added but 1
+            // will still have 1)
+            freezer.sync().await.unwrap();
+            assert!(freezer.resizing().is_some());
+
+            // Run until resize completes
+            while freezer.resizing().is_some() {
+                freezer.sync().await.unwrap();
+            }
+
+            // Ensure no entries are considered resizable
+            assert_eq!(freezer.resizable(), 0);
         });
     }
 

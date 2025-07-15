@@ -1,6 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{hash, sha256::Sha256};
 use commonware_storage::bmt::{Builder, Proof};
 use libfuzzer_sys::fuzz_target;
@@ -87,12 +88,12 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::SerializeProof => {
                 if let Some(ref p) = proof {
-                    let _serialized = p.serialize();
+                    let _serialized = p.encode();
                 }
             }
 
             BmtOperation::DeserializeProof { data } => {
-                if Proof::<Sha256>::deserialize(data).is_ok() {}
+                if Proof::<Sha256>::decode(&mut data.as_slice()).is_ok() {}
             }
 
             BmtOperation::BuildEmptyTree => {

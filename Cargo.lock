@@ -957,7 +957,7 @@ checksum = "d3fd119d74b830634cea2a0f58bbd0d54540518a14397557951e79340abc28c0"
 
 [[package]]
 name = "commonware-bridge"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "bytes",
  "clap",
@@ -980,7 +980,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-broadcast"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-chat"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "chrono",
  "clap",
@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "bytes",
  "paste",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec-fuzz"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1039,8 +1039,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-coding"
+version = "0.0.56"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-storage",
+ "criterion",
+ "rand",
+ "reed-solomon-simd",
+ "thiserror 2.0.12",
+]
+
+[[package]]
 name = "commonware-collector"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1061,7 +1075,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1084,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "blake3",
  "blst",
@@ -1104,7 +1118,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography-fuzz"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "arbitrary",
  "blst",
@@ -1119,7 +1133,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-deployer"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "aws-config",
  "aws-sdk-ec2",
@@ -1138,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-flood"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "clap",
  "commonware-codec",
@@ -1160,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-log"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "bytes",
  "chrono",
@@ -1185,7 +1199,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "futures",
  "futures-timer",
@@ -1198,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1220,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-resolver"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "bimap",
  "bytes",
@@ -1242,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "async-lock",
  "axum",
@@ -1272,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1296,9 +1310,10 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage-fuzz"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "arbitrary",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-runtime",
  "commonware-storage",
@@ -1309,7 +1324,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -1329,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream-fuzz"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "arbitrary",
  "chacha20poly1305",
@@ -1344,7 +1359,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-sync"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "bytes",
  "clap",
@@ -1365,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1378,7 +1393,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils-fuzz"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1389,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-vrf"
-version = "0.0.55"
+version = "0.0.56"
 dependencies = [
  "bytes",
  "clap",
@@ -1894,6 +1909,12 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "fixedbitset"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
 
 [[package]]
 name = "fnv"
@@ -3418,12 +3439,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "readme-rustdocifier"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08ad765b21a08b1a8e5cdce052719188a23772bcbefb3c439f0baaf62c56ceac"
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a908a6e00f1fdd0dfd9c0eb08ce85126f6d8bbda50017e74bc4a4b7d4a926a4"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "reed-solomon-simd"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab6badd4f4b9c93832eb3707431e8e7bea282fae96801312f0990d48b030f8c5"
+dependencies = [
+ "fixedbitset",
+ "readme-rustdocifier",
 ]
 
 [[package]]
