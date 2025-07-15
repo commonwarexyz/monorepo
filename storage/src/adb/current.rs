@@ -216,9 +216,9 @@ impl<
             "bitmap is pruned beyond where bits should be retained"
         );
 
-        // Advanced the pruning boundary if we failed to prune to the correct position for any reason.
         let target_prune_loc = inactivity_floor_loc.saturating_sub(config.pruning_gap);
         if target_prune_loc > start_leaf_num {
+            // Advance the pruning boundary if we failed to prune to the correct position for any reason.
             warn!(
                 inactivity_floor_loc,
                 target_prune_loc, start_leaf_num, "pruning MMR to correct position"
