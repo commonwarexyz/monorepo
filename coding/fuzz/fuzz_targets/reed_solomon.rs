@@ -41,7 +41,7 @@ fn fuzz(input: FuzzInput) {
 
     let decoded = match decode::<Sha256>(total, min, &root, chunks.clone()) {
         Ok(data) => data,
-        Err(e) => panic!("decode with all chunks failed: {:?}", e),
+        Err(e) => panic!("decode with all chunks failed: {e:?}"),
     };
     assert_eq!(decoded, payload, "decode with all chunks failed");
 
@@ -49,7 +49,7 @@ fn fuzz(input: FuzzInput) {
         let subset: Vec<Chunk<Sha256>> = chunks.into_iter().take(min as usize).collect();
         let decoded_subset = match decode::<Sha256>(total, min, &root, subset) {
             Ok(data) => data,
-            Err(e) => panic!("decode with min chunks failed: {:?}", e),
+            Err(e) => panic!("decode with min chunks failed: {e:?}"),
         };
         assert_eq!(decoded_subset, payload);
     }
