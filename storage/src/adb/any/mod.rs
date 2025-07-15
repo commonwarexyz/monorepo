@@ -1805,7 +1805,7 @@ pub(super) mod test {
             let AnyTest { ops, log, .. } = target_db;
 
             // Re-open `sync_db`
-            let db = Any::init_synced(
+            let sync_db = Any::init_synced(
                 context.clone(),
                 SyncConfig {
                     db_config: sync_db_config,
@@ -1820,15 +1820,15 @@ pub(super) mod test {
             .unwrap();
 
             // Verify database state
-            assert_eq!(db.op_count(), target_db_op_count);
-            assert_eq!(db.inactivity_floor_loc, target_db_inactivity_floor_loc);
-            assert_eq!(db.oldest_retained_loc(), target_db_oldest_retained_loc);
-            assert_eq!(db.log.size().await.unwrap(), target_db_log_size);
-            assert_eq!(db.ops.size(), target_db_mmr_size);
-            assert_eq!(db.ops.pruned_to_pos(), target_db_pruned_to_pos);
+            assert_eq!(sync_db.op_count(), target_db_op_count);
+            assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
+            assert_eq!(sync_db.oldest_retained_loc(), target_db_oldest_retained_loc);
+            assert_eq!(sync_db.log.size().await.unwrap(), target_db_log_size);
+            assert_eq!(sync_db.ops.size(), target_db_mmr_size);
+            assert_eq!(sync_db.ops.pruned_to_pos(), target_db_pruned_to_pos);
 
             // Verify the root hash matches the target
-            assert_eq!(db.root(&mut hasher), target_hash);
+            assert_eq!(sync_db.root(&mut hasher), target_hash);
 
             // Verify state matches the source operations
             let mut expected_kvs = HashMap::new();
@@ -1843,15 +1843,15 @@ pub(super) mod test {
                 }
             }
             for (key, value) in expected_kvs {
-                let synced_value = db.get(&key).await.unwrap().unwrap();
+                let synced_value = sync_db.get(&key).await.unwrap().unwrap();
                 assert_eq!(synced_value, value);
             }
             // Verify that deleted keys are absent
             for key in deleted_keys {
-                assert!(db.get(&key).await.unwrap().is_none(),);
+                assert!(sync_db.get(&key).await.unwrap().is_none(),);
             }
 
-            db.destroy().await.unwrap();
+            sync_db.destroy().await.unwrap();
             ops.destroy().await.unwrap();
         });
     }
@@ -1882,7 +1882,7 @@ pub(super) mod test {
             let mut hasher = Standard::<Sha256>::new();
             ops.close(&mut hasher).await.unwrap();
 
-            let db: AnyTest = Any::init_synced(
+            let sync_db: AnyTest = Any::init_synced(
                 context.clone(),
                 SyncConfig {
                     db_config,
@@ -1897,14 +1897,14 @@ pub(super) mod test {
             .unwrap();
 
             // Verify database state
-            assert_eq!(db.op_count(), target_db_op_count);
-            assert_eq!(db.inactivity_floor_loc, target_db_inactivity_floor_loc);
-            assert_eq!(db.oldest_retained_loc(), target_db_oldest_retained_loc);
-            assert_eq!(db.log.size().await.unwrap(), target_db_log_size);
-            assert_eq!(db.ops.size(), target_db_mmr_size);
-            assert_eq!(db.ops.pruned_to_pos(), target_db_pruned_to_pos);
+            assert_eq!(sync_db.op_count(), target_db_op_count);
+            assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
+            assert_eq!(sync_db.oldest_retained_loc(), target_db_oldest_retained_loc);
+            assert_eq!(sync_db.log.size().await.unwrap(), target_db_log_size);
+            assert_eq!(sync_db.ops.size(), target_db_mmr_size);
+            assert_eq!(sync_db.ops.pruned_to_pos(), target_db_pruned_to_pos);
 
-            db.destroy().await.unwrap();
+            sync_db.destroy().await.unwrap();
         });
     }
 

@@ -267,13 +267,13 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     ) -> Result<Self, Error> {
         let mut journal = Self::init(context.clone(), cfg.clone()).await?;
         let journal_size = journal.size().await?;
-        if journal_size <= lower_bound {
+        let journal = if journal_size <= lower_bound {
             debug!(
                 journal_size,
                 lower_bound, "Existing journal data is stale, re-initializing in pruned state"
             );
             journal.destroy().await?;
-            Self::init_empty_at_size(context, cfg, lower_bound).await
+            Self::init_empty_at_size(context, cfg, lower_bound).await?
         } else if journal_size <= upper_bound + 1 {
             debug!(
                 journal_size,
@@ -282,7 +282,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 "Existing journal data within sync range, pruning to lower bound"
             );
             journal.prune(lower_bound).await?;
-            Ok(journal)
+            journal
         } else {
             debug!(
                 journal_size,
@@ -292,8 +292,12 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             );
             journal.prune(lower_bound).await?;
             journal.rewind(upper_bound + 1).await?; // +1 because upper_bound is inclusive
-            Ok(journal)
-        }
+            journal
+        };
+        let journal_size = journal.size().await?;
+        assert!(journal_size <= upper_bound + 1);
+        assert!(journal_size >= lower_bound);
+        Ok(journal)
     }
 
     /// Initialize a new [Journal] instance in a pruned state at a given size.
