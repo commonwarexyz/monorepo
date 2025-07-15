@@ -205,7 +205,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// # Behavior
     ///
     /// This method handles different initialization scenarios based on existing data:
-    /// - If the MMR journal is empty, it creates a fresh MMR from the provided `pinned_nodes`
+    /// - If the MMR journal is empty or before `lower_bound`, it creates a fresh MMR from
+    ///   the provided `pinned_nodes`
     /// - If the MMR journal has data but is incomplete (< `upper_bound`), missing operations
     ///   from the log are applied to bring it up to the target state
     /// - If the MMR journal has data beyond the `upper_bound`, it is rewound to match the sync target
@@ -1720,7 +1721,7 @@ pub(super) mod test {
                 .unwrap();
 
                 // Verify database state
-                let expected_op_count = upper_bound + 1; // +1 because op_count is total number of ops
+                let expected_op_count = upper_bound + 1;
                 assert_eq!(db.log.size().await.unwrap(), expected_op_count);
                 assert_eq!(db.ops.size(), leaf_num_to_pos(expected_op_count));
                 assert_eq!(db.op_count(), expected_op_count);
@@ -1765,7 +1766,9 @@ pub(super) mod test {
             // Create and populate two databases.
             let mut target_db = create_test_db(context.clone()).await;
             let sync_db_config = create_test_config(context.next_u64());
-            let mut sync_db: AnyTest = Any::init(context.clone(), sync_db_config).await.unwrap();
+            let mut sync_db: AnyTest = Any::init(context.clone(), sync_db_config.clone())
+                .await
+                .unwrap();
             let original_ops = create_test_ops(NUM_OPS);
             target_db = apply_ops(target_db, original_ops.clone()).await;
             target_db.commit().await.unwrap();
@@ -1792,7 +1795,7 @@ pub(super) mod test {
             let sync_upper_bound = target_db.op_count() - 1;
 
             let pinned_nodes_map = target_db.ops.get_pinned_nodes();
-            let pinned_nodes = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(sync_lower_bound))
+            let pinned_nodes = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(target_db_log_size))
                 .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
                 .collect::<Vec<_>>();
 
@@ -1801,10 +1804,11 @@ pub(super) mod test {
 
             let AnyTest { ops, log, .. } = target_db;
 
+            // Re-open `sync_db`
             let db = Any::init_synced(
                 context.clone(),
                 SyncConfig {
-                    db_config: create_test_config(context.next_u64()),
+                    db_config: sync_db_config,
                     log,
                     lower_bound: sync_lower_bound,
                     upper_bound: sync_upper_bound,
