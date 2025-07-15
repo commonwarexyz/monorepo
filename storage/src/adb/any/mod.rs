@@ -1216,7 +1216,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 2336);
             assert_eq!(
                 db.oldest_retained_loc().unwrap(),
-                1478_u64.saturating_sub(100)
+                1478_u64.saturating_sub(10)
             ); // 1478 - pruning_gap
             assert_eq!(db.inactivity_floor_loc, 1478);
             assert_eq!(db.snapshot.items(), 857);
@@ -1461,11 +1461,12 @@ pub(super) mod test {
             let root = db.root(&mut hasher);
             // Create a bitmap based on the current db's pruned/inactive state.
             let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
-            for _ in 0..db.inactivity_floor_loc {
+            let pruning_boundary = db.oldest_retained_loc().unwrap();
+            for _ in 0..pruning_boundary {
                 bitmap.append(false);
             }
             bitmap.sync(&mut hasher).await.unwrap();
-            assert_eq!(bitmap.bit_count(), db.inactivity_floor_loc);
+            assert_eq!(bitmap.bit_count(), pruning_boundary);
             db.close().await.unwrap();
 
             // Initialize the db's mmr/log.
@@ -1604,12 +1605,13 @@ pub(super) mod test {
             let upper_bound_ops = source_db.op_count() - 1;
 
             // Get pinned nodes and target hash before moving source_db
-            let pinned_nodes_map = source_db.ops.get_pinned_nodes();
-            // Convert into Vec in order of expected by Proof::nodes_to_pin
+            // Extract the specific pinned nodes we need for syncing from lower_bound_ops
             let nodes_to_pin = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(lower_bound_ops));
-            let pinned_nodes = nodes_to_pin
-                .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
-                .collect();
+            let pinned_nodes = join_all(nodes_to_pin.map(|pos| source_db.ops.get_node(pos))).await;
+            let pinned_nodes = pinned_nodes
+                .iter()
+                .map(|node| node.as_ref().unwrap().unwrap())
+                .collect::<Vec<_>>();
             let mut hasher = Standard::<Sha256>::new();
             let target_hash = source_db.root(&mut hasher);
 
@@ -1653,7 +1655,7 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc, lower_bound_ops);
             assert_eq!(db.oldest_retained_loc(), Some(lower_bound_ops));
             assert_eq!(db.ops.size(), source_db.ops.size());
-            assert_eq!(db.ops.pruned_to_pos(), source_db.ops.pruned_to_pos());
+            assert_eq!(db.ops.pruned_to_pos(), leaf_num_to_pos(lower_bound_ops));
             assert_eq!(
                 db.log.size().await.unwrap(),
                 source_db.log.size().await.unwrap()
@@ -1816,10 +1818,8 @@ pub(super) mod test {
             // Capture target db state for comparison
             let target_db_op_count = target_db.op_count();
             let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc;
-            let target_db_oldest_retained_loc = target_db.oldest_retained_loc();
             let target_db_log_size = target_db.log.size().await.unwrap();
             let target_db_mmr_size = target_db.ops.size();
-            let target_db_pruned_to_pos = target_db.ops.pruned_to_pos();
 
             let sync_lower_bound = target_db.inactivity_floor_loc;
             let sync_upper_bound = target_db.op_count() - 1;
@@ -1852,10 +1852,13 @@ pub(super) mod test {
             // Verify database state
             assert_eq!(sync_db.op_count(), target_db_op_count);
             assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
-            assert_eq!(sync_db.oldest_retained_loc(), target_db_oldest_retained_loc);
+            assert_eq!(sync_db.oldest_retained_loc(), Some(sync_lower_bound));
             assert_eq!(sync_db.log.size().await.unwrap(), target_db_log_size);
             assert_eq!(sync_db.ops.size(), target_db_mmr_size);
-            assert_eq!(sync_db.ops.pruned_to_pos(), target_db_pruned_to_pos);
+            assert_eq!(
+                sync_db.ops.pruned_to_pos(),
+                leaf_num_to_pos(sync_lower_bound)
+            );
 
             // Verify the root hash matches the target
             assert_eq!(sync_db.root(&mut hasher), target_hash);
@@ -1901,10 +1904,8 @@ pub(super) mod test {
             let sync_upper_bound = db.op_count() - 1;
             let target_db_op_count = db.op_count();
             let target_db_inactivity_floor_loc = db.inactivity_floor_loc;
-            let target_db_oldest_retained_loc = db.oldest_retained_loc();
             let target_db_log_size = db.log.size().await.unwrap();
             let target_db_mmr_size = db.ops.size();
-            let target_db_pruned_to_pos = db.ops.pruned_to_pos();
 
             let AnyTest { ops, log, .. } = db;
 
@@ -1929,10 +1930,13 @@ pub(super) mod test {
             // Verify database state
             assert_eq!(sync_db.op_count(), target_db_op_count);
             assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
-            assert_eq!(sync_db.oldest_retained_loc(), target_db_oldest_retained_loc);
+            assert_eq!(sync_db.oldest_retained_loc(), Some(sync_lower_bound));
             assert_eq!(sync_db.log.size().await.unwrap(), target_db_log_size);
             assert_eq!(sync_db.ops.size(), target_db_mmr_size);
-            assert_eq!(sync_db.ops.pruned_to_pos(), target_db_pruned_to_pos);
+            assert_eq!(
+                sync_db.ops.pruned_to_pos(),
+                leaf_num_to_pos(sync_lower_bound)
+            );
 
             sync_db.destroy().await.unwrap();
         });

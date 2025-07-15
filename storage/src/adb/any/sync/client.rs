@@ -533,7 +533,6 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
             let target_op_count = target_db.op_count();
             let target_inactivity_floor = target_db.inactivity_floor_loc;
-            let target_pruned_pos = target_db.ops.pruned_to_pos();
             let target_log_size = target_db.log.size().await.unwrap();
             let mut hasher = create_test_hasher();
             let target_hash = target_db.root(&mut hasher);
@@ -579,7 +578,10 @@ pub(crate) mod tests {
             assert_eq!(got_db.op_count(), target_op_count);
             assert_eq!(got_db.inactivity_floor_loc, target_inactivity_floor);
             assert_eq!(got_db.log.size().await.unwrap(), target_log_size);
-            assert_eq!(got_db.ops.pruned_to_pos(), target_pruned_pos);
+            assert_eq!(
+                got_db.ops.pruned_to_pos(),
+                leaf_num_to_pos(target_inactivity_floor)
+            );
 
             // Verify the root hash matches the target
             assert_eq!(got_db.root(&mut hasher), target_hash);
@@ -761,13 +763,15 @@ pub(crate) mod tests {
             // Verify database state
             assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
             assert_eq!(sync_db.inactivity_floor_loc, target_db.inactivity_floor_loc);
-            assert_eq!(sync_db.oldest_retained_loc(), Some(lower_bound_ops));
+            assert_eq!(sync_db.oldest_retained_loc().unwrap(), lower_bound_ops);
             assert_eq!(
                 sync_db.log.size().await.unwrap(),
                 target_db.log.size().await.unwrap()
             );
-            assert_eq!(sync_db.ops.pruned_to_pos(), target_db.ops.pruned_to_pos());
-
+            assert_eq!(
+                sync_db.ops.pruned_to_pos(),
+                leaf_num_to_pos(lower_bound_ops)
+            );
             // Verify the root hash matches the target
             assert_eq!(sync_db.root(&mut hasher), target_hash);
 
@@ -851,15 +855,15 @@ pub(crate) mod tests {
             // Verify database state
             assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
             assert_eq!(sync_db.op_count(), target_db.op_count());
-            assert_eq!(
-                sync_db.oldest_retained_loc(),
-                target_db.oldest_retained_loc()
-            );
+            assert_eq!(sync_db.oldest_retained_loc().unwrap(), lower_bound_ops);
             assert_eq!(
                 sync_db.log.size().await.unwrap(),
                 target_db.log.size().await.unwrap()
             );
-            assert_eq!(sync_db.ops.pruned_to_pos(), target_db.ops.pruned_to_pos());
+            assert_eq!(
+                sync_db.ops.pruned_to_pos(),
+                leaf_num_to_pos(lower_bound_ops)
+            );
 
             // Verify the root hash matches the target
             assert_eq!(sync_db.root(&mut hasher), target_hash);
