@@ -53,7 +53,7 @@ fn fuzz(data: FuzzInput) {
             translator: EightCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            pruning_gap: 10,
+            pruning_gap: 0, // TODO danlaine: Set to non-zero
         };
 
         let mut adb = Any::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
