@@ -280,13 +280,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             context.with_label("snapshot"),
             cfg.db_config.translator.clone(),
         );
-        Any::<E, K, V, H, T>::build_snapshot_from_log::<0 /* UNUSED_N */>(
-            cfg.lower_bound,
-            &cfg.log,
-            &mut snapshot,
-            None,
-        )
+        let inactivity_floor_loc = Any::<E, K, V, H, T>::build_snapshot_from_log::<
+            0, /* UNUSED_N */
+        >(cfg.lower_bound, &cfg.log, &mut snapshot, None)
         .await?;
+        assert_eq!(inactivity_floor_loc, cfg.lower_bound);
 
         let mut db = Any {
             ops: mmr,
@@ -789,7 +787,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Prune historical operations that are >= `pruning_gap` steps behind the inactivity floor.
+    /// Prune historical operations that are > `pruning_gap` steps behind the inactivity floor.
     /// This does not affect the db's root or current snapshot.
     pub(super) async fn prune_inactive(&mut self) -> Result<(), Error> {
         let Some(oldest_retained_loc) = self.log.oldest_retained_pos().await? else {

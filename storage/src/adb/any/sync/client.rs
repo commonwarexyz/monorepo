@@ -671,9 +671,9 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
 
             let mut hasher = create_test_hasher();
-            // We will sync to this operation
             let upper_bound_ops = target_db.op_count() - 1;
             let target_hash = target_db.root(&mut hasher);
+            let lower_bound_ops = target_db.inactivity_floor_loc;
 
             // Add another operation after the sync range
             let final_op = &target_ops[TARGET_DB_OPS - 1];
@@ -681,7 +681,6 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
 
             // Start of the sync range is after the inactivity floor
-            let lower_bound_ops = target_db.inactivity_floor_loc + 1;
             let config = Config {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(10),
@@ -697,7 +696,12 @@ pub(crate) mod tests {
             let synced_db = sync(config).await.unwrap();
 
             // Verify the synced database has the correct range of operations
+            assert_eq!(synced_db.inactivity_floor_loc, lower_bound_ops);
             assert_eq!(synced_db.oldest_retained_loc(), Some(lower_bound_ops));
+            assert_eq!(
+                synced_db.ops.pruned_to_pos(),
+                leaf_num_to_pos(lower_bound_ops)
+            );
             assert_eq!(synced_db.op_count(), upper_bound_ops + 1);
 
             // Verify the final hash matches our target
