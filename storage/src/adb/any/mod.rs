@@ -205,8 +205,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// # Behavior
     ///
     /// This method handles different initialization scenarios based on existing data:
-    /// - If the MMR journal is empty or before `lower_bound`, it creates a fresh MMR from
-    ///   the provided `pinned_nodes`
+    /// - If the MMR journal is empty or the last item is before `lower_bound`, it creates a
+    ///   fresh MMR from the provided `pinned_nodes`
     /// - If the MMR journal has data but is incomplete (< `upper_bound`), missing operations
     ///   from the log are applied to bring it up to the target state
     /// - If the MMR journal has data beyond the `upper_bound`, it is rewound to match the sync target

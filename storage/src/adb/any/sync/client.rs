@@ -314,6 +314,7 @@ where
 
                 debug!(operations_len, "Received operations from resolver");
 
+                // Verify the proof is valid over the given operations
                 let proof_valid = {
                     let _timer = metrics.proof_verification_duration.timer();
                     adb::any::Any::<E, K, V, H, T>::verify_proof(
