@@ -933,7 +933,7 @@ mod tests {
         let context = deterministic::Context::default();
         let mut index = Index::init(context, TwoCap);
 
-        // Create a large collision chain with 50,000 items on the same key.
+        // Create a large collision chain with 50,000 items on the same key
         for i in 0..50000 {
             index.insert(b"", i as u64);
         }
