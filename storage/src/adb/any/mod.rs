@@ -1570,7 +1570,7 @@ pub(super) mod test {
             source_db = apply_ops(source_db, ops.clone()).await;
             source_db.commit().await.unwrap();
 
-            let lower_bound_ops = source_db.oldest_retained_loc().unwrap();
+            let lower_bound_ops = source_db.inactivity_floor_loc;
             let upper_bound_ops = source_db.op_count() - 1;
 
             // Get pinned nodes and target hash before moving source_db
@@ -1791,7 +1791,7 @@ pub(super) mod test {
             let target_db_mmr_size = target_db.ops.size();
             let target_db_pruned_to_pos = target_db.ops.pruned_to_pos();
 
-            let sync_lower_bound = target_db.oldest_retained_loc().unwrap();
+            let sync_lower_bound = target_db.inactivity_floor_loc;
             let sync_upper_bound = target_db.op_count() - 1;
 
             let pinned_nodes_map = target_db.ops.get_pinned_nodes();
@@ -1867,7 +1867,7 @@ pub(super) mod test {
             db = apply_ops(db, ops.clone()).await;
             db.commit().await.unwrap();
 
-            let sync_lower_bound = db.oldest_retained_loc().unwrap();
+            let sync_lower_bound = db.inactivity_floor_loc;
             let sync_upper_bound = db.op_count() - 1;
             let target_db_op_count = db.op_count();
             let target_db_inactivity_floor_loc = db.inactivity_floor_loc;

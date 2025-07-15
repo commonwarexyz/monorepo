@@ -46,7 +46,7 @@ where
     /// Target hash of the database.
     pub target_hash: H::Digest,
 
-    /// Lower bound of operations to sync (pruning boundary, inclusive).
+    /// Lower bound of operations to sync (inactivity floor, inclusive).
     pub lower_bound_ops: u64,
 
     /// Upper bound of operations to sync (inclusive).
@@ -538,8 +538,8 @@ pub(crate) mod tests {
             let target_hash = target_db.root(&mut hasher);
 
             // After commit, the database may have pruned early operations
-            // Start syncing from the oldest retained location, not 0
-            let lower_bound_ops = target_db.oldest_retained_loc().unwrap();
+            // Start syncing from the inactivity floor, not 0
+            let lower_bound_ops = target_db.inactivity_floor_loc;
 
             // Capture target database state and deleted keys before moving into config
             let mut expected_kvs = HashMap::new();
@@ -675,8 +675,8 @@ pub(crate) mod tests {
             let mut target_db = apply_ops(target_db, vec![final_op.clone()]).await; // TODO: this is wrong
             target_db.commit().await.unwrap();
 
-            // Start of the sync range is after the oldest retained operation
-            let lower_bound_ops = target_db.oldest_retained_loc().unwrap() + 1;
+            // Start of the sync range is after the inactivity floor
+            let lower_bound_ops = target_db.inactivity_floor_loc + 1;
             let config = Config {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(10),
@@ -740,7 +740,7 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
             let mut hasher = create_test_hasher();
             let target_hash = target_db.root(&mut hasher);
-            let lower_bound_ops = target_db.oldest_retained_loc().unwrap();
+            let lower_bound_ops = target_db.inactivity_floor_loc;
             let upper_bound_ops = target_db.op_count() - 1; // Up to the last operation
 
             // Reopen the sync database and sync it to the target database
@@ -828,7 +828,7 @@ pub(crate) mod tests {
             // Reopen sync_db
             let mut hasher = create_test_hasher();
             let target_hash = target_db.root(&mut hasher);
-            let lower_bound_ops = target_db.oldest_retained_loc().unwrap();
+            let lower_bound_ops = target_db.inactivity_floor_loc;
             let upper_bound_ops = target_db.op_count() - 1;
             // sync_db should never ask the resolver for operations
             // because it is already complete. Use a resolver that always fails
