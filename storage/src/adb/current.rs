@@ -360,7 +360,11 @@ impl<
             .await?;
         self.status.sync(&mut grafter).await?;
 
-        self.status.prune_to_bit(self.any.inactivity_floor_loc);
+        let prune_loc = self
+            .any
+            .inactivity_floor_loc
+            .saturating_sub(self.any.pruning_gap);
+        self.status.prune_to_bit(prune_loc);
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),
