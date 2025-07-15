@@ -350,7 +350,7 @@ impl<
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Failure recovery relies on this specific order of these three disk-based operations:
         //  (1) commit/sync the any db to disk (which raises the inactivity floor).
-        //  (2) prune the bitmap to the updated inactivity floor and write its state to disk.
+        //  (2) prune the bitmap to the updated pruning boundary and write its state to disk.
         //  (3) prune the any db of inactive operations.
         self.commit_ops().await?; // (1)
 
@@ -1194,6 +1194,14 @@ pub mod test {
                 .unwrap();
             let committed_root = db.root(&mut hasher).await.unwrap();
             let committed_op_count = db.op_count();
+            let committed_inactivity_floor = db.any.inactivity_floor_loc;
+            let committed_pruning_loc = db.any.oldest_retained_loc().unwrap();
+
+            // Verify the `pruning_delay` is correctly handled (default is 10)
+            assert_eq!(
+                committed_pruning_loc,
+                committed_inactivity_floor.saturating_sub(10)
+            );
 
             // Perform more random operations without committing any of them.
             apply_random_ops(ELEMENTS, false, rng_seed + 1, &mut db)
@@ -1206,6 +1214,14 @@ pub mod test {
             let mut db = open_db(context.clone(), partition).await;
             assert_eq!(db.root(&mut hasher).await.unwrap(), committed_root);
             assert_eq!(db.op_count(), committed_op_count);
+
+            // Verify `pruning_delay` is persisted correctly.
+            let recovered_pruning_loc = db.any.oldest_retained_loc().unwrap();
+            assert_eq!(recovered_pruning_loc, committed_pruning_loc);
+            assert_eq!(
+                recovered_pruning_loc,
+                db.any.inactivity_floor_loc.saturating_sub(10)
+            );
 
             // Re-apply the exact same uncommitted operations.
             apply_random_ops(ELEMENTS, false, rng_seed + 1, &mut db)
@@ -1223,6 +1239,13 @@ pub mod test {
             let db = open_db(context.clone(), partition).await;
             let scenario_2_root = db.root(&mut hasher).await.unwrap();
             let scenario_2_pruning_loc = db.any.oldest_retained_loc().unwrap();
+            let scenario_2_inactivity_floor = db.any.inactivity_floor_loc;
+
+            // Verify `pruning_delay` is persisted correctly.
+            assert_eq!(
+                scenario_2_pruning_loc,
+                scenario_2_inactivity_floor.saturating_sub(10)
+            );
 
             // To confirm the second committed hash is correct we'll re-build the DB in a new
             // partition, but without any failures. They should have the exact same state.
@@ -1239,6 +1262,12 @@ pub mod test {
             assert_eq!(db.root(&mut hasher).await.unwrap(), scenario_2_root);
             let successful_pruning_loc = db.any.oldest_retained_loc().unwrap();
             assert_eq!(successful_pruning_loc, scenario_2_pruning_loc);
+
+            // Verify `pruning_delay` is persisted correctly.
+            assert_eq!(
+                successful_pruning_loc,
+                db.any.inactivity_floor_loc.saturating_sub(10)
+            );
             db.close().await.unwrap();
 
             // SCENARIO #3: Simulate a crash that happens after the any db has been committed and
@@ -1258,9 +1287,13 @@ pub mod test {
             let db = open_db(context.clone(), fresh_partition).await;
             // State & pruning boundary should match that of the successful commit.
             assert_eq!(db.root(&mut hasher).await.unwrap(), scenario_2_root);
+            let recovered_pruning_loc_3 = db.any.oldest_retained_loc().unwrap();
+            assert_eq!(recovered_pruning_loc_3, successful_pruning_loc);
+
+            // Verify `pruning_delay` is persisted correctly.
             assert_eq!(
-                db.any.oldest_retained_loc().unwrap(),
-                successful_pruning_loc
+                recovered_pruning_loc_3,
+                db.any.inactivity_floor_loc.saturating_sub(10)
             );
 
             db.destroy().await.unwrap();
