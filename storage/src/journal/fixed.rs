@@ -273,7 +273,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 lower_bound, "Existing journal data is stale, re-initializing in pruned state"
             );
             journal.destroy().await?;
-            Self::init_empty_at_size(context, cfg, lower_bound).await?
+            Self::init_at_size(context, cfg, lower_bound).await?
         } else if journal_size <= upper_bound + 1 {
             debug!(
                 journal_size,
@@ -323,11 +323,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     /// - Reading from positions 0-19 will return `ItemPruned` since those blobs don't exist
     /// - This represents a journal that had operations 0-24, with operations 0-19 pruned,
     ///   leaving operations 20-24 in tail blob 2.
-    pub(crate) async fn init_empty_at_size(
-        context: E,
-        cfg: Config,
-        size: u64,
-    ) -> Result<Self, Error> {
+    pub(crate) async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         // Calculate the tail blob index and number of items in the tail
         let tail_index = size / cfg.items_per_blob;
         let tail_items = size % cfg.items_per_blob;
