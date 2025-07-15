@@ -360,7 +360,11 @@ impl<
             .await?;
         self.status.sync(&mut grafter).await?;
 
-        self.status.prune_to_bit(self.any.inactivity_floor_loc);
+        let target_prune_loc = self
+            .any
+            .inactivity_floor_loc
+            .saturating_sub(self.any.pruning_delay);
+        self.status.prune_to_bit(target_prune_loc);
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),
@@ -724,7 +728,11 @@ impl<
             .load_grafted_digests(&self.status.dirty_chunks(), &self.any.ops)
             .await?;
         self.status.sync(&mut grafter).await?;
-        self.status.prune_to_bit(self.any.inactivity_floor_loc);
+        let target_prune_loc = self
+            .any
+            .inactivity_floor_loc
+            .saturating_sub(self.any.pruning_delay);
+        self.status.prune_to_bit(target_prune_loc);
         self.status
             .write_pruned(
                 self.context.with_label("bitmap"),
