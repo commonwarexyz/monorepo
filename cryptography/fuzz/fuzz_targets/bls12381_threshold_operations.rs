@@ -1,15 +1,24 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::ReadExt;
 use commonware_cryptography::bls12381::primitives::{
-    group::{Element, Scalar, Share, G1, G2},
+    group::{Element, Share, G1, G2},
     ops::*,
-    poly::{compute_weights, Eval, Weight},
+    poly::{Eval, Poly, Weight},
     variant::{MinPk, MinSig},
 };
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
+
+mod common;
+use common::{
+    arbitrary_bytes, arbitrary_eval_g1, arbitrary_eval_g2, arbitrary_g1, arbitrary_g2,
+    arbitrary_messages, arbitrary_optional_bytes, arbitrary_poly_g1, arbitrary_poly_g2,
+    arbitrary_share, arbitrary_vec_eval_g1, arbitrary_vec_eval_g2, arbitrary_vec_g1,
+    arbitrary_vec_g2, arbitrary_vec_indexed_g1, arbitrary_vec_indexed_g2,
+    arbitrary_vec_of_vec_eval_g1, arbitrary_vec_of_vec_eval_g2, arbitrary_vec_pending_minpk,
+    arbitrary_vec_pending_minsig, arbitrary_weights,
+};
 
 type Message = (Option<Vec<u8>>, Vec<u8>);
 
@@ -233,275 +242,28 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
     }
 }
 
-use commonware_cryptography::bls12381::primitives::poly::Poly;
-
-fn arbitrary_scalar(u: &mut Unstructured) -> Result<Scalar, arbitrary::Error> {
-    let bytes: [u8; 32] = u.arbitrary()?;
-    match Scalar::read(&mut bytes.as_slice()) {
-        Ok(s) => Ok(s),
-        Err(_) => Ok(Scalar::from_index(u.int_in_range(0..=u32::MAX)?)),
-    }
-}
-
-fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
-    let bytes: [u8; 48] = u.arbitrary()?;
-    match G1::read(&mut bytes.as_slice()) {
-        Ok(point) => Ok(point),
-        Err(_) => Ok(if u.arbitrary()? {
-            G1::zero()
-        } else {
-            G1::one()
-        }),
-    }
-}
-
-fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
-    let bytes: [u8; 96] = u.arbitrary()?;
-    match G2::read(&mut bytes.as_slice()) {
-        Ok(point) => Ok(point),
-        Err(_) => Ok(if u.arbitrary()? {
-            G2::zero()
-        } else {
-            G2::one()
-        }),
-    }
-}
-
-fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> {
-    Ok(Share {
-        index: u.int_in_range(1..=100)?,
-        private: arbitrary_scalar(u)?,
-    })
-}
-
-fn arbitrary_poly_scalar(u: &mut Unstructured) -> Result<Poly<Scalar>, arbitrary::Error> {
-    let degree = u.int_in_range(0..=10)?;
-    let coeffs = arbitrary_vec_scalar(u, degree as usize + 1, degree as usize + 1)?;
-    Ok(Poly::from(coeffs))
-}
-
-fn arbitrary_poly_g1(u: &mut Unstructured) -> Result<Poly<G1>, arbitrary::Error> {
-    let scalar_poly = arbitrary_poly_scalar(u)?;
-    Ok(Poly::<G1>::commit(scalar_poly))
-}
-
-fn arbitrary_poly_g2(u: &mut Unstructured) -> Result<Poly<G2>, arbitrary::Error> {
-    let scalar_poly = arbitrary_poly_scalar(u)?;
-    Ok(Poly::<G2>::commit(scalar_poly))
-}
-
-fn arbitrary_eval_g1(u: &mut Unstructured) -> Result<Eval<G1>, arbitrary::Error> {
-    Ok(Eval {
-        index: u.int_in_range(1..=100)?,
-        value: arbitrary_g1(u)?,
-    })
-}
-
-fn arbitrary_eval_g2(u: &mut Unstructured) -> Result<Eval<G2>, arbitrary::Error> {
-    Ok(Eval {
-        index: u.int_in_range(1..=100)?,
-        value: arbitrary_g2(u)?,
-    })
-}
-
-fn arbitrary_vec_scalar(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<Scalar>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len).map(|_| arbitrary_scalar(u)).collect()
-}
-
-fn arbitrary_vec_g1(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<G1>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len).map(|_| arbitrary_g1(u)).collect()
-}
-
-fn arbitrary_vec_g2(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<G2>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len).map(|_| arbitrary_g2(u)).collect()
-}
-
-fn arbitrary_vec_eval_g1(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<Eval<G1>>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len).map(|_| arbitrary_eval_g1(u)).collect()
-}
-
-fn arbitrary_vec_eval_g2(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<Eval<G2>>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len).map(|_| arbitrary_eval_g2(u)).collect()
-}
-
-fn arbitrary_vec_indexed_g1(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<(u32, G1)>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len)
-        .map(|_| Ok((u.int_in_range(1..=100)?, arbitrary_g1(u)?)))
-        .collect()
-}
-
-fn arbitrary_vec_indexed_g2(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<(u32, G2)>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len)
-        .map(|_| Ok((u.int_in_range(1..=100)?, arbitrary_g2(u)?)))
-        .collect()
-}
-
-fn arbitrary_vec_pending_minpk(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<(u32, G1, G2)>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len)
-        .map(|_| Ok((u.int_in_range(1..=100)?, arbitrary_g1(u)?, arbitrary_g2(u)?)))
-        .collect()
-}
-
-fn arbitrary_vec_pending_minsig(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<(u32, G2, G1)>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len)
-        .map(|_| Ok((u.int_in_range(1..=100)?, arbitrary_g2(u)?, arbitrary_g1(u)?)))
-        .collect()
-}
-
-fn arbitrary_messages(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<Message>, arbitrary::Error> {
-    (0..u.int_in_range(min..=max)?)
-        .map(|_| {
-            Ok((
-                arbitrary_optional_bytes(u, 50)?,
-                arbitrary_bytes(u, 0, 100)?,
-            ))
-        })
-        .collect()
-}
-
-fn arbitrary_optional_bytes(
-    u: &mut Unstructured,
-    max: usize,
-) -> Result<Option<Vec<u8>>, arbitrary::Error> {
-    if u.arbitrary()? {
-        Ok(Some(arbitrary_bytes(u, 0, max)?))
-    } else {
-        Ok(None)
-    }
-}
-
-fn arbitrary_bytes(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<u8>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    u.bytes(len).map(|b| b.to_vec())
-}
-
-fn arbitrary_weights(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<BTreeMap<u32, Weight>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    if len == 0 {
-        return Ok(BTreeMap::new());
-    }
-
-    let mut indices = Vec::new();
-    for _ in 0..len {
-        let index = u.int_in_range(1..=100)?;
-        if !indices.contains(&index) {
-            indices.push(index);
-        }
-    }
-
-    if indices.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-
-    indices.sort();
-    compute_weights(indices).or_else(|_| Ok(BTreeMap::new()))
-}
-
-fn arbitrary_vec_of_vec_eval_g1(
-    u: &mut Unstructured,
-    outer_min: usize,
-    outer_max: usize,
-    inner_min: usize,
-    inner_max: usize,
-) -> Result<Vec<Vec<Eval<G1>>>, arbitrary::Error> {
-    let outer_len = u.int_in_range(outer_min..=outer_max)?;
-    (0..outer_len)
-        .map(|_| arbitrary_vec_eval_g1(u, inner_min, inner_max))
-        .collect()
-}
-
-fn arbitrary_vec_of_vec_eval_g2(
-    u: &mut Unstructured,
-    outer_min: usize,
-    outer_max: usize,
-    inner_min: usize,
-    inner_max: usize,
-) -> Result<Vec<Vec<Eval<G2>>>, arbitrary::Error> {
-    let outer_len = u.int_in_range(outer_min..=outer_max)?;
-    (0..outer_len)
-        .map(|_| arbitrary_vec_eval_g2(u, inner_min, inner_max))
-        .collect()
-}
-
 fn fuzz(op: FuzzOperation) {
     match op {
         FuzzOperation::PartialSignProofOfPossessionMinPk { public, share } => {
-            if share.index <= public.degree() + 1 {
+            if share.index <= public.required() {
                 let _ = partial_sign_proof_of_possession::<MinPk>(&public, &share);
             }
         }
 
         FuzzOperation::PartialSignProofOfPossessionMinSig { public, share } => {
-            if share.index <= public.degree() + 1 {
+            if share.index <= public.required() {
                 let _ = partial_sign_proof_of_possession::<MinSig>(&public, &share);
             }
         }
 
         FuzzOperation::PartialVerifyProofOfPossessionMinPk { public, partial } => {
-            if partial.index <= public.degree() + 1 {
+            if partial.index <= public.required() {
                 let _ = partial_verify_proof_of_possession::<MinPk>(&public, &partial);
             }
         }
 
         FuzzOperation::PartialVerifyProofOfPossessionMinSig { public, partial } => {
-            if partial.index <= public.degree() + 1 {
+            if partial.index <= public.required() {
                 let _ = partial_verify_proof_of_possession::<MinSig>(&public, &partial);
             }
         }
@@ -520,7 +282,7 @@ fn fuzz(op: FuzzOperation) {
             messages,
             partials,
         } => {
-            if index <= public.degree() + 1 && messages.len() == partials.len() {
+            if index <= public.required() && messages.len() == partials.len() {
                 let messages_refs: Vec<(Option<&[u8]>, &[u8])> = messages
                     .iter()
                     .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
@@ -548,7 +310,7 @@ fn fuzz(op: FuzzOperation) {
             messages,
             partials,
         } => {
-            if index <= public.degree() + 1 && messages.len() == partials.len() {
+            if index <= public.required() && messages.len() == partials.len() {
                 let messages_refs: Vec<(Option<&[u8]>, &[u8])> = messages
                     .iter()
                     .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))

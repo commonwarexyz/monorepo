@@ -1,13 +1,18 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::ReadExt;
 use commonware_cryptography::bls12381::primitives::{
-    group::{Element, G1, G2},
+    group::{G1, G2},
     ops::*,
     variant::{MinPk, MinSig},
 };
 use libfuzzer_sys::fuzz_target;
+
+mod common;
+use common::{
+    arbitrary_bytes, arbitrary_g1, arbitrary_g2, arbitrary_messages, arbitrary_optional_bytes,
+    arbitrary_vec_g1, arbitrary_vec_g2,
+};
 
 type Message = (Option<Vec<u8>>, Vec<u8>);
 
@@ -97,83 +102,6 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
         }
     }
-}
-
-fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
-    let bytes: [u8; 48] = u.arbitrary()?;
-    match G1::read(&mut bytes.as_slice()) {
-        Ok(point) => Ok(point),
-        Err(_) => Ok(if u.arbitrary()? {
-            G1::zero()
-        } else {
-            G1::one()
-        }),
-    }
-}
-
-fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
-    let bytes: [u8; 96] = u.arbitrary()?;
-    match G2::read(&mut bytes.as_slice()) {
-        Ok(point) => Ok(point),
-        Err(_) => Ok(if u.arbitrary()? {
-            G2::zero()
-        } else {
-            G2::one()
-        }),
-    }
-}
-
-fn arbitrary_vec_g1(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<G1>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len).map(|_| arbitrary_g1(u)).collect()
-}
-
-fn arbitrary_vec_g2(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<G2>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len).map(|_| arbitrary_g2(u)).collect()
-}
-
-fn arbitrary_messages(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<Message>, arbitrary::Error> {
-    (0..u.int_in_range(min..=max)?)
-        .map(|_| {
-            Ok((
-                arbitrary_optional_bytes(u, 50)?,
-                arbitrary_bytes(u, 0, 100)?,
-            ))
-        })
-        .collect()
-}
-
-fn arbitrary_optional_bytes(
-    u: &mut Unstructured,
-    max: usize,
-) -> Result<Option<Vec<u8>>, arbitrary::Error> {
-    if u.arbitrary()? {
-        Ok(Some(arbitrary_bytes(u, 0, max)?))
-    } else {
-        Ok(None)
-    }
-}
-
-fn arbitrary_bytes(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<u8>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    u.bytes(len).map(|b| b.to_vec())
 }
 
 fn fuzz(op: FuzzOperation) {
