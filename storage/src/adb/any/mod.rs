@@ -795,22 +795,22 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         };
 
         // Calculate the target pruning position: inactivity_floor_loc - pruning_delay
-        let prune_loc = self.inactivity_floor_loc.saturating_sub(self.pruning_delay);
-        let ops_to_prune = prune_loc - oldest_retained_loc;
+        let target_prune_loc = self.inactivity_floor_loc.saturating_sub(self.pruning_delay);
+        let ops_to_prune = target_prune_loc.saturating_sub(oldest_retained_loc);
         if ops_to_prune == 0 {
             return Ok(());
         }
-        debug!(ops_to_prune, "pruning inactive ops");
+        debug!(ops_to_prune, target_prune_loc, "pruning inactive ops");
 
         // Prune the MMR, whose pruning boundary serves as the "source of truth" for proving.
-        let prune_to_pos = leaf_num_to_pos(prune_loc);
+        let prune_to_pos = leaf_num_to_pos(target_prune_loc);
         self.ops
             .prune_to_pos(&mut self.hasher, prune_to_pos)
             .await?;
 
         // Because the log's pruning boundary will be blob-size aligned, we cannot use it as a
         // source of truth for the min provable element.
-        self.log.prune(prune_loc).await?;
+        self.log.prune(target_prune_loc).await?;
 
         Ok(())
     }
