@@ -216,13 +216,12 @@ impl<
             "bitmap is pruned beyond where bits should be retained"
         );
 
-        if inactivity_floor_loc > start_leaf_num {
-            // Advanced the pruning boundary if we failed to prune to the inactivity floor for any reason.
-            // Apply the pruning gap to maintain consistency with normal commit operations.
-            let target_prune_loc = inactivity_floor_loc.saturating_sub(config.pruning_gap);
+        // Advanced the pruning boundary if we failed to prune to the correct position for any reason.
+        let target_prune_loc = inactivity_floor_loc.saturating_sub(config.pruning_gap);
+        if target_prune_loc > start_leaf_num {
             warn!(
                 inactivity_floor_loc,
-                target_prune_loc, "pruning MMR to the correct position"
+                target_prune_loc, start_leaf_num, "pruning MMR to correct position"
             );
             mmr.prune_to_pos(grafter.standard(), leaf_num_to_pos(target_prune_loc))
                 .await?;

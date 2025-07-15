@@ -795,11 +795,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
         // Calculate the target pruning position: inactivity_floor_loc - pruning_gap
         let target_prune_loc = self.inactivity_floor_loc.saturating_sub(self.pruning_gap);
-        let pruned_ops = target_prune_loc - oldest_retained_loc;
-        if pruned_ops == 0 {
+        let ops_to_prune = target_prune_loc - oldest_retained_loc;
+        if ops_to_prune == 0 {
             return Ok(());
         }
-        debug!(pruned = pruned_ops, "pruning inactive ops");
+        debug!(ops_to_prune, "pruning inactive ops");
 
         // Prune the MMR, whose pruning boundary serves as the "source of truth" for proving.
         let prune_to_pos = leaf_num_to_pos(target_prune_loc);
