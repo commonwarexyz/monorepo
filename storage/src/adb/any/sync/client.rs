@@ -208,6 +208,8 @@ where
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
+        // Assert invariant from [Journal::init_sync]
+        assert!(log_size <= config.upper_bound_ops + 1);
         if log_size == config.upper_bound_ops + 1 {
             // We already have all the operations we need in the log.
             // Build the database immediately without fetching more operations.

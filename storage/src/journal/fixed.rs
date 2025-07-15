@@ -259,12 +259,20 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     /// 3. **Prune and Rewind**: existing_size > upper_bound + 1
     ///    - Prunes the journal to `lower_bound`
     ///    - Rewinds the journal to size `upper_bound + 1`
+    ///
+    /// # Invariants
+    ///
+    /// The returned [Journal] has size in [`lower_bound`, `upper_bound + 1`].
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config,
         lower_bound: u64,
         upper_bound: u64,
     ) -> Result<Self, Error> {
+        if lower_bound > upper_bound {
+            return Err(Error::InvalidSyncRange(lower_bound, upper_bound));
+        }
+
         let mut journal = Self::init(context.clone(), cfg.clone()).await?;
         let journal_size = journal.size().await?;
         let journal = if journal_size <= lower_bound {
@@ -1864,6 +1872,183 @@ mod tests {
             assert_eq!(read_value, test_digest(777));
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` returns InvalidSyncRange when lower_bound > upper_bound.
+    #[test_traced]
+    fn test_init_sync_invalid_range() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_invalid_range".into(),
+                items_per_blob: 4,
+                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            let lower_bound = 6;
+            let upper_bound = 5;
+            let result = Journal::<Context, Digest>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound,
+                upper_bound,
+            )
+            .await;
+
+            // Verify that we get the expected error
+            match result {
+                Err(Error::InvalidSyncRange(lb, ub)) => {
+                    assert_eq!(lb, lower_bound);
+                    assert_eq!(ub, upper_bound);
+                }
+                _ => panic!("Expected InvalidSyncRange error"),
+            }
+        });
+    }
+
+    /// Test `init_at_size` creates a journal in a pruned state at various sizes.
+    #[test_traced]
+    fn test_init_at_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_init_at_size".into(),
+                items_per_blob: 5,
+                write_buffer: 1024,
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            // Test 1: Initialize at size 0 (empty journal)
+            {
+                let mut journal =
+                    Journal::<Context, Digest>::init_at_size(context.clone(), cfg.clone(), 0)
+                        .await
+                        .expect("Failed to initialize journal at size 0");
+
+                assert_eq!(journal.size().await.unwrap(), 0);
+                assert_eq!(journal.tail_index, 0);
+                assert_eq!(journal.blobs.len(), 0);
+                assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+
+                // Should be able to append from position 0
+                let append_pos = journal.append(test_digest(100)).await.unwrap();
+                assert_eq!(append_pos, 0);
+                assert_eq!(journal.read(0).await.unwrap(), test_digest(100));
+                journal.destroy().await.unwrap();
+            }
+
+            // Test 2: Initialize at size exactly at blob boundary (10 with items_per_blob=5)
+            {
+                let mut journal =
+                    Journal::<Context, Digest>::init_at_size(context.clone(), cfg.clone(), 10)
+                        .await
+                        .expect("Failed to initialize journal at size 10");
+
+                assert_eq!(journal.size().await.unwrap(), 10);
+                assert_eq!(journal.tail_index, 2); // 10 / 5 = 2
+                assert_eq!(journal.blobs.len(), 0); // No historical blobs
+                assert_eq!(journal.oldest_retained_pos().await.unwrap(), None); // Tail is empty
+
+                // Operations 0-9 should be pruned
+                for i in 0..10 {
+                    let result = journal.read(i).await;
+                    assert!(matches!(result, Err(Error::ItemPruned(_))));
+                }
+
+                // Should be able to append from position 10
+                let append_pos = journal.append(test_digest(10)).await.unwrap();
+                assert_eq!(append_pos, 10);
+                assert_eq!(journal.read(10).await.unwrap(), test_digest(10));
+
+                journal.destroy().await.unwrap();
+            }
+
+            // Test 3: Initialize at size in middle of blob (7 with items_per_blob=5)
+            {
+                let mut journal =
+                    Journal::<Context, Digest>::init_at_size(context.clone(), cfg.clone(), 7)
+                        .await
+                        .expect("Failed to initialize journal at size 7");
+
+                assert_eq!(journal.size().await.unwrap(), 7);
+                assert_eq!(journal.tail_index, 1); // 7 / 5 = 1
+                assert_eq!(journal.blobs.len(), 0); // No historical blobs
+                                                    // Tail blob should have 2 items worth of space (7 % 5 = 2)
+                assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(5)); // First item in tail blob
+
+                // Operations 0-4 should be pruned (blob 0 doesn't exist)
+                for i in 0..5 {
+                    let result = journal.read(i).await;
+                    assert!(matches!(result, Err(Error::ItemPruned(_))));
+                }
+
+                // Operations 5-6 should be unreadable (dummy data in tail blob)
+                for i in 5..7 {
+                    let result = journal.read(i).await;
+                    assert!(result.is_err()); // Should fail due to invalid data
+                }
+
+                // Should be able to append from position 7
+                let append_pos = journal.append(test_digest(7)).await.unwrap();
+                assert_eq!(append_pos, 7);
+                assert_eq!(journal.read(7).await.unwrap(), test_digest(7));
+
+                journal.destroy().await.unwrap();
+            }
+
+            // Test 4: Initialize at larger size spanning multiple pruned blobs
+            {
+                let mut journal =
+                    Journal::<Context, Digest>::init_at_size(context.clone(), cfg.clone(), 23)
+                        .await
+                        .expect("Failed to initialize journal at size 23");
+
+                assert_eq!(journal.size().await.unwrap(), 23);
+                assert_eq!(journal.tail_index, 4); // 23 / 5 = 4
+                assert_eq!(journal.blobs.len(), 0); // No historical blobs
+                assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(20)); // First item in tail blob
+
+                // Operations 0-19 should be pruned (blobs 0-3 don't exist)
+                for i in 0..20 {
+                    let result = journal.read(i).await;
+                    assert!(matches!(result, Err(Error::ItemPruned(_))));
+                }
+
+                // Operations 20-22 should be unreadable (dummy data in tail blob)
+                for i in 20..23 {
+                    let result = journal.read(i).await;
+                    assert!(result.is_err()); // Should fail due to invalid data
+                }
+
+                // Should be able to append from position 23
+                let append_pos = journal.append(test_digest(23)).await.unwrap();
+                assert_eq!(append_pos, 23);
+                assert_eq!(journal.read(23).await.unwrap(), test_digest(23));
+
+                // Continue appending to test normal operation
+                let append_pos = journal.append(test_digest(24)).await.unwrap();
+                assert_eq!(append_pos, 24);
+                assert_eq!(journal.read(24).await.unwrap(), test_digest(24));
+
+                // Should have moved to a new tail blob
+                assert_eq!(journal.tail_index, 5);
+                assert_eq!(journal.blobs.len(), 1); // Previous tail became historical
+
+                // Fill the tail blob (positions 25-29)
+                for i in 25..30 {
+                    let append_pos = journal.append(test_digest(i)).await.unwrap();
+                    assert_eq!(append_pos, i);
+                    assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+                }
+
+                // At this point we should have moved to a new tail blob
+                assert_eq!(journal.tail_index, 6);
+                assert_eq!(journal.blobs.len(), 2); // Previous tail became historical
+
+                journal.destroy().await.unwrap();
+            }
         });
     }
 }
