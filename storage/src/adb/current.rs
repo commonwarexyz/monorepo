@@ -62,6 +62,9 @@ pub struct Config<T: Translator> {
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
+
+    /// The number of operations to keep below the inactivity floor before pruning.
+    pub pruning_gap: u64,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
@@ -143,6 +146,7 @@ impl<
             translator: config.translator.clone(),
             thread_pool: config.thread_pool,
             buffer_pool: config.buffer_pool,
+            pruning_gap: config.pruning_gap,
         };
 
         let context = context.with_label("adb::current");
@@ -229,6 +233,7 @@ impl<
             inactivity_floor_loc,
             uncommitted_ops: 0,
             hasher: Standard::<H>::new(),
+            pruning_gap: config.pruning_gap,
         };
 
         Ok(Self {
@@ -755,6 +760,7 @@ pub mod test {
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            pruning_gap: 10,
         }
     }
 

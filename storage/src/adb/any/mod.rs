@@ -72,6 +72,11 @@ pub struct Config<T: Translator> {
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
+
+    /// The number of operations to keep below the inactivity floor before pruning.
+    /// This creates a gap between the inactivity floor and the actual pruning boundary,
+    /// which is useful for state synchronization to prevent race conditions.
+    pub pruning_gap: u64,
 }
 
 /// Configuration for syncing an [Any] to a pruned target state.
@@ -140,6 +145,10 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T:
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
     pub(super) hasher: Standard<H>,
+
+    /// The number of operations to keep below the inactivity floor before pruning.
+    /// This creates a gap between the inactivity floor and the actual pruning boundary.
+    pub(super) pruning_gap: u64,
 }
 
 /// The result of a database `update` operation.
@@ -174,6 +183,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 translator: cfg.translator,
                 thread_pool: cfg.thread_pool,
                 buffer_pool: cfg.buffer_pool,
+                pruning_gap: cfg.pruning_gap,
             },
             &mut hasher,
         )
@@ -195,6 +205,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             inactivity_floor_loc,
             uncommitted_ops: 0,
             hasher,
+            pruning_gap: cfg.pruning_gap,
         };
 
         Ok(db)
@@ -281,6 +292,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             inactivity_floor_loc: cfg.lower_bound,
             uncommitted_ops: 0,
             hasher: Standard::<H>::new(),
+            pruning_gap: cfg.db_config.pruning_gap,
         };
         db.sync().await?;
         Ok(db)
@@ -781,21 +793,28 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             return Ok(());
         };
 
-        let pruned_ops = self.inactivity_floor_loc - oldest_retained_loc;
+        // Calculate the target pruning position: inactivity_floor_loc - pruning_gap
+        let target_prune_loc = if self.inactivity_floor_loc >= self.pruning_gap {
+            self.inactivity_floor_loc - self.pruning_gap
+        } else {
+            0
+        };
+
+        let pruned_ops = target_prune_loc - oldest_retained_loc;
         if pruned_ops == 0 {
             return Ok(());
         }
         debug!(pruned = pruned_ops, "pruning inactive ops");
 
         // Prune the MMR, whose pruning boundary serves as the "source of truth" for proving.
-        let prune_to_pos = leaf_num_to_pos(self.inactivity_floor_loc);
+        let prune_to_pos = leaf_num_to_pos(target_prune_loc);
         self.ops
             .prune_to_pos(&mut self.hasher, prune_to_pos)
             .await?;
 
         // Because the log's pruning boundary will be blob-size aligned, we cannot use it as a
         // source of truth for the min provable element.
-        self.log.prune(self.inactivity_floor_loc).await?;
+        self.log.prune(target_prune_loc).await?;
 
         Ok(())
     }
@@ -891,6 +910,7 @@ pub(super) mod test {
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            pruning_gap: 10,
         }
     }
 
@@ -916,6 +936,7 @@ pub(super) mod test {
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            pruning_gap: 10,
         }
     }
 
@@ -1136,7 +1157,10 @@ pub(super) mod test {
             db.prune_inactive().await.unwrap();
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.inactivity_floor_loc, db.oldest_retained_loc().unwrap());
+            assert_eq!(
+                db.inactivity_floor_loc.saturating_sub(db.pruning_gap),
+                db.oldest_retained_loc().unwrap()
+            );
 
             db.destroy().await.unwrap();
         });
@@ -1190,7 +1214,11 @@ pub(super) mod test {
             // Test that commit will raise the activity floor.
             db.commit().await.unwrap();
             assert_eq!(db.op_count(), 2336);
-            assert_eq!(db.oldest_retained_loc().unwrap(), 1478);
+            assert_eq!(
+                db.oldest_retained_loc().unwrap(),
+                1478_u64.saturating_sub(100)
+            ); // 1478 - pruning_gap
+            assert_eq!(db.inactivity_floor_loc, 1478);
             assert_eq!(db.snapshot.items(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -1442,6 +1470,7 @@ pub(super) mod test {
 
             // Initialize the db's mmr/log.
             let cfg = any_db_config("partition");
+            let pruning_gap = cfg.pruning_gap;
             let (mmr, log) = AnyTest::init_mmr_and_log(context.clone(), cfg, &mut hasher)
                 .await
                 .unwrap();
@@ -1467,6 +1496,7 @@ pub(super) mod test {
                 inactivity_floor_loc,
                 uncommitted_ops: 0,
                 hasher: Standard::<Sha256>::new(),
+                pruning_gap,
             };
             assert_eq!(db.root(&mut hasher), root);
 
