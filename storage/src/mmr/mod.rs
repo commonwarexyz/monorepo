@@ -118,4 +118,6 @@ pub enum Error {
     HistoricalSizeTooLarge(u64, u64),
     #[error("given historical size <= start location: ({0}) <= ({1})")]
     HistoricalSizeTooSmall(u64, u64),
+    #[error("invalid size: {0}")]
+    InvalidSize(u64),
 }

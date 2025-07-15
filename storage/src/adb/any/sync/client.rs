@@ -185,8 +185,9 @@ where
             });
         }
 
-        // Initialize only the pruned operation log. No MMR or snapshot yet.
-        let log = Journal::<E, Operation<K, V>>::init_pruned(
+        // Initialize the operations journal.
+        // It may have data in the target range.
+        let log = Journal::<E, Operation<K, V>>::init_sync(
             config.context.clone().with_label("log"),
             JConfig {
                 partition: config.db_config.log_journal_partition.clone(),
@@ -195,10 +196,39 @@ where
                 buffer_pool: config.db_config.buffer_pool.clone(),
             },
             config.lower_bound_ops,
+            config.upper_bound_ops,
         )
         .await
         .map_err(adb::Error::JournalError)
         .map_err(Error::Adb)?;
+
+        // Check how many operations are already in the log.
+        let log_size = log
+            .size()
+            .await
+            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+        // Assert invariant from [Journal::init_sync]
+        assert!(log_size <= config.upper_bound_ops + 1);
+        if log_size == config.upper_bound_ops + 1 {
+            // We already have all the operations we need in the log.
+            // Build the database immediately without fetching more operations.
+            let db = adb::any::Any::init_synced(
+                config.context.clone(),
+                SyncConfig {
+                    db_config: config.db_config.clone(),
+                    log,
+                    lower_bound: config.lower_bound_ops,
+                    upper_bound: config.upper_bound_ops,
+                    pinned_nodes: None,
+                    apply_batch_size: config.apply_batch_size,
+                },
+            )
+            .await
+            .map_err(Error::Adb)?;
+
+            return Ok(Client::Done { db });
+        }
 
         Ok(Client::FetchData {
             metrics: Metrics::new(config.context.clone()),
@@ -311,7 +341,7 @@ where
                 }
 
                 // Install pinned nodes on first successful batch.
-                if log_size == config.lower_bound_ops {
+                if pinned_nodes.is_none() {
                     let start_pos = leaf_num_to_pos(log_size);
                     let end_pos = leaf_num_to_pos(log_size + operations_len - 1);
                     let Ok(new_pinned_nodes) = proof.extract_pinned_nodes(start_pos, end_pos)
@@ -386,8 +416,9 @@ where
                         SyncConfig {
                             db_config: config.db_config.clone(),
                             log,
-                            pruned_to_loc: config.lower_bound_ops,
-                            pinned_nodes: pinned_nodes.unwrap(),
+                            lower_bound: config.lower_bound_ops,
+                            upper_bound: config.upper_bound_ops,
+                            pinned_nodes,
                             apply_batch_size: config.apply_batch_size,
                         },
                     )
@@ -447,7 +478,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         adb::any::{
-            sync::sync,
+            sync::{resolver::tests::FailResolver, sync},
             test::{apply_ops, create_test_db, create_test_ops},
         },
         translator,
@@ -460,7 +491,7 @@ pub(crate) mod tests {
     use test_case::test_case;
 
     type TestHash = Sha256;
-    type TestTranslator = translator::EightCap;
+    type TestTranslator = translator::TwoCap;
 
     const PAGE_SIZE: usize = 111;
     const PAGE_CACHE_SIZE: usize = 5;
@@ -541,12 +572,16 @@ pub(crate) mod tests {
                 apply_batch_size: 1024,
             };
             let got_db = sync(config).await.unwrap();
+
+            // Verify database state
             let mut hasher = create_test_hasher();
-            assert_eq!(got_db.root(&mut hasher), target_hash);
             assert_eq!(got_db.op_count(), target_op_count);
             assert_eq!(got_db.inactivity_floor_loc, target_inactivity_floor);
-            assert_eq!(got_db.ops.pruned_to_pos(), target_pruned_pos);
             assert_eq!(got_db.log.size().await.unwrap(), target_log_size);
+            assert_eq!(got_db.ops.pruned_to_pos(), target_pruned_pos);
+
+            // Verify the root hash matches the target
+            assert_eq!(got_db.root(&mut hasher), target_hash);
 
             // Verify that the synced database matches the target state
             for (key, &(value, loc)) in &expected_kvs {
@@ -668,6 +703,177 @@ pub(crate) mod tests {
                 synced_db.get(final_op.to_key().unwrap()).await.unwrap(),
                 None
             );
+        });
+    }
+
+    // Test syncing where the sync client has some but not all of the operations in the target
+    // database.
+    #[test]
+    fn test_sync_use_existing_db_partial_match() {
+        const ORIGINAL_DB_OPS: usize = 1_000;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let original_ops = create_test_ops(ORIGINAL_DB_OPS);
+
+            // Create two databases
+            let mut target_db = create_test_db(context.clone()).await;
+            let sync_db_config = create_test_config(1337);
+            let mut sync_db = adb::any::Any::init(context.clone(), sync_db_config.clone())
+                .await
+                .unwrap();
+
+            // Apply the same operations to both databases
+            target_db = apply_ops(target_db, original_ops.clone()).await;
+            sync_db = apply_ops(sync_db, original_ops.clone()).await;
+            target_db.commit().await.unwrap();
+            sync_db.commit().await.unwrap();
+
+            let original_db_op_count = target_db.op_count();
+
+            // Close sync_db
+            sync_db.close().await.unwrap();
+
+            // Add one more operation and commit the target database
+            let last_op = create_test_ops(1);
+            target_db = apply_ops(target_db, last_op.clone()).await;
+            target_db.commit().await.unwrap();
+            let mut hasher = create_test_hasher();
+            let target_hash = target_db.root(&mut hasher);
+            let lower_bound_ops = target_db.oldest_retained_loc().unwrap();
+            let upper_bound_ops = target_db.op_count() - 1; // Up to the last operation
+
+            // Reopen the sync database and sync it to the target database
+            let config = Config {
+                db_config: sync_db_config, // Use same config as before
+                fetch_batch_size: NZU64!(10),
+                target_hash,
+                lower_bound_ops,
+                upper_bound_ops,
+                context: context.clone(),
+                resolver: &target_db,
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+            };
+            let sync_db = sync(config).await.unwrap();
+
+            // Verify database state
+            assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
+            assert_eq!(sync_db.inactivity_floor_loc, target_db.inactivity_floor_loc);
+            assert_eq!(sync_db.oldest_retained_loc(), Some(lower_bound_ops));
+            assert_eq!(
+                sync_db.log.size().await.unwrap(),
+                target_db.log.size().await.unwrap()
+            );
+            assert_eq!(sync_db.ops.pruned_to_pos(), target_db.ops.pruned_to_pos());
+
+            // Verify the root hash matches the target
+            assert_eq!(sync_db.root(&mut hasher), target_hash);
+
+            // Verify that the operations in the overlapping range are present and correct
+            for i in lower_bound_ops..original_db_op_count {
+                let expected_op = target_db.log.read(i).await.unwrap();
+                let synced_op = sync_db.log.read(i).await.unwrap();
+                assert_eq!(expected_op, synced_op);
+            }
+
+            for target_op in &original_ops {
+                if let Some(key) = target_op.to_key() {
+                    let target_value = target_db.get(key).await.unwrap();
+                    let synced_value = sync_db.get(key).await.unwrap();
+                    assert_eq!(target_value, synced_value);
+                }
+            }
+            // Verify the last operation is present
+            let last_key = last_op[0].to_key().unwrap();
+            let last_value = *last_op[0].to_value().unwrap();
+            assert_eq!(sync_db.get(last_key).await.unwrap(), Some(last_value));
+
+            sync_db.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test case where existing database on disk exactly matches the sync target
+    #[test]
+    fn test_sync_use_existing_db_exact_match() {
+        const NUM_OPS: usize = 1_000;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let target_ops = create_test_ops(NUM_OPS);
+
+            // Create two databases
+            let target_config = create_test_config(context.next_u64());
+            let mut target_db = adb::any::Any::init(context.clone(), target_config)
+                .await
+                .unwrap();
+            let sync_config = create_test_config(context.next_u64());
+            let mut sync_db = adb::any::Any::init(context.clone(), sync_config.clone())
+                .await
+                .unwrap();
+
+            // Apply the same operations to both databases
+            target_db = apply_ops(target_db, target_ops.clone()).await;
+            sync_db = apply_ops(sync_db, target_ops.clone()).await;
+            target_db.commit().await.unwrap();
+            sync_db.commit().await.unwrap();
+
+            target_db.sync().await.unwrap();
+            sync_db.sync().await.unwrap();
+
+            // Close sync_db
+            sync_db.close().await.unwrap();
+
+            // Reopen sync_db
+            let mut hasher = create_test_hasher();
+            let target_hash = target_db.root(&mut hasher);
+            let lower_bound_ops = target_db.oldest_retained_loc().unwrap();
+            let upper_bound_ops = target_db.op_count() - 1;
+            // sync_db should never ask the resolver for operations
+            // because it is already complete. Use a resolver that always fails
+            // to ensure that it's not being used.
+            let resolver = FailResolver::<Digest, Digest, Digest>::new();
+            let config = Config {
+                db_config: sync_config, // Use same config to access same partitions
+                fetch_batch_size: NZU64!(10),
+                target_hash,
+                lower_bound_ops,
+                upper_bound_ops,
+                context: context.clone(),
+                resolver,
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+            };
+            let sync_db = sync(config).await.unwrap();
+
+            // Verify database state
+            assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
+            assert_eq!(sync_db.op_count(), target_db.op_count());
+            assert_eq!(
+                sync_db.oldest_retained_loc(),
+                target_db.oldest_retained_loc()
+            );
+            assert_eq!(
+                sync_db.log.size().await.unwrap(),
+                target_db.log.size().await.unwrap()
+            );
+            assert_eq!(sync_db.ops.pruned_to_pos(), target_db.ops.pruned_to_pos());
+
+            // Verify the root hash matches the target
+            assert_eq!(sync_db.root(&mut hasher), target_hash);
+
+            // Verify state matches for sample operations
+            for target_op in &target_ops {
+                if let Some(key) = target_op.to_key() {
+                    let target_value = target_db.get(key).await.unwrap();
+                    let synced_value = sync_db.get(key).await.unwrap();
+                    assert_eq!(target_value, synced_value);
+                }
+            }
+
+            sync_db.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
         });
     }
 }
