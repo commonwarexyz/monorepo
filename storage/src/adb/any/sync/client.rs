@@ -46,7 +46,9 @@ where
     /// Target hash of the database.
     pub target_hash: H::Digest,
 
-    /// Lower bound of operations to sync (inactivity floor, inclusive).
+    /// Lower bound of operations to sync.
+    /// This will be the inactivity floor and pruning boundary
+    /// of the synced database.
     pub lower_bound_ops: u64,
 
     /// Upper bound of operations to sync (inclusive).

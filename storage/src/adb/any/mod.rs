@@ -74,8 +74,9 @@ pub struct Config<T: Translator> {
     pub buffer_pool: PoolRef,
 
     /// The number of operations to keep below the inactivity floor before pruning.
-    /// This creates a gap between the inactivity floor and the actual pruning boundary,
-    /// which is useful for state synchronization to prevent race conditions.
+    /// This creates a gap between the inactivity floor and the pruning boundary,
+    /// which is useful for serving state sync clients, who may request operations
+    /// below the inactivity floor.
     pub pruning_gap: u64,
 }
 
@@ -147,7 +148,9 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T:
     pub(super) hasher: Standard<H>,
 
     /// The number of operations to keep below the inactivity floor before pruning.
-    /// This creates a gap between the inactivity floor and the actual pruning boundary.
+    /// This creates a gap between the inactivity floor and the pruning boundary,
+    /// which is useful for serving state sync clients, who may request operations
+    /// below the inactivity floor.
     pub(super) pruning_gap: u64,
 }
 
@@ -786,30 +789,30 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Prune any historical operations that are known to be inactive (those preceding the
-    /// inactivity floor). This does not affect the db's root or current snapshot.
+    /// Prune historical operations that are >= `pruning_gap` steps behind the inactivity floor.
+    /// This does not affect the db's root or current snapshot.
     pub(super) async fn prune_inactive(&mut self) -> Result<(), Error> {
         let Some(oldest_retained_loc) = self.log.oldest_retained_pos().await? else {
             return Ok(());
         };
 
         // Calculate the target pruning position: inactivity_floor_loc - pruning_gap
-        let target_prune_loc = self.inactivity_floor_loc.saturating_sub(self.pruning_gap);
-        let ops_to_prune = target_prune_loc - oldest_retained_loc;
+        let prune_loc = self.inactivity_floor_loc.saturating_sub(self.pruning_gap);
+        let ops_to_prune = prune_loc - oldest_retained_loc;
         if ops_to_prune == 0 {
             return Ok(());
         }
         debug!(ops_to_prune, "pruning inactive ops");
 
         // Prune the MMR, whose pruning boundary serves as the "source of truth" for proving.
-        let prune_to_pos = leaf_num_to_pos(target_prune_loc);
+        let prune_to_pos = leaf_num_to_pos(prune_loc);
         self.ops
             .prune_to_pos(&mut self.hasher, prune_to_pos)
             .await?;
 
         // Because the log's pruning boundary will be blob-size aligned, we cannot use it as a
         // source of truth for the min provable element.
-        self.log.prune(target_prune_loc).await?;
+        self.log.prune(prune_loc).await?;
 
         Ok(())
     }
@@ -1600,9 +1603,9 @@ pub(super) mod test {
             let upper_bound_ops = source_db.op_count() - 1;
 
             // Get pinned nodes and target hash before moving source_db
-            // Extract the specific pinned nodes we need for syncing from lower_bound_ops
-            let nodes_to_pin = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(lower_bound_ops));
-            let pinned_nodes = join_all(nodes_to_pin.map(|pos| source_db.ops.get_node(pos))).await;
+            let pinned_nodes_pos = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(lower_bound_ops));
+            let pinned_nodes =
+                join_all(pinned_nodes_pos.map(|pos| source_db.ops.get_node(pos))).await;
             let pinned_nodes = pinned_nodes
                 .iter()
                 .map(|node| node.as_ref().unwrap().unwrap())
