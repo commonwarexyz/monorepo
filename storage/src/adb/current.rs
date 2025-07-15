@@ -218,11 +218,17 @@ impl<
 
         if inactivity_floor_loc > start_leaf_num {
             // Advanced the pruning boundary if we failed to prune to the inactivity floor for any reason.
+            // Apply the pruning gap to maintain consistency with normal commit operations.
+            let target_prune_loc = if inactivity_floor_loc >= config.pruning_gap {
+                inactivity_floor_loc - config.pruning_gap
+            } else {
+                0
+            };
             warn!(
                 inactivity_floor_loc,
-                "pruning any db to the current inactivity floor"
+                target_prune_loc, "pruning MMR to the correct position"
             );
-            mmr.prune_to_pos(grafter.standard(), leaf_num_to_pos(inactivity_floor_loc))
+            mmr.prune_to_pos(grafter.standard(), leaf_num_to_pos(target_prune_loc))
                 .await?;
         }
 
