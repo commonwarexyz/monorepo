@@ -514,7 +514,7 @@ pub(crate) mod tests {
             translator: TestTranslator::default(),
             thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            pruning_gap: 100,
+            pruning_delay: 100,
         }
     }
 

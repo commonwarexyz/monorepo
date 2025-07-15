@@ -77,7 +77,7 @@ pub struct Config<T: Translator> {
     /// This creates a gap between the inactivity floor and the pruning boundary,
     /// which is useful for serving state sync clients, who may request operations
     /// below the inactivity floor.
-    pub pruning_gap: u64,
+    pub pruning_delay: u64,
 }
 
 /// Configuration for syncing an [Any] to a pruned target state.
@@ -151,7 +151,7 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T:
     /// This creates a gap between the inactivity floor and the pruning boundary,
     /// which is useful for serving state sync clients, who may request operations
     /// below the inactivity floor.
-    pub(super) pruning_gap: u64,
+    pub(super) pruning_delay: u64,
 }
 
 /// The result of a database `update` operation.
@@ -186,7 +186,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 translator: cfg.translator,
                 thread_pool: cfg.thread_pool,
                 buffer_pool: cfg.buffer_pool,
-                pruning_gap: cfg.pruning_gap,
+                pruning_delay: cfg.pruning_delay,
             },
             &mut hasher,
         )
@@ -208,7 +208,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             inactivity_floor_loc,
             uncommitted_ops: 0,
             hasher,
-            pruning_gap: cfg.pruning_gap,
+            pruning_delay: cfg.pruning_delay,
         };
 
         Ok(db)
@@ -293,7 +293,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             inactivity_floor_loc: cfg.lower_bound,
             uncommitted_ops: 0,
             hasher: Standard::<H>::new(),
-            pruning_gap: cfg.db_config.pruning_gap,
+            pruning_delay: cfg.db_config.pruning_delay,
         };
         db.sync().await?;
         Ok(db)
@@ -787,15 +787,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Prune historical operations that are > `pruning_gap` steps behind the inactivity floor.
+    /// Prune historical operations that are > `pruning_delay` steps behind the inactivity floor.
     /// This does not affect the db's root or current snapshot.
     pub(super) async fn prune_inactive(&mut self) -> Result<(), Error> {
         let Some(oldest_retained_loc) = self.log.oldest_retained_pos().await? else {
             return Ok(());
         };
 
-        // Calculate the target pruning position: inactivity_floor_loc - pruning_gap
-        let prune_loc = self.inactivity_floor_loc.saturating_sub(self.pruning_gap);
+        // Calculate the target pruning position: inactivity_floor_loc - pruning_delay
+        let prune_loc = self.inactivity_floor_loc.saturating_sub(self.pruning_delay);
         let ops_to_prune = prune_loc - oldest_retained_loc;
         if ops_to_prune == 0 {
             return Ok(());
@@ -906,7 +906,7 @@ pub(super) mod test {
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            pruning_gap: 10,
+            pruning_delay: 10,
         }
     }
 
@@ -932,7 +932,7 @@ pub(super) mod test {
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            pruning_gap: 10,
+            pruning_delay: 10,
         }
     }
 
@@ -1154,7 +1154,7 @@ pub(super) mod test {
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(
-                db.inactivity_floor_loc.saturating_sub(db.pruning_gap),
+                db.inactivity_floor_loc.saturating_sub(db.pruning_delay),
                 db.oldest_retained_loc().unwrap()
             );
 
@@ -1213,7 +1213,7 @@ pub(super) mod test {
             assert_eq!(
                 db.oldest_retained_loc().unwrap(),
                 1478_u64.saturating_sub(10)
-            ); // 1478 - pruning_gap
+            ); // 1478 - pruning_delay
             assert_eq!(db.inactivity_floor_loc, 1478);
             assert_eq!(db.snapshot.items(), 857);
 
@@ -1467,7 +1467,7 @@ pub(super) mod test {
 
             // Initialize the db's mmr/log.
             let cfg = any_db_config("partition");
-            let pruning_gap = cfg.pruning_gap;
+            let pruning_delay = cfg.pruning_delay;
             let (mmr, log) = AnyTest::init_mmr_and_log(context.clone(), cfg, &mut hasher)
                 .await
                 .unwrap();
@@ -1493,7 +1493,7 @@ pub(super) mod test {
                 inactivity_floor_loc,
                 uncommitted_ops: 0,
                 hasher: Standard::<Sha256>::new(),
-                pruning_gap,
+                pruning_delay,
             };
             assert_eq!(db.root(&mut hasher), root);
 

@@ -64,7 +64,7 @@ pub struct Config<T: Translator> {
     pub buffer_pool: PoolRef,
 
     /// The number of operations to keep below the inactivity floor before pruning.
-    pub pruning_gap: u64,
+    pub pruning_delay: u64,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
@@ -146,7 +146,7 @@ impl<
             translator: config.translator.clone(),
             thread_pool: config.thread_pool,
             buffer_pool: config.buffer_pool,
-            pruning_gap: config.pruning_gap,
+            pruning_delay: config.pruning_delay,
         };
 
         let context = context.with_label("adb::current");
@@ -216,7 +216,7 @@ impl<
             "bitmap is pruned beyond where bits should be retained"
         );
 
-        let target_prune_loc = inactivity_floor_loc.saturating_sub(config.pruning_gap);
+        let target_prune_loc = inactivity_floor_loc.saturating_sub(config.pruning_delay);
         if target_prune_loc > start_leaf_num {
             // Advance the pruning boundary if we failed to prune to the correct position for any reason.
             warn!(
@@ -234,7 +234,7 @@ impl<
             inactivity_floor_loc,
             uncommitted_ops: 0,
             hasher: Standard::<H>::new(),
-            pruning_gap: config.pruning_gap,
+            pruning_delay: config.pruning_delay,
         };
 
         Ok(Self {
@@ -761,7 +761,7 @@ pub mod test {
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            pruning_gap: 10,
+            pruning_delay: 10,
         }
     }
 
