@@ -345,8 +345,8 @@ impl<
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Also raises the inactivity floor according to the schedule,
-    /// and prunes those operations below it. Leverages parallel Merkleization of the MMR structures
-    /// if a thread pool is provided.
+    /// and prunes those operations more than `self.any.pruning_delay` below it. Leverages parallel
+    /// Merkleization of the MMR structures if a thread pool is provided.
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Failure recovery relies on this specific order of these three disk-based operations:
         //  (1) commit/sync the any db to disk (which raises the inactivity floor).
