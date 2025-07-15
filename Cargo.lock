@@ -1121,6 +1121,7 @@ name = "commonware-cryptography-fuzz"
 version = "0.0.56"
 dependencies = [
  "arbitrary",
+ "blake3",
  "blst",
  "commonware-codec",
  "commonware-cryptography",
