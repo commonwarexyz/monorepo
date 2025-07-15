@@ -31,7 +31,7 @@
 //! All `Blobs` in a given `partition` are kept open during the lifetime of `Journal`. You can limit
 //! the number of open blobs by using a higher number of `items_per_blob` or pruning old items.
 //!
-//! # Persistence
+//! # Consistency
 //!
 //! Data written to `Journal` may not be immediately persisted to `Storage`. It is up to the caller
 //! to determine when to force pending data to be written to `Storage` using the `sync` method. When
