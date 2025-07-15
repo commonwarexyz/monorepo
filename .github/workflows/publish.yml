@@ -75,6 +75,11 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    - name: Publish coding
+      run: cargo publish --manifest-path coding/Cargo.toml
+      continue-on-error: true
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     - name: Publish deployer
       run: cargo publish --manifest-path deployer/Cargo.toml
       continue-on-error: true

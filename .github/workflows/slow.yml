@@ -62,6 +62,10 @@ jobs:
             cargo_flags: ""
             file_suffix: ""
             benchmark_name: "commonware-stream"
+          - package: commonware-coding
+            cargo_flags: ""
+            file_suffix: ""
+            benchmark_name: "commonware-coding"
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
