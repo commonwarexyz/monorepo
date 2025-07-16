@@ -1081,7 +1081,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
             };
-            let (mut update_sender, update_receiver) = mpsc::unbounded();
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
             let client = Client::new_with_updater(config, Some(update_receiver))
                 .await
                 .unwrap();
@@ -1134,7 +1134,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
             };
-            let (mut update_sender, update_receiver) = mpsc::unbounded();
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
             let client = Client::new_with_updater(config, Some(update_receiver))
                 .await
                 .unwrap();
@@ -1187,7 +1187,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
             };
-            let (mut update_sender, update_receiver) = mpsc::unbounded();
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
             let client = Client::new_with_updater(config, Some(update_receiver))
                 .await
                 .unwrap();
@@ -1247,7 +1247,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
             };
-            let (mut update_sender, update_receiver) = mpsc::unbounded();
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
             let client = Client::new_with_updater(config, Some(update_receiver))
                 .await
                 .unwrap();
@@ -1301,7 +1301,7 @@ pub(crate) mod tests {
             };
 
             // Complete the sync
-            let (mut update_sender, update_receiver) = mpsc::unbounded();
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
             let client = Client::new_with_updater(config, Some(update_receiver))
                 .await
                 .unwrap();

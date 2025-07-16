@@ -31,10 +31,10 @@ pub struct SyncTarget<D: Digest> {
 }
 
 /// Channel for sending sync target updates
-pub type SyncTargetUpdateSender<D> = mpsc::UnboundedSender<SyncTarget<D>>;
+pub type SyncTargetUpdateSender<D> = mpsc::Sender<SyncTarget<D>>;
 
 /// Channel for receiving sync target updates
-pub type SyncTargetUpdateReceiver<D> = mpsc::UnboundedReceiver<SyncTarget<D>>;
+pub type SyncTargetUpdateReceiver<D> = mpsc::Receiver<SyncTarget<D>>;
 
 /// Synchronization errors
 #[derive(Debug, thiserror::Error)]
