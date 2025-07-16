@@ -6,10 +6,12 @@ use commonware_p2p::{
     simulated::{Config, Link, Network, Receiver, Sender},
     utils::codec::{wrap, WrappedReceiver, WrappedSender},
 };
-use commonware_runtime::{deterministic, Clock, Metrics, Network as RNetwork, Runner, Spawner};
+use commonware_runtime::{
+    deterministic, Clock, Handle, Metrics, Network as RNetwork, Runner, Spawner,
+};
 use estimator::{
-    calculate_threshold, count_peers, crate_version, get_latency_data, mean, median, parse_task,
-    std_dev, Command, Distribution, Latencies,
+    calculate_leader_region, calculate_threshold, count_peers, crate_version, get_latency_data,
+    mean, median, parse_task, std_dev, Command, Distribution, Latencies,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -35,7 +37,7 @@ type WaitLatencies = BTreeMap<usize, BTreeMap<String, Vec<f64>>>;
 /// A map of line numbers to the latency of the leader for that line
 type LeaderLatencies = BTreeMap<usize, f64>;
 
-/// A tuple containing an identity, region, sender, and receiver
+/// All state for a given peer
 type PeerIdentity = (
     ed25519::PublicKey,
     String,
@@ -43,12 +45,12 @@ type PeerIdentity = (
     WrappedReceiver<Receiver<ed25519::PublicKey>, u32>,
 );
 
-/// A handle to a peer job
-type PeerJobHandle = commonware_runtime::Handle<(
+/// The result of a peer job execution
+type PeerResult = (
     String,
     Vec<(usize, Duration)>,
     Option<Vec<(usize, Duration)>>,
-)>;
+);
 
 /// Context data for command processing
 struct ProcessContext {
@@ -213,19 +215,6 @@ fn run_single_simulation(
     }
 }
 
-/// Calculate which region a leader belongs to based on their index
-fn calculate_leader_region(leader_idx: usize, distribution: &Distribution) -> String {
-    let mut current = 0;
-    for (region, count) in distribution {
-        let start = current;
-        current += *count;
-        if leader_idx >= start && leader_idx < current {
-            return region.clone();
-        }
-    }
-    panic!("Leader index {leader_idx} out of bounds");
-}
-
 /// Core simulation logic that runs the network simulation
 async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + RngCore>(
     context: C,
@@ -250,13 +239,18 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
     let jobs = spawn_peer_jobs(&context, leader_idx, peers, identities, commands, tx);
 
     // Wait for all jobs to indicate they're done
-    let responders = collect_job_responses(&mut rx, peers).await;
+    let mut responders = Vec::with_capacity(peers);
+    for _ in 0..peers {
+        responders.push(rx.next().await.unwrap());
+    }
 
     // Ensure any messages in the simulator are queued (this is virtual time)
     context.sleep(Duration::from_millis(10_000)).await;
 
     // Send the shutdown signal to all jobs
-    shutdown_jobs(responders);
+    for responder in responders {
+        responder.send(()).unwrap();
+    }
 
     let results = try_join_all(jobs).await.unwrap();
     process_simulation_results(results)
@@ -319,7 +313,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
     identities: Vec<PeerIdentity>,
     commands: &[(usize, Command)],
     tx: mpsc::Sender<oneshot::Sender<()>>,
-) -> Vec<PeerJobHandle> {
+) -> Vec<Handle<PeerResult>> {
     let mut jobs = Vec::new();
 
     for (i, (identity, region, mut sender, mut receiver)) in identities.into_iter().enumerate() {
@@ -505,33 +499,8 @@ async fn process_command<C: Spawner + Clock>(
     }
 }
 
-/// Collect responses from all peer jobs
-async fn collect_job_responses(
-    rx: &mut mpsc::Receiver<oneshot::Sender<()>>,
-    peers: usize,
-) -> Vec<oneshot::Sender<()>> {
-    let mut responders = Vec::with_capacity(peers);
-    for _ in 0..peers {
-        responders.push(rx.next().await.unwrap());
-    }
-    responders
-}
-
-/// Send shutdown signal to all jobs
-fn shutdown_jobs(responders: Vec<oneshot::Sender<()>>) {
-    for responder in responders {
-        responder.send(()).unwrap();
-    }
-}
-
-type SimResult = (
-    String,
-    Vec<(usize, Duration)>,
-    Option<Vec<(usize, Duration)>>,
-);
-
 /// Process simulation results and extract wait/leader latencies
-fn process_simulation_results(results: Vec<SimResult>) -> (WaitLatencies, LeaderLatencies) {
+fn process_simulation_results(results: Vec<PeerResult>) -> (WaitLatencies, LeaderLatencies) {
     let mut leader_latencies: Option<LeaderLatencies> = None;
     let mut wait_latencies: WaitLatencies = BTreeMap::new();
 
