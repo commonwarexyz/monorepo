@@ -429,7 +429,7 @@ fn main() {
                         stats.sort_by(|a, b| a.0.cmp(&b.0));
                         for (region, count, mean_ms, median_ms, std_dev_ms) in stats {
                             let stat_line = format!(
-                                "    - Region: {}, Count: {}, Mean: {:.2}ms, Median: {:.2}ms, Std Dev: {:.2}ms",
+                                "    Region: {}, Count: {}, Mean: {:.2}ms, Median: {:.2}ms, Std Dev: {:.2}ms",
                                 region,
                                 count,
                                 mean_ms,
@@ -457,7 +457,7 @@ fn main() {
     }
 
     // Calculate and print averaged stats
-    println!("{}", "Averaged simulation results:\n".bold());
+    println!("{}", "\nAveraged simulation results:\n".bold());
     let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
     let mut wait_lines: Vec<usize> = all_wait_latencies.keys().cloned().collect();
     wait_lines.sort();
@@ -479,7 +479,7 @@ fn main() {
             stats.sort_by(|a, b| a.0.cmp(&b.0));
             for (region, count, mean_ms, median_ms, std_dev_ms) in stats {
                 let stat_line = format!(
-                    "    - Region: {}, Count: {}, Mean: {:.2}ms, Median: {:.2}ms, Std Dev: {:.2}ms",
+                    "    Region: {}, Count: {}, Mean: {:.2}ms, Median: {:.2}ms, Std Dev: {:.2}ms",
                     region, count, mean_ms, median_ms, std_dev_ms
                 );
                 println!("{}", stat_line.blue());
