@@ -587,7 +587,7 @@ propose id=1
     }
 
     #[test]
-    fn test_included_dsls() {
+    fn test_example_files() {
         let files = vec![
             ("stall.lazy", include_str!("../stall.lazy"), false),
             ("echo.lazy", include_str!("../echo.lazy"), true),
