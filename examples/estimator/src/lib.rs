@@ -1,8 +1,11 @@
 //! Simulate mechanism performance under realistic network conditions.
 
+use commonware_cryptography::ed25519::{self, PublicKey};
+use commonware_cryptography::{PrivateKeyExt, Signer};
+use commonware_p2p::Recipients;
 use reqwest::blocking::Client;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     time::Duration,
 };
 use tracing::debug;
@@ -26,9 +29,16 @@ pub type Latencies = BTreeMap<Region, BTreeMap<Region, Behavior>>;
 // Struct Definitions
 // =============================================================================
 
+/// CloudPing API response data structure
 #[derive(serde::Deserialize)]
 struct CloudPing {
     pub data: BTreeMap<Region, BTreeMap<Region, f64>>,
+}
+
+/// State of a peer during validation
+struct PeerState {
+    received: BTreeMap<u32, BTreeSet<PublicKey>>,
+    current_index: usize,
 }
 
 // =============================================================================
@@ -153,13 +163,13 @@ fn download_latency_data() -> Latencies {
 
     // Pull P50 and P90 matrices (time-frame: last 1 year)
     let p50: CloudPing = cli
-        .get(format!("{CLOUDPING_BASE}?percentile=p_50&timeframe=1Y"))
+        .get(format!("{CLOUDPING_BASE}?percentile=p_25&timeframe=1Y"))
         .send()
         .unwrap()
         .json()
         .unwrap();
     let p90: CloudPing = cli
-        .get(format!("{CLOUDPING_BASE}?percentile=p_90&timeframe=1Y"))
+        .get(format!("{CLOUDPING_BASE}?percentile=p_50&timeframe=1Y"))
         .send()
         .unwrap()
         .json()
@@ -272,9 +282,133 @@ pub fn calculate_threshold(thresh: &Threshold, peers: usize) -> usize {
     }
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
+/// Validate a DSL task file can be executed
+pub fn validate(commands: &[(usize, Command)], peers: usize, proposer: usize) -> bool {
+    // Initialize peer states
+    let mut peer_states: Vec<PeerState> = (0..peers)
+        .map(|_| PeerState {
+            received: BTreeMap::new(),
+            current_index: 0,
+        })
+        .collect();
+    let keys: Vec<PublicKey> = (0..peers)
+        .map(|i| ed25519::PrivateKey::from_seed(i as u64).public_key())
+        .collect();
+    let mut messages: Vec<(usize, Recipients<PublicKey>, u32)> = Vec::new();
+
+    // Run the simulation until completion or stall
+    loop {
+        let mut did_progress = false;
+        for p in 0..peers {
+            let state = &mut peer_states[p];
+            if state.current_index >= commands.len() {
+                continue;
+            }
+
+            loop {
+                // Check if the peer is done
+                if state.current_index >= commands.len() {
+                    break;
+                }
+
+                // Execute the next command
+                let cmd = &commands[state.current_index].1;
+                let is_proposer = p == proposer;
+                let identity = keys[p].clone();
+                let advanced = match cmd {
+                    Command::Propose(id) => {
+                        if is_proposer {
+                            messages.push((p, Recipients::All, *id));
+                            state.received.entry(*id).or_default().insert(identity);
+                        }
+                        true
+                    }
+                    Command::Broadcast(id) => {
+                        messages.push((p, Recipients::All, *id));
+                        state.received.entry(*id).or_default().insert(identity);
+                        true
+                    }
+                    Command::Reply(id) => {
+                        let proposer_key = keys[proposer].clone();
+                        if is_proposer {
+                            state.received.entry(*id).or_default().insert(identity);
+                        } else {
+                            messages.push((p, Recipients::One(proposer_key), *id));
+                        }
+                        true
+                    }
+                    Command::Collect(id, thresh, _) => {
+                        if is_proposer {
+                            let count = state.received.get(id).map_or(0, |s| s.len());
+                            let required = calculate_threshold(thresh, peers);
+                            count >= required
+                        } else {
+                            true
+                        }
+                    }
+                    Command::Wait(id, thresh, _) => {
+                        let count = state.received.get(id).map_or(0, |s| s.len());
+                        let required = calculate_threshold(thresh, peers);
+                        count >= required
+                    }
+                };
+
+                // If the peer advanced, continue
+                if advanced {
+                    state.current_index += 1;
+                    did_progress = true;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Deliver messages
+        let pending = std::mem::take(&mut messages);
+        if !pending.is_empty() {
+            did_progress = true;
+        }
+        for (from, recipients, id) in pending {
+            let from_key = keys[from].clone();
+            match recipients {
+                Recipients::All => {
+                    for (to, state) in peer_states.iter_mut().enumerate() {
+                        if to != from {
+                            state
+                                .received
+                                .entry(id)
+                                .or_default()
+                                .insert(from_key.clone());
+                        }
+                    }
+                }
+                Recipients::One(to_key) => {
+                    let to = keys
+                        .iter()
+                        .position(|k| k == &to_key)
+                        .expect("key not found");
+                    peer_states[to]
+                        .received
+                        .entry(id)
+                        .or_default()
+                        .insert(from_key);
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        // Check if all peers are done
+        if peer_states
+            .iter()
+            .all(|state| state.current_index >= commands.len())
+        {
+            return true;
+        }
+        if !did_progress {
+            return false;
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -450,5 +584,22 @@ propose id=1
     fn test_parse_task_unknown_command() {
         let content = "unknown_command id=1";
         parse_task(content);
+    }
+
+    #[test]
+    fn test_included_dsls() {
+        let files = vec![
+            ("stall.lazy", include_str!("../stall.lazy"), false),
+            ("echo.lazy", include_str!("../echo.lazy"), true),
+            ("simplex.lazy", include_str!("../simplex.lazy"), true),
+            ("minimmit.lazy", include_str!("../minimmit.lazy"), true),
+            ("hotstuff.lazy", include_str!("../hotstuff.lazy"), true),
+        ];
+
+        for (name, content, expected) in files {
+            let task = parse_task(content);
+            let completed = validate(&task, 3, 0);
+            assert_eq!(completed, expected, "{name}");
+        }
     }
 }
