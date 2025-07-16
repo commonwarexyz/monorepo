@@ -398,17 +398,28 @@ fn main() {
 
             if verbose {
                 let mut current = 0;
-                let leader_region = region_counts_outer.iter().find_map(|(reg, cnt)| {
-                    let start = current;
-                    current += *cnt;
-                    if leader_idx >= start && leader_idx < current {
-                        Some(reg.clone())
-                    } else {
-                        None
-                    }
-                }).unwrap();
-                println!("{}", format!("\nSimulation results for leader {} ({}):\n", leader_idx, leader_region).bold());
-                let dsl_lines: Vec<String> = task_content_inner.lines().map(|s| s.to_string()).collect();
+                let leader_region = region_counts_outer
+                    .iter()
+                    .find_map(|(reg, cnt)| {
+                        let start = current;
+                        current += *cnt;
+                        if leader_idx >= start && leader_idx < current {
+                            Some(reg.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap();
+                println!(
+                    "{}",
+                    format!(
+                        "\nSimulation results for leader {} ({}):\n",
+                        leader_idx, leader_region
+                    )
+                    .bold()
+                );
+                let dsl_lines: Vec<String> =
+                    task_content_inner.lines().map(|s| s.to_string()).collect();
                 let mut wait_lines: Vec<usize> = wait_latencies.keys().cloned().collect();
                 wait_lines.sort();
                 let mut wait_idx = 0;
@@ -429,12 +440,8 @@ fn main() {
                         stats.sort_by(|a, b| a.0.cmp(&b.0));
                         for (region, count, mean_ms, median_ms, std_dev_ms) in stats {
                             let stat_line = format!(
-                                "    Region: {}, Count: {}, Mean: {:.2}ms, Median: {:.2}ms, Std Dev: {:.2}ms",
-                                region,
-                                count,
-                                mean_ms,
-                                median_ms,
-                                std_dev_ms
+                                "    [{}] Mean: {:.2}ms, Median: {:.2}ms, Std Dev: {:.2}ms",
+                                region, mean_ms, median_ms, std_dev_ms
                             );
                             println!("{}", stat_line.blue());
                         }
@@ -479,8 +486,8 @@ fn main() {
             stats.sort_by(|a, b| a.0.cmp(&b.0));
             for (region, count, mean_ms, median_ms, std_dev_ms) in stats {
                 let stat_line = format!(
-                    "    Region: {}, Count: {}, Mean: {:.2}ms, Median: {:.2}ms, Std Dev: {:.2}ms",
-                    region, count, mean_ms, median_ms, std_dev_ms
+                    "    [{}] Mean: {:.2}ms, Median: {:.2}ms, Std Dev: {:.2}ms",
+                    region, mean_ms, median_ms, std_dev_ms
                 );
                 println!("{}", stat_line.blue());
             }
