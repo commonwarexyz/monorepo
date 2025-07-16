@@ -1,4 +1,4 @@
-use clap::{value_parser, Arg, Command};
+use clap::{value_parser, Arg, Command as ClapCommand};
 use colored::Colorize;
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 use commonware_macros::select;
@@ -7,6 +7,10 @@ use commonware_p2p::{
     utils::codec::{wrap, WrappedReceiver, WrappedSender},
 };
 use commonware_runtime::{deterministic, Clock, Metrics, Network as RNetwork, Runner, Spawner};
+use estimator::{
+    crate_version, download_latency_data, load_latency_data, mean, median, parse_task, std_dev,
+    Command, Latencies, Threshold,
+};
 use futures::{
     channel::{mpsc, oneshot},
     future::try_join_all,
@@ -18,12 +22,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tracing::debug;
-
-// Import from our library
-use estimator::{
-    crate_version, download_latency_data, load_latency_data, mean, median, parse_task, std_dev,
-    LatencyMap, SimCommand, Threshold,
-};
 
 const DEFAULT_CHANNEL: u32 = 0;
 const DEFAULT_SUCCESS_RATE: f64 = 1.0;
@@ -51,7 +49,7 @@ struct PeerContext {
     peers: usize,
     identity: ed25519::PublicKey,
     region: String,
-    dsl: Vec<(usize, SimCommand)>,
+    dsl: Vec<(usize, Command)>,
 }
 
 /// Context data for command processing
@@ -109,7 +107,7 @@ fn setup_logging() {
 
 /// Parse command line arguments and return structured data
 fn parse_arguments() -> Arguments {
-    let matches = Command::new("commonware-simulator")
+    let matches = ClapCommand::new("commonware-simulator")
         .about("TBA")
         .version(crate_version())
         .arg(
@@ -174,7 +172,7 @@ fn calculate_total_peers(region_counts: &RegionCounts) -> usize {
 }
 
 /// Get latency data either by downloading or loading from cache
-fn get_latency_data(reload: bool) -> LatencyMap {
+fn get_latency_data(reload: bool) -> Latencies {
     if reload {
         debug!("downloading latency data");
         download_latency_data()
@@ -188,8 +186,8 @@ fn get_latency_data(reload: bool) -> LatencyMap {
 fn run_all_simulations(
     peers: usize,
     region_counts: &RegionCounts,
-    dsl: &[(usize, SimCommand)],
-    latency_map: &LatencyMap,
+    dsl: &[(usize, Command)],
+    latency_map: &Latencies,
     task_content: &str,
 ) -> Vec<SimulationResult> {
     let leaders: Vec<usize> = (0..peers).collect();
@@ -208,8 +206,8 @@ fn run_all_simulations(
 fn run_single_simulation(
     leader_idx: usize,
     region_counts: &RegionCounts,
-    dsl: &[(usize, SimCommand)],
-    latency_map: &LatencyMap,
+    dsl: &[(usize, Command)],
+    latency_map: &Latencies,
 ) -> SimulationResult {
     let peers = calculate_total_peers(region_counts);
     let runtime_cfg = deterministic::Config::default().with_seed(leader_idx as u64);
@@ -262,8 +260,8 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
     leader_idx: usize,
     peers: usize,
     region_counts: &RegionCounts,
-    dsl: &[(usize, SimCommand)],
-    latency_map: &LatencyMap,
+    dsl: &[(usize, Command)],
+    latency_map: &Latencies,
 ) -> (WaitLatencies, LeaderLatencies) {
     let (network, mut oracle) = Network::new(
         context.with_label("network"),
@@ -321,14 +319,14 @@ async fn setup_network_identities(
 async fn setup_network_links(
     oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey>,
     identities: &[PeerIdentity],
-    latency_map: &LatencyMap,
+    latencies: &Latencies,
 ) {
     for (i, (identity, region, _, _)) in identities.iter().enumerate() {
         for (j, (other_identity, other_region, _, _)) in identities.iter().enumerate() {
             if i == j {
                 continue;
             }
-            let latency = latency_map[region][other_region];
+            let latency = latencies[region][other_region];
             let link = Link {
                 latency: latency.0,
                 jitter: latency.1,
@@ -348,7 +346,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
     leader_idx: usize,
     peers: usize,
     identities: Vec<PeerIdentity>,
-    dsl: &[(usize, SimCommand)],
+    dsl: &[(usize, Command)],
     tx: mpsc::Sender<oneshot::Sender<()>>,
 ) -> Vec<PeerJobHandle> {
     let mut jobs = Vec::new();
@@ -470,7 +468,7 @@ async fn run_peer_logic(
 
 /// Process a single command in the DSL
 async fn process_command<C: Spawner + Clock>(
-    command: &(usize, SimCommand),
+    command: &(usize, Command),
     current_index: &mut usize,
     process_ctx: &ProcessContext,
     sender: &mut WrappedSender<Sender<ed25519::PublicKey>, u32>,
@@ -479,7 +477,7 @@ async fn process_command<C: Spawner + Clock>(
     completions: &mut Vec<(usize, Duration)>,
 ) -> bool {
     match &command.1 {
-        SimCommand::Propose(id) => {
+        Command::Propose(id) => {
             if process_ctx.is_leader {
                 sender
                     .send(commonware_p2p::Recipients::All, *id, true)
@@ -493,7 +491,7 @@ async fn process_command<C: Spawner + Clock>(
             *current_index += 1;
             true
         }
-        SimCommand::Broadcast(id) => {
+        Command::Broadcast(id) => {
             sender
                 .send(commonware_p2p::Recipients::All, *id, true)
                 .await
@@ -505,7 +503,7 @@ async fn process_command<C: Spawner + Clock>(
             *current_index += 1;
             true
         }
-        SimCommand::Reply(id) => {
+        Command::Reply(id) => {
             let leader_identity =
                 ed25519::PrivateKey::from_seed(process_ctx.leader_idx as u64).public_key();
             if process_ctx.is_leader {
@@ -522,7 +520,7 @@ async fn process_command<C: Spawner + Clock>(
             *current_index += 1;
             true
         }
-        SimCommand::Collect(id, thresh, delay) => {
+        Command::Collect(id, thresh, delay) => {
             if process_ctx.is_leader {
                 let count = received.get(id).map_or(0, |s| s.len());
                 let required = calculate_threshold(thresh, process_ctx.peers);
@@ -545,7 +543,7 @@ async fn process_command<C: Spawner + Clock>(
                 true
             }
         }
-        SimCommand::Wait(id, thresh, delay) => {
+        Command::Wait(id, thresh, delay) => {
             let count = received.get(id).map_or(0, |s| s.len());
             let required = calculate_threshold(thresh, process_ctx.peers);
             if let Some((message, _)) = delay {

@@ -5,16 +5,16 @@ use std::{
 };
 
 pub type Region = String;
-pub type LatJitPair = (f64, f64); // (avg_latency_ms, jitter_ms)
-pub type LatencyMap = BTreeMap<Region, BTreeMap<Region, LatJitPair>>;
+pub type Behavior = (f64, f64); // (avg_latency_ms, jitter_ms)
+pub type Latencies = BTreeMap<Region, BTreeMap<Region, Behavior>>;
 
 #[derive(serde::Deserialize)]
-pub struct ApiResp {
+struct CloudPing {
     pub data: BTreeMap<Region, BTreeMap<Region, f64>>,
 }
 
 #[derive(Clone)]
-pub enum SimCommand {
+pub enum Command {
     Propose(u32),
     Broadcast(u32),
     Reply(u32),
@@ -36,17 +36,17 @@ pub fn crate_version() -> &'static str {
 }
 
 /// Downloads latency data from cloudping.co API
-pub fn download_latency_data() -> LatencyMap {
+pub fn download_latency_data() -> Latencies {
     let cli = Client::builder().build().unwrap();
 
     // Pull P50 and P90 matrices (time-frame: last 1 year)
-    let p50: ApiResp = cli
+    let p50: CloudPing = cli
         .get(format!("{BASE}?percentile=p_50&timeframe=1Y"))
         .send()
         .unwrap()
         .json()
         .unwrap();
-    let p90: ApiResp = cli
+    let p90: CloudPing = cli
         .get(format!("{BASE}?percentile=p_90&timeframe=1Y"))
         .send()
         .unwrap()
@@ -57,17 +57,17 @@ pub fn download_latency_data() -> LatencyMap {
 }
 
 /// Loads latency data from local JSON files
-pub fn load_latency_data() -> LatencyMap {
+pub fn load_latency_data() -> Latencies {
     let p50 = include_str!("p50.json");
     let p90 = include_str!("p90.json");
-    let p50: ApiResp = serde_json::from_str(p50).unwrap();
-    let p90: ApiResp = serde_json::from_str(p90).unwrap();
+    let p50: CloudPing = serde_json::from_str(p50).unwrap();
+    let p90: CloudPing = serde_json::from_str(p90).unwrap();
 
     populate_latency_map(p50, p90)
 }
 
 /// Populates a latency map from P50 and P90 data
-pub fn populate_latency_map(p50: ApiResp, p90: ApiResp) -> LatencyMap {
+fn populate_latency_map(p50: CloudPing, p90: CloudPing) -> Latencies {
     let mut map = BTreeMap::new();
     for (from, inner_p50) in p50.data {
         let inner_p90 = &p90.data[&from];
@@ -125,7 +125,7 @@ pub fn std_dev(data: &[f64]) -> Option<f64> {
 }
 
 /// Parses a DSL task file into a vector of simulation commands
-pub fn parse_task(content: &str) -> Vec<(usize, SimCommand)> {
+pub fn parse_task(content: &str) -> Vec<(usize, Command)> {
     let mut cmds = Vec::new();
     for (line_num, line) in content.lines().enumerate() {
         let line = line.trim();
@@ -149,17 +149,17 @@ pub fn parse_task(content: &str) -> Vec<(usize, SimCommand)> {
             "propose" => {
                 let id_str = args.get("id").expect("Missing id for propose");
                 let id = id_str.parse::<u32>().expect("Invalid id");
-                cmds.push((line_num + 1, SimCommand::Propose(id)));
+                cmds.push((line_num + 1, Command::Propose(id)));
             }
             "broadcast" => {
                 let id_str = args.get("id").expect("Missing id for broadcast");
                 let id = id_str.parse::<u32>().expect("Invalid id");
-                cmds.push((line_num + 1, SimCommand::Broadcast(id)));
+                cmds.push((line_num + 1, Command::Broadcast(id)));
             }
             "reply" => {
                 let id_str = args.get("id").expect("Missing id for reply");
                 let id = id_str.parse::<u32>().expect("Invalid id");
-                cmds.push((line_num + 1, SimCommand::Reply(id)));
+                cmds.push((line_num + 1, Command::Reply(id)));
             }
             "collect" | "wait" => {
                 let id_str = args.get("id").expect("Missing id");
@@ -186,9 +186,9 @@ pub fn parse_task(content: &str) -> Vec<(usize, SimCommand)> {
                     (message, completion)
                 });
                 if command == "collect" {
-                    cmds.push((line_num + 1, SimCommand::Collect(id, thresh, delay)));
+                    cmds.push((line_num + 1, Command::Collect(id, thresh, delay)));
                 } else {
-                    cmds.push((line_num + 1, SimCommand::Wait(id, thresh, delay)));
+                    cmds.push((line_num + 1, Command::Wait(id, thresh, delay)));
                 }
             }
             _ => panic!("Unknown command: {command}"),
@@ -244,6 +244,7 @@ mod tests {
                 ("eu-west-1".to_string(), 100.0),
             ]),
         )]);
+        let p50 = CloudPing { data: p50_data };
         let p90_data = BTreeMap::from([(
             "us-east-1".to_string(),
             BTreeMap::from([
@@ -251,12 +252,9 @@ mod tests {
                 ("eu-west-1".to_string(), 150.0),
             ]),
         )]);
-
-        let p50 = ApiResp { data: p50_data };
-        let p90 = ApiResp { data: p90_data };
+        let p90 = CloudPing { data: p90_data };
 
         let result = populate_latency_map(p50, p90);
-
         assert_eq!(result.len(), 1);
         let us_east = &result["us-east-1"];
         assert_eq!(us_east["us-west-1"], (50.0, 30.0)); // P50=50, jitter=P90-P50=30
@@ -276,17 +274,17 @@ reply id=3
         assert_eq!(commands.len(), 3);
 
         match &commands[0].1 {
-            SimCommand::Propose(id) => assert_eq!(*id, 1),
+            Command::Propose(id) => assert_eq!(*id, 1),
             _ => panic!("Expected Propose command"),
         }
 
         match &commands[1].1 {
-            SimCommand::Broadcast(id) => assert_eq!(*id, 2),
+            Command::Broadcast(id) => assert_eq!(*id, 2),
             _ => panic!("Expected Broadcast command"),
         }
 
         match &commands[2].1 {
-            SimCommand::Reply(id) => assert_eq!(*id, 3),
+            Command::Reply(id) => assert_eq!(*id, 3),
             _ => panic!("Expected Reply command"),
         }
     }
@@ -298,7 +296,7 @@ reply id=3
         assert_eq!(commands.len(), 1);
 
         match &commands[0].1 {
-            SimCommand::Collect(id, threshold, delay) => {
+            Command::Collect(id, threshold, delay) => {
                 assert_eq!(*id, 1);
                 match threshold {
                     Threshold::Percent(p) => assert_eq!(*p, 0.75),
@@ -317,7 +315,7 @@ reply id=3
         assert_eq!(commands.len(), 1);
 
         match &commands[0].1 {
-            SimCommand::Wait(id, threshold, delay) => {
+            Command::Wait(id, threshold, delay) => {
                 assert_eq!(*id, 2);
                 match threshold {
                     Threshold::Count(c) => assert_eq!(*c, 5),
