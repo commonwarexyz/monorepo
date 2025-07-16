@@ -680,6 +680,18 @@ fn main() {
                     );
                     println!("{}", stat_line.blue());
                 }
+                let mut all_lats: Vec<f64> = Vec::new();
+                for latencies in regional.values() {
+                    all_lats.extend_from_slice(latencies);
+                }
+                if !all_lats.is_empty() {
+                    let mut all_lats_sorted = all_lats.clone();
+                    let overall_mean = mean(&all_lats);
+                    let overall_median = median(&mut all_lats_sorted);
+                    let overall_std = std_dev(&all_lats).unwrap_or(0.0);
+                    let stat_line = format!("    [overall] Mean: {overall_mean:.2}ms (Std Dev: {overall_std:.2}ms) | Median: {overall_median:.2}ms");
+                    println!("{}", stat_line.white());
+                }
             }
             wait_idx += 1;
         }

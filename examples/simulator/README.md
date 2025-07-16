@@ -118,3 +118,8 @@ The DSL is a plain text file where each non-empty line represents a command. Com
 
 This DSL allows modeling protocols like echo broadcasts, quorums, or multi-phase consensus with realistic network delays.
 
+## Comparison on Alto-Like Network
+
+```
+cargo run -- --regions us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 --task hotstuff.lazy
+```
