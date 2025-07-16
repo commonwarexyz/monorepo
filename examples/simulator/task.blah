@@ -1,0 +1,6 @@
+propose 0
+wait 0 1
+broadcast 1
+wait 1 67%
+broadcast 2
+wait 2 67%
