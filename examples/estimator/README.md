@@ -2,6 +2,8 @@
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-estimator.svg)](https://crates.io/crates/commonware-estimator)
 
+Simulate the performance of mechanisms under realistic network conditions.
+
 ## Overview
 
 The Commonware Estimator is a tool for estimating the latency of distributed systems protocols under realistic network conditions. It uses a simulated peer-to-peer network with latency and jitter data derived from AWS regions (sourced from cloudping.co). The estimator allows you to define simulation behaviors using a simple Domain-Specific Language (DSL) and runs multiple simulations in parallel, varying the proposer/proposer across peers.

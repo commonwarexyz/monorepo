@@ -1,3 +1,5 @@
+//! Simulate the performance of mechanisms under realistic network conditions.
+
 use reqwest::blocking::Client;
 use std::{
     collections::{BTreeMap, HashMap},

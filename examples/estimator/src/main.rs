@@ -1,3 +1,5 @@
+//! Simulate the performance of mechanisms under realistic network conditions.
+
 use clap::{value_parser, Arg, Command as ClapCommand};
 use colored::Colorize;
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
