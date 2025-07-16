@@ -281,13 +281,9 @@ where
                 upper_bound_pos: new_target.upper_bound_ops,
             });
         }
-        if new_target.lower_bound_ops < old_target.lower_bound_ops {
-            return Err(Error::SyncTargetMovedBackward {
-                old: Box::new(old_target.clone()),
-                new: Box::new(new_target.clone()),
-            });
-        }
-        if new_target.upper_bound_ops < old_target.upper_bound_ops {
+        if new_target.lower_bound_ops < old_target.lower_bound_ops
+            || new_target.upper_bound_ops < old_target.upper_bound_ops
+        {
             return Err(Error::SyncTargetMovedBackward {
                 old: Box::new(old_target.clone()),
                 new: Box::new(new_target.clone()),
