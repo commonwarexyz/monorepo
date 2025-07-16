@@ -1299,4 +1299,186 @@ pub mod test {
             db.destroy().await.unwrap();
         });
     }
+
+    /// Test that the `pruning_delay` works as expected.
+    #[test_traced("WARN")]
+    pub fn test_current_db_pruning_delay() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create database with enough operations to trigger pruning
+            let mut hasher = Standard::<Sha256>::new();
+            let db_config = current_db_config("pruning_boundary_test");
+
+            let mut db = CurrentTest::init(context.clone(), db_config.clone())
+                .await
+                .unwrap();
+
+            const NUM_OPERATIONS: u64 = 500;
+            for i in 0..NUM_OPERATIONS {
+                let key = hash(&i.to_be_bytes());
+                let value = hash(&(i * 1000).to_be_bytes());
+                db.update(key, value).await.unwrap();
+
+                // Commit periodically to advance the inactivity floor
+                if i % 100 == 99 {
+                    db.commit().await.unwrap();
+                }
+            }
+
+            // Final commit to establish the inactivity floor
+            db.commit().await.unwrap();
+
+            // Get the root hash
+            let original_root = db.root(&mut hasher).await.unwrap();
+
+            // Verify the pruning boundary is correct
+            let oldest_retained = db.oldest_retained_loc().unwrap();
+            let inactivity_floor = db.any.inactivity_floor_loc;
+            assert_eq!(
+                oldest_retained,
+                inactivity_floor.saturating_sub(db_config.pruning_delay)
+            );
+
+            // Get proof of items below inactivity floor but after pruning boundary
+            let proof_start = oldest_retained;
+            let proof_end = std::cmp::min(inactivity_floor, oldest_retained + 10);
+            let max_ops = proof_end - proof_start;
+
+            let (original_proof, original_ops, original_chunks) = db
+                .range_proof(hasher.inner(), proof_start, max_ops)
+                .await
+                .unwrap();
+
+            // Verify the proof works
+            assert!(CurrentTest::verify_range_proof(
+                &mut hasher,
+                &original_proof,
+                proof_start,
+                &original_ops,
+                &original_chunks,
+                &original_root
+            ));
+
+            // Close and reopen the database
+            db.close().await.unwrap();
+            let db = CurrentTest::init(context.clone(), db_config).await.unwrap();
+
+            // Confirm root is identical after restart
+            let reopened_root = db.root(&mut hasher).await.unwrap();
+            assert_eq!(original_root, reopened_root);
+
+            // Get proof of items below inactivity floor again
+            let (reopened_proof, reopened_ops, reopened_chunks) = db
+                .range_proof(hasher.inner(), proof_start, max_ops)
+                .await
+                .unwrap();
+
+            // Verify the proof still works and is identical
+            assert_eq!(original_proof.size, reopened_proof.size);
+            assert_eq!(original_proof.digests, reopened_proof.digests);
+            assert_eq!(original_ops, reopened_ops);
+            assert_eq!(original_chunks, reopened_chunks);
+
+            assert!(CurrentTest::verify_range_proof(
+                &mut hasher,
+                &reopened_proof,
+                proof_start,
+                &reopened_ops,
+                &reopened_chunks,
+                &reopened_root
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that databases with different `pruning_delay` values generate the same root.
+    #[test_traced("WARN")]
+    pub fn test_current_db_different_pruning_delays_same_root() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Create two databases with different pruning delays
+            let mut db_config_no_delay = current_db_config("no_delay_test");
+            db_config_no_delay.pruning_delay = 0;
+
+            let mut db_config_max_delay = current_db_config("max_delay_test");
+            db_config_max_delay.pruning_delay = u64::MAX;
+
+            let mut db_no_delay = CurrentTest::init(context.clone(), db_config_no_delay.clone())
+                .await
+                .unwrap();
+            let mut db_max_delay = CurrentTest::init(context.clone(), db_config_max_delay.clone())
+                .await
+                .unwrap();
+
+            // Apply identical operations to both databases
+            const NUM_OPERATIONS: u64 = 1000;
+            for i in 0..NUM_OPERATIONS {
+                let key = hash(&i.to_be_bytes());
+                let value = hash(&(i * 1000).to_be_bytes());
+
+                db_no_delay.update(key, value).await.unwrap();
+                db_max_delay.update(key, value).await.unwrap();
+
+                // Commit periodically
+                if i % 50 == 49 {
+                    db_no_delay.commit().await.unwrap();
+                    db_max_delay.commit().await.unwrap();
+                }
+            }
+
+            // Final commit
+            db_no_delay.commit().await.unwrap();
+            db_max_delay.commit().await.unwrap();
+            let inactivity_floor = db_no_delay.any.inactivity_floor_loc;
+
+            // Get roots from both databases
+            let root_no_delay = db_no_delay.root(&mut hasher).await.unwrap();
+            let root_max_delay = db_max_delay.root(&mut hasher).await.unwrap();
+
+            // Verify they generate the same roots
+            assert_eq!(root_no_delay, root_max_delay);
+
+            // Verify different pruning behaviors
+            let oldest_no_delay = db_no_delay.oldest_retained_loc().unwrap();
+            let oldest_max_delay = db_max_delay.oldest_retained_loc().unwrap();
+
+            // With pruning_delay=0, more operations should be pruned
+            // With pruning_delay=u64::MAX, no operations should be pruned (oldest retained should be 0)
+            assert_eq!(oldest_no_delay, inactivity_floor);
+            assert_eq!(oldest_max_delay, 0);
+
+            // Close both databases
+            db_no_delay.close().await.unwrap();
+            db_max_delay.close().await.unwrap();
+
+            // Restart both databases
+            let db_no_delay = CurrentTest::init(context.clone(), db_config_no_delay)
+                .await
+                .unwrap();
+            let db_max_delay = CurrentTest::init(context.clone(), db_config_max_delay)
+                .await
+                .unwrap();
+
+            // Get roots after restart
+            let root_no_delay_restart = db_no_delay.root(&mut hasher).await.unwrap();
+            let root_max_delay_restart = db_max_delay.root(&mut hasher).await.unwrap();
+
+            // Ensure roots still match after restart
+            assert_eq!(root_no_delay, root_no_delay_restart);
+            assert_eq!(root_max_delay, root_max_delay_restart);
+
+            // Verify pruning boundaries are still different
+            let oldest_no_delay_restart = db_no_delay.oldest_retained_loc().unwrap();
+            let oldest_max_delay_restart = db_max_delay.oldest_retained_loc().unwrap();
+
+            assert_eq!(oldest_no_delay_restart, inactivity_floor);
+            assert_eq!(oldest_max_delay_restart, 0);
+
+            db_no_delay.destroy().await.unwrap();
+            db_max_delay.destroy().await.unwrap();
+        });
+    }
 }
