@@ -6,13 +6,11 @@ use commonware_p2p::{
     utils::codec::wrap,
 };
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-use commonware_utils::quorum;
 use futures::future::try_join_all;
 use reqwest::blocking::Client;
 use std::sync::mpsc::channel;
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
     time::Duration,
 };
 use tracing::info;
@@ -250,11 +248,9 @@ fn main() {
     for leader_idx in 0..peers {
         let task_content_inner = task_content.clone();
         let (tx, rx) = channel();
-        let verbose = verbose;
         let dsl_outer = dsl.clone();
         let region_counts_outer = region_counts.clone();
         let latency_map_outer = latency_map.clone();
-        let regions_outer = regions.clone();
         let runtime_cfg = deterministic::Config::new();
         let executor = deterministic::Runner::new(runtime_cfg);
         executor.start(async move |context| {
@@ -413,8 +409,7 @@ fn main() {
                 println!(
                     "{}",
                     format!(
-                        "\nSimulation results for leader {} ({}):\n",
-                        leader_idx, leader_region
+                        "\nSimulation results for leader {leader_idx} ({leader_region}):\n"
                     )
                     .bold()
                     .cyan()
@@ -432,17 +427,15 @@ fn main() {
                         let mut stats = Vec::new();
                         for (region, latencies) in regional.iter() {
                             let mut lats = latencies.clone();
-                            let count = lats.len();
                             let mean_ms = mean(&lats);
                             let median_ms = median(&mut lats);
                             let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
-                            stats.push((region.clone(), count, mean_ms, median_ms, std_dev_ms));
+                            stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
                         }
                         stats.sort_by(|a, b| a.0.cmp(&b.0));
-                        for (region, count, mean_ms, median_ms, std_dev_ms) in stats {
+                        for (region, mean_ms, median_ms, std_dev_ms) in stats {
                             let stat_line = format!(
-                                "    [{}] Mean: {:.2}ms, Median: {:.2}ms, Std Dev: {:.2}ms",
-                                region, mean_ms, median_ms, std_dev_ms
+                                "    [{region}] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms",
                             );
                             println!("{}", stat_line.cyan());
                         }
@@ -482,17 +475,15 @@ fn main() {
             let mut stats = Vec::new();
             for (region, latencies) in regional.iter() {
                 let mut lats = latencies.clone();
-                let count = lats.len();
                 let mean_ms = mean(&lats);
                 let median_ms = median(&mut lats);
                 let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
-                stats.push((region.clone(), count, mean_ms, median_ms, std_dev_ms));
+                stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
             }
             stats.sort_by(|a, b| a.0.cmp(&b.0));
-            for (region, count, mean_ms, median_ms, std_dev_ms) in stats {
+            for (region, mean_ms, median_ms, std_dev_ms) in stats {
                 let stat_line = format!(
-                    "    [{}] Mean: {:.2}ms, Median: {:.2}ms, Std Dev: {:.2}ms",
-                    region, mean_ms, median_ms, std_dev_ms
+                    "    [{region}] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms",
                 );
                 println!("{}", stat_line.blue());
             }
