@@ -24,18 +24,17 @@ cargo run -- [OPTIONS]
 
 ### Command-Line Options
 
-- `--regions <REGIONS>` (required): Specify regions and peer counts in the format `<region>:<count>`, comma-separated. Example: `us-east-1:10,eu-west-1:5`. Regions must match AWS regions from the latency data (e.g., us-east-1, eu-west-1).
+- `--distribution <DISTRIBUTION>` (required): Specify regions and peer counts in the format `<region>:<count>`, comma-separated. Example: `us-east-1:10,eu-west-1:5`. Regions must match AWS regions from the latency data (e.g., us-east-1, eu-west-1).
 - `--task <PATH>` (required): Path to the DSL file defining the simulation behavior (e.g., `minimmit.lazy`).
-- `--concurrency <NUM>` (optional, default: 4): Number of concurrent simulations to run (one per proposer).
 - `--reload-latency-data` (optional flag): Download fresh latency data from cloudping.co instead of using embedded data.
 
 ### Example
 
 ```
-cargo run -- --regions us-east-1:3,eu-west-1:2 --task examples/simulator/minimmit.lazy --concurrency 2
+cargo run -- --distribution us-east-1:3,eu-west-1:2 --task examples/simulator/minimmit.lazy
 ```
 
-This runs simulations with 5 peers (3 in us-east-1, 2 in eu-west-1), using the DSL from `minimmit.lazy`, processing 2 proposers concurrently.
+This runs simulations with 5 peers (3 in us-east-1, 2 in eu-west-1), using the DSL from `minimmit.lazy`.
 
 ### Output
 
@@ -121,5 +120,5 @@ This DSL allows modeling protocols like echo broadcasts, quorums, or multi-phase
 ## Comparison on Alto-Like Network
 
 ```
-cargo run -- --regions us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 --task hotstuff.lazy
+cargo run -- --distribution us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 --task hotstuff.lazy
 ```
