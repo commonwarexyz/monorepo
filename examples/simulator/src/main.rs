@@ -1,6 +1,7 @@
 use clap::{value_parser, Arg, Command};
 use colored::Colorize;
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
+use commonware_macros::select;
 use commonware_p2p::{
     simulated::{Config, Link, Network},
     utils::codec::wrap,
@@ -13,7 +14,7 @@ use std::{
     collections::{HashMap, HashSet},
     time::Duration,
 };
-use tracing::info;
+use tracing::debug;
 
 const DEFAULT_CHANNEL: u32 = 0;
 const DEFAULT_SUCCESS_RATE: f64 = 1.0;
@@ -194,12 +195,6 @@ fn main() {
                 .value_parser(value_parser!(String))
                 .help("Path to DSL file defining the simulation behavior"),
         )
-        .arg(
-            Arg::new("verbose")
-                .long("verbose")
-                .action(clap::ArgAction::SetTrue)
-                .help("Print results for each run")
-        )
         .get_matches();
     let region_counts = matches
         .get_many::<String>("regions")
@@ -216,35 +211,26 @@ fn main() {
         })
         .collect::<Vec<_>>();
     let peers: usize = region_counts.iter().map(|(_, count)| *count).sum();
-    let regions: Vec<String> = region_counts
-        .iter()
-        .map(|(region, _)| region.clone())
-        .collect();
-    assert!(
-        peers >= regions.len(),
-        "must have at least as many peers as regions"
-    );
+    assert!(peers > 1, "must have at least 2 peers");
     let task_path = matches
         .get_one::<String>("task")
         .expect("task file required")
         .clone();
     let task_content = std::fs::read_to_string(&task_path).expect("Failed to read task file");
     let dsl = parse_task(&task_content);
-    let verbose = matches.get_flag("verbose");
-
-    info!(peers, ?region_counts, "Initializing simulator");
+    debug!(peers, ?region_counts, "Initializing simulator");
 
     // Download latency data
     let latency_map = if matches.get_flag("reload-latency-data") {
-        info!("downloading latency data");
+        debug!("downloading latency data");
         download_latency_data()
     } else {
-        info!("loading latency data");
+        debug!("loading latency data");
         load_latency_data()
     };
-
     let mut all_wait_latencies: HashMap<usize, HashMap<String, Vec<f64>>> = HashMap::new();
 
+    // Run simulation for each proposer
     for leader_idx in 0..peers {
         let task_content_inner = task_content.clone();
         let (tx, rx) = channel();
@@ -372,16 +358,42 @@ fn main() {
                         received.entry(msg_id).or_default().insert(other_identity);
                     }
 
-                    (region, completions)
+                    (region, completions, receiver)
                 }));
             }
 
             // Wait for all jobs to complete
-            let results = try_join_all(jobs).await.unwrap();
+            let results_with_receivers = try_join_all(jobs).await.unwrap();
+            let mut drain_jobs = Vec::new();
+            let mut processed_results = Vec::new();
+            for (region, completions, mut receiver) in results_with_receivers.into_iter() {
+                drain_jobs.push(context.with_label("drain").spawn(move |ctx| async move {
+                    let drain_until = ctx.current() + Duration::from_millis(1000);
+                    loop {
+                        select! {
+                            _ = ctx.sleep_until(drain_until) => {
+                                break;
+                            },
+                            msg = receiver.recv() => {
+                                match msg {
+                                    Ok(_) => {
+                                        // Discard message
+                                    }
+                                    Err(_) => {
+                                        break;
+                                    }
+                                }
+                            },
+                        }
+                    }
+                }));
+                processed_results.push((region, completions));
+            }
+            try_join_all(drain_jobs).await.unwrap();
 
             // Group results by wait line and region
             let mut wait_latencies: HashMap<usize, HashMap<Region, Vec<f64>>> = HashMap::new();
-            for (region, completions) in results {
+            for (region, completions) in processed_results {
                 for (line, duration) in completions {
                     wait_latencies
                         .entry(line)
@@ -392,55 +404,54 @@ fn main() {
                 }
             }
 
-            if verbose {
-                let mut current = 0;
-                let leader_region = region_counts_outer
-                    .iter()
-                    .find_map(|(reg, cnt)| {
-                        let start = current;
-                        current += *cnt;
-                        if leader_idx >= start && leader_idx < current {
-                            Some(reg.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap();
-                println!(
-                    "{}",
-                    format!(
-                        "\nSimulation results for leader {leader_idx} ({leader_region}):\n"
-                    )
-                    .bold()
-                    .cyan()
-                );
-                let dsl_lines: Vec<String> =
-                    task_content_inner.lines().map(|s| s.to_string()).collect();
-                let mut wait_lines: Vec<usize> = wait_latencies.keys().cloned().collect();
-                wait_lines.sort();
-                let mut wait_idx = 0;
-                for (i, line) in dsl_lines.iter().enumerate() {
-                    println!("{}", line.yellow());
-                    let line_num = i + 1;
-                    if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
-                        let regional = wait_latencies.get(&line_num).unwrap();
-                        let mut stats = Vec::new();
-                        for (region, latencies) in regional.iter() {
-                            let mut lats = latencies.clone();
-                            let mean_ms = mean(&lats);
-                            let median_ms = median(&mut lats);
-                            let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
-                            stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
-                        }
-                        stats.sort_by(|a, b| a.0.cmp(&b.0));
-                        for (region, mean_ms, median_ms, std_dev_ms) in stats {
-                            let stat_line = format!(
-                                "    [{region}] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms",
-                            );
-                            println!("{}", stat_line.cyan());
-                        }
-                        wait_idx += 1;
+            // Print proposer results
+            let mut current = 0;
+            let leader_region = region_counts_outer
+                .iter()
+                .find_map(|(reg, cnt)| {
+                    let start = current;
+                    current += *cnt;
+                    if leader_idx >= start && leader_idx < current {
+                        Some(reg.clone())
+                    } else {
+                        None
                     }
+                })
+                .unwrap();
+            println!(
+                "{}",
+                format!(
+                    "\nSimulation results for proposer {leader_idx} ({leader_region}):\n"
+                )
+                .bold()
+                .cyan()
+            );
+            let dsl_lines: Vec<String> =
+                task_content_inner.lines().map(|s| s.to_string()).collect();
+            let mut wait_lines: Vec<usize> = wait_latencies.keys().cloned().collect();
+            wait_lines.sort();
+            let mut wait_idx = 0;
+            for (i, line) in dsl_lines.iter().enumerate() {
+                println!("{}", line.yellow());
+                let line_num = i + 1;
+                if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
+                    let regional = wait_latencies.get(&line_num).unwrap();
+                    let mut stats = Vec::new();
+                    for (region, latencies) in regional.iter() {
+                        let mut lats = latencies.clone();
+                        let mean_ms = mean(&lats);
+                        let median_ms = median(&mut lats);
+                        let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
+                        stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
+                    }
+                    stats.sort_by(|a, b| a.0.cmp(&b.0));
+                    for (region, mean_ms, median_ms, std_dev_ms) in stats {
+                        let stat_line = format!(
+                            "    [{region}] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms",
+                        );
+                        println!("{}", stat_line.cyan());
+                    }
+                    wait_idx += 1;
                 }
             }
 
@@ -456,10 +467,7 @@ fn main() {
             }
         }
     }
-
-    if verbose {
-        println!("\n{}", "-".repeat(80).yellow());
-    }
+    println!("\n{}", "-".repeat(80).yellow());
 
     // Calculate and print averaged stats
     println!("{}", "\nAveraged simulation results:\n".bold().magenta());
