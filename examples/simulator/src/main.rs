@@ -195,7 +195,12 @@ fn parse_task(content: &str) -> Vec<(usize, SimCommand)> {
     cmds
 }
 
-type SimResult = (usize, String, BTreeMap<usize, BTreeMap<String, Vec<f64>>>);
+type SimResult = (
+    usize,
+    String,
+    BTreeMap<usize, BTreeMap<String, Vec<f64>>>,
+    BTreeMap<usize, f64>,
+);
 
 fn main() {
     // Create logger
@@ -480,13 +485,19 @@ fn main() {
                                     let msg_id = message.unwrap();
                                     received.entry(msg_id).or_default().insert(other_identity);
                                 }
-                                (region, completions, receiver)
+                                let maybe_leader = if is_leader {
+                                    Some(completions.clone())
+                                } else {
+                                    None
+                                };
+                                (region, completions, maybe_leader, receiver)
                             }));
                         }
                         let results_with_receivers = try_join_all(jobs).await.unwrap();
                         let mut drain_jobs = Vec::new();
                         let mut processed_results = Vec::new();
-                        for (region, completions, mut receiver) in
+                        let mut leader_completions: Option<Vec<(usize, Duration)>> = None;
+                        for (region, completions, maybe_leader, mut receiver) in
                             results_with_receivers.into_iter()
                         {
                             drain_jobs.push(context.with_label("drain").spawn(
@@ -511,6 +522,9 @@ fn main() {
                                     }
                                 },
                             ));
+                            if let Some(comps) = maybe_leader {
+                                leader_completions = Some(comps);
+                            }
                             processed_results.push((region, completions));
                         }
                         try_join_all(drain_jobs).await.unwrap();
@@ -526,10 +540,15 @@ fn main() {
                                     .push(duration.as_millis() as f64);
                             }
                         }
-                        tx.send(wait_latencies).unwrap();
+                        let leader_latencies: BTreeMap<usize, f64> = leader_completions
+                            .unwrap()
+                            .into_iter()
+                            .map(|(line, dur)| (line, dur.as_millis() as f64))
+                            .collect();
+                        tx.send((wait_latencies, leader_latencies)).unwrap();
                     }
                 });
-                let wait_latencies = rx.recv().unwrap();
+                let (wait_latencies, leader_latencies) = rx.recv().unwrap();
                 let mut current = 0;
                 let leader_region = region_counts_clone
                     .iter()
@@ -543,7 +562,12 @@ fn main() {
                         }
                     })
                     .unwrap();
-                (leader_idx_clone, leader_region, wait_latencies)
+                (
+                    leader_idx_clone,
+                    leader_region,
+                    wait_latencies,
+                    leader_latencies,
+                )
             });
             chunk_handles.push(handle);
         }
@@ -552,9 +576,9 @@ fn main() {
             results.push(res);
         }
     }
-    results.sort_by_key(|(idx, _, _)| *idx);
+    results.sort_by_key(|(idx, _, _, _)| *idx);
     for tuple in &results {
-        let (leader_idx, leader_region, wait_latencies) = tuple;
+        let (leader_idx, leader_region, wait_latencies, leader_latencies) = tuple;
         println!(
             "{}",
             format!(
@@ -571,29 +595,43 @@ fn main() {
         for (i, line) in dsl_lines.iter().enumerate() {
             println!("{}", line.yellow());
             let line_num = i + 1;
+            let is_collect = line.starts_with("collect");
             if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
-                let regional = wait_latencies.get(&line_num).unwrap();
-                let mut stats: Vec<(String, f64, f64, f64)> = Vec::new();
-                for (region, latencies) in regional.iter() {
-                    let mut lats = latencies.clone();
-                    let mean_ms = mean(&lats);
-                    let median_ms = median(&mut lats);
-                    let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
-                    stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
+                if !is_collect {
+                    let regional = wait_latencies.get(&line_num).unwrap();
+                    let mut stats: Vec<(String, f64, f64, f64)> = Vec::new();
+                    for (region, latencies) in regional.iter() {
+                        let mut lats = latencies.clone();
+                        let mean_ms = mean(&lats);
+                        let median_ms = median(&mut lats);
+                        let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
+                        stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
+                    }
+                    stats.sort_by(|a, b| a.0.cmp(&b.0));
+                    for (region, mean_ms, median_ms, std_dev_ms) in stats {
+                        let stat_line = format!(
+                            "    [{region}] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms",
+                        );
+                        println!("{}", stat_line.cyan());
+                    }
                 }
-                stats.sort_by(|a, b| a.0.cmp(&b.0));
-                for (region, mean_ms, median_ms, std_dev_ms) in stats {
-                    let stat_line = format!(
-                        "    [{region}] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms",
-                    );
+                if let Some(proposer_latency) = leader_latencies.get(&line_num) {
+                    let stat_line = format!("    [proposer] Latency: {:.2}ms", proposer_latency);
                     println!("{}", stat_line.cyan());
                 }
                 wait_idx += 1;
             }
         }
     }
+    let mut all_leader_latencies: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
     for tuple in &results {
-        let (_, _, wait_latencies) = tuple;
+        let (_, _, _, leader_latencies) = tuple;
+        for (&line, &lat) in leader_latencies.iter() {
+            all_leader_latencies.entry(line).or_default().push(lat);
+        }
+    }
+    for tuple in &results {
+        let (_, _, wait_latencies, _) = tuple;
         for (line, regional) in wait_latencies.iter() {
             let all_regional = all_wait_latencies.entry(*line).or_default();
             for (region, lats) in regional.iter() {
@@ -613,22 +651,35 @@ fn main() {
     for (i, line) in dsl_lines.iter().enumerate() {
         println!("{}", line.green());
         let line_num = i + 1;
+        let is_collect = line.starts_with("collect");
         if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
-            let regional = all_wait_latencies.get(&line_num).unwrap();
-            let mut stats = Vec::new();
-            for (region, latencies) in regional.iter() {
-                let mut lats = latencies.clone();
-                let mean_ms = mean(&lats);
-                let median_ms = median(&mut lats);
-                let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
-                stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
+            if !is_collect {
+                let regional = all_wait_latencies.get(&line_num).unwrap();
+                let mut stats = Vec::new();
+                for (region, latencies) in regional.iter() {
+                    let mut lats = latencies.clone();
+                    let mean_ms = mean(&lats);
+                    let median_ms = median(&mut lats);
+                    let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
+                    stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
+                }
+                stats.sort_by(|a, b| a.0.cmp(&b.0));
+                for (region, mean_ms, median_ms, std_dev_ms) in stats {
+                    let stat_line = format!(
+                        "    [{region}] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms",
+                    );
+                    println!("{}", stat_line.blue());
+                }
             }
-            stats.sort_by(|a, b| a.0.cmp(&b.0));
-            for (region, mean_ms, median_ms, std_dev_ms) in stats {
-                let stat_line = format!(
-                    "    [{region}] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms",
-                );
-                println!("{}", stat_line.blue());
+            if let Some(lats) = all_leader_latencies.get(&line_num) {
+                if !lats.is_empty() {
+                    let mut lats_sorted = lats.clone();
+                    let mean_ms = mean(&lats);
+                    let median_ms = median(&mut lats_sorted);
+                    let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
+                    let stat_line = format!("    [proposer] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms");
+                    println!("{}", stat_line.blue());
+                }
             }
             wait_idx += 1;
         }
