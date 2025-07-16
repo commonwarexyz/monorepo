@@ -132,8 +132,8 @@ fn parse_task(content: &str) -> Vec<(usize, SimCommand)> {
         }
         let parts: Vec<&str> = line.split_whitespace().collect();
         match parts[0] {
-            "leader_propose" => {
-                let id = parts[1].parse::<u32>().expect("Invalid leader_propose id");
+            "propose" => {
+                let id = parts[1].parse::<u32>().expect("Invalid propose id");
                 cmds.push((line_num + 1, SimCommand::Propose(id)));
             }
             "broadcast" => {
