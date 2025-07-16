@@ -22,7 +22,7 @@ use tracing::debug;
 // Import from our library
 use estimator::{
     crate_version, download_latency_data, load_latency_data, mean, median, parse_task, std_dev,
-    LatencyMap, Region, SimCommand, Threshold,
+    LatencyMap, SimCommand, Threshold,
 };
 
 const DEFAULT_CHANNEL: u32 = 0;
@@ -32,6 +32,27 @@ const DEFAULT_SUCCESS_RATE: f64 = 1.0;
 type RegionCounts = Vec<(String, usize)>;
 type WaitLatencies = BTreeMap<usize, BTreeMap<String, Vec<f64>>>;
 type LeaderLatencies = BTreeMap<usize, f64>;
+type PeerIdentity = (
+    ed25519::PublicKey,
+    String,
+    WrappedSender<Sender<ed25519::PublicKey>, u32>,
+    WrappedReceiver<Receiver<ed25519::PublicKey>, u32>,
+);
+type PeerJobHandle = commonware_runtime::Handle<(
+    String,
+    Vec<(usize, Duration)>,
+    Option<Vec<(usize, Duration)>>,
+)>;
+
+/// Context data for a peer in the simulation
+struct PeerContext {
+    peer_idx: usize,
+    leader_idx: usize,
+    peers: usize,
+    identity: ed25519::PublicKey,
+    region: String,
+    dsl: Vec<(usize, SimCommand)>,
+}
 
 /// Results from a single simulation run
 #[derive(Clone)]
@@ -45,7 +66,6 @@ struct SimulationResult {
 /// Command line arguments parsed from user input
 struct Arguments {
     region_counts: RegionCounts,
-    task_path: String,
     task_content: String,
     reload_latency_data: bool,
 }
@@ -132,7 +152,6 @@ fn parse_arguments() -> Arguments {
 
     Arguments {
         region_counts,
-        task_path,
         task_content,
         reload_latency_data,
     }
@@ -225,7 +244,7 @@ fn calculate_leader_region(leader_idx: usize, region_counts: &RegionCounts) -> S
             return region.clone();
         }
     }
-    panic!("Leader index {} out of bounds", leader_idx);
+    panic!("Leader index {leader_idx} out of bounds");
 }
 
 /// Core simulation logic that runs the network simulation
@@ -268,12 +287,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
 async fn setup_network_identities(
     oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey>,
     region_counts: &RegionCounts,
-) -> Vec<(
-    ed25519::PublicKey,
-    String,
-    WrappedSender<Sender<ed25519::PublicKey>, u32>,
-    WrappedReceiver<Receiver<ed25519::PublicKey>, u32>,
-)> {
+) -> Vec<PeerIdentity> {
     let peers = calculate_total_peers(region_counts);
     let mut identities = Vec::with_capacity(peers);
     let mut peer_idx = 0;
@@ -297,12 +311,7 @@ async fn setup_network_identities(
 /// Set up network links between all peers with appropriate latencies
 async fn setup_network_links(
     oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey>,
-    identities: &[(
-        ed25519::PublicKey,
-        String,
-        WrappedSender<Sender<ed25519::PublicKey>, u32>,
-        WrappedReceiver<Receiver<ed25519::PublicKey>, u32>,
-    )],
+    identities: &[PeerIdentity],
     latency_map: &LatencyMap,
 ) {
     for (i, (identity, region, _, _)) in identities.iter().enumerate() {
@@ -329,33 +338,27 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
     context: &C,
     leader_idx: usize,
     peers: usize,
-    identities: Vec<(
-        ed25519::PublicKey,
-        String,
-        WrappedSender<Sender<ed25519::PublicKey>, u32>,
-        WrappedReceiver<Receiver<ed25519::PublicKey>, u32>,
-    )>,
+    identities: Vec<PeerIdentity>,
     dsl: &[(usize, SimCommand)],
     tx: mpsc::Sender<oneshot::Sender<()>>,
-) -> Vec<
-    commonware_runtime::Handle<(
-        String,
-        Vec<(usize, Duration)>,
-        Option<Vec<(usize, Duration)>>,
-    )>,
-> {
+) -> Vec<PeerJobHandle> {
     let mut jobs = Vec::new();
 
     for (i, (identity, region, sender, receiver)) in identities.into_iter().enumerate() {
-        let mut tx = tx.clone();
+        let tx = tx.clone();
         let job = context.with_label("job");
         let dsl = dsl.to_vec();
 
         jobs.push(job.spawn(move |ctx| async move {
-            run_peer_logic(
-                ctx, i, leader_idx, peers, identity, region, sender, receiver, dsl, tx,
-            )
-            .await
+            let peer_context = PeerContext {
+                peer_idx: i,
+                leader_idx,
+                peers,
+                identity,
+                region,
+                dsl,
+            };
+            run_peer_logic(ctx, peer_context, sender, receiver, tx).await
         }));
     }
 
@@ -365,20 +368,23 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
 /// Core logic for a single peer in the simulation
 async fn run_peer_logic(
     ctx: impl Spawner + Clock,
-    peer_idx: usize,
-    leader_idx: usize,
-    peers: usize,
-    identity: ed25519::PublicKey,
-    region: String,
+    peer_context: PeerContext,
     mut sender: WrappedSender<Sender<ed25519::PublicKey>, u32>,
     mut receiver: WrappedReceiver<Receiver<ed25519::PublicKey>, u32>,
-    dsl: Vec<(usize, SimCommand)>,
     mut tx: mpsc::Sender<oneshot::Sender<()>>,
 ) -> (
     String,
     Vec<(usize, Duration)>,
     Option<Vec<(usize, Duration)>>,
 ) {
+    let PeerContext {
+        peer_idx,
+        leader_idx,
+        peers,
+        identity,
+        region,
+        dsl,
+    } = peer_context;
     let is_leader = peer_idx == leader_idx;
     let start = ctx.current();
     let mut completions: Vec<(usize, Duration)> = Vec::new();
@@ -394,7 +400,6 @@ async fn run_peer_logic(
         // Process commands that can be executed immediately
         let mut advanced = true;
         while advanced {
-            advanced = false;
             if current_index >= dsl.len() {
                 break;
             }
