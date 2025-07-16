@@ -1328,4 +1328,142 @@ pub(crate) mod tests {
             target_db.destroy().await.unwrap();
         });
     }
+
+    /// Test that the client can handle target updates during sync execution
+    #[test_traced("WARN")]
+    fn test_target_update_during_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate target database with initial operations
+            let mut target_db = create_test_db(context.clone()).await;
+            let initial_ops = create_test_ops(20);
+            target_db = apply_ops(target_db, initial_ops).await;
+            target_db.commit().await.unwrap();
+
+            // Capture initial target state
+            let mut hasher = create_test_hasher();
+            let initial_lower_bound = target_db.inactivity_floor_loc;
+            let initial_upper_bound = target_db.op_count() - 1;
+            let initial_hash = target_db.root(&mut hasher);
+
+            // Create client with initial target and small batch size
+            let config = Config {
+                context: context.clone(),
+                db_config: create_test_config(context.next_u64()),
+                fetch_batch_size: NZU64!(5), // Small batch size to ensure multiple batches needed
+                target: SyncTarget {
+                    hash: initial_hash,
+                    lower_bound_ops: initial_lower_bound,
+                    upper_bound_ops: initial_upper_bound,
+                },
+                resolver: &target_db,
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+            };
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let mut client = Client::new_with_updater(config, Some(update_receiver))
+                .await
+                .unwrap();
+
+            // Capture initial log size before processing any batches
+            let initial_log_size = match &client {
+                Client::FetchData { log, .. } => log.size().await.unwrap(),
+                _ => panic!("Expected FetchData state"),
+            };
+
+            // Step the client twice to ensure it has processed at least one batch
+            // First step: FetchData -> ApplyData (receives batch)
+            // Second step: ApplyData -> FetchData (applies batch)
+            client = client.step().await.unwrap();
+            client = client.step().await.unwrap();
+
+            // Verify that at least one batch was processed
+            let current_log_size = match &client {
+                Client::FetchData { log, .. } => log.size().await.unwrap(),
+                Client::ApplyData { log, .. } => log.size().await.unwrap(),
+                Client::Done { .. } => panic!("Sync completed before target update"),
+            };
+            assert!(
+                current_log_size > initial_log_size,
+                "Expected at least one batch to be processed"
+            );
+
+            // We need to separate the target database from the client to modify it
+            // Extract the client components and drop the old config to release the reference
+            let (sync_log, sync_pinned_nodes, sync_metrics, sync_update_receiver) = match client {
+                Client::FetchData {
+                    log,
+                    pinned_nodes,
+                    metrics,
+                    update_receiver,
+                    ..
+                } => (log, pinned_nodes, metrics, update_receiver),
+                Client::ApplyData {
+                    log,
+                    pinned_nodes,
+                    metrics,
+                    update_receiver,
+                    ..
+                } => (log, pinned_nodes, metrics, update_receiver),
+                Client::Done { .. } => panic!("Sync completed before target update"),
+            };
+
+            // Now add more operations to the target database (after first batch processed)
+            let additional_ops = create_test_ops(15);
+            target_db = apply_ops(target_db, additional_ops).await;
+            target_db.commit().await.unwrap();
+
+            // Capture new target state
+            let mut hasher = create_test_hasher();
+            let new_lower_bound = target_db.inactivity_floor_loc;
+            let new_upper_bound = target_db.op_count() - 1;
+            let new_hash = target_db.root(&mut hasher);
+
+            // Recreate the client with the updated target database
+            let new_config = Config {
+                context: context.clone(),
+                db_config: create_test_config(context.next_u64()),
+                fetch_batch_size: NZU64!(5),
+                target: SyncTarget {
+                    hash: initial_hash, // Keep the old target for now
+                    lower_bound_ops: initial_lower_bound,
+                    upper_bound_ops: initial_upper_bound,
+                },
+                resolver: &target_db, // Use the updated target database
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+            };
+
+            let client = Client::FetchData {
+                config: new_config,
+                log: sync_log,
+                pinned_nodes: sync_pinned_nodes,
+                metrics: sync_metrics,
+                update_receiver: sync_update_receiver,
+            };
+
+            // Send target update with new target
+            update_sender
+                .send(SyncTarget {
+                    hash: new_hash,
+                    lower_bound_ops: new_lower_bound,
+                    upper_bound_ops: new_upper_bound,
+                })
+                .await
+                .unwrap();
+
+            // Complete the sync
+            let synced_db = client.sync().await.unwrap();
+
+            // Verify the synced database has the expected final state
+            let mut hasher = create_test_hasher();
+            assert_eq!(synced_db.root(&mut hasher), new_hash);
+            assert_eq!(synced_db.op_count(), new_upper_bound + 1);
+            assert_eq!(synced_db.inactivity_floor_loc, new_lower_bound);
+            assert_eq!(synced_db.oldest_retained_loc().unwrap(), new_lower_bound);
+
+            synced_db.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
+        });
+    }
 }
