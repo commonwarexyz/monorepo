@@ -116,7 +116,8 @@ enum SimCommand {
     Propose(u32),
     Broadcast(u32),
     Reply(u32),
-    Collect(u32, Threshold),
+    Delay(Duration),
+    Collect(u32, Threshold, Option<Duration>),
     Wait(u32, Threshold),
 }
 
@@ -147,6 +148,13 @@ fn parse_task(content: &str) -> Vec<(usize, SimCommand)> {
                 let id = parts[1].parse::<u32>().expect("Invalid reply id");
                 cmds.push((line_num + 1, SimCommand::Reply(id)));
             }
+            "delay" => {
+                let duration = parts[1].parse::<u64>().expect("Invalid delay duration");
+                cmds.push((
+                    line_num + 1,
+                    SimCommand::Delay(Duration::from_millis(duration)),
+                ));
+            }
             "collect" => {
                 let id = parts[1].parse::<u32>().expect("Invalid collect id");
                 let thresh_str = parts[2];
@@ -161,7 +169,13 @@ fn parse_task(content: &str) -> Vec<(usize, SimCommand)> {
                     let c = thresh_str.parse::<usize>().expect("Invalid count");
                     Threshold::Count(c)
                 };
-                cmds.push((line_num + 1, SimCommand::Collect(id, thresh)));
+                let delay = if parts.len() > 3 {
+                    let delay = parts[3].parse::<u64>().expect("Invalid delay duration");
+                    Some(Duration::from_millis(delay))
+                } else {
+                    None
+                };
+                cmds.push((line_num + 1, SimCommand::Collect(id, thresh, delay)));
             }
             "wait" => {
                 let id = parts[1].parse::<u32>().expect("Invalid wait id");
@@ -404,7 +418,12 @@ fn main() {
                                                 current_index += 1;
                                                 advanced = true;
                                             }
-                                            SimCommand::Collect(id, thresh) => {
+                                            SimCommand::Delay(duration) => {
+                                                ctx.sleep(*duration).await;
+                                                current_index += 1;
+                                                advanced = true;
+                                            }
+                                            SimCommand::Collect(id, thresh, delay) => {
                                                 if is_leader {
                                                     let count =
                                                         received.get(id).map_or(0, |s| s.len());
@@ -422,6 +441,9 @@ fn main() {
                                                             .unwrap();
                                                         completions
                                                             .push((dsl[current_index].0, duration));
+                                                        if let Some(delay) = delay {
+                                                            ctx.sleep(*delay).await;
+                                                        }
                                                         current_index += 1;
                                                         advanced = true;
                                                     }

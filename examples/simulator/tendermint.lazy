@@ -1,8 +1,9 @@
 propose 0
 wait 0 1
+delay 10
 reply 1
-collect 1 67%
+collect 1 67% 5
 propose 1
 wait 1 1
 reply 2
-collect 2 67%
+collect 2 67% 5
