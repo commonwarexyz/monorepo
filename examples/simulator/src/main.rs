@@ -262,7 +262,7 @@ fn main() {
                     .register(identity.clone(), DEFAULT_CHANNEL)
                     .await
                     .unwrap();
-                let (sender, receiver) = wrap::<_, _, u8>((), sender, receiver);
+                let (sender, receiver) = wrap::<_, _, u32>((), sender, receiver);
                 identities.push((identity, region.clone(), sender, receiver));
                 peer_idx += 1;
             }
@@ -301,6 +301,7 @@ fn main() {
                 let mut current_index = 0;
                 let mut received: HashMap<u32, HashSet<ed25519::PublicKey>> = HashMap::new();
                 loop {
+                    // Attempt to advance state machine
                     if current_index >= dsl.len() {
                         break;
                     }
@@ -313,7 +314,7 @@ fn main() {
                         match &dsl[current_index] {
                             SimCommand::Propose(id) | SimCommand::Broadcast(id) => {
                                 sender
-                                    .send(commonware_p2p::Recipients::All, *id as u8, true)
+                                    .send(commonware_p2p::Recipients::All, *id, true)
                                     .await
                                     .unwrap();
                                 received.entry(*id).or_default().insert(identity.clone());
@@ -333,15 +334,11 @@ fn main() {
                             }
                         }
                     }
+
+                    // Process messages from other peers
                     let (other_identity, message) = receiver.recv().await.unwrap();
-                    if let Ok(msg_id) = message {
-                        received
-                            .entry(msg_id as u32)
-                            .or_default()
-                            .insert(other_identity);
-                    } else {
-                        panic!("error receiving message: {:?}", message);
-                    }
+                    let msg_id = message.unwrap();
+                    received.entry(msg_id).or_default().insert(other_identity);
                 }
 
                 let duration = ctx.current().duration_since(start).unwrap();
