@@ -7,14 +7,10 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::{Digest, Hasher};
-#[cfg(test)]
-use commonware_runtime::RwLock;
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_runtime::{Clock, Metrics, RwLock, Storage};
 use commonware_utils::Array;
 use futures::channel::oneshot;
-#[cfg(test)]
-use std::sync::Arc;
-use std::{future::Future, num::NonZeroU64};
+use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// Result of a call to [Resolver::get_operations].
 pub struct GetOperationsResult<D: Digest, K: Array, V: Array> {
@@ -96,7 +92,6 @@ where
     }
 }
 
-#[cfg(test)]
 impl<T> Resolver for Arc<RwLock<T>>
 where
     T: Resolver,
