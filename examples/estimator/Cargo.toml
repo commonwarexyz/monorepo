@@ -4,7 +4,7 @@ edition = "2021"
 publish = true
 version = "0.0.56"
 license = "MIT OR Apache-2.0"
-description = "TBA"
+description = "Simulate mechanism performance under realistic network conditions."
 readme = "README.md"
 homepage = "https://commonware.xyz"
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/estimator"
@@ -34,6 +34,9 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"] }
 serde   = { version = "1.0", features = ["derive"] }
 anyhow  = "1.0"
 colored = "2"
+
+[lib]
+name = "estimator"
 
 [[bin]]
 name = "commonware-estimator"

@@ -1,227 +1,125 @@
-use clap::{value_parser, Arg, Command};
+//! Simulate mechanism performance under realistic network conditions.
+
+use clap::{value_parser, Arg, Command as ClapCommand};
 use colored::Colorize;
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 use commonware_macros::select;
 use commonware_p2p::{
-    simulated::{Config, Link, Network},
-    utils::codec::wrap,
+    simulated::{Config, Link, Network, Receiver, Sender},
+    utils::codec::{wrap, WrappedReceiver, WrappedSender},
 };
-use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-use futures::future::try_join_all;
-use reqwest::blocking::Client;
-use std::sync::mpsc::channel;
+use commonware_runtime::{
+    deterministic, Clock, Handle, Metrics, Network as RNetwork, Runner, Spawner,
+};
+use estimator::{
+    calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
+    mean, median, parse_task, std_dev, Command, Distribution, Latencies,
+};
+use futures::{
+    channel::{mpsc, oneshot},
+    future::try_join_all,
+    SinkExt, StreamExt,
+};
+use rand::RngCore;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
-    time::Duration,
+    collections::{BTreeMap, BTreeSet},
+    time::{Duration, SystemTime},
 };
 use tracing::debug;
 
+/// The channel to use for all messages
 const DEFAULT_CHANNEL: u32 = 0;
+
+/// The success rate over all links (1.0 = 100%)
 const DEFAULT_SUCCESS_RATE: f64 = 1.0;
 
-/// Returns the version of the crate.
-fn crate_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
-type Region = String;
-type LatJitPair = (f64, f64); // (avg_latency_ms, jitter_ms)
-type LatencyMap = BTreeMap<Region, BTreeMap<Region, LatJitPair>>;
-
-#[derive(serde::Deserialize)]
-struct ApiResp {
-    data: BTreeMap<Region, BTreeMap<Region, f64>>,
-}
-
-const BASE: &str = "https://www.cloudping.co/api/latencies";
-
-fn download_latency_data() -> LatencyMap {
-    let cli = Client::builder().build().unwrap();
-
-    // Pull P50 and P90 matrices (time-frame: last 1 year)
-    let p50: ApiResp = cli
-        .get(format!("{BASE}?percentile=p_50&timeframe=1Y"))
-        .send()
-        .unwrap()
-        .json()
-        .unwrap();
-    let p90: ApiResp = cli
-        .get(format!("{BASE}?percentile=p_90&timeframe=1Y"))
-        .send()
-        .unwrap()
-        .json()
-        .unwrap();
-
-    populate_latency_map(p50, p90)
-}
-
-fn load_latency_data() -> LatencyMap {
-    let p50 = include_str!("p50.json");
-    let p90 = include_str!("p90.json");
-    let p50: ApiResp = serde_json::from_str(p50).unwrap();
-    let p90: ApiResp = serde_json::from_str(p90).unwrap();
-
-    populate_latency_map(p50, p90)
-}
-
-fn populate_latency_map(p50: ApiResp, p90: ApiResp) -> LatencyMap {
-    let mut map = BTreeMap::new();
-    for (from, inner_p50) in p50.data {
-        let inner_p90 = &p90.data[&from];
-        let mut dest_map = BTreeMap::new();
-        for (to, lat50) in inner_p50 {
-            if let Some(lat90) = inner_p90.get(&to) {
-                dest_map.insert(to.clone(), (lat50, lat90 - lat50));
-            }
-        }
-        map.insert(from, dest_map);
-    }
-
-    map
-}
-
-fn mean(data: &[f64]) -> f64 {
-    let sum = data.iter().sum::<f64>();
-    sum / data.len() as f64
-}
-
-fn median(data: &mut [f64]) -> f64 {
-    data.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-    let mid = data.len() / 2;
-    if data.len() % 2 == 0 {
-        (data[mid - 1] + data[mid]) / 2.0
-    } else {
-        data[mid]
-    }
-}
-
-fn std_dev(data: &[f64]) -> Option<f64> {
-    if data.is_empty() {
-        return None;
-    }
-    let mean = mean(data);
-    let variance = data
-        .iter()
-        .map(|value| {
-            let diff = mean - *value;
-            diff * diff
-        })
-        .sum::<f64>()
-        / data.len() as f64;
-    Some(variance.sqrt())
-}
-
-#[derive(Clone)]
-enum SimCommand {
-    Propose(u32),
-    Broadcast(u32),
-    Reply(u32),
-    Collect(u32, Threshold, Option<(Duration, Duration)>),
-    Wait(u32, Threshold, Option<(Duration, Duration)>),
-}
-
-#[derive(Clone)]
-enum Threshold {
-    Count(usize),
-    Percent(f64),
-}
-
-fn parse_task(content: &str) -> Vec<(usize, SimCommand)> {
-    let mut cmds = Vec::new();
-    for (line_num, line) in content.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with("#") {
-            continue;
-        }
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        let command = parts[0];
-        let mut args: HashMap<&str, &str> = HashMap::new();
-        for &arg in &parts[1..] {
-            let kv: Vec<&str> = arg.splitn(2, '=').collect();
-            if kv.len() != 2 {
-                panic!("Invalid argument format: {arg}");
-            }
-            args.insert(kv[0], kv[1]);
-        }
-        match command {
-            "propose" => {
-                let id_str = args.get("id").expect("Missing id for propose");
-                let id = id_str.parse::<u32>().expect("Invalid id");
-                cmds.push((line_num + 1, SimCommand::Propose(id)));
-            }
-            "broadcast" => {
-                let id_str = args.get("id").expect("Missing id for broadcast");
-                let id = id_str.parse::<u32>().expect("Invalid id");
-                cmds.push((line_num + 1, SimCommand::Broadcast(id)));
-            }
-            "reply" => {
-                let id_str = args.get("id").expect("Missing id for reply");
-                let id = id_str.parse::<u32>().expect("Invalid id");
-                cmds.push((line_num + 1, SimCommand::Reply(id)));
-            }
-            "collect" | "wait" => {
-                let id_str = args.get("id").expect("Missing id");
-                let id = id_str.parse::<u32>().expect("Invalid id");
-                let thresh_str = args.get("threshold").expect("Missing threshold");
-                let thresh = if thresh_str.ends_with('%') {
-                    let p = thresh_str
-                        .trim_end_matches('%')
-                        .parse::<f64>()
-                        .expect("Invalid percent")
-                        / 100.0;
-                    Threshold::Percent(p)
-                } else {
-                    let c = thresh_str.parse::<usize>().expect("Invalid count");
-                    Threshold::Count(c)
-                };
-                let delay = args.get("delay").map(|delay_str| {
-                    let delay_str = delay_str.trim_matches('(').trim_matches(')');
-                    let parts: Vec<&str> = delay_str.split(',').collect();
-                    let message =
-                        Duration::from_secs_f64(parts[0].parse::<f64>().expect("Invalid delay"));
-                    let completion =
-                        Duration::from_secs_f64(parts[1].parse::<f64>().expect("Invalid delay"));
-                    (message, completion)
-                });
-                if command == "collect" {
-                    cmds.push((line_num + 1, SimCommand::Collect(id, thresh, delay)));
-                } else {
-                    cmds.push((line_num + 1, SimCommand::Wait(id, thresh, delay)));
-                }
-            }
-            _ => panic!("Unknown command: {command}"),
-        }
-    }
-    cmds
-}
-
-type SimResult = (
-    usize,
+/// All state for a given peer
+type PeerIdentity = (
+    ed25519::PublicKey,
     String,
-    BTreeMap<usize, BTreeMap<String, Vec<f64>>>,
-    BTreeMap<usize, f64>,
+    WrappedSender<Sender<ed25519::PublicKey>, u32>,
+    WrappedReceiver<Receiver<ed25519::PublicKey>, u32>,
 );
 
+/// The result of a peer job execution
+type PeerResult = (
+    String,
+    Vec<(usize, Duration)>,
+    Option<Vec<(usize, Duration)>>,
+);
+
+/// Context data for command processing
+struct CommandContext {
+    is_proposer: bool,
+    proposer_idx: usize,
+    peers: usize,
+    identity: ed25519::PublicKey,
+    start: SystemTime,
+}
+
+/// A map of line numbers to the latencies of all regions for that line
+type Observations = BTreeMap<usize, BTreeMap<String, Vec<f64>>>;
+
+/// A map of line numbers to the latencies of all regions for that line
+#[derive(Clone)]
+struct Steps {
+    all: Observations,
+    proposer: BTreeMap<usize, f64>,
+}
+
+/// Results from a single simulation run
+#[derive(Clone)]
+struct Simulation {
+    proposer_idx: usize,
+    proposer_region: String,
+    steps: Steps,
+}
+
+/// Command line arguments parsed from user input
+struct Arguments {
+    distribution: Distribution,
+    task_content: String,
+    reload_latency_data: bool,
+}
+
 fn main() {
-    // Create logger
+    // Initialize logging
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .init();
 
-    // Parse arguments
-    let matches = Command::new("commonware-simulator")
+    // Parse command line arguments
+    let args = parse_arguments();
+    let peers = count_peers(&args.distribution);
+    let commands = parse_task(&args.task_content);
+    debug!(peers, ?args.distribution, "Initializing simulator");
+
+    // Get latency data
+    let latency_map = get_latency_data(args.reload_latency_data);
+
+    // Run simulations
+    let simulation_results = run_all_simulations(
+        peers,
+        &args.distribution,
+        &commands,
+        &latency_map,
+        &args.task_content,
+    );
+    print_aggregated_results(&simulation_results, &args.task_content);
+}
+
+/// Parse command line arguments and return structured data
+fn parse_arguments() -> Arguments {
+    let matches = ClapCommand::new("commonware-simulator")
         .about("TBA")
         .version(crate_version())
         .arg(
-            Arg::new("regions")
-                .long("regions")
+            Arg::new("distribution")
+                .long("distribution")
                 .required(true)
                 .value_delimiter(',')
                 .value_parser(value_parser!(String))
-                .help("Regions to simulate in the form <region>:<count>, e.g. us-east-1:3,eu-west-1:2"),
+                .help("Distribution of peers across regions in the form <region>:<count>, e.g. us-east-1:3,eu-west-1:2"),
         )
         .arg(
             Arg::new("reload-latency-data")
@@ -237,17 +135,10 @@ fn main() {
                 .value_parser(value_parser!(String))
                 .help("Path to DSL file defining the simulation behavior"),
         )
-        .arg(
-            Arg::new("concurrency")
-                .long("concurrency")
-                .required(false)
-                .value_parser(value_parser!(usize))
-                .default_value("4")
-                .help("Number of concurrent simulations to run"),
-        )
         .get_matches();
-    let region_counts = matches
-        .get_many::<String>("regions")
+
+    let distribution = matches
+        .get_many::<String>("distribution")
         .unwrap()
         .map(|s| {
             let mut parts = s.split(':');
@@ -259,384 +150,498 @@ fn main() {
                 .expect("invalid count");
             (region, count)
         })
-        .collect::<Vec<_>>();
-    let peers: usize = region_counts.iter().map(|(_, count)| *count).sum();
-    assert!(peers > 1, "must have at least 2 peers");
+        .collect();
+
     let task_path = matches
         .get_one::<String>("task")
         .expect("task file required")
         .clone();
-    let task_content = std::fs::read_to_string(&task_path).expect("Failed to read task file");
-    let dsl = parse_task(&task_content);
-    debug!(peers, ?region_counts, "Initializing simulator");
 
-    // Download latency data
-    let latency_map = if matches.get_flag("reload-latency-data") {
-        debug!("downloading latency data");
-        download_latency_data()
-    } else {
-        debug!("loading latency data");
-        load_latency_data()
-    };
-    let concurrency = *matches.get_one::<usize>("concurrency").unwrap_or(&4);
-    let leaders: Vec<usize> = (0..peers).collect();
-    let mut results: Vec<SimResult> = Vec::new();
-    let mut all_wait_latencies: BTreeMap<usize, BTreeMap<String, Vec<f64>>> = BTreeMap::new();
-    for chunk in leaders.chunks(concurrency) {
-        let mut chunk_handles: Vec<std::thread::JoinHandle<SimResult>> = Vec::new();
-        for &leader_idx in chunk {
-            let dsl_clone = dsl.clone();
-            let latency_map_clone = latency_map.clone();
-            let region_counts_clone = region_counts.clone();
-            let peers_clone = peers;
-            let handle = std::thread::spawn(move || {
-                let leader_idx_clone = leader_idx;
-                let (tx, rx) = channel();
-                let runtime_cfg = deterministic::Config::default().with_seed(leader_idx as u64);
-                let executor = deterministic::Runner::new(runtime_cfg);
-                executor.start({
-                    let region_counts_clone = region_counts_clone.clone();
-                    async move |context| {
-                        let (network, mut oracle) = Network::new(
-                            context.with_label("network"),
-                            Config {
-                                max_size: usize::MAX,
-                            },
-                        );
-                        network.start();
-                        let mut identities = Vec::with_capacity(peers_clone);
-                        let mut peer_idx = 0;
-                        for (region, count) in &region_counts_clone {
-                            for _ in 0..*count {
-                                let identity =
-                                    ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
-                                let (sender, receiver) = oracle
-                                    .register(identity.clone(), DEFAULT_CHANNEL)
-                                    .await
-                                    .unwrap();
-                                let (sender, receiver) = wrap::<_, _, u32>((), sender, receiver);
-                                identities.push((identity, region.clone(), sender, receiver));
-                                peer_idx += 1;
-                            }
-                        }
-                        for (i, (identity, region, _, _)) in identities.iter().enumerate() {
-                            for (j, (other_identity, other_region, _, _)) in
-                                identities.iter().enumerate()
-                            {
-                                if i == j {
-                                    continue;
-                                }
-                                let latency = latency_map_clone[region][other_region];
-                                let link = Link {
-                                    latency: latency.0,
-                                    jitter: latency.1,
-                                    success_rate: DEFAULT_SUCCESS_RATE,
-                                };
-                                oracle
-                                    .add_link(identity.clone(), other_identity.clone(), link)
-                                    .await
-                                    .unwrap();
-                            }
-                        }
-                        let mut jobs = Vec::new();
-                        for (i, (identity, region, mut sender, mut receiver)) in
-                            identities.into_iter().enumerate()
-                        {
-                            let job = context.with_label("job");
-                            let dsl = dsl_clone.clone();
-                            jobs.push(job.spawn(move |ctx| async move {
-                                let is_leader = i == leader_idx_clone;
-                                let start = ctx.current();
-                                let mut completions: Vec<(usize, Duration)> = Vec::new();
-                                let mut current_index = 0;
-                                let mut received: BTreeMap<u32, BTreeSet<ed25519::PublicKey>> =
-                                    BTreeMap::new();
-                                loop {
-                                    if current_index >= dsl.len() {
-                                        break;
-                                    }
-                                    let mut advanced = true;
-                                    while advanced {
-                                        advanced = false;
-                                        if current_index >= dsl.len() {
-                                            break;
-                                        }
-                                        match &dsl[current_index].1 {
-                                            SimCommand::Propose(id) => {
-                                                if is_leader {
-                                                    sender
-                                                        .send(
-                                                            commonware_p2p::Recipients::All,
-                                                            *id,
-                                                            true,
-                                                        )
-                                                        .await
-                                                        .unwrap();
-                                                    received
-                                                        .entry(*id)
-                                                        .or_default()
-                                                        .insert(identity.clone());
-                                                }
-                                                current_index += 1;
-                                                advanced = true;
-                                            }
-                                            SimCommand::Broadcast(id) => {
-                                                sender
-                                                    .send(
-                                                        commonware_p2p::Recipients::All,
-                                                        *id,
-                                                        true,
-                                                    )
-                                                    .await
-                                                    .unwrap();
-                                                received
-                                                    .entry(*id)
-                                                    .or_default()
-                                                    .insert(identity.clone());
-                                                current_index += 1;
-                                                advanced = true;
-                                            }
-                                            SimCommand::Reply(id) => {
-                                                let leader_identity =
-                                                    ed25519::PrivateKey::from_seed(
-                                                        leader_idx_clone as u64,
-                                                    )
-                                                    .public_key();
-                                                if is_leader {
-                                                    received
-                                                        .entry(*id)
-                                                        .or_default()
-                                                        .insert(identity.clone());
-                                                } else {
-                                                    sender
-                                                        .send(
-                                                            commonware_p2p::Recipients::One(
-                                                                leader_identity,
-                                                            ),
-                                                            *id,
-                                                            true,
-                                                        )
-                                                        .await
-                                                        .unwrap();
-                                                }
-                                                current_index += 1;
-                                                advanced = true;
-                                            }
-                                            SimCommand::Collect(id, thresh, delay) => {
-                                                if is_leader {
-                                                    let count =
-                                                        received.get(id).map_or(0, |s| s.len());
-                                                    let required = match thresh {
-                                                        Threshold::Percent(p) => {
-                                                            ((peers_clone as f64) * *p).ceil()
-                                                                as usize
-                                                        }
-                                                        Threshold::Count(c) => *c,
-                                                    };
-                                                    if let Some((message, _)) = delay {
-                                                        ctx.sleep(*message).await;
-                                                    }
-                                                    if count >= required {
-                                                        let duration = ctx
-                                                            .current()
-                                                            .duration_since(start)
-                                                            .unwrap();
-                                                        completions
-                                                            .push((dsl[current_index].0, duration));
-                                                        if let Some((_, completion)) = delay {
-                                                            ctx.sleep(*completion).await;
-                                                        }
-                                                        current_index += 1;
-                                                        advanced = true;
-                                                    }
-                                                } else {
-                                                    current_index += 1;
-                                                    advanced = true;
-                                                }
-                                            }
-                                            SimCommand::Wait(id, thresh, delay) => {
-                                                let count = received.get(id).map_or(0, |s| s.len());
-                                                let required = match thresh {
-                                                    Threshold::Percent(p) => {
-                                                        ((peers_clone as f64) * *p).ceil() as usize
-                                                    }
-                                                    Threshold::Count(c) => *c,
-                                                };
-                                                if let Some((message, _)) = delay {
-                                                    ctx.sleep(*message).await;
-                                                }
-                                                if count >= required {
-                                                    let duration = ctx
-                                                        .current()
-                                                        .duration_since(start)
-                                                        .unwrap();
-                                                    completions
-                                                        .push((dsl[current_index].0, duration));
-                                                    if let Some((_, completion)) = delay {
-                                                        ctx.sleep(*completion).await;
-                                                    }
-                                                    current_index += 1;
-                                                    advanced = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if current_index >= dsl.len() {
-                                        break;
-                                    }
-                                    let (other_identity, message) = receiver.recv().await.unwrap();
-                                    let msg_id = message.unwrap();
-                                    received.entry(msg_id).or_default().insert(other_identity);
-                                }
-                                let maybe_leader = if is_leader {
-                                    Some(completions.clone())
-                                } else {
-                                    None
-                                };
-                                (region, completions, maybe_leader, receiver)
-                            }));
-                        }
-                        let results_with_receivers = try_join_all(jobs).await.unwrap();
-                        let mut drain_jobs = Vec::new();
-                        let mut processed_results = Vec::new();
-                        let mut leader_completions: Option<Vec<(usize, Duration)>> = None;
-                        for (region, completions, maybe_leader, mut receiver) in
-                            results_with_receivers.into_iter()
-                        {
-                            drain_jobs.push(context.with_label("drain").spawn(
-                                move |ctx| async move {
-                                    let drain_until = ctx.current() + Duration::from_millis(1000);
-                                    loop {
-                                        select! {
-                                            _ = ctx.sleep_until(drain_until) => {
-                                                break;
-                                            },
-                                            msg = receiver.recv() => {
-                                                match msg {
-                                                    Ok(_) => {
-                                                        // Discard message
-                                                    }
-                                                    Err(_) => {
-                                                        break;
-                                                    }
-                                                }
-                                            },
-                                        }
-                                    }
-                                },
-                            ));
-                            if let Some(comps) = maybe_leader {
-                                leader_completions = Some(comps);
-                            }
-                            processed_results.push((region, completions));
-                        }
-                        try_join_all(drain_jobs).await.unwrap();
-                        let mut wait_latencies: BTreeMap<usize, BTreeMap<Region, Vec<f64>>> =
-                            BTreeMap::new();
-                        for (region, completions) in processed_results {
-                            for (line, duration) in completions {
-                                wait_latencies
-                                    .entry(line)
-                                    .or_default()
-                                    .entry(region.clone())
-                                    .or_default()
-                                    .push(duration.as_millis() as f64);
-                            }
-                        }
-                        let leader_latencies: BTreeMap<usize, f64> = leader_completions
-                            .unwrap()
-                            .into_iter()
-                            .map(|(line, dur)| (line, dur.as_millis() as f64))
-                            .collect();
-                        tx.send((wait_latencies, leader_latencies)).unwrap();
-                    }
-                });
-                let (wait_latencies, leader_latencies) = rx.recv().unwrap();
-                let mut current = 0;
-                let leader_region = region_counts_clone
-                    .iter()
-                    .find_map(|(reg, cnt)| {
-                        let start = current;
-                        current += *cnt;
-                        if leader_idx_clone >= start && leader_idx_clone < current {
-                            Some(reg.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap();
-                (
-                    leader_idx_clone,
-                    leader_region,
-                    wait_latencies,
-                    leader_latencies,
-                )
-            });
-            chunk_handles.push(handle);
-        }
-        for handle in chunk_handles {
-            let res = handle.join().unwrap();
-            results.push(res);
+    let task_content = std::fs::read_to_string(&task_path).expect("Failed to read task file");
+    let reload_latency_data = matches.get_flag("reload-latency-data");
+
+    Arguments {
+        distribution,
+        task_content,
+        reload_latency_data,
+    }
+}
+
+/// Run simulations for all possible proposers and return results
+fn run_all_simulations(
+    peers: usize,
+    region_counts: &BTreeMap<String, usize>,
+    dsl: &[(usize, Command)],
+    latency_map: &Latencies,
+    task_content: &str,
+) -> Vec<Simulation> {
+    let proposers: Vec<usize> = (0..peers).collect();
+    let mut results = Vec::new();
+
+    for proposer_idx in proposers {
+        let result = run_single_simulation(proposer_idx, region_counts, dsl, latency_map);
+        print_simulation_results(&result, task_content);
+        results.push(result);
+    }
+
+    results
+}
+
+/// Run a single simulation with the specified proposer
+fn run_single_simulation(
+    proposer_idx: usize,
+    distribution: &Distribution,
+    commands: &[(usize, Command)],
+    latencies: &Latencies,
+) -> Simulation {
+    let proposer_region = calculate_proposer_region(proposer_idx, distribution);
+    let peers = count_peers(distribution);
+    let runtime_cfg = deterministic::Config::default().with_seed(proposer_idx as u64);
+    let executor = deterministic::Runner::new(runtime_cfg);
+
+    // Run the simulation
+    let steps = executor.start(async move |context| {
+        run_simulation_logic(
+            context,
+            proposer_idx,
+            peers,
+            distribution,
+            commands,
+            latencies,
+        )
+        .await
+    });
+
+    Simulation {
+        proposer_idx,
+        proposer_region,
+        steps,
+    }
+}
+
+/// Core simulation logic that runs the network simulation
+async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + RngCore>(
+    context: C,
+    proposer_idx: usize,
+    peers: usize,
+    distribution: &Distribution,
+    commands: &[(usize, Command)],
+    latencies: &Latencies,
+) -> Steps {
+    let (network, mut oracle) = Network::new(
+        context.with_label("network"),
+        Config {
+            max_size: usize::MAX,
+        },
+    );
+    network.start();
+
+    let identities = setup_network_identities(&mut oracle, distribution).await;
+    setup_network_links(&mut oracle, &identities, latencies).await;
+
+    let (tx, mut rx) = mpsc::channel(peers);
+    let jobs = spawn_peer_jobs(&context, proposer_idx, peers, identities, commands, tx);
+
+    // Wait for all jobs to indicate they're done
+    let mut responders = Vec::with_capacity(peers);
+    for _ in 0..peers {
+        responders.push(rx.next().await.unwrap());
+    }
+
+    // Ensure any messages in the simulator are queued (this is virtual time)
+    context.sleep(Duration::from_millis(10_000)).await;
+
+    // Send the shutdown signal to all jobs
+    for responder in responders {
+        responder.send(()).unwrap();
+    }
+
+    let results = try_join_all(jobs).await.unwrap();
+    process_simulation_results(results)
+}
+
+/// Set up network identities for all peers across regions
+async fn setup_network_identities(
+    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey>,
+    distribution: &Distribution,
+) -> Vec<PeerIdentity> {
+    let peers = count_peers(distribution);
+    let mut identities = Vec::with_capacity(peers);
+    let mut peer_idx = 0;
+    for (region, count) in distribution {
+        for _ in 0..*count {
+            let identity = ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
+            let (sender, receiver) = oracle
+                .register(identity.clone(), DEFAULT_CHANNEL)
+                .await
+                .unwrap();
+            let (sender, receiver) = wrap::<_, _, u32>((), sender, receiver);
+            identities.push((identity, region.clone(), sender, receiver));
+            peer_idx += 1;
         }
     }
-    results.sort_by_key(|(idx, _, _, _)| *idx);
-    for tuple in &results {
-        let (leader_idx, leader_region, wait_latencies, leader_latencies) = tuple;
-        println!(
-            "{}",
-            format!(
-                "\nSimulation results for proposer {} ({}):\n",
-                *leader_idx, leader_region
-            )
-            .bold()
-            .cyan()
-        );
-        let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
-        let mut wait_lines: Vec<usize> = wait_latencies.keys().cloned().collect();
-        wait_lines.sort();
-        let mut wait_idx = 0;
-        for (i, line) in dsl_lines.iter().enumerate() {
-            println!("{}", line.yellow());
-            let line_num = i + 1;
-            let is_collect = line.starts_with("collect");
-            if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
-                if let Some(proposer_latency) = leader_latencies.get(&line_num) {
-                    let stat_line = format!("    [proposer] Latency: {proposer_latency:.2}ms");
-                    println!("{}", stat_line.magenta());
+
+    identities
+}
+
+/// Set up network links between all peers with appropriate latencies
+async fn setup_network_links(
+    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey>,
+    identities: &[PeerIdentity],
+    latencies: &Latencies,
+) {
+    for (i, (identity, region, _, _)) in identities.iter().enumerate() {
+        for (j, (other_identity, other_region, _, _)) in identities.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let latency = latencies[region][other_region];
+            let link = Link {
+                latency: latency.0,
+                jitter: latency.1,
+                success_rate: DEFAULT_SUCCESS_RATE,
+            };
+            oracle
+                .add_link(identity.clone(), other_identity.clone(), link)
+                .await
+                .unwrap();
+        }
+    }
+}
+
+/// Spawn jobs for all peers in the simulation
+fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
+    context: &C,
+    proposer_idx: usize,
+    peers: usize,
+    identities: Vec<PeerIdentity>,
+    commands: &[(usize, Command)],
+    tx: mpsc::Sender<oneshot::Sender<()>>,
+) -> Vec<Handle<PeerResult>> {
+    let mut jobs = Vec::new();
+
+    for (i, (identity, region, mut sender, mut receiver)) in identities.into_iter().enumerate() {
+        let mut tx = tx.clone();
+        let job = context.with_label("job");
+        let commands = commands.to_vec();
+
+        jobs.push(job.spawn(move |ctx| async move {
+            let is_proposer = i == proposer_idx;
+            let start = ctx.current();
+            let mut completions: Vec<(usize, Duration)> = Vec::new();
+            let mut current_index = 0;
+            let mut received: BTreeMap<u32, BTreeSet<ed25519::PublicKey>> = BTreeMap::new();
+
+            loop {
+                if current_index >= commands.len() {
+                    break;
                 }
-                if !is_collect {
-                    let regional = wait_latencies.get(&line_num).unwrap();
-                    let mut stats: Vec<(String, f64, f64, f64)> = Vec::new();
-                    for (region, latencies) in regional.iter() {
-                        let mut lats = latencies.clone();
-                        let mean_ms = mean(&lats);
-                        let median_ms = median(&mut lats);
-                        let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
-                        stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
+
+                // Process commands that can be executed immediately
+                let mut advanced = true;
+                while advanced {
+                    if current_index >= commands.len() {
+                        break;
                     }
-                    stats.sort_by(|a, b| a.0.cmp(&b.0));
-                    for (region, mean_ms, median_ms, std_dev_ms) in stats {
-                        let stat_line = format!(
-                            "    [{region}] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms",
-                        );
-                        println!("{}", stat_line.cyan());
+
+                    let mut command_ctx = CommandContext {
+                        is_proposer,
+                        proposer_idx,
+                        peers,
+                        identity: identity.clone(),
+                        start,
+                    };
+                    let command = &commands[current_index];
+                    advanced = process_command(
+                        &ctx,
+                        &mut command_ctx,
+                        &mut current_index,
+                        command,
+                        &mut sender,
+                        &mut received,
+                        &mut completions,
+                    )
+                    .await;
+                }
+
+                if current_index >= commands.len() {
+                    break;
+                }
+
+                // Wait for incoming message
+                let (other_identity, message) = receiver.recv().await.unwrap();
+                let msg_id = message.unwrap();
+                received.entry(msg_id).or_default().insert(other_identity);
+            }
+
+            let maybe_proposer = if is_proposer {
+                Some(completions.clone())
+            } else {
+                None
+            };
+
+            // Signal completion and wait for shutdown
+            let (shutter, mut listener) = oneshot::channel::<()>();
+            tx.send(shutter).await.unwrap();
+
+            // Process remaining messages until shutdown
+            loop {
+                select! {
+                    _ = receiver.recv() => {
+                        // Discard message
+                    },
+                    _ = &mut listener => {
+                        break;
                     }
                 }
-                wait_idx += 1;
+            }
+
+            (region, completions, maybe_proposer)
+        }));
+    }
+
+    jobs
+}
+
+/// Process a single command in the DSL
+async fn process_command<C: Spawner + Clock>(
+    ctx: &C,
+    command_ctx: &mut CommandContext,
+    current_index: &mut usize,
+    command: &(usize, Command),
+    sender: &mut WrappedSender<Sender<ed25519::PublicKey>, u32>,
+    received: &mut BTreeMap<u32, BTreeSet<ed25519::PublicKey>>,
+    completions: &mut Vec<(usize, Duration)>,
+) -> bool {
+    match &command.1 {
+        Command::Propose(id) => {
+            if command_ctx.is_proposer {
+                sender
+                    .send(commonware_p2p::Recipients::All, *id, true)
+                    .await
+                    .unwrap();
+                received
+                    .entry(*id)
+                    .or_default()
+                    .insert(command_ctx.identity.clone());
+            }
+            *current_index += 1;
+            true
+        }
+        Command::Broadcast(id) => {
+            sender
+                .send(commonware_p2p::Recipients::All, *id, true)
+                .await
+                .unwrap();
+            received
+                .entry(*id)
+                .or_default()
+                .insert(command_ctx.identity.clone());
+            *current_index += 1;
+            true
+        }
+        Command::Reply(id) => {
+            let proposer_identity =
+                ed25519::PrivateKey::from_seed(command_ctx.proposer_idx as u64).public_key();
+            if command_ctx.is_proposer {
+                received
+                    .entry(*id)
+                    .or_default()
+                    .insert(command_ctx.identity.clone());
+            } else {
+                sender
+                    .send(
+                        commonware_p2p::Recipients::One(proposer_identity),
+                        *id,
+                        true,
+                    )
+                    .await
+                    .unwrap();
+            }
+            *current_index += 1;
+            true
+        }
+        Command::Collect(id, thresh, delay) => {
+            if command_ctx.is_proposer {
+                let count = received.get(id).map_or(0, |s| s.len());
+                let required = calculate_threshold(thresh, command_ctx.peers);
+                if let Some((message, _)) = delay {
+                    ctx.sleep(*message).await;
+                }
+                if count >= required {
+                    let duration = ctx.current().duration_since(command_ctx.start).unwrap();
+                    completions.push((command.0, duration));
+                    if let Some((_, completion)) = delay {
+                        ctx.sleep(*completion).await;
+                    }
+                    *current_index += 1;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                *current_index += 1;
+                true
+            }
+        }
+        Command::Wait(id, thresh, delay) => {
+            let count = received.get(id).map_or(0, |s| s.len());
+            let required = calculate_threshold(thresh, command_ctx.peers);
+            if let Some((message, _)) = delay {
+                ctx.sleep(*message).await;
+            }
+            if count >= required {
+                let duration = ctx.current().duration_since(command_ctx.start).unwrap();
+                completions.push((command.0, duration));
+                if let Some((_, completion)) = delay {
+                    ctx.sleep(*completion).await;
+                }
+                *current_index += 1;
+                true
+            } else {
+                false
             }
         }
     }
-    let mut all_leader_latencies: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
-    for tuple in &results {
-        let (_, _, _, leader_latencies) = tuple;
-        for (&line, &lat) in leader_latencies.iter() {
-            all_leader_latencies.entry(line).or_default().push(lat);
+}
+
+/// Process simulation results and extract wait/proposer latencies
+fn process_simulation_results(results: Vec<PeerResult>) -> Steps {
+    let mut steps = Steps {
+        all: BTreeMap::new(),
+        proposer: BTreeMap::new(),
+    };
+
+    for (region, completions, maybe_proposer) in results {
+        for (line, duration) in completions {
+            steps
+                .all
+                .entry(line)
+                .or_default()
+                .entry(region.clone())
+                .or_default()
+                .push(duration.as_millis() as f64);
+        }
+        if let Some(completions) = maybe_proposer {
+            steps.proposer = completions
+                .into_iter()
+                .map(|(line, dur)| (line, dur.as_millis() as f64))
+                .collect();
         }
     }
-    for tuple in &results {
-        let (_, _, wait_latencies, _) = tuple;
-        for (line, regional) in wait_latencies.iter() {
-            let all_regional = all_wait_latencies.entry(*line).or_default();
+
+    steps
+}
+
+/// Print results for a single simulation
+fn print_simulation_results(result: &Simulation, task_content: &str) {
+    println!(
+        "{}",
+        format!(
+            "\nresults for proposer {} ({}):\n",
+            result.proposer_idx, result.proposer_region
+        )
+        .bold()
+        .cyan()
+    );
+
+    // Emit results
+    let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
+    let mut wait_lines: Vec<usize> = result.steps.all.keys().cloned().collect();
+    wait_lines.sort();
+    let mut wait_idx = 0;
+    for (i, line) in dsl_lines.iter().enumerate() {
+        println!("{}", line.yellow());
+        let line_num = i + 1;
+        let is_collect = line.starts_with("collect");
+
+        if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
+            // Print proposer latency if available
+            if let Some(proposer_latency) = result.steps.proposer.get(&line_num) {
+                let stat_line = format!("    [proposer] latency: {proposer_latency:.2}ms");
+                println!("{}", stat_line.magenta());
+            }
+
+            // Print regional statistics for non-collect commands
+            if !is_collect {
+                print_regional_statistics(&result.steps, line_num);
+            }
+            wait_idx += 1;
+        }
+    }
+}
+
+/// Print regional statistics for a specific line
+fn print_regional_statistics(steps: &Steps, line: usize) {
+    let Some(regional) = steps.all.get(&line) else {
+        return;
+    };
+
+    // Calculate statistics
+    let mut stats: Vec<(String, f64, f64, f64)> = Vec::new();
+    for (region, latencies) in regional.iter() {
+        let mut lats = latencies.clone();
+        let mean_ms = mean(&lats);
+        let median_ms = median(&mut lats);
+        let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
+        stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
+    }
+    stats.sort_by(|a, b| a.0.cmp(&b.0));
+    for (region, mean_ms, median_ms, std_dev_ms) in stats {
+        let stat_line = format!(
+                "    [{region}] mean: {mean_ms:.2}ms (dev: {std_dev_ms:.2}ms) | median: {median_ms:.2}ms",
+            );
+        println!("{}", stat_line.cyan());
+    }
+}
+
+/// Print aggregated results across all simulations
+fn print_aggregated_results(results: &[Simulation], task_content: &str) {
+    println!("\n{}", "-".repeat(80).yellow());
+    println!("{}", "\nresults:\n".bold().blue());
+
+    // Emit results
+    let (observations, proposer_observations) = aggregate_simulation_results(results);
+    let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
+    let mut wait_lines: Vec<usize> = observations.keys().cloned().collect();
+    wait_lines.sort();
+    let mut wait_idx = 0;
+    for (i, line) in dsl_lines.iter().enumerate() {
+        println!("{}", line.green());
+        let line_num = i + 1;
+        let is_collect = line.starts_with("collect");
+
+        if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
+            // Print aggregated proposer statistics
+            print_aggregated_proposer_statistics(&proposer_observations, line_num);
+
+            // Print aggregated regional and overall statistics for non-collect commands
+            if !is_collect {
+                print_aggregated_regional_statistics(&observations, line_num);
+            }
+            wait_idx += 1;
+        }
+    }
+}
+
+/// Aggregate results from all simulations
+fn aggregate_simulation_results(
+    results: &[Simulation],
+) -> (Observations, BTreeMap<usize, Vec<f64>>) {
+    let mut proposer_observations: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+    let mut observations: Observations = BTreeMap::new();
+
+    // Aggregate proposer latencies
+    for result in results {
+        for (&line, &lat) in result.steps.proposer.iter() {
+            proposer_observations.entry(line).or_default().push(lat);
+        }
+    }
+
+    // Aggregate wait latencies
+    for result in results {
+        for (line, regional) in result.steps.all.iter() {
+            let all_regional = observations.entry(*line).or_default();
             for (region, lats) in regional.iter() {
                 all_regional
                     .entry(region.clone())
@@ -645,58 +650,71 @@ fn main() {
             }
         }
     }
-    println!("\n{}", "-".repeat(80).yellow());
-    println!("{}", "\nAveraged simulation results:\n".bold().blue());
-    let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
-    let mut wait_lines: Vec<usize> = all_wait_latencies.keys().cloned().collect();
-    wait_lines.sort();
-    let mut wait_idx = 0;
-    for (i, line) in dsl_lines.iter().enumerate() {
-        println!("{}", line.green());
-        let line_num = i + 1;
-        let is_collect = line.starts_with("collect");
-        if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
-            if let Some(lats) = all_leader_latencies.get(&line_num) {
-                if !lats.is_empty() {
-                    let mut lats_sorted = lats.clone();
-                    let mean_ms = mean(lats);
-                    let median_ms = median(&mut lats_sorted);
-                    let std_dev_ms = std_dev(lats).unwrap_or(0.0);
-                    let stat_line = format!("    [proposer] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms");
-                    println!("{}", stat_line.magenta());
-                }
-            }
-            if !is_collect {
-                let regional = all_wait_latencies.get(&line_num).unwrap();
-                let mut stats = Vec::new();
-                for (region, latencies) in regional.iter() {
-                    let mut lats = latencies.clone();
-                    let mean_ms = mean(&lats);
-                    let median_ms = median(&mut lats);
-                    let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
-                    stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
-                }
-                stats.sort_by(|a, b| a.0.cmp(&b.0));
-                for (region, mean_ms, median_ms, std_dev_ms) in stats {
-                    let stat_line = format!(
-                        "    [{region}] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms",
-                    );
-                    println!("{}", stat_line.blue());
-                }
-                let mut all_lats: Vec<f64> = Vec::new();
-                for latencies in regional.values() {
-                    all_lats.extend_from_slice(latencies);
-                }
-                if !all_lats.is_empty() {
-                    let mut all_lats_sorted = all_lats.clone();
-                    let overall_mean = mean(&all_lats);
-                    let overall_median = median(&mut all_lats_sorted);
-                    let overall_std = std_dev(&all_lats).unwrap_or(0.0);
-                    let stat_line = format!("    [all] Mean: {overall_mean:.2}ms (Std Dev: {overall_std:.2}ms) | Median: {overall_median:.2}ms");
-                    println!("{}", stat_line.white());
-                }
-            }
-            wait_idx += 1;
-        }
+
+    (observations, proposer_observations)
+}
+
+/// Print aggregated proposer statistics
+fn print_aggregated_proposer_statistics(
+    proposer_observations: &BTreeMap<usize, Vec<f64>>,
+    line_num: usize,
+) {
+    // Determine if there are any observations for this line
+    let Some(lats) = proposer_observations.get(&line_num) else {
+        return;
+    };
+    if lats.is_empty() {
+        return;
+    }
+
+    // Calculate statistics
+    let mut lats_sorted = lats.clone();
+    let mean_ms = mean(lats);
+    let median_ms = median(&mut lats_sorted);
+    let std_dev_ms = std_dev(lats).unwrap_or(0.0);
+    let stat_line = format!(
+        "    [proposer] mean: {mean_ms:.2}ms (dev: {std_dev_ms:.2}ms) | median: {median_ms:.2}ms"
+    );
+    println!("{}", stat_line.magenta());
+}
+
+/// Print aggregated regional and overall statistics
+fn print_aggregated_regional_statistics(observations: &Observations, line_num: usize) {
+    // Determine if there are any observations for this line
+    let Some(regional) = observations.get(&line_num) else {
+        return;
+    };
+    let mut stats = Vec::new();
+    let mut all_lats: Vec<f64> = Vec::new();
+
+    // Calculate regional statistics
+    for (region, latencies) in regional.iter() {
+        let mut lats = latencies.clone();
+        let mean_ms = mean(&lats);
+        let median_ms = median(&mut lats);
+        let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
+        stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
+        all_lats.extend_from_slice(latencies);
+    }
+
+    // Print regional statistics
+    stats.sort_by(|a, b| a.0.cmp(&b.0));
+    for (region, mean_ms, median_ms, std_dev_ms) in stats {
+        let stat_line = format!(
+                "    [{region}] mean: {mean_ms:.2}ms (dev: {std_dev_ms:.2}ms) | median: {median_ms:.2}ms",
+            );
+        println!("{}", stat_line.blue());
+    }
+
+    // Print overall statistics
+    if !all_lats.is_empty() {
+        let mut all_lats_sorted = all_lats.clone();
+        let overall_mean = mean(&all_lats);
+        let overall_median = median(&mut all_lats_sorted);
+        let overall_std = std_dev(&all_lats).unwrap_or(0.0);
+        let stat_line = format!(
+                "    [all] mean: {overall_mean:.2}ms (dev: {overall_std:.2}ms) | median: {overall_median:.2}ms"
+            );
+        println!("{}", stat_line.white());
     }
 }
