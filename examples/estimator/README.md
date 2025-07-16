@@ -1,10 +1,10 @@
-# Commonware Simulator
+# commonware-estimator
 
-[![Crates.io](https://img.shields.io/crates/v/commonware-log.svg)](https://crates.io/crates/commonware-log)
+[![Crates.io](https://img.shields.io/crates/v/commonware-estimator.svg)](https://crates.io/crates/commonware-estimator)
 
 ## Overview
 
-The Commonware Simulator is a tool for simulating distributed systems protocols under realistic network conditions. It uses a simulated peer-to-peer network with latency and jitter data derived from AWS regions (sourced from cloudping.co). The simulator allows you to define simulation behaviors using a simple Domain-Specific Language (DSL) and runs multiple simulations in parallel, varying the leader/proposer across peers.
+The Commonware Estimator is a tool for estimating the latency of distributed systems protocols under realistic network conditions. It uses a simulated peer-to-peer network with latency and jitter data derived from AWS regions (sourced from cloudping.co). The estimator allows you to define simulation behaviors using a simple Domain-Specific Language (DSL) and runs multiple simulations in parallel, varying the leader/proposer across peers.
 
 Key features:
 - Simulates peers distributed across specified AWS regions with real-world latency/jitter.
