@@ -417,6 +417,7 @@ fn main() {
                         leader_idx, leader_region
                     )
                     .bold()
+                    .cyan()
                 );
                 let dsl_lines: Vec<String> =
                     task_content_inner.lines().map(|s| s.to_string()).collect();
@@ -424,7 +425,7 @@ fn main() {
                 wait_lines.sort();
                 let mut wait_idx = 0;
                 for (i, line) in dsl_lines.iter().enumerate() {
-                    println!("{}", line.green());
+                    println!("{}", line.yellow());
                     let line_num = i + 1;
                     if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
                         let regional = wait_latencies.get(&line_num).unwrap();
@@ -443,7 +444,7 @@ fn main() {
                                 "    [{}] Mean: {:.2}ms, Median: {:.2}ms, Std Dev: {:.2}ms",
                                 region, mean_ms, median_ms, std_dev_ms
                             );
-                            println!("{}", stat_line.blue());
+                            println!("{}", stat_line.cyan());
                         }
                         wait_idx += 1;
                     }
@@ -463,8 +464,12 @@ fn main() {
         }
     }
 
+    if verbose {
+        println!("\n{}", "-".repeat(80).yellow());
+    }
+
     // Calculate and print averaged stats
-    println!("{}", "\nAveraged simulation results:\n".bold());
+    println!("{}", "\nAveraged simulation results:\n".bold().magenta());
     let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
     let mut wait_lines: Vec<usize> = all_wait_latencies.keys().cloned().collect();
     wait_lines.sort();
