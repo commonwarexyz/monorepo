@@ -355,7 +355,7 @@ fn main() {
                                     let count = received.get(id).map_or(0, |s| s.len());
                                     let required = match thresh {
                                         Threshold::Percent(p) => {
-                                            (((peers as f64) * p).ceil() as usize)
+                                            ((peers as f64) * p).ceil() as usize
                                         }
                                         Threshold::Count(c) => *c,
                                     };
@@ -396,34 +396,38 @@ fn main() {
             }
 
             if verbose {
-                info!("Simulation results for leader {}:", leader_idx);
+                println!("{}", format!("\nSimulation results for leader {}:\n", leader_idx).bold());
+                let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
                 let mut wait_lines: Vec<usize> = wait_latencies.keys().cloned().collect();
                 wait_lines.sort();
-                for line in wait_lines.iter() {
-                    let regional = wait_latencies.get(line).unwrap();
-                    let mut stats = Vec::new();
-                    for (region, latencies) in regional.iter() {
-                        let mut lats = latencies.clone();
-                        stats.push((
-                            region.clone(),
-                            lats.len(),
-                            mean(&lats),
-                            median(&mut lats),
-                            std_dev(&lats).unwrap_or(0.0),
-                        ));
-                    }
-                    stats.sort_by(|a, b| a.0.cmp(&b.0));
-                    info!(line = *line, "Wait completion stats:");
-                    for (region, count, mean, median, std_dev) in stats {
-                        info!(
-                            line = *line,
-                            ?region,
-                            count,
-                            mean_ms = ?mean,
-                            median_ms = ?median,
-                            std_dev_ms = ?std_dev,
-                            "wait completed"
-                        );
+                let mut wait_idx = 0;
+                for (i, line) in dsl_lines.iter().enumerate() {
+                    println!("{}", line.green());
+                    let line_num = i + 1;
+                    if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
+                        let regional = wait_latencies.get(&line_num).unwrap();
+                        let mut stats = Vec::new();
+                        for (region, latencies) in regional.iter() {
+                            let mut lats = latencies.clone();
+                            let count = lats.len();
+                            let mean_ms = mean(&lats);
+                            let median_ms = median(&mut lats);
+                            let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
+                            stats.push((region.clone(), count, mean_ms, median_ms, std_dev_ms));
+                        }
+                        stats.sort_by(|a, b| a.0.cmp(&b.0));
+                        for (region, count, mean_ms, median_ms, std_dev_ms) in stats {
+                            let stat_line = format!(
+                                "    - Region: {}, Count: {}, Mean: {:.2}ms, Median: {:.2}ms, Std Dev: {:.2}ms",
+                                region,
+                                count,
+                                mean_ms,
+                                median_ms,
+                                std_dev_ms
+                            );
+                            println!("{}", stat_line.blue());
+                        }
+                        wait_idx += 1;
                     }
                 }
             }
