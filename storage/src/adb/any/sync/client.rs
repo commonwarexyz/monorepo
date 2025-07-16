@@ -1423,8 +1423,11 @@ pub(crate) mod tests {
             assert_eq!(synced_db.root(&mut hasher), new_hash);
 
             // Verify the target database matches the synced database
+            let target_db = match Arc::try_unwrap(target_db) {
+                Ok(rw_lock) => rw_lock.into_inner(),
+                Err(_) => panic!("Failed to unwrap Arc - still has references"),
+            };
             {
-                let target_db = target_db.read().await;
                 assert_eq!(synced_db.op_count(), target_db.op_count());
                 assert_eq!(
                     synced_db.inactivity_floor_loc,
@@ -1435,14 +1438,9 @@ pub(crate) mod tests {
                     target_db.inactivity_floor_loc
                 );
                 assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
-            } // Drop the read guard
+            }
 
             synced_db.destroy().await.unwrap();
-            // Extract the database from the Arc<RwLock<>> to destroy it
-            let target_db = match Arc::try_unwrap(target_db) {
-                Ok(rw_lock) => rw_lock.into_inner(),
-                Err(_) => panic!("Failed to unwrap Arc - still has references"),
-            };
             target_db.destroy().await.unwrap();
         });
     }
