@@ -1,4 +1,11 @@
+# Echo
+
+## Propose a message
 propose id=0
+
+## Immediately reply to proposal
 wait id=0 threshold=1
-reply id=0
-collect id=0 threshold=67%
+reply id=1
+
+## Wait for 67% of the network to reply
+collect id=1 threshold=67%
