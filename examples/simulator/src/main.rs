@@ -692,7 +692,7 @@ fn main() {
                     let overall_mean = mean(&all_lats);
                     let overall_median = median(&mut all_lats_sorted);
                     let overall_std = std_dev(&all_lats).unwrap_or(0.0);
-                    let stat_line = format!("    [overall] Mean: {overall_mean:.2}ms (Std Dev: {overall_std:.2}ms) | Median: {overall_median:.2}ms");
+                    let stat_line = format!("    [all] Mean: {overall_mean:.2}ms (Std Dev: {overall_std:.2}ms) | Median: {overall_median:.2}ms");
                     println!("{}", stat_line.white());
                 }
             }
