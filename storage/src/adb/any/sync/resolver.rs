@@ -72,3 +72,45 @@ where
             })
     }
 }
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    use std::marker::PhantomData;
+
+    pub struct FailResolver<D, K, V> {
+        _digest: PhantomData<D>,
+        _key: PhantomData<K>,
+        _value: PhantomData<V>,
+    }
+
+    impl<D, K, V> Resolver for FailResolver<D, K, V>
+    where
+        D: Digest,
+        K: Array,
+        V: Array,
+    {
+        type Digest = D;
+        type Key = K;
+        type Value = V;
+
+        async fn get_operations(
+            &self,
+            _size: u64,
+            _start_loc: u64,
+            _max_ops: NonZeroU64,
+        ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error> {
+            Err(Error::AlreadyComplete)
+        }
+    }
+
+    impl<D, K, V> FailResolver<D, K, V> {
+        pub fn new() -> Self {
+            Self {
+                _digest: PhantomData,
+                _key: PhantomData,
+                _value: PhantomData,
+            }
+        }
+    }
+}

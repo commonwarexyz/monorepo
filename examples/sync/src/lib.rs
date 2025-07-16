@@ -54,6 +54,7 @@ pub fn create_adb_config() -> Config<Translator> {
         translator: Translator::default(),
         thread_pool: None,
         buffer_pool: commonware_runtime::buffer::PoolRef::new(1024, 10),
+        pruning_delay: 10,
     }
 }
 
