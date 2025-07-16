@@ -4,7 +4,7 @@ use crate::{
         any::{
             sync::{
                 resolver::{GetOperationsResult, Resolver},
-                Error, SyncTarget, SyncTargetUpdate, SyncTargetUpdateReceiver,
+                Error, SyncTarget, SyncTargetUpdateReceiver,
             },
             SyncConfig,
         },
@@ -302,7 +302,7 @@ where
     /// Apply a target update to the client
     async fn apply_target_update(
         &mut self,
-        update: SyncTargetUpdate<H::Digest>,
+        new_target: SyncTarget<H::Digest>,
     ) -> Result<(), Error> {
         let (config, log, pinned_nodes) = match self {
             Client::FetchData {
@@ -325,14 +325,14 @@ where
 
         info!(
             old_target = ?config.target,
-            new_target = ?update.target,
+            new_target = ?new_target,
             "Applying target update"
         );
 
-        Self::validate_target_update(&config.target, &update.target)?;
+        Self::validate_target_update(&config.target, &new_target)?;
 
         // Prune operations below the new lower bound
-        log.prune(update.target.lower_bound_ops)
+        log.prune(new_target.lower_bound_ops)
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
@@ -340,7 +340,7 @@ where
         *pinned_nodes = None;
 
         // Update the target
-        config.target = update.target;
+        config.target = new_target;
         Ok(())
     }
 
@@ -1053,12 +1053,10 @@ pub(crate) mod tests {
 
             // Send target update with decreased lower bound
             update_sender
-                .send(SyncTargetUpdate {
-                    target: SyncTarget {
-                        hash: initial_hash,
-                        lower_bound_ops: initial_lower_bound.saturating_sub(1),
-                        upper_bound_ops: initial_upper_bound.saturating_add(1),
-                    },
+                .send(SyncTarget {
+                    hash: initial_hash,
+                    lower_bound_ops: initial_lower_bound.saturating_sub(1),
+                    upper_bound_ops: initial_upper_bound.saturating_add(1),
                 })
                 .await
                 .unwrap();
@@ -1108,12 +1106,10 @@ pub(crate) mod tests {
 
             // Send target update with decreased upper bound
             update_sender
-                .send(SyncTargetUpdate {
-                    target: SyncTarget {
-                        hash: initial_hash,
-                        lower_bound_ops: initial_lower_bound.saturating_add(1),
-                        upper_bound_ops: initial_upper_bound.saturating_sub(1),
-                    },
+                .send(SyncTarget {
+                    hash: initial_hash,
+                    lower_bound_ops: initial_lower_bound.saturating_add(1),
+                    upper_bound_ops: initial_upper_bound.saturating_sub(1),
                 })
                 .await
                 .unwrap();
@@ -1163,12 +1159,10 @@ pub(crate) mod tests {
 
             // Send target update with increased bounds
             let _ = update_sender
-                .send(SyncTargetUpdate {
-                    target: SyncTarget {
-                        hash: final_hash,
-                        lower_bound_ops: final_lower_bound,
-                        upper_bound_ops: final_upper_bound,
-                    },
+                .send(SyncTarget {
+                    hash: final_hash,
+                    lower_bound_ops: final_lower_bound,
+                    upper_bound_ops: final_upper_bound,
                 })
                 .await;
 
@@ -1225,12 +1219,10 @@ pub(crate) mod tests {
 
             // Send target update with invalid bounds (lower > upper)
             let _ = update_sender
-                .send(SyncTargetUpdate {
-                    target: SyncTarget {
-                        hash: initial_hash,
-                        lower_bound_ops: initial_upper_bound, // Greater than upper bound
-                        upper_bound_ops: initial_lower_bound, // Less than lower bound
-                    },
+                .send(SyncTarget {
+                    hash: initial_hash,
+                    lower_bound_ops: initial_upper_bound, // Greater than upper bound
+                    upper_bound_ops: initial_lower_bound, // Less than
                 })
                 .await;
 
@@ -1283,13 +1275,11 @@ pub(crate) mod tests {
             // Attempt to apply a target update after sync is complete to verify
             // we don't panic
             let _ = update_sender
-                .send(SyncTargetUpdate {
-                    target: SyncTarget {
-                        // Dummy target update
-                        hash: Digest::from([2u8; 32]),
-                        lower_bound_ops: target_lower_bound + 1,
-                        upper_bound_ops: target_upper_bound + 1,
-                    },
+                .send(SyncTarget {
+                    // Dummy target update
+                    hash: Digest::from([2u8; 32]),
+                    lower_bound_ops: target_lower_bound + 1,
+                    upper_bound_ops: target_upper_bound + 1,
                 })
                 .await;
 

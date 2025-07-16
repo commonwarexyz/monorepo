@@ -30,18 +30,11 @@ pub struct SyncTarget<D: Digest> {
     pub upper_bound_ops: u64,
 }
 
-/// Update message for changing the sync target during synchronization
-#[derive(Debug, Clone)]
-pub struct SyncTargetUpdate<D: Digest> {
-    /// New sync target
-    pub target: SyncTarget<D>,
-}
-
 /// Channel for sending sync target updates
-pub type SyncTargetUpdateSender<D> = mpsc::UnboundedSender<SyncTargetUpdate<D>>;
+pub type SyncTargetUpdateSender<D> = mpsc::UnboundedSender<SyncTarget<D>>;
 
 /// Channel for receiving sync target updates
-pub type SyncTargetUpdateReceiver<D> = mpsc::UnboundedReceiver<SyncTargetUpdate<D>>;
+pub type SyncTargetUpdateReceiver<D> = mpsc::UnboundedReceiver<SyncTarget<D>>;
 
 /// Synchronization errors
 #[derive(Debug, thiserror::Error)]
