@@ -67,7 +67,7 @@ struct Steps {
 
 /// Results from a single simulation run
 #[derive(Clone)]
-struct SimulationResult {
+struct Simulation {
     leader_idx: usize,
     leader_region: String,
     steps: Steps,
@@ -172,7 +172,7 @@ fn run_all_simulations(
     dsl: &[(usize, Command)],
     latency_map: &Latencies,
     task_content: &str,
-) -> Vec<SimulationResult> {
+) -> Vec<Simulation> {
     let leaders: Vec<usize> = (0..peers).collect();
     let mut results = Vec::new();
 
@@ -191,7 +191,7 @@ fn run_single_simulation(
     distribution: &Distribution,
     commands: &[(usize, Command)],
     latencies: &Latencies,
-) -> SimulationResult {
+) -> Simulation {
     let leader_region = calculate_leader_region(leader_idx, distribution);
     let peers = count_peers(distribution);
     let runtime_cfg = deterministic::Config::default().with_seed(leader_idx as u64);
@@ -210,7 +210,7 @@ fn run_single_simulation(
         .await
     });
 
-    SimulationResult {
+    Simulation {
         leader_idx,
         leader_region,
         steps,
@@ -528,7 +528,7 @@ fn process_simulation_results(results: Vec<PeerResult>) -> Steps {
 }
 
 /// Print results for a single simulation
-fn print_simulation_results(result: &SimulationResult, task_content: &str) {
+fn print_simulation_results(result: &Simulation, task_content: &str) {
     println!(
         "{}",
         format!(
@@ -587,7 +587,7 @@ fn print_regional_statistics(steps: &Steps, line_num: usize) {
 }
 
 /// Print aggregated results across all simulations
-fn print_aggregated_results(results: &[SimulationResult], task_content: &str) {
+fn print_aggregated_results(results: &[Simulation], task_content: &str) {
     let (all_wait_latencies, all_leader_latencies) = aggregate_simulation_results(results);
 
     println!("\n{}", "-".repeat(80).yellow());
@@ -618,7 +618,7 @@ fn print_aggregated_results(results: &[SimulationResult], task_content: &str) {
 
 /// Aggregate results from all simulations
 fn aggregate_simulation_results(
-    results: &[SimulationResult],
+    results: &[Simulation],
 ) -> (WaitLatencies, BTreeMap<usize, Vec<f64>>) {
     let mut all_leader_latencies: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
     let mut all_wait_latencies: WaitLatencies = BTreeMap::new();
