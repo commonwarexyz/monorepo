@@ -53,16 +53,6 @@ type PeerJobHandle = commonware_runtime::Handle<(
     Option<Vec<(usize, Duration)>>,
 )>;
 
-/// Context data for a peer in the simulation
-struct PeerContext {
-    peer_idx: usize,
-    leader_idx: usize,
-    peers: usize,
-    identity: ed25519::PublicKey,
-    region: String,
-    commands: Vec<(usize, Command)>,
-}
-
 /// Context data for command processing
 struct ProcessContext {
     is_leader: bool,
@@ -362,119 +352,88 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
 ) -> Vec<PeerJobHandle> {
     let mut jobs = Vec::new();
 
-    for (i, (identity, region, sender, receiver)) in identities.into_iter().enumerate() {
-        let tx = tx.clone();
+    for (i, (identity, region, mut sender, mut receiver)) in identities.into_iter().enumerate() {
+        let mut tx = tx.clone();
         let job = context.with_label("job");
         let commands = commands.to_vec();
 
         jobs.push(job.spawn(move |ctx| async move {
-            let peer_context = PeerContext {
-                peer_idx: i,
+            let is_leader = i == leader_idx;
+            let start = ctx.current();
+            let mut completions: Vec<(usize, Duration)> = Vec::new();
+            let mut current_index = 0;
+            let mut received: BTreeMap<u32, BTreeSet<ed25519::PublicKey>> = BTreeMap::new();
+
+            let process_ctx = ProcessContext {
+                is_leader,
                 leader_idx,
                 peers,
                 identity,
-                region,
-                commands,
+                start,
             };
-            run_peer_logic(ctx, peer_context, sender, receiver, tx).await
+
+            // Main simulation loop
+            loop {
+                if current_index >= commands.len() {
+                    break;
+                }
+
+                // Process commands that can be executed immediately
+                let mut advanced = true;
+                while advanced {
+                    if current_index >= commands.len() {
+                        break;
+                    }
+
+                    advanced = process_command(
+                        &commands[current_index],
+                        &mut current_index,
+                        &process_ctx,
+                        &mut sender,
+                        &mut received,
+                        &ctx,
+                        &mut completions,
+                    )
+                    .await;
+                }
+
+                if current_index >= commands.len() {
+                    break;
+                }
+
+                // Wait for incoming message
+                let (other_identity, message) = receiver.recv().await.unwrap();
+                let msg_id = message.unwrap();
+                received.entry(msg_id).or_default().insert(other_identity);
+            }
+
+            let maybe_leader = if is_leader {
+                Some(completions.clone())
+            } else {
+                None
+            };
+
+            // Signal completion and wait for shutdown
+            let (shutter, mut listener) = oneshot::channel::<()>();
+            tx.send(shutter).await.unwrap();
+
+            // Process remaining messages until shutdown
+            loop {
+                select! {
+                    _ = receiver.recv() => {
+                        // Discard message
+                    },
+                    _ = &mut listener => {
+                        break;
+                    }
+                }
+            }
+
+            (region, completions, maybe_leader)
         }));
     }
 
     jobs
-}
-
-/// Core logic for a single peer in the simulation
-async fn run_peer_logic(
-    ctx: impl Spawner + Clock,
-    peer_context: PeerContext,
-    mut sender: WrappedSender<Sender<ed25519::PublicKey>, u32>,
-    mut receiver: WrappedReceiver<Receiver<ed25519::PublicKey>, u32>,
-    mut tx: mpsc::Sender<oneshot::Sender<()>>,
-) -> (
-    String,
-    Vec<(usize, Duration)>,
-    Option<Vec<(usize, Duration)>>,
-) {
-    let PeerContext {
-        peer_idx,
-        leader_idx,
-        peers,
-        identity,
-        region,
-        commands,
-    } = peer_context;
-    let is_leader = peer_idx == leader_idx;
-    let start = ctx.current();
-    let mut completions: Vec<(usize, Duration)> = Vec::new();
-    let mut current_index = 0;
-    let mut received: BTreeMap<u32, BTreeSet<ed25519::PublicKey>> = BTreeMap::new();
-
-    let process_ctx = ProcessContext {
-        is_leader,
-        leader_idx,
-        peers,
-        identity,
-        start,
-    };
-
-    // Main simulation loop
-    loop {
-        if current_index >= commands.len() {
-            break;
-        }
-
-        // Process commands that can be executed immediately
-        let mut advanced = true;
-        while advanced {
-            if current_index >= commands.len() {
-                break;
-            }
-
-            advanced = process_command(
-                &commands[current_index],
-                &mut current_index,
-                &process_ctx,
-                &mut sender,
-                &mut received,
-                &ctx,
-                &mut completions,
-            )
-            .await;
-        }
-
-        if current_index >= commands.len() {
-            break;
-        }
-
-        // Wait for incoming message
-        let (other_identity, message) = receiver.recv().await.unwrap();
-        let msg_id = message.unwrap();
-        received.entry(msg_id).or_default().insert(other_identity);
-    }
-
-    let maybe_leader = if is_leader {
-        Some(completions.clone())
-    } else {
-        None
-    };
-
-    // Signal completion and wait for shutdown
-    let (shutter, mut listener) = oneshot::channel::<()>();
-    tx.send(shutter).await.unwrap();
-
-    // Process remaining messages until shutdown
-    loop {
-        select! {
-            _ = receiver.recv() => {
-                // Discard message
-            },
-            _ = &mut listener => {
-                break;
-            }
-        }
-    }
-
-    (region, completions, maybe_leader)
 }
 
 /// Process a single command in the DSL
