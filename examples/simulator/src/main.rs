@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
@@ -10,7 +8,7 @@ use commonware_p2p::{
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
 use futures::future::try_join_all;
 use reqwest::blocking::Client;
-use serde_json;
+use std::collections::HashMap;
 use tracing::info;
 
 const DEFAULT_CHANNEL: u32 = 0;
@@ -199,33 +197,60 @@ fn main() {
 
         // For each peer, see how long it takes to send a message (and hear back from all other peers)
         let mut jobs = Vec::new();
-        for (i, (identity, region, sender, receiver)) in identities.iter().enumerate() {
-            let mut job = context.with_label("job");
+        for (i, (identity, region, mut sender, mut receiver)) in identities.into_iter().enumerate()
+        {
+            let job = context.with_label("job");
             jobs.push(job.spawn(move |ctx| async move {
                 let start = ctx.current();
 
-                for (j, (other_identity, other_region, other_sender, other_receiver)) in
-                    identities.iter().enumerate()
-                {
-                    if i == j {
-                        continue;
-                    }
-
-                    // Send message
-                    sender
-                        .send(
-                            commonware_p2p::Recipients::One(other_identity.clone()),
-                            Bytes::from("Hello, world!"),
-                            true,
-                        )
-                        .await
-                        .unwrap();
-                }
+                // Send message
+                sender
+                    .send(
+                        commonware_p2p::Recipients::All,
+                        Bytes::from("Hello, world!"),
+                        true,
+                    )
+                    .await
+                    .unwrap();
 
                 // Loop until all messages are received
-                while let Ok((other_identity, message)) = receiver.recv().await {
-                    info!(?other_identity, "message received");
+                let mut sent = 0;
+                let mut received = 0;
+                let mut completed = None;
+                loop {
+                    if let Ok((other_identity, message)) = receiver.recv().await {
+                        if message == Bytes::from("Hello, world!") {
+                            sender
+                                .send(
+                                    commonware_p2p::Recipients::One(other_identity),
+                                    Bytes::from("Message received"),
+                                    true,
+                                )
+                                .await
+                                .unwrap();
+                            sent += 1;
+                        } else if message == Bytes::from("Message received") {
+                            received += 1;
+                            if received == peers - 1 {
+                                completed = Some(ctx.current());
+                            }
+                        } else {
+                            panic!("unexpected message: {:?}", message);
+                        }
+                    }
+
+                    if sent == peers - 1 && received == peers - 1 {
+                        break;
+                    }
                 }
+
+                // Print results
+                info!(
+                    ?identity,
+                    ?region,
+                    latency = ?completed.unwrap().duration_since(start).unwrap(),
+                    "job completed"
+                );
             }));
         }
 
