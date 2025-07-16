@@ -112,12 +112,12 @@ fn parse_arguments() -> Arguments {
         .about("TBA")
         .version(crate_version())
         .arg(
-            Arg::new("regions")
-                .long("regions")
+            Arg::new("distribution")
+                .long("distribution")
                 .required(true)
                 .value_delimiter(',')
                 .value_parser(value_parser!(String))
-                .help("Regions to simulate in the form <region>:<count>, e.g. us-east-1:3,eu-west-1:2"),
+                .help("Distribution of peers across regions in the form <region>:<count>, e.g. us-east-1:3,eu-west-1:2"),
         )
         .arg(
             Arg::new("reload-latency-data")
@@ -136,7 +136,7 @@ fn parse_arguments() -> Arguments {
         .get_matches();
 
     let distribution = matches
-        .get_many::<String>("regions")
+        .get_many::<String>("distribution")
         .unwrap()
         .map(|s| {
             let mut parts = s.split(':');
