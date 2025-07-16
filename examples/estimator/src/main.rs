@@ -12,194 +12,20 @@ use futures::{
     future::try_join_all,
     SinkExt, StreamExt,
 };
-use reqwest::blocking::Client;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
 use tracing::debug;
 
+// Import from our library
+use estimator::{
+    crate_version, download_latency_data, load_latency_data, mean, median, parse_task, std_dev,
+    Region, SimCommand, Threshold,
+};
+
 const DEFAULT_CHANNEL: u32 = 0;
 const DEFAULT_SUCCESS_RATE: f64 = 1.0;
-
-/// Returns the version of the crate.
-fn crate_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
-type Region = String;
-type LatJitPair = (f64, f64); // (avg_latency_ms, jitter_ms)
-type LatencyMap = BTreeMap<Region, BTreeMap<Region, LatJitPair>>;
-
-#[derive(serde::Deserialize)]
-struct ApiResp {
-    data: BTreeMap<Region, BTreeMap<Region, f64>>,
-}
-
-const BASE: &str = "https://www.cloudping.co/api/latencies";
-
-fn download_latency_data() -> LatencyMap {
-    let cli = Client::builder().build().unwrap();
-
-    // Pull P50 and P90 matrices (time-frame: last 1 year)
-    let p50: ApiResp = cli
-        .get(format!("{BASE}?percentile=p_50&timeframe=1Y"))
-        .send()
-        .unwrap()
-        .json()
-        .unwrap();
-    let p90: ApiResp = cli
-        .get(format!("{BASE}?percentile=p_90&timeframe=1Y"))
-        .send()
-        .unwrap()
-        .json()
-        .unwrap();
-
-    populate_latency_map(p50, p90)
-}
-
-fn load_latency_data() -> LatencyMap {
-    let p50 = include_str!("p50.json");
-    let p90 = include_str!("p90.json");
-    let p50: ApiResp = serde_json::from_str(p50).unwrap();
-    let p90: ApiResp = serde_json::from_str(p90).unwrap();
-
-    populate_latency_map(p50, p90)
-}
-
-fn populate_latency_map(p50: ApiResp, p90: ApiResp) -> LatencyMap {
-    let mut map = BTreeMap::new();
-    for (from, inner_p50) in p50.data {
-        let inner_p90 = &p90.data[&from];
-        let mut dest_map = BTreeMap::new();
-        for (to, lat50) in inner_p50 {
-            if let Some(lat90) = inner_p90.get(&to) {
-                dest_map.insert(to.clone(), (lat50, lat90 - lat50));
-            }
-        }
-        map.insert(from, dest_map);
-    }
-
-    map
-}
-
-fn mean(data: &[f64]) -> f64 {
-    let sum = data.iter().sum::<f64>();
-    sum / data.len() as f64
-}
-
-fn median(data: &mut [f64]) -> f64 {
-    data.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-    let mid = data.len() / 2;
-    if data.len() % 2 == 0 {
-        (data[mid - 1] + data[mid]) / 2.0
-    } else {
-        data[mid]
-    }
-}
-
-fn std_dev(data: &[f64]) -> Option<f64> {
-    if data.is_empty() {
-        return None;
-    }
-    let mean = mean(data);
-    let variance = data
-        .iter()
-        .map(|value| {
-            let diff = mean - *value;
-            diff * diff
-        })
-        .sum::<f64>()
-        / data.len() as f64;
-    Some(variance.sqrt())
-}
-
-#[derive(Clone)]
-enum SimCommand {
-    Propose(u32),
-    Broadcast(u32),
-    Reply(u32),
-    Collect(u32, Threshold, Option<(Duration, Duration)>),
-    Wait(u32, Threshold, Option<(Duration, Duration)>),
-}
-
-#[derive(Clone)]
-enum Threshold {
-    Count(usize),
-    Percent(f64),
-}
-
-fn parse_task(content: &str) -> Vec<(usize, SimCommand)> {
-    let mut cmds = Vec::new();
-    for (line_num, line) in content.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with("#") {
-            continue;
-        }
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        let command = parts[0];
-        let mut args: HashMap<&str, &str> = HashMap::new();
-        for &arg in &parts[1..] {
-            let kv: Vec<&str> = arg.splitn(2, '=').collect();
-            if kv.len() != 2 {
-                panic!("Invalid argument format: {arg}");
-            }
-            args.insert(kv[0], kv[1]);
-        }
-        match command {
-            "propose" => {
-                let id_str = args.get("id").expect("Missing id for propose");
-                let id = id_str.parse::<u32>().expect("Invalid id");
-                cmds.push((line_num + 1, SimCommand::Propose(id)));
-            }
-            "broadcast" => {
-                let id_str = args.get("id").expect("Missing id for broadcast");
-                let id = id_str.parse::<u32>().expect("Invalid id");
-                cmds.push((line_num + 1, SimCommand::Broadcast(id)));
-            }
-            "reply" => {
-                let id_str = args.get("id").expect("Missing id for reply");
-                let id = id_str.parse::<u32>().expect("Invalid id");
-                cmds.push((line_num + 1, SimCommand::Reply(id)));
-            }
-            "collect" | "wait" => {
-                let id_str = args.get("id").expect("Missing id");
-                let id = id_str.parse::<u32>().expect("Invalid id");
-                let thresh_str = args.get("threshold").expect("Missing threshold");
-                let thresh = if thresh_str.ends_with('%') {
-                    let p = thresh_str
-                        .trim_end_matches('%')
-                        .parse::<f64>()
-                        .expect("Invalid percent")
-                        / 100.0;
-                    Threshold::Percent(p)
-                } else {
-                    let c = thresh_str.parse::<usize>().expect("Invalid count");
-                    Threshold::Count(c)
-                };
-                let delay = args.get("delay").map(|delay_str| {
-                    let delay_str = delay_str.trim_matches('(').trim_matches(')');
-                    let parts: Vec<&str> = delay_str.split(',').collect();
-                    let message =
-                        Duration::from_secs_f64(parts[0].parse::<f64>().expect("Invalid delay"));
-                    let completion =
-                        Duration::from_secs_f64(parts[1].parse::<f64>().expect("Invalid delay"));
-                    (message, completion)
-                });
-                if command == "collect" {
-                    cmds.push((line_num + 1, SimCommand::Collect(id, thresh, delay)));
-                } else {
-                    cmds.push((line_num + 1, SimCommand::Wait(id, thresh, delay)));
-                }
-            }
-            _ => panic!("Unknown command: {command}"),
-        }
-    }
-    cmds
-}
 
 type SimResult = (
     usize,
