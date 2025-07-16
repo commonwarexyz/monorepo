@@ -7,7 +7,11 @@ use commonware_p2p::{
     utils::codec::wrap,
 };
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-use futures::future::try_join_all;
+use futures::{
+    channel::{mpsc, oneshot},
+    future::try_join_all,
+    FutureExt, SinkExt, StreamExt,
+};
 use reqwest::blocking::Client;
 use std::sync::mpsc::channel;
 use std::{
@@ -274,10 +278,9 @@ fn main() {
     let mut results: Vec<SimResult> = Vec::new();
     let mut all_wait_latencies: BTreeMap<usize, BTreeMap<String, Vec<f64>>> = BTreeMap::new();
     for leader_idx in leaders {
-        let (tx, rx) = channel();
         let runtime_cfg = deterministic::Config::default().with_seed(leader_idx as u64);
         let executor = deterministic::Runner::new(runtime_cfg);
-        executor.start({
+        let (wait_latencies, leader_completions) = executor.start({
             let dsl_clone = dsl.clone();
             let latency_map_clone = latency_map.clone();
             let region_counts_clone = region_counts.clone();
@@ -320,10 +323,12 @@ fn main() {
                             .unwrap();
                     }
                 }
+                let (tx, mut rx) = mpsc::channel(peers);
                 let mut jobs = Vec::new();
                 for (i, (identity, region, mut sender, mut receiver)) in
                     identities.into_iter().enumerate()
                 {
+                    let mut tx = tx.clone();
                     let job = context.with_label("job");
                     let dsl = dsl_clone.clone();
                     jobs.push(job.spawn(move |ctx| async move {
@@ -454,45 +459,44 @@ fn main() {
                         } else {
                             None
                         };
-                        (region, completions, maybe_leader, receiver)
-                    }));
-                }
-                let results_with_receivers = try_join_all(jobs).await.unwrap();
-                let mut drain_jobs = Vec::new();
-                let mut processed_results = Vec::new();
-                let mut leader_completions: Option<Vec<(usize, Duration)>> = None;
-                for (region, completions, maybe_leader, mut receiver) in
-                    results_with_receivers.into_iter()
-                {
-                    drain_jobs.push(context.with_label("drain").spawn(move |ctx| async move {
-                        let drain_until = ctx.current() + Duration::from_millis(1000);
+
+                        // Notify that we're done
+                        let (shutter, listener) = oneshot::channel::<()>();
+                        tx.send(shutter).await.unwrap();
+
+                        // Process messages until we're done
                         loop {
                             select! {
-                                _ = ctx.sleep_until(drain_until) => {
+                                _ = receiver.recv() => {
+                                    // Discard message
+                                },
+                                _ = listener => {
                                     break;
-                                },
-                                msg = receiver.recv() => {
-                                    match msg {
-                                        Ok(_) => {
-                                            // Discard message
-                                        }
-                                        Err(_) => {
-                                            break;
-                                        }
-                                    }
-                                },
+                                }
                             }
                         }
+
+                        (region, completions, maybe_leader)
                     }));
-                    if let Some(comps) = maybe_leader {
-                        leader_completions = Some(comps);
-                    }
-                    processed_results.push((region, completions));
                 }
-                try_join_all(drain_jobs).await.unwrap();
+
+                // Wait for all jobs to indicate they're done
+                let mut responders = Vec::with_capacity(peers);
+                for _ in 0..peers {
+                    responders.push(rx.next().await.unwrap());
+                }
+
+                // Send the shutdown signal to all jobs
+                for responder in responders {
+                    responder.send(()).unwrap();
+                }
+
+                // Wait for all jobs to terminate
+                let results = try_join_all(jobs).await.unwrap();
+                let mut leader_latencies: Option<BTreeMap<usize, f64>> = None;
                 let mut wait_latencies: BTreeMap<usize, BTreeMap<Region, Vec<f64>>> =
                     BTreeMap::new();
-                for (region, completions) in processed_results {
+                for (region, completions, maybe_leader) in results {
                     for (line, duration) in completions {
                         wait_latencies
                             .entry(line)
@@ -501,16 +505,18 @@ fn main() {
                             .or_default()
                             .push(duration.as_millis() as f64);
                     }
+                    if let Some(completions) = maybe_leader {
+                        leader_latencies = Some(
+                            completions
+                                .into_iter()
+                                .map(|(line, dur)| (line, dur.as_millis() as f64))
+                                .collect(),
+                        );
+                    }
                 }
-                let leader_latencies: BTreeMap<usize, f64> = leader_completions
-                    .unwrap()
-                    .into_iter()
-                    .map(|(line, dur)| (line, dur.as_millis() as f64))
-                    .collect();
-                tx.send((wait_latencies, leader_latencies)).unwrap();
+                (wait_latencies, leader_latencies.unwrap())
             }
         });
-        let (wait_latencies, leader_latencies) = rx.recv().unwrap();
         let mut current = 0;
         let leader_region = region_counts
             .iter()
@@ -524,7 +530,12 @@ fn main() {
                 }
             })
             .unwrap();
-        results.push((leader_idx, leader_region, wait_latencies, leader_latencies));
+        results.push((
+            leader_idx,
+            leader_region,
+            wait_latencies,
+            leader_completions,
+        ));
     }
     results.sort_by_key(|(idx, _, _, _)| *idx);
     for tuple in &results {
