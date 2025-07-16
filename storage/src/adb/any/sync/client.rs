@@ -1274,7 +1274,24 @@ pub(crate) mod tests {
             };
 
             // Complete the sync
-            let synced_db = sync(config).await.unwrap();
+            let (mut update_sender, update_receiver) = mpsc::unbounded();
+            let client = Client::new_with_updater(config, Some(update_receiver))
+                .await
+                .unwrap();
+            let synced_db = client.sync().await.unwrap();
+
+            // Attempt to apply a target update after sync is complete to verify
+            // we don't panic
+            let _ = update_sender
+                .send(SyncTargetUpdate {
+                    target: SyncTarget {
+                        // Dummy target update
+                        hash: Digest::from([2u8; 32]),
+                        lower_bound_ops: target_lower_bound + 1,
+                        upper_bound_ops: target_upper_bound + 1,
+                    },
+                })
+                .await;
 
             // Verify the synced database has the expected state
             let mut hasher = create_test_hasher();
