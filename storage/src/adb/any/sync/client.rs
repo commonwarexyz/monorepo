@@ -1424,20 +1424,17 @@ pub(crate) mod tests {
 
             // Verify the target database matches the synced database
             {
-                let target_db_read = target_db.read().await;
-                assert_eq!(synced_db.op_count(), target_db_read.op_count());
+                let target_db = target_db.read().await;
+                assert_eq!(synced_db.op_count(), target_db.op_count());
                 assert_eq!(
                     synced_db.inactivity_floor_loc,
-                    target_db_read.inactivity_floor_loc
+                    target_db.inactivity_floor_loc
                 );
                 assert_eq!(
                     synced_db.oldest_retained_loc().unwrap(),
-                    target_db_read.inactivity_floor_loc
+                    target_db.inactivity_floor_loc
                 );
-                assert_eq!(
-                    synced_db.root(&mut hasher),
-                    target_db_read.root(&mut hasher)
-                );
+                assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
             } // Drop the read guard
 
             synced_db.destroy().await.unwrap();
