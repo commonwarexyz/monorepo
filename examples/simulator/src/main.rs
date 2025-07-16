@@ -2,13 +2,14 @@ use std::collections::HashMap;
 
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
-use commonware_p2p::simulated::{Config, Network};
+use commonware_p2p::simulated::{Config, Link, Network};
 use commonware_runtime::{deterministic, Metrics, Runner};
 use reqwest::blocking::Client;
 use serde_json;
 use tracing::info;
 
 const DEFAULT_CHANNEL: u32 = 0;
+const DEFAULT_SUCCESS_RATE: f64 = 1.0;
 
 /// Returns the version of the crate.
 fn crate_version() -> &'static str {
@@ -170,5 +171,25 @@ fn main() {
         }
 
         // Create connections between all peers
+        for (i, (identity, region, _, _)) in identities.iter().enumerate() {
+            for (j, (other_identity, other_region, _, _)) in identities.iter().enumerate() {
+                // Skip self
+                if i == j {
+                    continue;
+                }
+
+                // Add link
+                let latency = latency_map[region][other_region];
+                let link = Link {
+                    latency: latency.0,
+                    jitter: latency.1,
+                    success_rate: DEFAULT_SUCCESS_RATE,
+                };
+                oracle
+                    .add_link(identity.clone(), other_identity.clone(), link)
+                    .await
+                    .unwrap();
+            }
+        }
     });
 }
