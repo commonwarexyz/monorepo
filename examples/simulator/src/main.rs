@@ -117,10 +117,8 @@ fn main() {
         .get_matches();
     let peers = *matches.get_one::<usize>("peers").unwrap();
     let regions = matches
-        .get_one::<String>("regions")
+        .get_many::<String>("regions")
         .unwrap()
-        .split(',')
-        .map(|s| s.to_string())
         .collect::<Vec<_>>();
     assert!(
         peers >= regions.len(),
