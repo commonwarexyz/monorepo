@@ -5,15 +5,33 @@ use std::{
 };
 use tracing::debug;
 
+// =============================================================================
+// Constants
+// =============================================================================
+
+const BASE: &str = "https://www.cloudping.co/api/latencies";
+
+// =============================================================================
+// Type Definitions
+// =============================================================================
+
 pub type Region = String;
 pub type Distribution = BTreeMap<Region, usize>;
 pub type Behavior = (f64, f64); // (avg_latency_ms, jitter_ms)
 pub type Latencies = BTreeMap<Region, BTreeMap<Region, Behavior>>;
 
+// =============================================================================
+// Struct Definitions
+// =============================================================================
+
 #[derive(serde::Deserialize)]
 struct CloudPing {
     pub data: BTreeMap<Region, BTreeMap<Region, f64>>,
 }
+
+// =============================================================================
+// Enum Definitions
+// =============================================================================
 
 #[derive(Clone)]
 pub enum Command {
@@ -30,59 +48,13 @@ pub enum Threshold {
     Percent(f64),
 }
 
-const BASE: &str = "https://www.cloudping.co/api/latencies";
+// =============================================================================
+// Public API Functions
+// =============================================================================
 
 /// Returns the version of the crate.
 pub fn crate_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
-}
-
-/// Downloads latency data from cloudping.co API
-fn download_latency_data() -> Latencies {
-    let cli = Client::builder().build().unwrap();
-
-    // Pull P50 and P90 matrices (time-frame: last 1 year)
-    let p50: CloudPing = cli
-        .get(format!("{BASE}?percentile=p_50&timeframe=1Y"))
-        .send()
-        .unwrap()
-        .json()
-        .unwrap();
-    let p90: CloudPing = cli
-        .get(format!("{BASE}?percentile=p_90&timeframe=1Y"))
-        .send()
-        .unwrap()
-        .json()
-        .unwrap();
-
-    populate_latency_map(p50, p90)
-}
-
-/// Loads latency data from local JSON files
-fn load_latency_data() -> Latencies {
-    let p50 = include_str!("p50.json");
-    let p90 = include_str!("p90.json");
-    let p50: CloudPing = serde_json::from_str(p50).unwrap();
-    let p90: CloudPing = serde_json::from_str(p90).unwrap();
-
-    populate_latency_map(p50, p90)
-}
-
-/// Populates a latency map from P50 and P90 data
-fn populate_latency_map(p50: CloudPing, p90: CloudPing) -> Latencies {
-    let mut map = BTreeMap::new();
-    for (from, inner_p50) in p50.data {
-        let inner_p90 = &p90.data[&from];
-        let mut dest_map = BTreeMap::new();
-        for (to, lat50) in inner_p50 {
-            if let Some(lat90) = inner_p90.get(&to) {
-                dest_map.insert(to.clone(), (lat50, lat90 - lat50));
-            }
-        }
-        map.insert(from, dest_map);
-    }
-
-    map
 }
 
 /// Get latency data either by downloading or loading from cache
@@ -93,75 +65,6 @@ pub fn get_latency_data(reload: bool) -> Latencies {
     } else {
         debug!("loading latency data");
         load_latency_data()
-    }
-}
-
-/// Calculate total number of peers across all regions
-pub fn count_peers(distribution: &Distribution) -> usize {
-    let peers = distribution.values().sum();
-    assert!(peers > 1, "must have at least 2 peers");
-    peers
-}
-
-/// Calculate which region a proposer belongs to based on their index
-pub fn calculate_proposer_region(proposer_idx: usize, distribution: &Distribution) -> String {
-    let mut current = 0;
-    for (region, count) in distribution {
-        let start = current;
-        current += *count;
-        if proposer_idx >= start && proposer_idx < current {
-            return region.clone();
-        }
-    }
-    panic!("Leader index {proposer_idx} out of bounds");
-}
-
-/// Calculates the mean of a slice of f64 values
-pub fn mean(data: &[f64]) -> f64 {
-    if data.is_empty() {
-        return 0.0;
-    }
-    let sum = data.iter().sum::<f64>();
-    sum / data.len() as f64
-}
-
-/// Calculates the median of a slice of f64 values
-/// Note: This function modifies the input slice by sorting it
-pub fn median(data: &mut [f64]) -> f64 {
-    if data.is_empty() {
-        return 0.0;
-    }
-    data.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-    let mid = data.len() / 2;
-    if data.len() % 2 == 0 {
-        (data[mid - 1] + data[mid]) / 2.0
-    } else {
-        data[mid]
-    }
-}
-
-/// Calculates the standard deviation of a slice of f64 values
-pub fn std_dev(data: &[f64]) -> Option<f64> {
-    if data.is_empty() {
-        return None;
-    }
-    let mean_val = mean(data);
-    let variance = data
-        .iter()
-        .map(|value| {
-            let diff = mean_val - *value;
-            diff * diff
-        })
-        .sum::<f64>()
-        / data.len() as f64;
-    Some(variance.sqrt())
-}
-
-/// Calculate required count based on threshold
-pub fn calculate_threshold(thresh: &Threshold, peers: usize) -> usize {
-    match thresh {
-        Threshold::Percent(p) => ((peers as f64) * *p).ceil() as usize,
-        Threshold::Count(c) => *c,
     }
 }
 
@@ -237,6 +140,139 @@ pub fn parse_task(content: &str) -> Vec<(usize, Command)> {
     }
     cmds
 }
+
+// =============================================================================
+// Latency Data Functions
+// =============================================================================
+
+/// Downloads latency data from cloudping.co API
+fn download_latency_data() -> Latencies {
+    let cli = Client::builder().build().unwrap();
+
+    // Pull P50 and P90 matrices (time-frame: last 1 year)
+    let p50: CloudPing = cli
+        .get(format!("{BASE}?percentile=p_50&timeframe=1Y"))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let p90: CloudPing = cli
+        .get(format!("{BASE}?percentile=p_90&timeframe=1Y"))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+
+    populate_latency_map(p50, p90)
+}
+
+/// Loads latency data from local JSON files
+fn load_latency_data() -> Latencies {
+    let p50 = include_str!("p50.json");
+    let p90 = include_str!("p90.json");
+    let p50: CloudPing = serde_json::from_str(p50).unwrap();
+    let p90: CloudPing = serde_json::from_str(p90).unwrap();
+
+    populate_latency_map(p50, p90)
+}
+
+/// Populates a latency map from P50 and P90 data
+fn populate_latency_map(p50: CloudPing, p90: CloudPing) -> Latencies {
+    let mut map = BTreeMap::new();
+    for (from, inner_p50) in p50.data {
+        let inner_p90 = &p90.data[&from];
+        let mut dest_map = BTreeMap::new();
+        for (to, lat50) in inner_p50 {
+            if let Some(lat90) = inner_p90.get(&to) {
+                dest_map.insert(to.clone(), (lat50, lat90 - lat50));
+            }
+        }
+        map.insert(from, dest_map);
+    }
+
+    map
+}
+
+// =============================================================================
+// Statistical Functions
+// =============================================================================
+
+/// Calculates the mean of a slice of f64 values
+pub fn mean(data: &[f64]) -> f64 {
+    if data.is_empty() {
+        return 0.0;
+    }
+    let sum = data.iter().sum::<f64>();
+    sum / data.len() as f64
+}
+
+/// Calculates the median of a slice of f64 values
+/// Note: This function modifies the input slice by sorting it
+pub fn median(data: &mut [f64]) -> f64 {
+    if data.is_empty() {
+        return 0.0;
+    }
+    data.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    let mid = data.len() / 2;
+    if data.len() % 2 == 0 {
+        (data[mid - 1] + data[mid]) / 2.0
+    } else {
+        data[mid]
+    }
+}
+
+/// Calculates the standard deviation of a slice of f64 values
+pub fn std_dev(data: &[f64]) -> Option<f64> {
+    if data.is_empty() {
+        return None;
+    }
+    let mean_val = mean(data);
+    let variance = data
+        .iter()
+        .map(|value| {
+            let diff = mean_val - *value;
+            diff * diff
+        })
+        .sum::<f64>()
+        / data.len() as f64;
+    Some(variance.sqrt())
+}
+
+// =============================================================================
+// Peer & Region Calculation Functions
+// =============================================================================
+
+/// Calculate total number of peers across all regions
+pub fn count_peers(distribution: &Distribution) -> usize {
+    let peers = distribution.values().sum();
+    assert!(peers > 1, "must have at least 2 peers");
+    peers
+}
+
+/// Calculate which region a proposer belongs to based on their index
+pub fn calculate_proposer_region(proposer_idx: usize, distribution: &Distribution) -> String {
+    let mut current = 0;
+    for (region, count) in distribution {
+        let start = current;
+        current += *count;
+        if proposer_idx >= start && proposer_idx < current {
+            return region.clone();
+        }
+    }
+    panic!("Leader index {proposer_idx} out of bounds");
+}
+
+/// Calculate required count based on threshold
+pub fn calculate_threshold(thresh: &Threshold, peers: usize) -> usize {
+    match thresh {
+        Threshold::Percent(p) => ((peers as f64) * *p).ceil() as usize,
+        Threshold::Count(c) => *c,
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
 
 #[cfg(test)]
 mod tests {
