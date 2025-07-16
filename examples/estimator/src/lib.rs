@@ -261,7 +261,7 @@ pub fn calculate_proposer_region(proposer_idx: usize, distribution: &Distributio
             return region.clone();
         }
     }
-    panic!("Leader index {proposer_idx} out of bounds");
+    panic!("Proposer index {proposer_idx} out of bounds");
 }
 
 /// Calculate required count based on threshold

@@ -6,15 +6,15 @@ Simulate mechanism performance under realistic network conditions.
 
 ## Overview
 
-The Commonware Estimator is a tool for estimating the latency of distributed systems protocols under realistic network conditions. It uses a simulated peer-to-peer network with latency and jitter data derived from AWS regions (sourced from cloudping.co). The estimator allows you to define simulation behaviors using a simple Domain-Specific Language (DSL) and runs multiple simulations in parallel, varying the proposer/proposer across peers.
+`commonware-estimator` shortens the time from idea to data when experimenting with new mechanisms. With a basic DSL, you can simulate the performance of arbitrary mechanisms under realistic network conditions (AWS region-to-region latencies from cloudping.co).
 
 Key features:
 - Simulates peers distributed across specified AWS regions with real-world latency/jitter.
-- Supports defining simulation tasks via a DSL file.
-- Outputs latency statistics (mean, median, std dev) for key points in the simulation, both per-proposer and averaged across all runs.
+- Supports defining simulation tasks via a simple DSL.
+- Outputs latency statistics (mean, median, std dev) at intermediate points in the simulation, both per-proposer and averaged across all runs.
 - Deterministic runtime for reproducible results.
 
-The simulator models message passing (proposes, broadcasts, replies) and waiting/collecting thresholds, making it suitable for testing consensus algorithms like HotStuff or other broadcast-based protocols.
+With built-in handling for message passing (proposes, broadcasts, replies) and waiting/collecting thresholds, it's suitable for testing new consensus algorithms or other broadcast-based protocols.
 
 ## Usage
 
@@ -47,20 +47,60 @@ For each possible proposer (peer index), the simulator prints:
 
 Finally, it prints averaged results across all proposer simulations.
 
+```
+# HotStuff
+
+## Send PREPARE
+propose id=0
+
+## Reply to proposer PREPARE with VOTE(PREPARE)
+wait id=0 threshold=1 delay=(0.0001,0.001)
+    [proposer] mean: 5.80ms (dev: 0.40ms) | median: 6.00ms
+    [eu-west-1] mean: 50.80ms (dev: 33.35ms) | median: 73.50ms
+    [us-east-1] mean: 37.20ms (dev: 32.05ms) | median: 17.00ms
+    [all] mean: 42.64ms (dev: 33.25ms) | median: 18.00ms
+reply id=1
+
+## Collect VOTE(PREPARE) from 67% of the network and then broadcast (PRECOMMIT, QC_PREPARE)
+collect id=1 threshold=67% delay=(0.0001,0.001)
+    [proposer] mean: 151.60ms (dev: 4.41ms) | median: 153.00ms
+propose id=1
+
+## Reply to proposer (PRECOMMIT, QC_PREPARE) with VOTE(PRECOMMIT)
+wait id=1 threshold=1 delay=(0.0001,0.001)
+    [proposer] mean: 158.60ms (dev: 4.41ms) | median: 160.00ms
+    [eu-west-1] mean: 200.70ms (dev: 34.08ms) | median: 226.50ms
+    [us-east-1] mean: 190.07ms (dev: 32.98ms) | median: 168.00ms
+    [all] mean: 194.32ms (dev: 33.83ms) | median: 169.00ms
+reply id=2
+
+## Collect VOTE(PRECOMMIT) from 67% of the network and then broadcast (COMMIT, QC_PRECOMMIT)
+collect id=2 threshold=67% delay=(0.0001,0.001)
+    [proposer] mean: 304.60ms (dev: 2.42ms) | median: 304.00ms
+propose id=3
+
+## Wait for proposer (COMMIT, QC_PRECOMMIT)
+wait id=3 threshold=1 delay=(0.0001,0.001)
+    [proposer] mean: 311.60ms (dev: 2.42ms) | median: 311.00ms
+    [eu-west-1] mean: 354.70ms (dev: 31.66ms) | median: 376.00ms
+    [us-east-1] mean: 343.27ms (dev: 35.18ms) | median: 320.00ms
+    [all] mean: 347.84ms (dev: 34.27ms) | median: 324.00ms
+```
+
 ## DSL Style Guide
 
 The DSL is a plain text file where each non-empty line represents a command. Commands are executed sequentially by each simulated peer, but blocking commands (`wait` and `collect`) pause until their conditions are met. Empty lines are ignored.
 
 ### General Rules
+
 - Commands are case-sensitive.
 - Parameters are specified as `key=value` pairs, separated by spaces.
 - No quotes are needed for values unless they contain spaces (but currently, values shouldn't contain spaces).
 - Lines must not end with semicolons or other terminators.
-- Comments are not supported; keep the file clean.
 - Thresholds can be absolute counts (e.g., `5`) or percentages (e.g., `80%`). Percentages are relative to the total number of peers.
-- Delays are optional and specified as `delay=(<message_delay>,<completion_delay>)`, where delays are floats in seconds (e.g., `(0.1,0.2)`). The message delay is slept before checking the threshold, and completion delay after the threshold is met.
+- Delays are optional and specified as `delay=(<message_delay>,<completion_delay>)`, where delays are floats in seconds (e.g., `(0.1,0.2)`). The message delay is incurred for each processed message and completion delay is incurred once after the threshold is met.
 - Each command must have a unique `id` (u32) for tracking messages.
-- Execution is per-peer: Leaders (current proposer) may behave differently (e.g., in `propose` or `collect`).
+- Execution is per-peer: Proposers (current proposer) may behave differently (e.g., in `propose` or `collect`).
 - Peers process commands in lockstep but use async selects for receiving messages when blocked on `wait`/`collect`.
 
 ### Supported Commands
@@ -87,13 +127,13 @@ The DSL is a plain text file where each non-empty line represents a command. Com
    - Use case: Respond to a proposer's proposal or broadcast.
 
 4. **collect id=<number> threshold=<threshold> [delay=(<msg_delay>,<comp_delay>)]**
-   - Description: (Leader-only) Blocks until the threshold number of messages with the given ID are received. Records the latency from simulation start, then advances. Non-proposers skip immediately.
+   - Description: (Proposer-only) Blocks until the threshold number of messages with the given ID are received. Records the latency from simulation start, then advances. Non-proposers skip immediately.
    - Parameters:
      - `id`: Message ID to collect.
      - `threshold`: Count (e.g., `5`) or percentage (e.g., `80%`).
      - `delay` (optional): Sleeps `msg_delay` before checking, and `comp_delay` after threshold met.
    - Example: `collect id=1 threshold=80% delay=(0.0001,0.001)`
-   - Use case: Leader waits for quorum of votes/acks.
+   - Use case: Proposer waits for quorum of votes/acks.
 
 5. **wait id=<number> threshold=<threshold> [delay=(<msg_delay>,<comp_delay>)]**
    - Description: (All peers) Blocks until the threshold number of messages with the given ID are received. Records the latency from simulation start, then advances.
@@ -101,26 +141,40 @@ The DSL is a plain text file where each non-empty line represents a command. Com
    - Example: `wait id=0 threshold=40%`
    - Use case: Peers wait for a certain fraction of the network to acknowledge or respond.
 
-### Best Practices
-- Use unique IDs across the DSL to avoid message confusion.
-- Start with simple thresholds (e.g., absolute counts) for small networks.
-- Include delays to simulate processing time; keep them small for fast simulations.
-- Test with small peer counts first to validate DSL logic.
-- For percentages, note that they are ceiled (e.g., 80% of 5 peers = ceil(4) = 4).
-- Avoid infinite loops; ensure waits/collects can eventually complete based on prior sends.
-- Example file (`hotstuff.lazy`):
-  ```
-  propose id=0
-  wait id=0 threshold=1 delay=(0.0001,0.001)
-  broadcast id=1
-  wait id=1 threshold=40% delay=(0.0001,0.001)
-  wait id=1 threshold=80% delay=(0.0001,0.001)
-  ```
+### Example DSL (hotstuff.lazy)
 
-This DSL allows modeling protocols like echo broadcasts, quorums, or multi-phase consensus with realistic network delays.
+```
+# HotStuff
+
+## Send PREPARE
+propose id=0
+
+## Reply to proposer PREPARE with VOTE(PREPARE)
+wait id=0 threshold=1 delay=(0.0001,0.001)
+reply id=1
+
+## Collect VOTE(PREPARE) from 67% of the network and then broadcast (PRECOMMIT, QC_PREPARE)
+collect id=1 threshold=67% delay=(0.0001,0.001)
+propose id=1
+
+## Reply to proposer (PRECOMMIT, QC_PREPARE) with VOTE(PRECOMMIT)
+wait id=1 threshold=1 delay=(0.0001,0.001)
+reply id=2
+
+## Collect VOTE(PRECOMMIT) from 67% of the network and then broadcast (COMMIT, QC_PRECOMMIT)
+collect id=2 threshold=67% delay=(0.0001,0.001)
+propose id=3
+
+## Wait for proposer (COMMIT, QC_PRECOMMIT)
+wait id=3 threshold=1 delay=(0.0001,0.001)
+```
 
 ## Comparison on Alto-Like Network
 
+To simulate the performance of HotStuff, Simplicity, and Minimmit on an [Alto-like network](https://alto.commonware.xyz), run:
+
 ```
 cargo run -- --distribution us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 --task hotstuff.lazy
+cargo run -- --distribution us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 --task simplex.lazy
+cargo run -- --distribution us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 --task minimmit.lazy
 ```
