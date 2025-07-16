@@ -532,7 +532,7 @@ fn print_simulation_results(result: &Simulation, task_content: &str) {
     println!(
         "{}",
         format!(
-            "\nSimulation results for proposer {} ({}):\n",
+            "\nresults for proposer {} ({}):\n",
             result.leader_idx, result.leader_region
         )
         .bold()
@@ -552,7 +552,7 @@ fn print_simulation_results(result: &Simulation, task_content: &str) {
         if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
             // Print proposer latency if available
             if let Some(proposer_latency) = result.steps.leader.get(&line_num) {
-                let stat_line = format!("    [proposer] Latency: {proposer_latency:.2}ms");
+                let stat_line = format!("    [proposer] latency: {proposer_latency:.2}ms");
                 println!("{}", stat_line.magenta());
             }
 
@@ -583,7 +583,7 @@ fn print_regional_statistics(steps: &Steps, line: usize) {
     stats.sort_by(|a, b| a.0.cmp(&b.0));
     for (region, mean_ms, median_ms, std_dev_ms) in stats {
         let stat_line = format!(
-                "    [{region}] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms",
+                "    [{region}] mean: {mean_ms:.2}ms (dev: {std_dev_ms:.2}ms) | median: {median_ms:.2}ms",
             );
         println!("{}", stat_line.cyan());
     }
@@ -592,7 +592,7 @@ fn print_regional_statistics(steps: &Steps, line: usize) {
 /// Print aggregated results across all simulations
 fn print_aggregated_results(results: &[Simulation], task_content: &str) {
     println!("\n{}", "-".repeat(80).yellow());
-    println!("{}", "\nResults:\n".bold().blue());
+    println!("{}", "\nresults:\n".bold().blue());
 
     // Emit results
     let (observations, leader_observations) = aggregate_simulation_results(results);
@@ -667,8 +667,8 @@ fn print_aggregated_proposer_statistics(
     let median_ms = median(&mut lats_sorted);
     let std_dev_ms = std_dev(lats).unwrap_or(0.0);
     let stat_line = format!(
-                "    [proposer] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms"
-            );
+        "    [proposer] mean: {mean_ms:.2}ms (dev: {std_dev_ms:.2}ms) | median: {median_ms:.2}ms"
+    );
     println!("{}", stat_line.magenta());
 }
 
@@ -695,7 +695,7 @@ fn print_aggregated_regional_statistics(observations: &Observations, line_num: u
     stats.sort_by(|a, b| a.0.cmp(&b.0));
     for (region, mean_ms, median_ms, std_dev_ms) in stats {
         let stat_line = format!(
-                "    [{region}] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms",
+                "    [{region}] mean: {mean_ms:.2}ms (dev: {std_dev_ms:.2}ms) | median: {median_ms:.2}ms",
             );
         println!("{}", stat_line.blue());
     }
@@ -707,7 +707,7 @@ fn print_aggregated_regional_statistics(observations: &Observations, line_num: u
         let overall_median = median(&mut all_lats_sorted);
         let overall_std = std_dev(&all_lats).unwrap_or(0.0);
         let stat_line = format!(
-                "    [all] Mean: {overall_mean:.2}ms (Std Dev: {overall_std:.2}ms) | Median: {overall_median:.2}ms"
+                "    [all] mean: {overall_mean:.2}ms (dev: {overall_std:.2}ms) | median: {overall_median:.2}ms"
             );
         println!("{}", stat_line.white());
     }
