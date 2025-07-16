@@ -248,6 +248,7 @@ fn main() {
     let mut all_wait_latencies: HashMap<usize, HashMap<String, Vec<f64>>> = HashMap::new();
 
     for leader_idx in 0..peers {
+        let task_content_inner = task_content.clone();
         let (tx, rx) = channel();
         let verbose = verbose;
         let dsl_outer = dsl.clone();
@@ -396,8 +397,18 @@ fn main() {
             }
 
             if verbose {
-                println!("{}", format!("\nSimulation results for leader {}:\n", leader_idx).bold());
-                let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
+                let mut current = 0;
+                let leader_region = region_counts_outer.iter().find_map(|(reg, cnt)| {
+                    let start = current;
+                    current += *cnt;
+                    if leader_idx >= start && leader_idx < current {
+                        Some(reg.clone())
+                    } else {
+                        None
+                    }
+                }).unwrap();
+                println!("{}", format!("\nSimulation results for leader {} ({}):\n", leader_idx, leader_region).bold());
+                let dsl_lines: Vec<String> = task_content_inner.lines().map(|s| s.to_string()).collect();
                 let mut wait_lines: Vec<usize> = wait_latencies.keys().cloned().collect();
                 wait_lines.sort();
                 let mut wait_idx = 0;
