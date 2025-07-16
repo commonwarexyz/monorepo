@@ -485,13 +485,16 @@ fn main() {
                     responders.push(rx.next().await.unwrap());
                 }
 
+                // Ensure any messages in the simulator are queued (this is virtual time)
+                context.sleep(Duration::from_millis(10_000)).await;
+
                 // Send the shutdown signal to all jobs
                 for responder in responders {
                     responder.send(()).unwrap();
                 }
-
-                // Wait for all jobs to terminate
                 let results = try_join_all(jobs).await.unwrap();
+
+                // Process the results
                 let mut leader_latencies: Option<BTreeMap<usize, f64>> = None;
                 let mut wait_latencies: BTreeMap<usize, BTreeMap<Region, Vec<f64>>> =
                     BTreeMap::new();
@@ -516,6 +519,8 @@ fn main() {
                 (wait_latencies, leader_latencies.unwrap())
             }
         });
+
+        // Emit intermediate results
         let mut current = 0;
         let leader_region = region_counts
             .iter()
