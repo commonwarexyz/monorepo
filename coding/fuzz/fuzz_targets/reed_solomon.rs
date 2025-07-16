@@ -4,13 +4,13 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_coding::reed_solomon::{decode, encode, Chunk};
 use commonware_cryptography::Sha256;
 use libfuzzer_sys::fuzz_target;
-use rand::{seq::SliceRandom, thread_rng};
 
 #[derive(Debug)]
 struct FuzzInput {
     total: u16,
     min: u16,
     data: Vec<u8>,
+    shuffle_bytes: Vec<u8>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -19,8 +19,36 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         let total = u.int_in_range(min + 1..=1000)?; // total > min
         let data_len = u.int_in_range(0..=u16::MAX)?; // data.len() <= u32:Max
         let data = u.bytes(data_len as usize)?.to_vec();
+        let shuffle_bytes = u.bytes(8)?.to_vec();
 
-        Ok(FuzzInput { total, min, data })
+        Ok(FuzzInput {
+            total,
+            min,
+            data,
+            shuffle_bytes,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct ShuffledChunks {
+    pub chunks: Vec<Chunk<Sha256>>,
+}
+
+impl ShuffledChunks {
+    pub fn from_chunks<I>(chunks: I, fuzz_bytes: &[u8]) -> arbitrary::Result<Self>
+    where
+        I: IntoIterator<Item = Chunk<Sha256>>,
+    {
+        let mut chunks: Vec<_> = chunks.into_iter().collect();
+        let mut u = Unstructured::new(fuzz_bytes);
+
+        for i in (1..chunks.len()).rev() {
+            let j = u.int_in_range(0..=i)?;
+            chunks.swap(i, j);
+        }
+
+        Ok(ShuffledChunks { chunks })
     }
 }
 
@@ -28,6 +56,7 @@ fn fuzz(input: FuzzInput) {
     let total = input.total;
     let min = input.min;
     let payload = input.data;
+    let shuffle_bytes = input.shuffle_bytes;
 
     let (root, chunks) = match encode::<Sha256>(total, min, payload.to_vec()) {
         Ok(result) => result,
@@ -46,13 +75,10 @@ fn fuzz(input: FuzzInput) {
     };
     assert_eq!(decoded, payload, "decode with all chunks failed");
 
-    let subset: Vec<Chunk<Sha256>> = {
-        let mut temp: Vec<_> = chunks.into_iter().collect();
-        temp.shuffle(&mut thread_rng());
-        temp
-    };
+    let subset =
+        ShuffledChunks::from_chunks(chunks, &shuffle_bytes).expect("failed to shuffle chunks");
 
-    let decoded_subset = match decode::<Sha256>(total, min, &root, subset) {
+    let decoded_subset = match decode::<Sha256>(total, min, &root, subset.chunks) {
         Ok(data) => data,
         Err(e) => panic!("decode with min chunks failed: {e:?}"),
     };
