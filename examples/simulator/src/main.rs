@@ -133,6 +133,9 @@ fn parse_task(content: &str) -> Vec<(usize, SimCommand)> {
         if line.is_empty() {
             continue;
         }
+        if line.starts_with("#") {
+            continue;
+        }
         let parts: Vec<&str> = line.split_whitespace().collect();
         let command = parts[0];
         let mut args: HashMap<&str, &str> = HashMap::new();
