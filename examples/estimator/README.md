@@ -24,14 +24,14 @@ cargo run -- [OPTIONS]
 
 ### Command-Line Options
 
-- `--distribution <DISTRIBUTION>` (required): Specify regions and peer counts in the format `<region>:<count>`, comma-separated. Example: `us-east-1:10,eu-west-1:5`. Regions must match AWS regions from the latency data (e.g., us-east-1, eu-west-1).
+- `--distribution <DISTRIBUTION>` (required): Specify the distribution of peers across regions in the format `<region>:<count>`, comma-separated. Example: `us-east-1:10,eu-west-1:5`. Regions must match AWS regions from the latency data (e.g., us-east-1, eu-west-1).
 - `--task <PATH>` (required): Path to the DSL file defining the simulation behavior (e.g., `minimmit.lazy`).
 - `--reload-latency-data` (optional flag): Download fresh latency data from cloudping.co instead of using embedded data.
 
 ### Example
 
 ```
-cargo run -- --distribution us-east-1:3,eu-west-1:2 --task examples/simulator/minimmit.lazy
+cargo run -- --distribution us-east-1:3,eu-west-1:2 --task examples/estimator/hotstuff.lazy
 ```
 
 This runs simulations with 5 peers (3 in us-east-1, 2 in eu-west-1), using the DSL from `minimmit.lazy`.
@@ -106,7 +106,7 @@ The DSL is a plain text file where each non-empty line represents a command. Com
 - Test with small peer counts first to validate DSL logic.
 - For percentages, note that they are ceiled (e.g., 80% of 5 peers = ceil(4) = 4).
 - Avoid infinite loops; ensure waits/collects can eventually complete based on prior sends.
-- Example file (`minimmit.lazy`):
+- Example file (`hotstuff.lazy`):
   ```
   propose id=0
   wait id=0 threshold=1 delay=(0.0001,0.001)
