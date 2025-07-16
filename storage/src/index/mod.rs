@@ -927,4 +927,17 @@ mod tests {
         assert!(ctx.encode().contains("keys 1"));
         assert!(ctx.encode().contains("items 1"));
     }
+
+    #[test_traced]
+    fn test_index_large_collision_chain_stack_overflow() {
+        let context = deterministic::Context::default();
+        let mut index = Index::init(context, TwoCap);
+
+        // Create a large collision chain with 50,000 items on the same key
+        for i in 0..50000 {
+            index.insert(b"", i as u64);
+        }
+
+        // Should not stack overflow (using default Rust drop, it will)
+    }
 }

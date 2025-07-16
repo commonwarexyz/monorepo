@@ -541,3 +541,16 @@ impl<T: Translator, V: Eq> Index<T, V> {
         }
     }
 }
+
+impl<T: Translator, V: Eq> Drop for Index<T, V> {
+    /// To avoid stack overflow on keys with many collisions, we implement an iterative
+    /// drop (in lieu of Rust's default recursive drop).
+    fn drop(&mut self) {
+        for (_, mut record) in self.map.drain() {
+            let mut next = record.next.take();
+            while let Some(mut record) = next {
+                next = record.next.take();
+            }
+        }
+    }
+}
