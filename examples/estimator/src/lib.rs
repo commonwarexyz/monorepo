@@ -214,7 +214,7 @@ pub fn median(data: &mut [f64]) -> f64 {
     if data.is_empty() {
         return 0.0;
     }
-    data.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    data.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let mid = data.len() / 2;
     if data.len() % 2 == 0 {
         (data[mid - 1] + data[mid]) / 2.0
