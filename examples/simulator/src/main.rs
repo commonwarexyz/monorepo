@@ -598,7 +598,7 @@ fn main() {
             let is_collect = line.starts_with("collect");
             if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
                 if let Some(proposer_latency) = leader_latencies.get(&line_num) {
-                    let stat_line = format!("    [proposer] Latency: {:.2}ms", proposer_latency);
+                    let stat_line = format!("    [proposer] Latency: {proposer_latency:.2}ms");
                     println!("{}", stat_line.magenta());
                 }
                 if !is_collect {
@@ -643,7 +643,7 @@ fn main() {
         }
     }
     println!("\n{}", "-".repeat(80).yellow());
-    println!("{}", "\nAveraged simulation results:\n".bold().white());
+    println!("{}", "\nAveraged simulation results:\n".bold().blue());
     let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
     let mut wait_lines: Vec<usize> = all_wait_latencies.keys().cloned().collect();
     wait_lines.sort();
@@ -656,9 +656,9 @@ fn main() {
             if let Some(lats) = all_leader_latencies.get(&line_num) {
                 if !lats.is_empty() {
                     let mut lats_sorted = lats.clone();
-                    let mean_ms = mean(&lats);
+                    let mean_ms = mean(lats);
                     let median_ms = median(&mut lats_sorted);
-                    let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
+                    let std_dev_ms = std_dev(lats).unwrap_or(0.0);
                     let stat_line = format!("    [proposer] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms");
                     println!("{}", stat_line.magenta());
                 }
