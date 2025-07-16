@@ -1,5 +1,5 @@
 [package]
-name = "commonware-simulator"
+name = "commonware-estimator"
 edition = "2021"
 publish = true
 version = "0.0.56"
@@ -7,8 +7,8 @@ license = "MIT OR Apache-2.0"
 description = "TBA"
 readme = "README.md"
 homepage = "https://commonware.xyz"
-repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/simulator"
-documentation = "https://docs.rs/commonware-simulator"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/estimator"
+documentation = "https://docs.rs/commonware-estimator"
 
 [dependencies]
 commonware-cryptography = { workspace = true }
