@@ -1,14 +1,61 @@
+use std::collections::HashMap;
+
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 use commonware_p2p::simulated::{Config, Network};
 use commonware_runtime::{deterministic, Metrics, Runner};
+use reqwest::blocking::Client;
 use tracing::info;
 
 const DEFAULT_CHANNEL: u32 = 0;
 
 /// Returns the version of the crate.
-pub fn crate_version() -> &'static str {
+fn crate_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+type Region = String;
+type LatJitPair = (f64, f64); // (avg_latency_ms, jitter_ms)
+type LatencyMap = HashMap<Region, HashMap<Region, LatJitPair>>;
+
+#[derive(serde::Deserialize)]
+struct ApiResp {
+    data: HashMap<Region, HashMap<Region, f64>>,
+}
+
+const BASE: &str = "https://www.cloudping.co/api/latencies";
+
+fn download_latency_data() -> LatencyMap {
+    let cli = Client::builder().build().unwrap();
+
+    // Pull P50 and P90 matrices (time-frame: last 1 year)
+    let p50: ApiResp = cli
+        .get(format!("{BASE}?percentile=p_50&timeframe=1Y"))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let p90: ApiResp = cli
+        .get(format!("{BASE}?percentile=p_90&timeframe=1Y"))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+
+    // Merge into LatencyMap with jitter = P90 − P50
+    let mut map: LatencyMap = HashMap::new();
+    for (from, inner_p50) in p50.data {
+        let inner_p90 = &p90.data[&from];
+        let mut dest_map = HashMap::new();
+        for (to, lat50) in inner_p50 {
+            if let Some(lat90) = inner_p90.get(&to) {
+                dest_map.insert(to.clone(), (lat50, lat90 - lat50));
+            }
+        }
+        map.insert(from, dest_map);
+    }
+
+    map
 }
 
 fn main() {
@@ -62,6 +109,10 @@ fn main() {
         message_processing_time,
         "Initializing simulator"
     );
+
+    // Download latency data
+    let latency_map = download_latency_data();
+    info!(?latency_map, "downloaded latency data");
 
     // Configure deterministic runtime
     let runtime_cfg = deterministic::Config::new();
