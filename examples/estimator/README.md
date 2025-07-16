@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-estimator.svg)](https://crates.io/crates/commonware-estimator)
 
-Simulate the performance of mechanisms under realistic network conditions.
+Simulate mechanism performance under realistic network conditions.
 
 ## Overview
 

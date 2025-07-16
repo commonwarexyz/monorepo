@@ -1,4 +1,4 @@
-//! Simulate the performance of mechanisms under realistic network conditions.
+//! Simulate mechanism performance under realistic network conditions.
 
 use reqwest::blocking::Client;
 use std::{
