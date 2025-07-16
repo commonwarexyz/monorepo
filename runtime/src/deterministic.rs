@@ -53,7 +53,7 @@ use std::{
     mem::replace,
     net::SocketAddr,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -466,14 +466,18 @@ enum Operation {
 struct Task {
     id: u128,
     label: Label,
-    tasks: Arc<Tasks>,
+    tasks: Weak<Tasks>,
 
     operation: Operation,
 }
 
 impl ArcWake for Task {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        arc_self.tasks.enqueue(arc_self.clone());
+        // Upgrade the weak reference to re-enqueue this task.
+        // If upgrade fails, the task queue has been dropped and no action is required.
+        if let Some(tasks) = arc_self.tasks.upgrade() {
+            tasks.enqueue(arc_self.clone());
+        }
     }
 }
 
@@ -519,7 +523,7 @@ impl Tasks {
         queue.push(Arc::new(Task {
             id,
             label: Label::root(),
-            tasks: arc_self.clone(),
+            tasks: Arc::downgrade(arc_self),
             operation: Operation::Root,
         }));
     }
@@ -535,7 +539,7 @@ impl Tasks {
         queue.push(Arc::new(Task {
             id,
             label,
-            tasks: arc_self.clone(),
+            tasks: Arc::downgrade(arc_self),
             operation: Operation::Work {
                 future: Mutex::new(future),
                 completed: Mutex::new(false),
