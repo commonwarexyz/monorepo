@@ -2,6 +2,7 @@ use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 use commonware_p2p::simulated::{Config, Network};
 use commonware_runtime::{deterministic, Metrics, Runner};
+use tracing::info;
 
 const DEFAULT_CHANNEL: u32 = 0;
 
@@ -11,6 +12,11 @@ pub fn crate_version() -> &'static str {
 }
 
 fn main() {
+    // Create logger
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
+
     // Parse arguments
     let matches = Command::new("commonware-simulator")
         .about("TBA")
@@ -50,6 +56,12 @@ fn main() {
         "must have at least as many peers as regions"
     );
     let message_processing_time = *matches.get_one::<u64>("message-processing-time").unwrap();
+    info!(
+        peers,
+        ?regions,
+        message_processing_time,
+        "Initializing simulator"
+    );
 
     // Configure deterministic runtime
     let runtime_cfg = deterministic::Config::new();
@@ -77,7 +89,10 @@ fn main() {
                 .await
                 .unwrap();
             let region = regions[i % regions.len()].clone();
+            info!(?identity, region, "registered peer");
             identities.push((identity, region, sender, receiver));
         }
+
+        // Create connections between all peers
     });
 }
