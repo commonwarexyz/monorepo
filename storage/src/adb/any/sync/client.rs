@@ -1015,207 +1015,26 @@ pub(crate) mod tests {
         });
     }
 
-    // Test that the client fails to sync if the lower bound is decreased
+    /// Test that the client fails to sync if the lower bound is decreased
     #[test_traced("WARN")]
     fn test_target_update_lower_bound_decrease() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
             let mut target_db = create_test_db(context.clone()).await;
-            let initial_ops = create_test_ops(50);
-            target_db = apply_ops(target_db, initial_ops).await;
-            target_db.commit().await.unwrap();
-
-            // Capture initial target state (inactivity floor, size, hash)
-            let mut hasher = create_test_hasher();
-            let initial_lower_bound = target_db.inactivity_floor_loc;
-            let initial_upper_bound = target_db.op_count() - 1;
-            let initial_hash = target_db.root(&mut hasher);
-
-            // Create client with initial target
-            let config = Config {
-                context: context.clone(),
-                db_config: create_test_config(context.next_u64()),
-                fetch_batch_size: NonZeroU64::new(5).unwrap(),
-                target: SyncTarget {
-                    lower_bound_ops: initial_lower_bound,
-                    upper_bound_ops: initial_upper_bound,
-                    hash: initial_hash,
-                },
-                resolver: &target_db,
-                hasher: create_test_hasher(),
-                apply_batch_size: 1000,
-            };
-            let (mut update_tx, update_rx) = mpsc::unbounded();
-            let client = Client::new_with_updater(config, Some(update_rx))
-                .await
-                .unwrap();
-
-            let _ = update_tx
-                .send(SyncTargetUpdate {
-                    target: SyncTarget {
-                        lower_bound_ops: initial_lower_bound.saturating_sub(1),
-                        upper_bound_ops: initial_upper_bound.saturating_add(1),
-                        hash: initial_hash,
-                    },
-                })
-                .await
-                .unwrap();
-
-            let result = client.step().await;
-            assert!(matches!(result, Err(Error::SyncTargetMovedBackward { .. })));
-
-            target_db.destroy().await.unwrap();
-        });
-    }
-
-    // Test that the client fails to sync if the upper bound is decreased
-    #[test_traced("WARN")]
-    fn test_target_update_upper_bound_decrease() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Create and populate target database
-            let mut target_db = create_test_db(context.clone()).await;
-            let initial_ops = create_test_ops(50);
-            target_db = apply_ops(target_db, initial_ops).await;
-            target_db.commit().await.unwrap();
-
-            // Capture initial target state (inactivity floor, size, hash)
-            let mut hasher = create_test_hasher();
-            let initial_lower_bound = target_db.inactivity_floor_loc;
-            let initial_upper_bound = target_db.op_count() - 1;
-            let initial_hash = target_db.root(&mut hasher);
-
-            // Create client with initial target
-            let config = Config {
-                context: context.clone(),
-                db_config: create_test_config(context.next_u64()),
-                fetch_batch_size: NonZeroU64::new(5).unwrap(),
-                target: SyncTarget {
-                    lower_bound_ops: initial_lower_bound,
-                    upper_bound_ops: initial_upper_bound,
-                    hash: initial_hash,
-                },
-                resolver: &target_db,
-                hasher: create_test_hasher(),
-                apply_batch_size: 1000,
-            };
-            let (mut update_tx, update_rx) = mpsc::unbounded();
-            let client = Client::new_with_updater(config, Some(update_rx))
-                .await
-                .unwrap();
-
-            let _ = update_tx
-                .send(SyncTargetUpdate {
-                    target: SyncTarget {
-                        lower_bound_ops: initial_lower_bound.saturating_add(1),
-                        upper_bound_ops: initial_upper_bound.saturating_sub(1),
-                        hash: initial_hash,
-                    },
-                })
-                .await
-                .unwrap();
-
-            let result = client.step().await;
-            assert!(matches!(result, Err(Error::SyncTargetMovedBackward { .. })));
-
-            target_db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_target_update_bounds_increase() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Create target database with operations
-            let mut target_db = create_test_db(context.clone()).await;
-            let target_ops = create_test_ops(100);
-            target_db = apply_ops(target_db, target_ops.clone()).await;
-            target_db.commit().await.unwrap();
-
-            // Get the target state
-            let mut hasher = create_test_hasher();
-            let target_lower_bound = target_db.inactivity_floor_loc;
-            let target_upper_bound = target_db.op_count() - 1;
-            let target_hash = target_db.root(&mut hasher);
-
-            // Set up target update to send before sync starts
-            let (mut update_sender, update_receiver) = mpsc::unbounded();
-
-            // Create client with fake initial target that will be updated
-            let config = Config {
-                db_config: create_test_config(context.next_u64()),
-                fetch_batch_size: NZU64!(10),
-                target: SyncTarget {
-                    hash: Digest::from([1u8; 32]),
-                    lower_bound_ops: 10,
-                    upper_bound_ops: 100,
-                },
-                context: context.clone(),
-                resolver: &target_db,
-                hasher: create_test_hasher(),
-                apply_batch_size: 1024,
-            };
-
-            let client = Client::new_with_updater(config, Some(update_receiver))
-                .await
-                .unwrap();
-
-            // Send target update before sync starts - increase bounds and change hash
-            let _ = update_sender
-                .send(SyncTargetUpdate {
-                    target: SyncTarget {
-                        hash: target_hash,
-                        lower_bound_ops: target_lower_bound,
-                        upper_bound_ops: target_upper_bound,
-                    },
-                })
-                .await;
-
-            // Start sync process - should succeed with updated target
-            let result = client.sync().await;
-
-            // Verify that sync completed successfully with the updated bounds
-            match result {
-                Ok(synced_db) => {
-                    // Verify the synced database has the expected state
-                    let mut hasher = create_test_hasher();
-                    assert_eq!(synced_db.root(&mut hasher), target_hash);
-                    assert_eq!(synced_db.op_count(), target_upper_bound + 1);
-                    assert_eq!(synced_db.inactivity_floor_loc, target_lower_bound);
-
-                    synced_db.destroy().await.unwrap();
-                }
-                Err(e) => {
-                    panic!("Sync should have succeeded but failed with: {:?}", e);
-                }
-            }
-
-            target_db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_target_update_invalid_bounds() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Create a test database
-            let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(50);
             target_db = apply_ops(target_db, target_ops).await;
             target_db.commit().await.unwrap();
 
-            // Get initial valid target state
+            // Capture initial target state
             let mut hasher = create_test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
             let initial_upper_bound = target_db.op_count() - 1;
             let initial_hash = target_db.root(&mut hasher);
 
-            // Set up target update with invalid bounds (lower > upper)
-            let (mut update_sender, update_receiver) = mpsc::unbounded();
-
-            // Create client
+            // Create client with initial target
             let config = Config {
+                context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(5),
                 target: SyncTarget {
@@ -1223,17 +1042,188 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                context: context.clone(),
                 resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
             };
-
+            let (mut update_sender, update_receiver) = mpsc::unbounded();
             let client = Client::new_with_updater(config, Some(update_receiver))
                 .await
                 .unwrap();
 
-            // Send target update with invalid bounds before sync starts
+            // Send target update with decreased lower bound
+            let _ = update_sender
+                .send(SyncTargetUpdate {
+                    target: SyncTarget {
+                        hash: initial_hash,
+                        lower_bound_ops: initial_lower_bound.saturating_sub(1),
+                        upper_bound_ops: initial_upper_bound.saturating_add(1),
+                    },
+                })
+                .await
+                .unwrap();
+
+            let result = client.step().await;
+            assert!(matches!(result, Err(Error::SyncTargetMovedBackward { .. })));
+
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that the client fails to sync if the upper bound is decreased
+    #[test_traced("WARN")]
+    fn test_target_update_upper_bound_decrease() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate target database
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(50);
+            target_db = apply_ops(target_db, target_ops).await;
+            target_db.commit().await.unwrap();
+
+            // Capture initial target state
+            let mut hasher = create_test_hasher();
+            let initial_lower_bound = target_db.inactivity_floor_loc;
+            let initial_upper_bound = target_db.op_count() - 1;
+            let initial_hash = target_db.root(&mut hasher);
+
+            // Create client with initial target
+            let config = Config {
+                context: context.clone(),
+                db_config: create_test_config(context.next_u64()),
+                fetch_batch_size: NZU64!(5),
+                target: SyncTarget {
+                    hash: initial_hash,
+                    lower_bound_ops: initial_lower_bound,
+                    upper_bound_ops: initial_upper_bound,
+                },
+                resolver: &target_db,
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+            };
+            let (mut update_sender, update_receiver) = mpsc::unbounded();
+            let client = Client::new_with_updater(config, Some(update_receiver))
+                .await
+                .unwrap();
+
+            // Send target update with decreased upper bound
+            let _ = update_sender
+                .send(SyncTargetUpdate {
+                    target: SyncTarget {
+                        hash: initial_hash,
+                        lower_bound_ops: initial_lower_bound.saturating_add(1),
+                        upper_bound_ops: initial_upper_bound.saturating_sub(1),
+                    },
+                })
+                .await
+                .unwrap();
+
+            let result = client.step().await;
+            assert!(matches!(result, Err(Error::SyncTargetMovedBackward { .. })));
+
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that the client succeeds when both bounds are increased
+    #[test_traced("WARN")]
+    fn test_target_update_bounds_increase() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate target database
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(100);
+            target_db = apply_ops(target_db, target_ops.clone()).await;
+            target_db.commit().await.unwrap();
+
+            // Capture final target state
+            let mut hasher = create_test_hasher();
+            let final_lower_bound = target_db.inactivity_floor_loc;
+            let final_upper_bound = target_db.op_count() - 1;
+            let final_hash = target_db.root(&mut hasher);
+
+            // Create client with placeholder initial target
+            let config = Config {
+                context: context.clone(),
+                db_config: create_test_config(context.next_u64()),
+                fetch_batch_size: NZU64!(10),
+                target: SyncTarget {
+                    hash: Digest::from([1u8; 32]),
+                    lower_bound_ops: 10,
+                    upper_bound_ops: 100,
+                },
+                resolver: &target_db,
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+            };
+            let (mut update_sender, update_receiver) = mpsc::unbounded();
+            let client = Client::new_with_updater(config, Some(update_receiver))
+                .await
+                .unwrap();
+
+            // Send target update with increased bounds
+            let _ = update_sender
+                .send(SyncTargetUpdate {
+                    target: SyncTarget {
+                        hash: final_hash,
+                        lower_bound_ops: final_lower_bound,
+                        upper_bound_ops: final_upper_bound,
+                    },
+                })
+                .await;
+
+            // Complete sync with updated target
+            let synced_db = client.sync().await.unwrap();
+
+            // Verify the synced database has the expected state
+            let mut hasher = create_test_hasher();
+            assert_eq!(synced_db.root(&mut hasher), final_hash);
+            assert_eq!(synced_db.op_count(), final_upper_bound + 1);
+            assert_eq!(synced_db.inactivity_floor_loc, final_lower_bound);
+            assert_eq!(synced_db.oldest_retained_loc().unwrap(), final_lower_bound);
+
+            synced_db.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that the client fails to sync with invalid bounds (lower > upper)
+    #[test_traced("WARN")]
+    fn test_target_update_invalid_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate target database
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(50);
+            target_db = apply_ops(target_db, target_ops).await;
+            target_db.commit().await.unwrap();
+
+            // Capture initial target state
+            let mut hasher = create_test_hasher();
+            let initial_lower_bound = target_db.inactivity_floor_loc;
+            let initial_upper_bound = target_db.op_count() - 1;
+            let initial_hash = target_db.root(&mut hasher);
+
+            // Create client with initial target
+            let config = Config {
+                context: context.clone(),
+                db_config: create_test_config(context.next_u64()),
+                fetch_batch_size: NZU64!(5),
+                target: SyncTarget {
+                    hash: initial_hash,
+                    lower_bound_ops: initial_lower_bound,
+                    upper_bound_ops: initial_upper_bound,
+                },
+                resolver: &target_db,
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+            };
+            let (mut update_sender, update_receiver) = mpsc::unbounded();
+            let client = Client::new_with_updater(config, Some(update_receiver))
+                .await
+                .unwrap();
+
+            // Send target update with invalid bounds (lower > upper)
             let _ = update_sender
                 .send(SyncTargetUpdate {
                     target: SyncTarget {
@@ -1251,48 +1241,49 @@ pub(crate) mod tests {
         });
     }
 
+    /// Test that sync completes successfully when target is already available
     #[test_traced("WARN")]
     fn test_target_update_on_done_client() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            // Create a simple completed database
+            // Create and populate target database
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(10);
             target_db = apply_ops(target_db, target_ops).await;
             target_db.commit().await.unwrap();
 
-            // Get valid target state
+            // Capture target state
             let mut hasher = create_test_hasher();
-            let lower_bound = target_db.inactivity_floor_loc;
-            let upper_bound = target_db.op_count() - 1;
+            let target_lower_bound = target_db.inactivity_floor_loc;
+            let target_upper_bound = target_db.op_count() - 1;
             let target_hash = target_db.root(&mut hasher);
 
-            // Create client with target that will complete quickly
+            // Create client with target that will complete immediately
             let config = Config {
+                context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(20),
                 target: SyncTarget {
                     hash: target_hash,
-                    lower_bound_ops: lower_bound,
-                    upper_bound_ops: upper_bound,
+                    lower_bound_ops: target_lower_bound,
+                    upper_bound_ops: target_upper_bound,
                 },
-                context: context.clone(),
                 resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
             };
 
             // Complete the sync
-            let db = sync(config).await.unwrap();
+            let synced_db = sync(config).await.unwrap();
 
             // Verify the synced database has the expected state
             let mut hasher = create_test_hasher();
-            assert_eq!(db.root(&mut hasher), target_hash);
-            assert_eq!(db.op_count(), upper_bound + 1);
-            assert_eq!(db.inactivity_floor_loc, lower_bound);
-            assert_eq!(db.oldest_retained_loc().unwrap(), lower_bound);
+            assert_eq!(synced_db.root(&mut hasher), target_hash);
+            assert_eq!(synced_db.op_count(), target_upper_bound + 1);
+            assert_eq!(synced_db.inactivity_floor_loc, target_lower_bound);
+            assert_eq!(synced_db.oldest_retained_loc().unwrap(), target_lower_bound);
 
-            db.destroy().await.unwrap();
+            synced_db.destroy().await.unwrap();
             target_db.destroy().await.unwrap();
         });
     }
