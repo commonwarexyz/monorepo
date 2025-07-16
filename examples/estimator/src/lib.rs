@@ -1,7 +1,9 @@
 //! Simulate mechanism performance under realistic network conditions.
 
-use commonware_cryptography::ed25519::{self, PublicKey};
-use commonware_cryptography::{PrivateKeyExt, Signer};
+use commonware_cryptography::{
+    ed25519::{self, PublicKey},
+    PrivateKeyExt, Signer,
+};
 use commonware_p2p::Recipients;
 use reqwest::blocking::Client;
 use std::{
