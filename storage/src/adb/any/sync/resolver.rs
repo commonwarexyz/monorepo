@@ -47,7 +47,6 @@ pub trait Resolver {
     ) -> impl Future<Output = Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error>>;
 }
 
-/// Core implementation for Any database
 impl<E, K, V, H, T> Resolver for Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
