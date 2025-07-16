@@ -1,6 +1,5 @@
 propose 0
-wait 0 1
-delay 10
+wait 0 1 10
 broadcast 1
-wait 1 40%
-wait 1 80%
+wait 1 40% 1
+wait 1 80% 1
