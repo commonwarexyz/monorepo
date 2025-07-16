@@ -17,6 +17,7 @@ members = [
     "examples/chat",
     "examples/flood",
     "examples/log",
+    "examples/simulator",
     "examples/sync",
     "examples/vrf",
 

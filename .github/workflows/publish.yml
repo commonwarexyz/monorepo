@@ -115,3 +115,8 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    - name: Publish simulator
+      run: cargo publish --manifest-path examples/simulator/Cargo.toml
+      continue-on-error: true
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
