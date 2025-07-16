@@ -1283,8 +1283,15 @@ pub(crate) mod tests {
             };
 
             // Complete the sync
-            // TODO verify state
             let db = sync(config).await.unwrap();
+
+            // Verify the synced database has the expected state
+            let mut hasher = create_test_hasher();
+            assert_eq!(db.root(&mut hasher), target_hash);
+            assert_eq!(db.op_count(), upper_bound + 1);
+            assert_eq!(db.inactivity_floor_loc, lower_bound);
+            assert_eq!(db.oldest_retained_loc().unwrap(), lower_bound);
+
             db.destroy().await.unwrap();
             target_db.destroy().await.unwrap();
         });
