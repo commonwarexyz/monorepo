@@ -9,7 +9,7 @@ use commonware_utils::quorum;
 use futures::future::try_join_all;
 use reqwest::blocking::Client;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -110,6 +110,58 @@ fn std_dev(data: &[f64]) -> Option<f64> {
     Some(variance.sqrt())
 }
 
+#[derive(Clone)]
+enum SimCommand {
+    Propose(u32),
+    Broadcast(u32),
+    Wait(u32, Threshold),
+}
+
+#[derive(Clone)]
+enum Threshold {
+    Count(usize),
+    Percent(f64),
+}
+
+fn parse_task(content: &str) -> Vec<SimCommand> {
+    let mut cmds = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        match parts[0] {
+            "propose" => {
+                let id = parts[1].parse::<u32>().expect("Invalid propose id");
+                cmds.push(SimCommand::Propose(id));
+            }
+            "broadcast" => {
+                let id = parts[1].parse::<u32>().expect("Invalid broadcast id");
+                cmds.push(SimCommand::Broadcast(id));
+            }
+            "wait" => {
+                let id = parts[1].parse::<u32>().expect("Invalid wait id");
+                let thresh_str = parts[2];
+                let thresh = if thresh_str.ends_with('%') {
+                    let p = thresh_str
+                        .trim_end_matches('%')
+                        .parse::<f64>()
+                        .expect("Invalid percent")
+                        / 100.0;
+                    Threshold::Percent(p)
+                } else {
+                    let c = thresh_str.parse::<usize>().expect("Invalid count");
+                    Threshold::Count(c)
+                };
+                cmds.push(SimCommand::Wait(id, thresh));
+            }
+            _ => panic!("Unknown command: {}", parts[0]),
+        }
+    }
+    cmds
+}
+
 fn main() {
     // Create logger
     tracing_subscriber::fmt()
@@ -129,18 +181,18 @@ fn main() {
                 .help("Regions to simulate in the form <region>:<count>, e.g. us-east-1:3,eu-west-1:2"),
         )
         .arg(
-            Arg::new("message-processing-time")
-                .long("message-processing-time")
-                .required(true)
-                .value_parser(value_parser!(u64))
-                .help("Message processing time in milliseconds"),
-        )
-        .arg(
             Arg::new("reload-latency-data")
                 .long("reload-latency-data")
                 .required(false)
                 .num_args(0)
                 .help("Reload latency data from cloudping.co"),
+        )
+        .arg(
+            Arg::new("task")
+                .long("task")
+                .required(true)
+                .value_parser(value_parser!(String))
+                .help("Path to DSL file defining the simulation behavior"),
         )
         .get_matches();
     let region_counts = matches
@@ -166,13 +218,13 @@ fn main() {
         peers >= regions.len(),
         "must have at least as many peers as regions"
     );
-    let message_processing_time = *matches.get_one::<u64>("message-processing-time").unwrap();
-    info!(
-        peers,
-        ?region_counts,
-        message_processing_time,
-        "Initializing simulator"
-    );
+    let task_path = matches
+        .get_one::<String>("task")
+        .expect("task file required")
+        .clone();
+    let task_content = std::fs::read_to_string(&task_path).expect("Failed to read task file");
+    let dsl = parse_task(&task_content);
+    info!(peers, ?region_counts, "Initializing simulator");
 
     // Download latency data
     let latency_map = if matches.get_flag("reload-latency-data") {
@@ -210,8 +262,7 @@ fn main() {
                     .register(identity.clone(), DEFAULT_CHANNEL)
                     .await
                     .unwrap();
-                let (sender, receiver) =
-                    wrap::<_, _, (ed25519::PublicKey, u8)>(((), ()), sender, receiver);
+                let (sender, receiver) = wrap::<_, _, u8>((), sender, receiver);
                 identities.push((identity, region.clone(), sender, receiver));
                 peer_idx += 1;
             }
@@ -239,78 +290,62 @@ fn main() {
             }
         }
 
-        // For each peer, see how long it takes to send a message (and hear back from all other peers)
+        // For each peer, see how long it takes to complete the DSL script
         let mut jobs = Vec::new();
         for (i, (identity, region, mut sender, mut receiver)) in identities.into_iter().enumerate()
         {
             let job = context.with_label("job");
+            let dsl = dsl.clone();
             jobs.push(job.spawn(move |ctx| async move {
                 let start = ctx.current();
-
-                // Send message
-                sender
-                    .send(commonware_p2p::Recipients::All, (identity.clone(), 0), true)
-                    .await
-                    .unwrap();
-
-                // Loop until all messages are received
-                let inbound_notarized = 0;
-                let outbound_notarized = 0;
-                let inbound_finalized = 0;
-                let outbound_finalized = 0;
+                let mut current_index = 0;
+                let mut received: HashMap<u32, HashSet<ed25519::PublicKey>> = HashMap::new();
                 loop {
-                    if let Ok((other_identity, message)) = receiver.recv().await {
-                        // Wait for message to be processed
-                        ctx.sleep(Duration::from_millis(message_processing_time))
-                            .await;
-
-                        // Handle inbound message
-                        match message {
-                            // Handle propose message
-                            Ok((_, 0)) => {
+                    if current_index >= dsl.len() {
+                        break;
+                    }
+                    let mut advanced = true;
+                    while advanced {
+                        advanced = false;
+                        if current_index >= dsl.len() {
+                            break;
+                        }
+                        match &dsl[current_index] {
+                            SimCommand::Propose(id) | SimCommand::Broadcast(id) => {
                                 sender
-                                    .send(commonware_p2p::Recipients::One(other_identity), 1, true)
+                                    .send(commonware_p2p::Recipients::All, *id as u8, true)
                                     .await
                                     .unwrap();
-                                outbound_notarized += 1;
+                                received.entry(*id).or_default().insert(identity.clone());
+                                current_index += 1;
+                                advanced = true;
                             }
-                            // Handle notarize message
-                            Ok((proposal, 1)) => {
-                                inbound_notarized += 1;
-
-                                // Send finalize message
-                                if inbound_notarized != quorum(peers as u32 - 1) {
-                                    continue;
+                            SimCommand::Wait(id, thresh) => {
+                                let count = received.get(id).map_or(0, |s| s.len());
+                                let required = match thresh {
+                                    Threshold::Percent(p) => (((peers as f64) * p).ceil() as usize),
+                                    Threshold::Count(c) => *c,
+                                };
+                                if count >= required {
+                                    current_index += 1;
+                                    advanced = true;
                                 }
-                                sender
-                                    .send(commonware_p2p::Recipients::All, 2, true)
-                                    .await
-                                    .unwrap();
-                            }
-                            // Handle finalize message
-                            Ok(2) => {
-                                // Check if we have enough to finalize
-                                inbound_finalized += 1;
-                                if inbound_finalized != quorum(peers as u32 - 1) {
-                                    continue;
-                                }
-                            }
-                            Ok(message) => {
-                                panic!("unexpected message: {message:?}");
-                            }
-                            Err(error) => {
-                                panic!("error receiving message: {error:?}");
                             }
                         }
                     }
-
-                    if sent == peers - 1 && received == peers - 1 {
-                        break;
+                    let (other_identity, message) = receiver.recv().await.unwrap();
+                    if let Ok(msg_id) = message {
+                        received
+                            .entry(msg_id as u32)
+                            .or_default()
+                            .insert(other_identity);
+                    } else {
+                        panic!("error receiving message: {:?}", message);
                     }
                 }
 
-                // Return results
-                (region, completed.unwrap().duration_since(start).unwrap())
+                let duration = ctx.current().duration_since(start).unwrap();
+                (region, duration)
             }));
         }
 
