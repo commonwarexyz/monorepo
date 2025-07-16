@@ -273,7 +273,7 @@ fn main() {
     let leaders: Vec<usize> = (0..peers).collect();
     let mut results: Vec<SimResult> = Vec::new();
     let mut all_wait_latencies: BTreeMap<usize, BTreeMap<String, Vec<f64>>> = BTreeMap::new();
-    for &leader_idx in leaders {
+    for leader_idx in leaders {
         let (tx, rx) = channel();
         let runtime_cfg = deterministic::Config::default().with_seed(leader_idx as u64);
         let executor = deterministic::Runner::new(runtime_cfg);
@@ -327,7 +327,7 @@ fn main() {
                     let job = context.with_label("job");
                     let dsl = dsl_clone.clone();
                     jobs.push(job.spawn(move |ctx| async move {
-                        let is_leader = i == leader_idx_clone;
+                        let is_leader = i == leader_idx;
                         let start = ctx.current();
                         let mut completions: Vec<(usize, Duration)> = Vec::new();
                         let mut current_index = 0;
@@ -369,7 +369,7 @@ fn main() {
                                     }
                                     SimCommand::Reply(id) => {
                                         let leader_identity =
-                                            ed25519::PrivateKey::from_seed(leader_idx_clone as u64)
+                                            ed25519::PrivateKey::from_seed(leader_idx as u64)
                                                 .public_key();
                                         if is_leader {
                                             received
@@ -396,7 +396,7 @@ fn main() {
                                             let count = received.get(id).map_or(0, |s| s.len());
                                             let required = match thresh {
                                                 Threshold::Percent(p) => {
-                                                    ((peers_clone as f64) * *p).ceil() as usize
+                                                    ((peers as f64) * *p).ceil() as usize
                                                 }
                                                 Threshold::Count(c) => *c,
                                             };
@@ -422,7 +422,7 @@ fn main() {
                                         let count = received.get(id).map_or(0, |s| s.len());
                                         let required = match thresh {
                                             Threshold::Percent(p) => {
-                                                ((peers_clone as f64) * *p).ceil() as usize
+                                                ((peers as f64) * *p).ceil() as usize
                                             }
                                             Threshold::Count(c) => *c,
                                         };
