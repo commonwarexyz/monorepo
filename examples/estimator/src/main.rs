@@ -54,6 +54,15 @@ struct PeerContext {
     dsl: Vec<(usize, SimCommand)>,
 }
 
+/// Context data for command processing
+struct ProcessContext {
+    is_leader: bool,
+    leader_idx: usize,
+    peers: usize,
+    identity: ed25519::PublicKey,
+    start: SystemTime,
+}
+
 /// Results from a single simulation run
 #[derive(Clone)]
 struct SimulationResult {
@@ -391,6 +400,14 @@ async fn run_peer_logic(
     let mut current_index = 0;
     let mut received: BTreeMap<u32, BTreeSet<ed25519::PublicKey>> = BTreeMap::new();
 
+    let process_ctx = ProcessContext {
+        is_leader,
+        leader_idx,
+        peers,
+        identity,
+        start,
+    };
+
     // Main simulation loop
     loop {
         if current_index >= dsl.len() {
@@ -407,14 +424,10 @@ async fn run_peer_logic(
             advanced = process_command(
                 &dsl[current_index],
                 &mut current_index,
-                is_leader,
-                leader_idx,
-                peers,
-                &identity,
+                &process_ctx,
                 &mut sender,
                 &mut received,
                 &ctx,
-                start,
                 &mut completions,
             )
             .await;
@@ -459,24 +472,23 @@ async fn run_peer_logic(
 async fn process_command<C: Spawner + Clock>(
     command: &(usize, SimCommand),
     current_index: &mut usize,
-    is_leader: bool,
-    leader_idx: usize,
-    peers: usize,
-    identity: &ed25519::PublicKey,
+    process_ctx: &ProcessContext,
     sender: &mut WrappedSender<Sender<ed25519::PublicKey>, u32>,
     received: &mut BTreeMap<u32, BTreeSet<ed25519::PublicKey>>,
     ctx: &C,
-    start: SystemTime,
     completions: &mut Vec<(usize, Duration)>,
 ) -> bool {
     match &command.1 {
         SimCommand::Propose(id) => {
-            if is_leader {
+            if process_ctx.is_leader {
                 sender
                     .send(commonware_p2p::Recipients::All, *id, true)
                     .await
                     .unwrap();
-                received.entry(*id).or_default().insert(identity.clone());
+                received
+                    .entry(*id)
+                    .or_default()
+                    .insert(process_ctx.identity.clone());
             }
             *current_index += 1;
             true
@@ -486,14 +498,21 @@ async fn process_command<C: Spawner + Clock>(
                 .send(commonware_p2p::Recipients::All, *id, true)
                 .await
                 .unwrap();
-            received.entry(*id).or_default().insert(identity.clone());
+            received
+                .entry(*id)
+                .or_default()
+                .insert(process_ctx.identity.clone());
             *current_index += 1;
             true
         }
         SimCommand::Reply(id) => {
-            let leader_identity = ed25519::PrivateKey::from_seed(leader_idx as u64).public_key();
-            if is_leader {
-                received.entry(*id).or_default().insert(identity.clone());
+            let leader_identity =
+                ed25519::PrivateKey::from_seed(process_ctx.leader_idx as u64).public_key();
+            if process_ctx.is_leader {
+                received
+                    .entry(*id)
+                    .or_default()
+                    .insert(process_ctx.identity.clone());
             } else {
                 sender
                     .send(commonware_p2p::Recipients::One(leader_identity), *id, true)
@@ -504,14 +523,14 @@ async fn process_command<C: Spawner + Clock>(
             true
         }
         SimCommand::Collect(id, thresh, delay) => {
-            if is_leader {
+            if process_ctx.is_leader {
                 let count = received.get(id).map_or(0, |s| s.len());
-                let required = calculate_threshold(thresh, peers);
+                let required = calculate_threshold(thresh, process_ctx.peers);
                 if let Some((message, _)) = delay {
                     ctx.sleep(*message).await;
                 }
                 if count >= required {
-                    let duration = ctx.current().duration_since(start).unwrap();
+                    let duration = ctx.current().duration_since(process_ctx.start).unwrap();
                     completions.push((command.0, duration));
                     if let Some((_, completion)) = delay {
                         ctx.sleep(*completion).await;
@@ -528,12 +547,12 @@ async fn process_command<C: Spawner + Clock>(
         }
         SimCommand::Wait(id, thresh, delay) => {
             let count = received.get(id).map_or(0, |s| s.len());
-            let required = calculate_threshold(thresh, peers);
+            let required = calculate_threshold(thresh, process_ctx.peers);
             if let Some((message, _)) = delay {
                 ctx.sleep(*message).await;
             }
             if count >= required {
-                let duration = ctx.current().duration_since(start).unwrap();
+                let duration = ctx.current().duration_since(process_ctx.start).unwrap();
                 completions.push((command.0, duration));
                 if let Some((_, completion)) = delay {
                     ctx.sleep(*completion).await;
