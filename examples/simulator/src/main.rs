@@ -121,19 +121,12 @@ fn main() {
         .about("TBA")
         .version(crate_version())
         .arg(
-            Arg::new("peers")
-                .long("peers")
-                .required(true)
-                .value_parser(value_parser!(usize))
-                .help("Number of peers to simulate"),
-        )
-        .arg(
             Arg::new("regions")
                 .long("regions")
                 .required(true)
                 .value_delimiter(',')
                 .value_parser(value_parser!(String))
-                .help("Regions to simulate"),
+                .help("Regions to simulate in the form <region>:<count>, e.g. us-east-1:3,eu-west-1:2"),
         )
         .arg(
             Arg::new("message-processing-time")
@@ -150,11 +143,25 @@ fn main() {
                 .help("Reload latency data from cloudping.co"),
         )
         .get_matches();
-    let peers = *matches.get_one::<usize>("peers").unwrap();
-    let regions = matches
+    let region_counts = matches
         .get_many::<String>("regions")
         .unwrap()
+        .map(|s| {
+            let mut parts = s.split(':');
+            let region = parts.next().expect("missing region").to_string();
+            let count = parts
+                .next()
+                .expect("missing count")
+                .parse::<usize>()
+                .expect("invalid count");
+            (region, count)
+        })
         .collect::<Vec<_>>();
+    let peers: usize = region_counts.iter().map(|(_, count)| *count).sum();
+    let regions: Vec<String> = region_counts
+        .iter()
+        .map(|(region, _)| region.clone())
+        .collect();
     assert!(
         peers >= regions.len(),
         "must have at least as many peers as regions"
@@ -162,7 +169,7 @@ fn main() {
     let message_processing_time = *matches.get_one::<u64>("message-processing-time").unwrap();
     info!(
         peers,
-        ?regions,
+        ?region_counts,
         message_processing_time,
         "Initializing simulator"
     );
@@ -195,16 +202,19 @@ fn main() {
 
         // Generate peers
         let mut identities = Vec::with_capacity(peers);
-        for i in 0..peers {
-            let identity = ed25519::PrivateKey::from_seed(i as u64).public_key();
-            let (sender, receiver) = oracle
-                .register(identity.clone(), DEFAULT_CHANNEL)
-                .await
-                .unwrap();
-            let region = regions[i % regions.len()].clone();
-            let (sender, receiver) =
-                wrap::<_, _, (ed25519::PublicKey, u8)>(((), ()), sender, receiver);
-            identities.push((identity, region, sender, receiver));
+        let mut peer_idx = 0;
+        for (region, count) in &region_counts {
+            for _ in 0..*count {
+                let identity = ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
+                let (sender, receiver) = oracle
+                    .register(identity.clone(), DEFAULT_CHANNEL)
+                    .await
+                    .unwrap();
+                let (sender, receiver) =
+                    wrap::<_, _, (ed25519::PublicKey, u8)>(((), ()), sender, receiver);
+                identities.push((identity, region.clone(), sender, receiver));
+                peer_idx += 1;
+            }
         }
 
         // Create connections between all peers
