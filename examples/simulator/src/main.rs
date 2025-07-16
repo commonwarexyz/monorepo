@@ -5,6 +5,7 @@ use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 use commonware_p2p::simulated::{Config, Network};
 use commonware_runtime::{deterministic, Metrics, Runner};
 use reqwest::blocking::Client;
+use serde_json;
 use tracing::info;
 
 const DEFAULT_CHANNEL: u32 = 0;
@@ -42,8 +43,20 @@ fn download_latency_data() -> LatencyMap {
         .json()
         .unwrap();
 
-    // Merge into LatencyMap with jitter = P90 − P50
-    let mut map: LatencyMap = HashMap::new();
+    populate_latency_map(p50, p90)
+}
+
+fn load_latency_data() -> LatencyMap {
+    let p50 = include_str!("p50.json");
+    let p90 = include_str!("p90.json");
+    let p50: ApiResp = serde_json::from_str(p50).unwrap();
+    let p90: ApiResp = serde_json::from_str(p90).unwrap();
+
+    populate_latency_map(p50, p90)
+}
+
+fn populate_latency_map(p50: ApiResp, p90: ApiResp) -> LatencyMap {
+    let mut map = HashMap::new();
     for (from, inner_p50) in p50.data {
         let inner_p90 = &p90.data[&from];
         let mut dest_map = HashMap::new();
@@ -90,6 +103,13 @@ fn main() {
                 .value_parser(value_parser!(u64))
                 .help("Message processing time in milliseconds"),
         )
+        .arg(
+            Arg::new("reload-latency-data")
+                .long("reload-latency-data")
+                .required(false)
+                .num_args(0)
+                .help("Reload latency data from cloudping.co"),
+        )
         .get_matches();
     let peers = *matches.get_one::<usize>("peers").unwrap();
     let regions = matches
@@ -111,8 +131,13 @@ fn main() {
     );
 
     // Download latency data
-    let latency_map = download_latency_data();
-    info!(?latency_map, "downloaded latency data");
+    let latency_map = if matches.get_flag("reload-latency-data") {
+        info!("downloading latency data");
+        download_latency_data()
+    } else {
+        info!("loading latency data");
+        load_latency_data()
+    };
 
     // Configure deterministic runtime
     let runtime_cfg = deterministic::Config::new();
