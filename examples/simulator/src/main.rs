@@ -1,15 +1,13 @@
-use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 use commonware_p2p::{
     simulated::{Config, Link, Network},
-    Receiver, Sender,
+    utils::codec::wrap,
 };
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
 use futures::future::try_join_all;
 use reqwest::blocking::Client;
 use std::collections::HashMap;
-use std::time::Duration;
 use tracing::info;
 
 const DEFAULT_CHANNEL: u32 = 0;
@@ -199,6 +197,7 @@ fn main() {
                 .await
                 .unwrap();
             let region = regions[i % regions.len()].clone();
+            let (sender, receiver) = wrap::<_, _, u8>((), sender, receiver);
             identities.push((identity, region, sender, receiver));
         }
 
@@ -234,11 +233,7 @@ fn main() {
 
                 // Send message
                 sender
-                    .send(
-                        commonware_p2p::Recipients::All,
-                        Bytes::from("Hello, world!"),
-                        true,
-                    )
+                    .send(commonware_p2p::Recipients::All, 0, true)
                     .await
                     .unwrap();
 
@@ -248,23 +243,26 @@ fn main() {
                 let mut completed = None;
                 loop {
                     if let Ok((other_identity, message)) = receiver.recv().await {
-                        if message == Bytes::from("Hello, world!") {
-                            sender
-                                .send(
-                                    commonware_p2p::Recipients::One(other_identity),
-                                    Bytes::from("Message received"),
-                                    true,
-                                )
-                                .await
-                                .unwrap();
-                            sent += 1;
-                        } else if message == Bytes::from("Message received") {
-                            received += 1;
-                            if received == peers - 1 {
-                                completed = Some(ctx.current());
+                        match message {
+                            Ok(0) => {
+                                sender
+                                    .send(commonware_p2p::Recipients::One(other_identity), 1, true)
+                                    .await
+                                    .unwrap();
+                                sent += 1;
                             }
-                        } else {
-                            panic!("unexpected message: {:?}", message);
+                            Ok(1) => {
+                                received += 1;
+                                if received == peers - 1 {
+                                    completed = Some(ctx.current());
+                                }
+                            }
+                            Ok(message) => {
+                                panic!("unexpected message: {message:?}");
+                            }
+                            Err(error) => {
+                                panic!("error receiving message: {error:?}");
+                            }
                         }
                     }
 
