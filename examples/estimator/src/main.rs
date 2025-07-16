@@ -279,7 +279,7 @@ fn main() {
     for leader_idx in leaders {
         let runtime_cfg = deterministic::Config::default().with_seed(leader_idx as u64);
         let executor = deterministic::Runner::new(runtime_cfg);
-        let (wait_latencies, leader_completions) = executor.start({
+        let (wait_latencies, leader_latencies) = executor.start({
             let dsl_clone = dsl.clone();
             let latency_map_clone = latency_map.clone();
             let region_counts_clone = region_counts.clone();
@@ -529,24 +529,12 @@ fn main() {
                 }
             })
             .unwrap();
-        results.push((
-            leader_idx,
-            leader_region,
-            wait_latencies,
-            leader_completions,
-        ));
-    }
-    results.sort_by_key(|(idx, _, _, _)| *idx);
-    for tuple in &results {
-        let (leader_idx, leader_region, wait_latencies, leader_latencies) = tuple;
+
         println!(
             "{}",
-            format!(
-                "\nSimulation results for proposer {} ({}):\n",
-                *leader_idx, leader_region
-            )
-            .bold()
-            .cyan()
+            format!("\nSimulation results for proposer {leader_idx} ({leader_region}):\n")
+                .bold()
+                .cyan()
         );
         let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
         let mut wait_lines: Vec<usize> = wait_latencies.keys().cloned().collect();
@@ -582,6 +570,8 @@ fn main() {
                 wait_idx += 1;
             }
         }
+
+        results.push((leader_idx, leader_region, wait_latencies, leader_latencies));
     }
     let mut all_leader_latencies: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
     for tuple in &results {
