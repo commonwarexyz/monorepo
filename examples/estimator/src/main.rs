@@ -50,10 +50,9 @@ type PeerResult = (
 
 /// Context data for command processing
 struct CommandContext {
-    is_proposer: bool,
-    proposer_idx: usize,
-    peers: usize,
     identity: ed25519::PublicKey,
+    proposer_identity: ed25519::PublicKey,
+    peers: usize,
     start: SystemTime,
 }
 
@@ -318,15 +317,14 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
     commands: &[(usize, Command)],
     tx: mpsc::Sender<oneshot::Sender<()>>,
 ) -> Vec<Handle<PeerResult>> {
+    let proposer_identity = identities[proposer_idx].0.clone();
     let mut jobs = Vec::new();
-
     for (i, (identity, region, mut sender, mut receiver)) in identities.into_iter().enumerate() {
+        let proposer_identity = proposer_identity.clone();
         let mut tx = tx.clone();
         let job = context.with_label("job");
         let commands = commands.to_vec();
-
         jobs.push(job.spawn(move |ctx| async move {
-            let is_proposer = i == proposer_idx;
             let start = ctx.current();
             let mut completions: Vec<(usize, Duration)> = Vec::new();
             let mut current_index = 0;
@@ -345,8 +343,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
                     }
 
                     let mut command_ctx = CommandContext {
-                        is_proposer,
-                        proposer_idx,
+                        proposer_identity: proposer_identity.clone(),
                         peers,
                         identity: identity.clone(),
                         start,
@@ -374,7 +371,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
                 received.entry(msg_id).or_default().insert(other_identity);
             }
 
-            let maybe_proposer = if is_proposer {
+            let maybe_proposer = if i == proposer_idx {
                 Some(completions.clone())
             } else {
                 None
@@ -413,9 +410,10 @@ async fn process_command<C: Spawner + Clock>(
     received: &mut BTreeMap<u32, BTreeSet<ed25519::PublicKey>>,
     completions: &mut Vec<(usize, Duration)>,
 ) -> bool {
+    let is_proposer = command_ctx.identity == command_ctx.proposer_identity;
     match &command.1 {
         Command::Propose(id) => {
-            if command_ctx.is_proposer {
+            if is_proposer {
                 sender
                     .send(commonware_p2p::Recipients::All, *id, true)
                     .await
@@ -441,9 +439,7 @@ async fn process_command<C: Spawner + Clock>(
             true
         }
         Command::Reply(id) => {
-            let proposer_identity =
-                ed25519::PrivateKey::from_seed(command_ctx.proposer_idx as u64).public_key();
-            if command_ctx.is_proposer {
+            if is_proposer {
                 received
                     .entry(*id)
                     .or_default()
@@ -451,7 +447,7 @@ async fn process_command<C: Spawner + Clock>(
             } else {
                 sender
                     .send(
-                        commonware_p2p::Recipients::One(proposer_identity),
+                        commonware_p2p::Recipients::One(command_ctx.proposer_identity.clone()),
                         *id,
                         true,
                     )
@@ -462,7 +458,7 @@ async fn process_command<C: Spawner + Clock>(
             true
         }
         Command::Collect(id, thresh, delay) => {
-            if command_ctx.is_proposer {
+            if is_proposer {
                 let count = received.get(id).map_or(0, |s| s.len());
                 let required = calculate_threshold(thresh, command_ctx.peers);
                 if let Some((message, _)) = delay {
