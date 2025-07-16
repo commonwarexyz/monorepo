@@ -11,7 +11,7 @@ use futures::future::try_join_all;
 use reqwest::blocking::Client;
 use std::sync::mpsc::channel;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
 use tracing::debug;
@@ -26,11 +26,11 @@ fn crate_version() -> &'static str {
 
 type Region = String;
 type LatJitPair = (f64, f64); // (avg_latency_ms, jitter_ms)
-type LatencyMap = HashMap<Region, HashMap<Region, LatJitPair>>;
+type LatencyMap = BTreeMap<Region, BTreeMap<Region, LatJitPair>>;
 
 #[derive(serde::Deserialize)]
 struct ApiResp {
-    data: HashMap<Region, HashMap<Region, f64>>,
+    data: BTreeMap<Region, BTreeMap<Region, f64>>,
 }
 
 const BASE: &str = "https://www.cloudping.co/api/latencies";
@@ -65,10 +65,10 @@ fn load_latency_data() -> LatencyMap {
 }
 
 fn populate_latency_map(p50: ApiResp, p90: ApiResp) -> LatencyMap {
-    let mut map = HashMap::new();
+    let mut map = BTreeMap::new();
     for (from, inner_p50) in p50.data {
         let inner_p90 = &p90.data[&from];
-        let mut dest_map = HashMap::new();
+        let mut dest_map = BTreeMap::new();
         for (to, lat50) in inner_p50 {
             if let Some(lat90) = inner_p90.get(&to) {
                 dest_map.insert(to.clone(), (lat50, lat90 - lat50));
@@ -185,7 +185,7 @@ fn parse_task(content: &str) -> Vec<(usize, SimCommand)> {
     cmds
 }
 
-type SimResult = (usize, String, HashMap<usize, HashMap<String, Vec<f64>>>);
+type SimResult = (usize, String, BTreeMap<usize, BTreeMap<String, Vec<f64>>>);
 
 fn main() {
     // Create logger
@@ -263,7 +263,7 @@ fn main() {
     let concurrency = *matches.get_one::<usize>("concurrency").unwrap_or(&4);
     let leaders: Vec<usize> = (0..peers).collect();
     let mut results: Vec<SimResult> = Vec::new();
-    let mut all_wait_latencies: HashMap<usize, HashMap<String, Vec<f64>>> = HashMap::new();
+    let mut all_wait_latencies: BTreeMap<usize, BTreeMap<String, Vec<f64>>> = BTreeMap::new();
     for chunk in leaders.chunks(concurrency) {
         let mut chunk_handles: Vec<std::thread::JoinHandle<SimResult>> = Vec::new();
         for &leader_idx in chunk {
@@ -331,8 +331,8 @@ fn main() {
                                 let start = ctx.current();
                                 let mut completions: Vec<(usize, Duration)> = Vec::new();
                                 let mut current_index = 0;
-                                let mut received: HashMap<u32, HashSet<ed25519::PublicKey>> =
-                                    HashMap::new();
+                                let mut received: BTreeMap<u32, BTreeSet<ed25519::PublicKey>> =
+                                    BTreeMap::new();
                                 loop {
                                     if current_index >= dsl.len() {
                                         break;
@@ -492,8 +492,8 @@ fn main() {
                             processed_results.push((region, completions));
                         }
                         try_join_all(drain_jobs).await.unwrap();
-                        let mut wait_latencies: HashMap<usize, HashMap<Region, Vec<f64>>> =
-                            HashMap::new();
+                        let mut wait_latencies: BTreeMap<usize, BTreeMap<Region, Vec<f64>>> =
+                            BTreeMap::new();
                         for (region, completions) in processed_results {
                             for (line, duration) in completions {
                                 wait_latencies
