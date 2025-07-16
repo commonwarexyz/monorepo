@@ -245,31 +245,6 @@ where
         })
     }
 
-    /// Check for and handle target update
-    async fn handle_target_updates(&mut self) -> Result<(), Error> {
-        let update_receiver = match self {
-            Client::FetchData {
-                update_receiver, ..
-            } => update_receiver,
-            Client::ApplyData {
-                update_receiver, ..
-            } => update_receiver,
-            Client::Done { .. } => return Ok(()),
-        };
-
-        if let Some(ref mut receiver) = update_receiver {
-            // Only apply the last update, if any.
-            let mut update = None;
-            while let Ok(Some(update_)) = receiver.try_next() {
-                update = Some(update_);
-            }
-            if let Some(update) = update {
-                self.apply_target_update(update).await?;
-            }
-        }
-        Ok(())
-    }
-
     /// Validate a target update against the current target
     fn validate_target_update(
         old_target: &SyncTarget<H::Digest>,
@@ -296,27 +271,56 @@ where
     }
 
     /// Apply a target update to the client
-    async fn apply_target_update(
-        &mut self,
-        new_target: SyncTarget<H::Digest>,
-    ) -> Result<(), Error> {
-        let (config, log, pinned_nodes) = match self {
+    async fn handle_target_updates(mut self) -> Result<Self, Error> {
+        // Get the latest target update, if any
+        let update_receiver = match &mut self {
+            Client::FetchData {
+                update_receiver, ..
+            } => update_receiver,
+            Client::ApplyData {
+                update_receiver, ..
+            } => update_receiver,
+            Client::Done { .. } => return Ok(self),
+        };
+        let mut new_target = None;
+        if let Some(ref mut receiver) = update_receiver {
+            // Only apply the last update, if any.
+            while let Ok(Some(update_)) = receiver.try_next() {
+                new_target = Some(update_);
+            }
+        }
+
+        let Some(new_target) = new_target else {
+            // There is no new target to apply.
+            return Ok(self);
+        };
+
+        let config = match &self {
+            Client::FetchData { config, .. } => config,
+            Client::ApplyData { config, .. } => config,
+            Client::Done { .. } => {
+                warn!("Ignoring target update - sync already completed");
+                return Ok(self);
+            }
+        };
+        Self::validate_target_update(&config.target, &new_target)?;
+
+        let (mut config, mut log, metrics, update_receiver) = match self {
             Client::FetchData {
                 config,
                 log,
-                pinned_nodes,
+                metrics,
+                update_receiver,
                 ..
-            } => (config, log, pinned_nodes),
+            } => (config, log, metrics, update_receiver),
             Client::ApplyData {
                 config,
                 log,
-                pinned_nodes,
+                metrics,
+                update_receiver,
                 ..
-            } => (config, log, pinned_nodes),
-            Client::Done { .. } => {
-                warn!("Ignoring target update - sync already completed");
-                return Ok(());
-            }
+            } => (config, log, metrics, update_receiver),
+            Client::Done { .. } => unreachable!(),
         };
 
         info!(
@@ -325,25 +329,60 @@ where
             "Applying target update"
         );
 
-        Self::validate_target_update(&config.target, &new_target)?;
-
-        // Prune operations below the new lower bound
-        log.prune(new_target.lower_bound_ops)
+        // Check if the existing log contains data in the updated sync range
+        let log_size = log
+            .size()
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
-        // Reset pinned nodes when lower bound changes
-        *pinned_nodes = None;
+        let log = if log_size <= new_target.lower_bound_ops {
+            log.close()
+                .await
+                .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+            // Log is stale (last element is before the new lower bound)
+            // Reinitialize the log with the new sync range
+            let new_log = Journal::<E, Operation<K, V>>::init_sync(
+                config.context.clone().with_label("log"),
+                JConfig {
+                    partition: config.db_config.log_journal_partition.clone(),
+                    items_per_blob: config.db_config.log_items_per_blob,
+                    write_buffer: config.db_config.log_write_buffer,
+                    buffer_pool: config.db_config.buffer_pool.clone(),
+                },
+                new_target.lower_bound_ops,
+                new_target.upper_bound_ops,
+            )
+            .await
+            .map_err(adb::Error::JournalError)
+            .map_err(Error::Adb)?;
+
+            new_log
+        } else {
+            // Log contains data in the updated sync range, prune normally
+            log.prune(new_target.lower_bound_ops)
+                .await
+                .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            log
+        };
 
         // Update the target
         config.target = new_target;
-        Ok(())
+
+        // Return the new client state
+        Ok(Client::FetchData {
+            config,
+            log,
+            pinned_nodes: None,
+            metrics,
+            update_receiver,
+        })
     }
 
     /// Process the next step in the sync process
     async fn step(mut self) -> Result<Self, Error> {
         // Handle any pending target updates
-        self.handle_target_updates().await?;
+        self = self.handle_target_updates().await?;
 
         match self {
             Client::FetchData {
@@ -1117,7 +1156,7 @@ pub(crate) mod tests {
         });
     }
 
-    /// Test that the client succeeds when both bounds are increased
+    /// Test that the client succeeds when bounds are updated to a stale range
     #[test_traced("WARN")]
     fn test_target_update_bounds_increase() {
         let executor = deterministic::Runner::default();
@@ -1134,15 +1173,15 @@ pub(crate) mod tests {
             let final_upper_bound = target_db.op_count() - 1;
             let final_hash = target_db.root(&mut hasher);
 
-            // Create client with placeholder initial target
+            // Create client with placeholder initial target (stale compared to final target)
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(10),
                 target: SyncTarget {
                     hash: Digest::from([1u8; 32]),
-                    lower_bound_ops: 10,
-                    upper_bound_ops: 100,
+                    lower_bound_ops: 1,
+                    upper_bound_ops: 10,
                 },
                 resolver: &target_db,
                 hasher: create_test_hasher(),
