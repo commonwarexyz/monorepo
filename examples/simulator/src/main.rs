@@ -123,9 +123,9 @@ enum Threshold {
     Percent(f64),
 }
 
-fn parse_task(content: &str) -> Vec<SimCommand> {
+fn parse_task(content: &str) -> Vec<(usize, SimCommand)> {
     let mut cmds = Vec::new();
-    for line in content.lines() {
+    for (line_num, line) in content.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -134,11 +134,11 @@ fn parse_task(content: &str) -> Vec<SimCommand> {
         match parts[0] {
             "propose" => {
                 let id = parts[1].parse::<u32>().expect("Invalid propose id");
-                cmds.push(SimCommand::Propose(id));
+                cmds.push((line_num + 1, SimCommand::Propose(id)));
             }
             "broadcast" => {
                 let id = parts[1].parse::<u32>().expect("Invalid broadcast id");
-                cmds.push(SimCommand::Broadcast(id));
+                cmds.push((line_num + 1, SimCommand::Broadcast(id)));
             }
             "wait" => {
                 let id = parts[1].parse::<u32>().expect("Invalid wait id");
@@ -154,7 +154,7 @@ fn parse_task(content: &str) -> Vec<SimCommand> {
                     let c = thresh_str.parse::<usize>().expect("Invalid count");
                     Threshold::Count(c)
                 };
-                cmds.push(SimCommand::Wait(id, thresh));
+                cmds.push((line_num + 1, SimCommand::Wait(id, thresh)));
             }
             _ => panic!("Unknown command: {}", parts[0]),
         }
@@ -298,6 +298,7 @@ fn main() {
             let dsl = dsl.clone();
             jobs.push(job.spawn(move |ctx| async move {
                 let start = ctx.current();
+                let mut completions: Vec<(usize, Duration)> = Vec::new();
                 let mut current_index = 0;
                 let mut received: HashMap<u32, HashSet<ed25519::PublicKey>> = HashMap::new();
                 loop {
@@ -311,7 +312,7 @@ fn main() {
                         if current_index >= dsl.len() {
                             break;
                         }
-                        match &dsl[current_index] {
+                        match &dsl[current_index].1 {
                             SimCommand::Propose(id) | SimCommand::Broadcast(id) => {
                                 sender
                                     .send(commonware_p2p::Recipients::All, *id, true)
@@ -328,6 +329,8 @@ fn main() {
                                     Threshold::Count(c) => *c,
                                 };
                                 if count >= required {
+                                    let duration = ctx.current().duration_since(start).unwrap();
+                                    completions.push((dsl[current_index].0, duration));
                                     current_index += 1;
                                     advanced = true;
                                 }
@@ -341,46 +344,56 @@ fn main() {
                     received.entry(msg_id).or_default().insert(other_identity);
                 }
 
-                let duration = ctx.current().duration_since(start).unwrap();
-                (region, duration)
+                (region, completions)
             }));
         }
 
         // Wait for all jobs to complete
         let results = try_join_all(jobs).await.unwrap();
 
-        // Group results by region
-        let mut regional_latencies: HashMap<Region, Vec<f64>> = HashMap::new();
-        for (region, latency) in results {
-            regional_latencies
-                .entry(region)
-                .or_default()
-                .push(latency.as_millis() as f64);
+        // Group results by wait line and region
+        let mut wait_latencies: HashMap<usize, HashMap<Region, Vec<f64>>> = HashMap::new();
+        for (region, completions) in results {
+            for (line, duration) in completions {
+                wait_latencies
+                    .entry(line)
+                    .or_default()
+                    .entry(region.clone())
+                    .or_default()
+                    .push(duration.as_millis() as f64);
+            }
         }
 
-        // Calculate and print stats per region
-        let mut stats = Vec::new();
-        for (region, mut latencies) in regional_latencies {
-            stats.push((
-                region,
-                latencies.len(),
-                mean(&latencies),
-                median(&mut latencies),
-                std_dev(&latencies).unwrap_or(0.0),
-            ));
-        }
-        stats.sort_by(|a, b| a.0.cmp(&b.0));
-
+        // Calculate and print stats per wait line
+        let mut wait_lines: Vec<usize> = wait_latencies.keys().cloned().collect();
+        wait_lines.sort();
         info!("Simulation results:");
-        for (region, count, mean, median, std_dev) in stats {
-            info!(
-                ?region,
-                count,
-                mean_ms = ?mean,
-                median_ms = ?median,
-                std_dev_ms = ?std_dev,
-                "job completed"
-            );
+        for line in wait_lines {
+            let regional = wait_latencies.get(&line).unwrap();
+            let mut stats = Vec::new();
+            for (region, latencies) in regional.iter() {
+                let mut lats = latencies.clone();
+                stats.push((
+                    region.clone(),
+                    lats.len(),
+                    mean(&lats),
+                    median(&mut lats),
+                    std_dev(&lats).unwrap_or(0.0),
+                ));
+            }
+            stats.sort_by(|a, b| a.0.cmp(&b.0));
+            info!(line, "Wait completion stats:");
+            for (region, count, mean, median, std_dev) in stats {
+                info!(
+                    line,
+                    ?region,
+                    count,
+                    mean_ms = ?mean,
+                    median_ms = ?median,
+                    std_dev_ms = ?std_dev,
+                    "wait completed"
+                );
+            }
         }
     });
 }
