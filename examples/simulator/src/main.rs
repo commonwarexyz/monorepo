@@ -11,7 +11,7 @@ use futures::future::try_join_all;
 use reqwest::blocking::Client;
 use std::sync::mpsc::channel;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     time::Duration,
 };
 use tracing::debug;
@@ -134,22 +134,35 @@ fn parse_task(content: &str) -> Vec<(usize, SimCommand)> {
             continue;
         }
         let parts: Vec<&str> = line.split_whitespace().collect();
-        match parts[0] {
+        let command = parts[0];
+        let mut args: HashMap<&str, &str> = HashMap::new();
+        for &arg in &parts[1..] {
+            let kv: Vec<&str> = arg.splitn(2, '=').collect();
+            if kv.len() != 2 {
+                panic!("Invalid argument format: {arg}");
+            }
+            args.insert(kv[0], kv[1]);
+        }
+        match command {
             "propose" => {
-                let id = parts[1].parse::<u32>().expect("Invalid propose id");
+                let id_str = args.get("id").expect("Missing id for propose");
+                let id = id_str.parse::<u32>().expect("Invalid id");
                 cmds.push((line_num + 1, SimCommand::Propose(id)));
             }
             "broadcast" => {
-                let id = parts[1].parse::<u32>().expect("Invalid broadcast id");
+                let id_str = args.get("id").expect("Missing id for broadcast");
+                let id = id_str.parse::<u32>().expect("Invalid id");
                 cmds.push((line_num + 1, SimCommand::Broadcast(id)));
             }
             "reply" => {
-                let id = parts[1].parse::<u32>().expect("Invalid reply id");
+                let id_str = args.get("id").expect("Missing id for reply");
+                let id = id_str.parse::<u32>().expect("Invalid id");
                 cmds.push((line_num + 1, SimCommand::Reply(id)));
             }
-            "collect" => {
-                let id = parts[1].parse::<u32>().expect("Invalid collect id");
-                let thresh_str = parts[2];
+            "collect" | "wait" => {
+                let id_str = args.get("id").expect("Missing id");
+                let id = id_str.parse::<u32>().expect("Invalid id");
+                let thresh_str = args.get("threshold").expect("Missing threshold");
                 let thresh = if thresh_str.ends_with('%') {
                     let p = thresh_str
                         .trim_end_matches('%')
@@ -161,37 +174,16 @@ fn parse_task(content: &str) -> Vec<(usize, SimCommand)> {
                     let c = thresh_str.parse::<usize>().expect("Invalid count");
                     Threshold::Count(c)
                 };
-                let delay = if parts.len() > 3 {
-                    let delay = parts[3].parse::<u64>().expect("Invalid delay duration");
-                    Some(Duration::from_millis(delay))
+                let delay = args.get("delay").map(|delay_str| {
+                    Duration::from_millis(delay_str.parse::<u64>().expect("Invalid delay"))
+                });
+                if command == "collect" {
+                    cmds.push((line_num + 1, SimCommand::Collect(id, thresh, delay)));
                 } else {
-                    None
-                };
-                cmds.push((line_num + 1, SimCommand::Collect(id, thresh, delay)));
+                    cmds.push((line_num + 1, SimCommand::Wait(id, thresh, delay)));
+                }
             }
-            "wait" => {
-                let id = parts[1].parse::<u32>().expect("Invalid wait id");
-                let thresh_str = parts[2];
-                let thresh = if thresh_str.ends_with('%') {
-                    let p = thresh_str
-                        .trim_end_matches('%')
-                        .parse::<f64>()
-                        .expect("Invalid percent")
-                        / 100.0;
-                    Threshold::Percent(p)
-                } else {
-                    let c = thresh_str.parse::<usize>().expect("Invalid count");
-                    Threshold::Count(c)
-                };
-                let delay = if parts.len() > 3 {
-                    let delay = parts[3].parse::<u64>().expect("Invalid delay duration");
-                    Some(Duration::from_millis(delay))
-                } else {
-                    None
-                };
-                cmds.push((line_num + 1, SimCommand::Wait(id, thresh, delay)));
-            }
-            _ => panic!("Unknown command: {}", parts[0]),
+            _ => panic!("Unknown command: {command}"),
         }
     }
     cmds

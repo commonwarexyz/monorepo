@@ -1,5 +1,5 @@
-propose 0
-wait 0 1 10
-broadcast 1
-wait 1 40% 1
-wait 1 80% 1
+propose id=0
+wait id=0 threshold=1 delay=10
+broadcast id=1
+wait id=1 threshold=40% delay=1
+wait id=1 threshold=80% delay=1

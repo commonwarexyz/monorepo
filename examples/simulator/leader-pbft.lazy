@@ -1,8 +1,8 @@
-propose 0
-wait 0 1 10
-reply 1
-collect 1 67% 5
-propose 1
-wait 1 1 1
-reply 2
-collect 2 67% 5
+propose id=0
+wait id=0 threshold=1 delay=10
+reply id=1
+collect id=1 threshold=67% delay=5
+propose id=1
+wait id=1 threshold=1 delay=1
+reply id=2
+collect id=2 threshold=67% delay=5
