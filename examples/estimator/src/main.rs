@@ -31,12 +31,6 @@ const DEFAULT_CHANNEL: u32 = 0;
 /// The success rate over all links (1.0 = 100%)
 const DEFAULT_SUCCESS_RATE: f64 = 1.0;
 
-/// A map of line numbers to the latencies of all regions for that line
-type WaitLatencies = BTreeMap<usize, BTreeMap<String, Vec<f64>>>;
-
-/// A map of line numbers to the latency of the leader for that line
-type LeaderLatencies = BTreeMap<usize, f64>;
-
 /// All state for a given peer
 type PeerIdentity = (
     ed25519::PublicKey,
@@ -61,13 +55,22 @@ struct ProcessContext {
     start: SystemTime,
 }
 
+/// A map of line numbers to the latencies of all regions for that line
+type WaitLatencies = BTreeMap<usize, BTreeMap<String, Vec<f64>>>;
+
+/// A map of line numbers to the latencies of all regions for that line
+#[derive(Clone)]
+struct Steps {
+    all: BTreeMap<usize, BTreeMap<String, Vec<f64>>>,
+    leader: BTreeMap<usize, f64>,
+}
+
 /// Results from a single simulation run
 #[derive(Clone)]
 struct SimulationResult {
     leader_idx: usize,
     leader_region: String,
-    wait_latencies: WaitLatencies,
-    leader_latencies: LeaderLatencies,
+    steps: Steps,
 }
 
 /// Command line arguments parsed from user input
@@ -195,7 +198,7 @@ fn run_single_simulation(
     let executor = deterministic::Runner::new(runtime_cfg);
 
     // Run the simulation
-    let (wait_latencies, leader_latencies) = executor.start(async move |context| {
+    let steps = executor.start(async move |context| {
         run_simulation_logic(
             context,
             leader_idx,
@@ -210,8 +213,7 @@ fn run_single_simulation(
     SimulationResult {
         leader_idx,
         leader_region,
-        wait_latencies,
-        leader_latencies,
+        steps,
     }
 }
 
@@ -223,7 +225,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
     distribution: &Distribution,
     commands: &[(usize, Command)],
     latencies: &Latencies,
-) -> (WaitLatencies, LeaderLatencies) {
+) -> Steps {
     let (network, mut oracle) = Network::new(
         context.with_label("network"),
         Config {
@@ -500,13 +502,16 @@ async fn process_command<C: Spawner + Clock>(
 }
 
 /// Process simulation results and extract wait/leader latencies
-fn process_simulation_results(results: Vec<PeerResult>) -> (WaitLatencies, LeaderLatencies) {
-    let mut leader_latencies: Option<LeaderLatencies> = None;
-    let mut wait_latencies: WaitLatencies = BTreeMap::new();
+fn process_simulation_results(results: Vec<PeerResult>) -> Steps {
+    let mut steps = Steps {
+        all: BTreeMap::new(),
+        leader: BTreeMap::new(),
+    };
 
     for (region, completions, maybe_leader) in results {
         for (line, duration) in completions {
-            wait_latencies
+            steps
+                .all
                 .entry(line)
                 .or_default()
                 .entry(region.clone())
@@ -514,16 +519,14 @@ fn process_simulation_results(results: Vec<PeerResult>) -> (WaitLatencies, Leade
                 .push(duration.as_millis() as f64);
         }
         if let Some(completions) = maybe_leader {
-            leader_latencies = Some(
-                completions
-                    .into_iter()
-                    .map(|(line, dur)| (line, dur.as_millis() as f64))
-                    .collect(),
-            );
+            steps.leader = completions
+                .into_iter()
+                .map(|(line, dur)| (line, dur.as_millis() as f64))
+                .collect();
         }
     }
 
-    (wait_latencies, leader_latencies.unwrap())
+    steps
 }
 
 /// Print results for a single simulation
@@ -539,7 +542,7 @@ fn print_simulation_results(result: &SimulationResult, task_content: &str) {
     );
 
     let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
-    let mut wait_lines: Vec<usize> = result.wait_latencies.keys().cloned().collect();
+    let mut wait_lines: Vec<usize> = result.steps.all.keys().cloned().collect();
     wait_lines.sort();
     let mut wait_idx = 0;
 
@@ -550,14 +553,14 @@ fn print_simulation_results(result: &SimulationResult, task_content: &str) {
 
         if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
             // Print proposer latency if available
-            if let Some(proposer_latency) = result.leader_latencies.get(&line_num) {
+            if let Some(proposer_latency) = result.steps.leader.get(&line_num) {
                 let stat_line = format!("    [proposer] Latency: {proposer_latency:.2}ms");
                 println!("{}", stat_line.magenta());
             }
 
             // Print regional statistics for non-collect commands
             if !is_collect {
-                print_regional_statistics(&result.wait_latencies, line_num);
+                print_regional_statistics(&result.steps, line_num);
             }
             wait_idx += 1;
         }
@@ -565,8 +568,8 @@ fn print_simulation_results(result: &SimulationResult, task_content: &str) {
 }
 
 /// Print regional statistics for a specific line
-fn print_regional_statistics(wait_latencies: &WaitLatencies, line_num: usize) {
-    if let Some(regional) = wait_latencies.get(&line_num) {
+fn print_regional_statistics(steps: &Steps, line_num: usize) {
+    if let Some(regional) = steps.all.get(&line_num) {
         let mut stats: Vec<(String, f64, f64, f64)> = Vec::new();
         for (region, latencies) in regional.iter() {
             let mut lats = latencies.clone();
@@ -624,14 +627,14 @@ fn aggregate_simulation_results(
 
     // Aggregate leader latencies
     for result in results {
-        for (&line, &lat) in result.leader_latencies.iter() {
+        for (&line, &lat) in result.steps.leader.iter() {
             all_leader_latencies.entry(line).or_default().push(lat);
         }
     }
 
     // Aggregate wait latencies
     for result in results {
-        for (line, regional) in result.wait_latencies.iter() {
+        for (line, regional) in result.steps.all.iter() {
             let all_regional = all_wait_latencies.entry(*line).or_default();
             for (region, lats) in regional.iter() {
                 all_regional
