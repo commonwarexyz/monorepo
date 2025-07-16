@@ -56,12 +56,12 @@ struct CommandContext {
 }
 
 /// A map of line numbers to the latencies of all regions for that line
-type WaitLatencies = BTreeMap<usize, BTreeMap<String, Vec<f64>>>;
+type Observations = BTreeMap<usize, BTreeMap<String, Vec<f64>>>;
 
 /// A map of line numbers to the latencies of all regions for that line
 #[derive(Clone)]
 struct Steps {
-    all: BTreeMap<usize, BTreeMap<String, Vec<f64>>>,
+    all: Observations,
     leader: BTreeMap<usize, f64>,
 }
 
@@ -539,11 +539,11 @@ fn print_simulation_results(result: &Simulation, task_content: &str) {
         .cyan()
     );
 
+    // Emit results
     let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
     let mut wait_lines: Vec<usize> = result.steps.all.keys().cloned().collect();
     wait_lines.sort();
     let mut wait_idx = 0;
-
     for (i, line) in dsl_lines.iter().enumerate() {
         println!("{}", line.yellow());
         let line_num = i + 1;
@@ -566,38 +566,40 @@ fn print_simulation_results(result: &Simulation, task_content: &str) {
 }
 
 /// Print regional statistics for a specific line
-fn print_regional_statistics(steps: &Steps, line_num: usize) {
-    if let Some(regional) = steps.all.get(&line_num) {
-        let mut stats: Vec<(String, f64, f64, f64)> = Vec::new();
-        for (region, latencies) in regional.iter() {
-            let mut lats = latencies.clone();
-            let mean_ms = mean(&lats);
-            let median_ms = median(&mut lats);
-            let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
-            stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
-        }
-        stats.sort_by(|a, b| a.0.cmp(&b.0));
-        for (region, mean_ms, median_ms, std_dev_ms) in stats {
-            let stat_line = format!(
+fn print_regional_statistics(steps: &Steps, line: usize) {
+    let Some(regional) = steps.all.get(&line) else {
+        return;
+    };
+
+    // Calculate statistics
+    let mut stats: Vec<(String, f64, f64, f64)> = Vec::new();
+    for (region, latencies) in regional.iter() {
+        let mut lats = latencies.clone();
+        let mean_ms = mean(&lats);
+        let median_ms = median(&mut lats);
+        let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
+        stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
+    }
+    stats.sort_by(|a, b| a.0.cmp(&b.0));
+    for (region, mean_ms, median_ms, std_dev_ms) in stats {
+        let stat_line = format!(
                 "    [{region}] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms",
             );
-            println!("{}", stat_line.cyan());
-        }
+        println!("{}", stat_line.cyan());
     }
 }
 
 /// Print aggregated results across all simulations
 fn print_aggregated_results(results: &[Simulation], task_content: &str) {
-    let (all_wait_latencies, all_leader_latencies) = aggregate_simulation_results(results);
-
     println!("\n{}", "-".repeat(80).yellow());
-    println!("{}", "\nAveraged simulation results:\n".bold().blue());
+    println!("{}", "\nResults:\n".bold().blue());
 
+    // Emit results
+    let (observations, leader_observations) = aggregate_simulation_results(results);
     let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
-    let mut wait_lines: Vec<usize> = all_wait_latencies.keys().cloned().collect();
+    let mut wait_lines: Vec<usize> = observations.keys().cloned().collect();
     wait_lines.sort();
     let mut wait_idx = 0;
-
     for (i, line) in dsl_lines.iter().enumerate() {
         println!("{}", line.green());
         let line_num = i + 1;
@@ -605,11 +607,11 @@ fn print_aggregated_results(results: &[Simulation], task_content: &str) {
 
         if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
             // Print aggregated proposer statistics
-            print_aggregated_proposer_statistics(&all_leader_latencies, line_num);
+            print_aggregated_proposer_statistics(&leader_observations, line_num);
 
             // Print aggregated regional and overall statistics for non-collect commands
             if !is_collect {
-                print_aggregated_regional_statistics(&all_wait_latencies, line_num);
+                print_aggregated_regional_statistics(&observations, line_num);
             }
             wait_idx += 1;
         }
@@ -619,21 +621,21 @@ fn print_aggregated_results(results: &[Simulation], task_content: &str) {
 /// Aggregate results from all simulations
 fn aggregate_simulation_results(
     results: &[Simulation],
-) -> (WaitLatencies, BTreeMap<usize, Vec<f64>>) {
-    let mut all_leader_latencies: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
-    let mut all_wait_latencies: WaitLatencies = BTreeMap::new();
+) -> (Observations, BTreeMap<usize, Vec<f64>>) {
+    let mut leader_observations: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+    let mut observations: Observations = BTreeMap::new();
 
     // Aggregate leader latencies
     for result in results {
         for (&line, &lat) in result.steps.leader.iter() {
-            all_leader_latencies.entry(line).or_default().push(lat);
+            leader_observations.entry(line).or_default().push(lat);
         }
     }
 
     // Aggregate wait latencies
     for result in results {
         for (line, regional) in result.steps.all.iter() {
-            let all_regional = all_wait_latencies.entry(*line).or_default();
+            let all_regional = observations.entry(*line).or_default();
             for (region, lats) in regional.iter() {
                 all_regional
                     .entry(region.clone())
@@ -643,63 +645,70 @@ fn aggregate_simulation_results(
         }
     }
 
-    (all_wait_latencies, all_leader_latencies)
+    (observations, leader_observations)
 }
 
 /// Print aggregated proposer statistics
 fn print_aggregated_proposer_statistics(
-    all_leader_latencies: &BTreeMap<usize, Vec<f64>>,
+    leader_observations: &BTreeMap<usize, Vec<f64>>,
     line_num: usize,
 ) {
-    if let Some(lats) = all_leader_latencies.get(&line_num) {
-        if !lats.is_empty() {
-            let mut lats_sorted = lats.clone();
-            let mean_ms = mean(lats);
-            let median_ms = median(&mut lats_sorted);
-            let std_dev_ms = std_dev(lats).unwrap_or(0.0);
-            let stat_line = format!(
+    // Determine if there are any observations for this line
+    let Some(lats) = leader_observations.get(&line_num) else {
+        return;
+    };
+    if lats.is_empty() {
+        return;
+    }
+
+    // Calculate statistics
+    let mut lats_sorted = lats.clone();
+    let mean_ms = mean(lats);
+    let median_ms = median(&mut lats_sorted);
+    let std_dev_ms = std_dev(lats).unwrap_or(0.0);
+    let stat_line = format!(
                 "    [proposer] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms"
             );
-            println!("{}", stat_line.magenta());
-        }
-    }
+    println!("{}", stat_line.magenta());
 }
 
 /// Print aggregated regional and overall statistics
-fn print_aggregated_regional_statistics(all_wait_latencies: &WaitLatencies, line_num: usize) {
-    if let Some(regional) = all_wait_latencies.get(&line_num) {
-        let mut stats = Vec::new();
-        let mut all_lats: Vec<f64> = Vec::new();
+fn print_aggregated_regional_statistics(observations: &Observations, line_num: usize) {
+    // Determine if there are any observations for this line
+    let Some(regional) = observations.get(&line_num) else {
+        return;
+    };
+    let mut stats = Vec::new();
+    let mut all_lats: Vec<f64> = Vec::new();
 
-        // Calculate regional statistics
-        for (region, latencies) in regional.iter() {
-            let mut lats = latencies.clone();
-            let mean_ms = mean(&lats);
-            let median_ms = median(&mut lats);
-            let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
-            stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
-            all_lats.extend_from_slice(latencies);
-        }
+    // Calculate regional statistics
+    for (region, latencies) in regional.iter() {
+        let mut lats = latencies.clone();
+        let mean_ms = mean(&lats);
+        let median_ms = median(&mut lats);
+        let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
+        stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
+        all_lats.extend_from_slice(latencies);
+    }
 
-        // Print regional statistics
-        stats.sort_by(|a, b| a.0.cmp(&b.0));
-        for (region, mean_ms, median_ms, std_dev_ms) in stats {
-            let stat_line = format!(
+    // Print regional statistics
+    stats.sort_by(|a, b| a.0.cmp(&b.0));
+    for (region, mean_ms, median_ms, std_dev_ms) in stats {
+        let stat_line = format!(
                 "    [{region}] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms",
             );
-            println!("{}", stat_line.blue());
-        }
+        println!("{}", stat_line.blue());
+    }
 
-        // Print overall statistics
-        if !all_lats.is_empty() {
-            let mut all_lats_sorted = all_lats.clone();
-            let overall_mean = mean(&all_lats);
-            let overall_median = median(&mut all_lats_sorted);
-            let overall_std = std_dev(&all_lats).unwrap_or(0.0);
-            let stat_line = format!(
+    // Print overall statistics
+    if !all_lats.is_empty() {
+        let mut all_lats_sorted = all_lats.clone();
+        let overall_mean = mean(&all_lats);
+        let overall_median = median(&mut all_lats_sorted);
+        let overall_std = std_dev(&all_lats).unwrap_or(0.0);
+        let stat_line = format!(
                 "    [all] Mean: {overall_mean:.2}ms (Std Dev: {overall_std:.2}ms) | Median: {overall_median:.2}ms"
             );
-            println!("{}", stat_line.white());
-        }
+        println!("{}", stat_line.white());
     }
 }
