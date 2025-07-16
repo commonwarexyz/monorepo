@@ -46,7 +46,9 @@ where
     /// Target hash of the database.
     pub target_hash: H::Digest,
 
-    /// Lower bound of operations to sync (pruning boundary, inclusive).
+    /// Lower bound of operations to sync.
+    /// This will be the inactivity floor and pruning boundary
+    /// of the synced database.
     pub lower_bound_ops: u64,
 
     /// Upper bound of operations to sync (inclusive).
@@ -512,6 +514,7 @@ pub(crate) mod tests {
             translator: TestTranslator::default(),
             thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            pruning_delay: 100,
         }
     }
 
@@ -532,14 +535,13 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
             let target_op_count = target_db.op_count();
             let target_inactivity_floor = target_db.inactivity_floor_loc;
-            let target_pruned_pos = target_db.ops.pruned_to_pos();
             let target_log_size = target_db.log.size().await.unwrap();
             let mut hasher = create_test_hasher();
             let target_hash = target_db.root(&mut hasher);
 
             // After commit, the database may have pruned early operations
-            // Start syncing from the oldest retained location, not 0
-            let lower_bound_ops = target_db.oldest_retained_loc().unwrap();
+            // Start syncing from the inactivity floor, not 0
+            let lower_bound_ops = target_db.inactivity_floor_loc;
 
             // Capture target database state and deleted keys before moving into config
             let mut expected_kvs = HashMap::new();
@@ -578,7 +580,10 @@ pub(crate) mod tests {
             assert_eq!(got_db.op_count(), target_op_count);
             assert_eq!(got_db.inactivity_floor_loc, target_inactivity_floor);
             assert_eq!(got_db.log.size().await.unwrap(), target_log_size);
-            assert_eq!(got_db.ops.pruned_to_pos(), target_pruned_pos);
+            assert_eq!(
+                got_db.ops.pruned_to_pos(),
+                leaf_num_to_pos(target_inactivity_floor)
+            );
 
             // Verify the root hash matches the target
             assert_eq!(got_db.root(&mut hasher), target_hash);
@@ -666,17 +671,16 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
 
             let mut hasher = create_test_hasher();
-            // We will sync to this operation
             let upper_bound_ops = target_db.op_count() - 1;
             let target_hash = target_db.root(&mut hasher);
+            let lower_bound_ops = target_db.inactivity_floor_loc;
 
             // Add another operation after the sync range
             let final_op = &target_ops[TARGET_DB_OPS - 1];
             let mut target_db = apply_ops(target_db, vec![final_op.clone()]).await; // TODO: this is wrong
             target_db.commit().await.unwrap();
 
-            // Start of the sync range is after the oldest retained operation
-            let lower_bound_ops = target_db.oldest_retained_loc().unwrap() + 1;
+            // Start of the sync range is after the inactivity floor
             let config = Config {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(10),
@@ -692,7 +696,12 @@ pub(crate) mod tests {
             let synced_db = sync(config).await.unwrap();
 
             // Verify the synced database has the correct range of operations
+            assert_eq!(synced_db.inactivity_floor_loc, lower_bound_ops);
             assert_eq!(synced_db.oldest_retained_loc(), Some(lower_bound_ops));
+            assert_eq!(
+                synced_db.ops.pruned_to_pos(),
+                leaf_num_to_pos(lower_bound_ops)
+            );
             assert_eq!(synced_db.op_count(), upper_bound_ops + 1);
 
             // Verify the final hash matches our target
@@ -740,7 +749,7 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
             let mut hasher = create_test_hasher();
             let target_hash = target_db.root(&mut hasher);
-            let lower_bound_ops = target_db.oldest_retained_loc().unwrap();
+            let lower_bound_ops = target_db.inactivity_floor_loc;
             let upper_bound_ops = target_db.op_count() - 1; // Up to the last operation
 
             // Reopen the sync database and sync it to the target database
@@ -760,13 +769,15 @@ pub(crate) mod tests {
             // Verify database state
             assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
             assert_eq!(sync_db.inactivity_floor_loc, target_db.inactivity_floor_loc);
-            assert_eq!(sync_db.oldest_retained_loc(), Some(lower_bound_ops));
+            assert_eq!(sync_db.oldest_retained_loc().unwrap(), lower_bound_ops);
             assert_eq!(
                 sync_db.log.size().await.unwrap(),
                 target_db.log.size().await.unwrap()
             );
-            assert_eq!(sync_db.ops.pruned_to_pos(), target_db.ops.pruned_to_pos());
-
+            assert_eq!(
+                sync_db.ops.pruned_to_pos(),
+                leaf_num_to_pos(lower_bound_ops)
+            );
             // Verify the root hash matches the target
             assert_eq!(sync_db.root(&mut hasher), target_hash);
 
@@ -828,7 +839,7 @@ pub(crate) mod tests {
             // Reopen sync_db
             let mut hasher = create_test_hasher();
             let target_hash = target_db.root(&mut hasher);
-            let lower_bound_ops = target_db.oldest_retained_loc().unwrap();
+            let lower_bound_ops = target_db.inactivity_floor_loc;
             let upper_bound_ops = target_db.op_count() - 1;
             // sync_db should never ask the resolver for operations
             // because it is already complete. Use a resolver that always fails
@@ -850,15 +861,15 @@ pub(crate) mod tests {
             // Verify database state
             assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
             assert_eq!(sync_db.op_count(), target_db.op_count());
-            assert_eq!(
-                sync_db.oldest_retained_loc(),
-                target_db.oldest_retained_loc()
-            );
+            assert_eq!(sync_db.oldest_retained_loc().unwrap(), lower_bound_ops);
             assert_eq!(
                 sync_db.log.size().await.unwrap(),
                 target_db.log.size().await.unwrap()
             );
-            assert_eq!(sync_db.ops.pruned_to_pos(), target_db.ops.pruned_to_pos());
+            assert_eq!(
+                sync_db.ops.pruned_to_pos(),
+                leaf_num_to_pos(lower_bound_ops)
+            );
 
             // Verify the root hash matches the target
             assert_eq!(sync_db.root(&mut hasher), target_hash);
