@@ -32,6 +32,7 @@ jobs:
     - name: Remove fuzz
       run: |
         rm -rf codec/fuzz
+        rm -rf coding/fuzz
         rm -rf cryptography/fuzz
         rm -rf storage/fuzz
         rm -rf stream/fuzz

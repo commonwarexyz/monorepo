@@ -1053,6 +1053,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-coding-fuzz"
+version = "0.0.56"
+dependencies = [
+ "arbitrary",
+ "commonware-coding",
+ "commonware-cryptography",
+ "libfuzzer-sys",
+ "rand",
+]
+
+[[package]]
 name = "commonware-collector"
 version = "0.0.56"
 dependencies = [
@@ -1121,6 +1132,7 @@ name = "commonware-cryptography-fuzz"
 version = "0.0.56"
 dependencies = [
  "arbitrary",
+ "blake3",
  "blst",
  "commonware-codec",
  "commonware-cryptography",

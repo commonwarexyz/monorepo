@@ -89,7 +89,7 @@ pub struct Scalar(blst_fr);
 ///
 /// Because `r` is only 255 bits wide, the most‑significant byte is always in
 /// the range `0x00‥=0x7f`, leaving the top bit clear.
-const SCALAR_LENGTH: usize = 32;
+pub const SCALAR_LENGTH: usize = 32;
 
 /// Effective bit‑length of the field modulus `r` (`⌈log_2 r⌉ = 255`).
 ///

@@ -17,6 +17,7 @@ p256 = { workspace = true, features = ["ecdsa"] }
 sha2 = { workspace = true }
 ed25519-zebra = "4.0.3"
 rand = { workspace = true }
+blake3 = { workspace = true }
 
 [[bin]]
 name = "bls12381_decode"
@@ -70,6 +71,27 @@ bench = false
 [[bin]]
 name = "ed25519_batch_verifier"
 path = "fuzz_targets/ed25519_batch_verifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bls12381_threshold_operations"
+path = "fuzz_targets/bls12381_threshold_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bls12381_aggregate_operations"
+path = "fuzz_targets/bls12381_aggregate_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "blake3_hasher"
+path = "fuzz_targets/blake3_hasher.rs"
 test = false
 doc = false
 bench = false
