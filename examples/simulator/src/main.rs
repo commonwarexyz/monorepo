@@ -9,6 +9,7 @@ use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
 use futures::future::try_join_all;
 use reqwest::blocking::Client;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::info;
 
 const DEFAULT_CHANNEL: u32 = 0;
@@ -73,6 +74,37 @@ fn populate_latency_map(p50: ApiResp, p90: ApiResp) -> LatencyMap {
     }
 
     map
+}
+
+fn mean(data: &[f64]) -> f64 {
+    let sum = data.iter().sum::<f64>();
+    sum / data.len() as f64
+}
+
+fn median(data: &mut [f64]) -> f64 {
+    data.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    let mid = data.len() / 2;
+    if data.len() % 2 == 0 {
+        (data[mid - 1] + data[mid]) / 2.0
+    } else {
+        data[mid]
+    }
+}
+
+fn std_dev(data: &[f64]) -> Option<f64> {
+    if data.is_empty() {
+        return None;
+    }
+    let mean = mean(data);
+    let variance = data
+        .iter()
+        .map(|value| {
+            let diff = mean - *value;
+            diff * diff
+        })
+        .sum::<f64>()
+        / data.len() as f64;
+    Some(variance.sqrt())
 }
 
 fn main() {
@@ -156,7 +188,7 @@ fn main() {
         );
 
         // Start network
-        let network_handler = network.start();
+        network.start();
 
         // Generate peers
         let mut identities = Vec::with_capacity(peers);
@@ -167,7 +199,6 @@ fn main() {
                 .await
                 .unwrap();
             let region = regions[i % regions.len()].clone();
-            info!(?identity, region, "registered peer");
             identities.push((identity, region, sender, receiver));
         }
 
@@ -242,17 +273,46 @@ fn main() {
                     }
                 }
 
-                // Print results
-                info!(
-                    ?identity,
-                    ?region,
-                    latency = ?completed.unwrap().duration_since(start).unwrap(),
-                    "job completed"
-                );
+                // Return results
+                (region, completed.unwrap().duration_since(start).unwrap())
             }));
         }
 
         // Wait for all jobs to complete
-        try_join_all(jobs).await.unwrap();
+        let results = try_join_all(jobs).await.unwrap();
+
+        // Group results by region
+        let mut regional_latencies: HashMap<Region, Vec<f64>> = HashMap::new();
+        for (region, latency) in results {
+            regional_latencies
+                .entry(region)
+                .or_default()
+                .push(latency.as_millis() as f64);
+        }
+
+        // Calculate and print stats per region
+        let mut stats = Vec::new();
+        for (region, mut latencies) in regional_latencies {
+            stats.push((
+                region,
+                latencies.len(),
+                mean(&latencies),
+                median(&mut latencies),
+                std_dev(&latencies).unwrap_or(0.0),
+            ));
+        }
+        stats.sort_by(|a, b| a.0.cmp(&b.0));
+
+        info!("Simulation results:");
+        for (region, count, mean, median, std_dev) in stats {
+            info!(
+                ?region,
+                count,
+                mean_ms = ?mean,
+                median_ms = ?median,
+                std_dev_ms = ?std_dev,
+                "job completed"
+            );
+        }
     });
 }
