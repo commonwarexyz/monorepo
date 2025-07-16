@@ -3,7 +3,7 @@
 ## Send PREPARE
 propose id=0
 
-## Reply to leader PREPARE with VOTE(PREPARE)
+## Reply to proposer PREPARE with VOTE(PREPARE)
 wait id=0 threshold=1 delay=(0.0001,0.001)
 reply id=1
 
@@ -11,7 +11,7 @@ reply id=1
 collect id=1 threshold=67% delay=(0.0001,0.001)
 propose id=1
 
-## Reply to leader (PRECOMMIT, QC_PREPARE) with VOTE(PRECOMMIT)
+## Reply to proposer (PRECOMMIT, QC_PREPARE) with VOTE(PRECOMMIT)
 wait id=1 threshold=1 delay=(0.0001,0.001)
 reply id=2
 
@@ -19,5 +19,5 @@ reply id=2
 collect id=2 threshold=67% delay=(0.0001,0.001)
 propose id=3
 
-## Wait for leader (COMMIT, QC_PRECOMMIT)
+## Wait for proposer (COMMIT, QC_PRECOMMIT)
 wait id=3 threshold=1 delay=(0.0001,0.001)

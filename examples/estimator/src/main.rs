@@ -10,7 +10,7 @@ use commonware_runtime::{
     deterministic, Clock, Handle, Metrics, Network as RNetwork, Runner, Spawner,
 };
 use estimator::{
-    calculate_leader_region, calculate_threshold, count_peers, crate_version, get_latency_data,
+    calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
     mean, median, parse_task, std_dev, Command, Distribution, Latencies,
 };
 use futures::{
@@ -48,8 +48,8 @@ type PeerResult = (
 
 /// Context data for command processing
 struct CommandContext {
-    is_leader: bool,
-    leader_idx: usize,
+    is_proposer: bool,
+    proposer_idx: usize,
     peers: usize,
     identity: ed25519::PublicKey,
     start: SystemTime,
@@ -62,14 +62,14 @@ type Observations = BTreeMap<usize, BTreeMap<String, Vec<f64>>>;
 #[derive(Clone)]
 struct Steps {
     all: Observations,
-    leader: BTreeMap<usize, f64>,
+    proposer: BTreeMap<usize, f64>,
 }
 
 /// Results from a single simulation run
 #[derive(Clone)]
 struct Simulation {
-    leader_idx: usize,
-    leader_region: String,
+    proposer_idx: usize,
+    proposer_region: String,
     steps: Steps,
 }
 
@@ -165,7 +165,7 @@ fn parse_arguments() -> Arguments {
     }
 }
 
-/// Run simulations for all possible leaders and return results
+/// Run simulations for all possible proposers and return results
 fn run_all_simulations(
     peers: usize,
     region_counts: &BTreeMap<String, usize>,
@@ -173,11 +173,11 @@ fn run_all_simulations(
     latency_map: &Latencies,
     task_content: &str,
 ) -> Vec<Simulation> {
-    let leaders: Vec<usize> = (0..peers).collect();
+    let proposers: Vec<usize> = (0..peers).collect();
     let mut results = Vec::new();
 
-    for leader_idx in leaders {
-        let result = run_single_simulation(leader_idx, region_counts, dsl, latency_map);
+    for proposer_idx in proposers {
+        let result = run_single_simulation(proposer_idx, region_counts, dsl, latency_map);
         print_simulation_results(&result, task_content);
         results.push(result);
     }
@@ -185,23 +185,23 @@ fn run_all_simulations(
     results
 }
 
-/// Run a single simulation with the specified leader
+/// Run a single simulation with the specified proposer
 fn run_single_simulation(
-    leader_idx: usize,
+    proposer_idx: usize,
     distribution: &Distribution,
     commands: &[(usize, Command)],
     latencies: &Latencies,
 ) -> Simulation {
-    let leader_region = calculate_leader_region(leader_idx, distribution);
+    let proposer_region = calculate_proposer_region(proposer_idx, distribution);
     let peers = count_peers(distribution);
-    let runtime_cfg = deterministic::Config::default().with_seed(leader_idx as u64);
+    let runtime_cfg = deterministic::Config::default().with_seed(proposer_idx as u64);
     let executor = deterministic::Runner::new(runtime_cfg);
 
     // Run the simulation
     let steps = executor.start(async move |context| {
         run_simulation_logic(
             context,
-            leader_idx,
+            proposer_idx,
             peers,
             distribution,
             commands,
@@ -211,8 +211,8 @@ fn run_single_simulation(
     });
 
     Simulation {
-        leader_idx,
-        leader_region,
+        proposer_idx,
+        proposer_region,
         steps,
     }
 }
@@ -220,7 +220,7 @@ fn run_single_simulation(
 /// Core simulation logic that runs the network simulation
 async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + RngCore>(
     context: C,
-    leader_idx: usize,
+    proposer_idx: usize,
     peers: usize,
     distribution: &Distribution,
     commands: &[(usize, Command)],
@@ -238,7 +238,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
     setup_network_links(&mut oracle, &identities, latencies).await;
 
     let (tx, mut rx) = mpsc::channel(peers);
-    let jobs = spawn_peer_jobs(&context, leader_idx, peers, identities, commands, tx);
+    let jobs = spawn_peer_jobs(&context, proposer_idx, peers, identities, commands, tx);
 
     // Wait for all jobs to indicate they're done
     let mut responders = Vec::with_capacity(peers);
@@ -310,7 +310,7 @@ async fn setup_network_links(
 /// Spawn jobs for all peers in the simulation
 fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
     context: &C,
-    leader_idx: usize,
+    proposer_idx: usize,
     peers: usize,
     identities: Vec<PeerIdentity>,
     commands: &[(usize, Command)],
@@ -324,7 +324,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
         let commands = commands.to_vec();
 
         jobs.push(job.spawn(move |ctx| async move {
-            let is_leader = i == leader_idx;
+            let is_proposer = i == proposer_idx;
             let start = ctx.current();
             let mut completions: Vec<(usize, Duration)> = Vec::new();
             let mut current_index = 0;
@@ -343,8 +343,8 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
                     }
 
                     let mut command_ctx = CommandContext {
-                        is_leader,
-                        leader_idx,
+                        is_proposer,
+                        proposer_idx,
                         peers,
                         identity: identity.clone(),
                         start,
@@ -372,7 +372,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
                 received.entry(msg_id).or_default().insert(other_identity);
             }
 
-            let maybe_leader = if is_leader {
+            let maybe_proposer = if is_proposer {
                 Some(completions.clone())
             } else {
                 None
@@ -394,7 +394,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
                 }
             }
 
-            (region, completions, maybe_leader)
+            (region, completions, maybe_proposer)
         }));
     }
 
@@ -413,7 +413,7 @@ async fn process_command<C: Spawner + Clock>(
 ) -> bool {
     match &command.1 {
         Command::Propose(id) => {
-            if command_ctx.is_leader {
+            if command_ctx.is_proposer {
                 sender
                     .send(commonware_p2p::Recipients::All, *id, true)
                     .await
@@ -439,16 +439,20 @@ async fn process_command<C: Spawner + Clock>(
             true
         }
         Command::Reply(id) => {
-            let leader_identity =
-                ed25519::PrivateKey::from_seed(command_ctx.leader_idx as u64).public_key();
-            if command_ctx.is_leader {
+            let proposer_identity =
+                ed25519::PrivateKey::from_seed(command_ctx.proposer_idx as u64).public_key();
+            if command_ctx.is_proposer {
                 received
                     .entry(*id)
                     .or_default()
                     .insert(command_ctx.identity.clone());
             } else {
                 sender
-                    .send(commonware_p2p::Recipients::One(leader_identity), *id, true)
+                    .send(
+                        commonware_p2p::Recipients::One(proposer_identity),
+                        *id,
+                        true,
+                    )
                     .await
                     .unwrap();
             }
@@ -456,7 +460,7 @@ async fn process_command<C: Spawner + Clock>(
             true
         }
         Command::Collect(id, thresh, delay) => {
-            if command_ctx.is_leader {
+            if command_ctx.is_proposer {
                 let count = received.get(id).map_or(0, |s| s.len());
                 let required = calculate_threshold(thresh, command_ctx.peers);
                 if let Some((message, _)) = delay {
@@ -499,14 +503,14 @@ async fn process_command<C: Spawner + Clock>(
     }
 }
 
-/// Process simulation results and extract wait/leader latencies
+/// Process simulation results and extract wait/proposer latencies
 fn process_simulation_results(results: Vec<PeerResult>) -> Steps {
     let mut steps = Steps {
         all: BTreeMap::new(),
-        leader: BTreeMap::new(),
+        proposer: BTreeMap::new(),
     };
 
-    for (region, completions, maybe_leader) in results {
+    for (region, completions, maybe_proposer) in results {
         for (line, duration) in completions {
             steps
                 .all
@@ -516,8 +520,8 @@ fn process_simulation_results(results: Vec<PeerResult>) -> Steps {
                 .or_default()
                 .push(duration.as_millis() as f64);
         }
-        if let Some(completions) = maybe_leader {
-            steps.leader = completions
+        if let Some(completions) = maybe_proposer {
+            steps.proposer = completions
                 .into_iter()
                 .map(|(line, dur)| (line, dur.as_millis() as f64))
                 .collect();
@@ -533,7 +537,7 @@ fn print_simulation_results(result: &Simulation, task_content: &str) {
         "{}",
         format!(
             "\nresults for proposer {} ({}):\n",
-            result.leader_idx, result.leader_region
+            result.proposer_idx, result.proposer_region
         )
         .bold()
         .cyan()
@@ -551,7 +555,7 @@ fn print_simulation_results(result: &Simulation, task_content: &str) {
 
         if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
             // Print proposer latency if available
-            if let Some(proposer_latency) = result.steps.leader.get(&line_num) {
+            if let Some(proposer_latency) = result.steps.proposer.get(&line_num) {
                 let stat_line = format!("    [proposer] latency: {proposer_latency:.2}ms");
                 println!("{}", stat_line.magenta());
             }
@@ -595,7 +599,7 @@ fn print_aggregated_results(results: &[Simulation], task_content: &str) {
     println!("{}", "\nresults:\n".bold().blue());
 
     // Emit results
-    let (observations, leader_observations) = aggregate_simulation_results(results);
+    let (observations, proposer_observations) = aggregate_simulation_results(results);
     let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
     let mut wait_lines: Vec<usize> = observations.keys().cloned().collect();
     wait_lines.sort();
@@ -607,7 +611,7 @@ fn print_aggregated_results(results: &[Simulation], task_content: &str) {
 
         if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
             // Print aggregated proposer statistics
-            print_aggregated_proposer_statistics(&leader_observations, line_num);
+            print_aggregated_proposer_statistics(&proposer_observations, line_num);
 
             // Print aggregated regional and overall statistics for non-collect commands
             if !is_collect {
@@ -622,13 +626,13 @@ fn print_aggregated_results(results: &[Simulation], task_content: &str) {
 fn aggregate_simulation_results(
     results: &[Simulation],
 ) -> (Observations, BTreeMap<usize, Vec<f64>>) {
-    let mut leader_observations: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+    let mut proposer_observations: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
     let mut observations: Observations = BTreeMap::new();
 
-    // Aggregate leader latencies
+    // Aggregate proposer latencies
     for result in results {
-        for (&line, &lat) in result.steps.leader.iter() {
-            leader_observations.entry(line).or_default().push(lat);
+        for (&line, &lat) in result.steps.proposer.iter() {
+            proposer_observations.entry(line).or_default().push(lat);
         }
     }
 
@@ -645,16 +649,16 @@ fn aggregate_simulation_results(
         }
     }
 
-    (observations, leader_observations)
+    (observations, proposer_observations)
 }
 
 /// Print aggregated proposer statistics
 fn print_aggregated_proposer_statistics(
-    leader_observations: &BTreeMap<usize, Vec<f64>>,
+    proposer_observations: &BTreeMap<usize, Vec<f64>>,
     line_num: usize,
 ) {
     // Determine if there are any observations for this line
-    let Some(lats) = leader_observations.get(&line_num) else {
+    let Some(lats) = proposer_observations.get(&line_num) else {
         return;
     };
     if lats.is_empty() {

@@ -103,17 +103,17 @@ pub fn count_peers(distribution: &Distribution) -> usize {
     peers
 }
 
-/// Calculate which region a leader belongs to based on their index
-pub fn calculate_leader_region(leader_idx: usize, distribution: &Distribution) -> String {
+/// Calculate which region a proposer belongs to based on their index
+pub fn calculate_proposer_region(proposer_idx: usize, distribution: &Distribution) -> String {
     let mut current = 0;
     for (region, count) in distribution {
         let start = current;
         current += *count;
-        if leader_idx >= start && leader_idx < current {
+        if proposer_idx >= start && proposer_idx < current {
             return region.clone();
         }
     }
-    panic!("Leader index {leader_idx} out of bounds");
+    panic!("Leader index {proposer_idx} out of bounds");
 }
 
 /// Calculates the mean of a slice of f64 values
