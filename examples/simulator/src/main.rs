@@ -597,6 +597,10 @@ fn main() {
             let line_num = i + 1;
             let is_collect = line.starts_with("collect");
             if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
+                if let Some(proposer_latency) = leader_latencies.get(&line_num) {
+                    let stat_line = format!("    [proposer] Latency: {:.2}ms", proposer_latency);
+                    println!("{}", stat_line.magenta());
+                }
                 if !is_collect {
                     let regional = wait_latencies.get(&line_num).unwrap();
                     let mut stats: Vec<(String, f64, f64, f64)> = Vec::new();
@@ -614,10 +618,6 @@ fn main() {
                         );
                         println!("{}", stat_line.cyan());
                     }
-                }
-                if let Some(proposer_latency) = leader_latencies.get(&line_num) {
-                    let stat_line = format!("    [proposer] Latency: {:.2}ms", proposer_latency);
-                    println!("{}", stat_line.cyan());
                 }
                 wait_idx += 1;
             }
@@ -643,7 +643,7 @@ fn main() {
         }
     }
     println!("\n{}", "-".repeat(80).yellow());
-    println!("{}", "\nAveraged simulation results:\n".bold().magenta());
+    println!("{}", "\nAveraged simulation results:\n".bold().white());
     let dsl_lines: Vec<String> = task_content.lines().map(|s| s.to_string()).collect();
     let mut wait_lines: Vec<usize> = all_wait_latencies.keys().cloned().collect();
     wait_lines.sort();
@@ -653,6 +653,16 @@ fn main() {
         let line_num = i + 1;
         let is_collect = line.starts_with("collect");
         if wait_idx < wait_lines.len() && wait_lines[wait_idx] == line_num {
+            if let Some(lats) = all_leader_latencies.get(&line_num) {
+                if !lats.is_empty() {
+                    let mut lats_sorted = lats.clone();
+                    let mean_ms = mean(&lats);
+                    let median_ms = median(&mut lats_sorted);
+                    let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
+                    let stat_line = format!("    [proposer] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms");
+                    println!("{}", stat_line.magenta());
+                }
+            }
             if !is_collect {
                 let regional = all_wait_latencies.get(&line_num).unwrap();
                 let mut stats = Vec::new();
@@ -668,16 +678,6 @@ fn main() {
                     let stat_line = format!(
                         "    [{region}] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms",
                     );
-                    println!("{}", stat_line.blue());
-                }
-            }
-            if let Some(lats) = all_leader_latencies.get(&line_num) {
-                if !lats.is_empty() {
-                    let mut lats_sorted = lats.clone();
-                    let mean_ms = mean(&lats);
-                    let median_ms = median(&mut lats_sorted);
-                    let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
-                    let stat_line = format!("    [proposer] Mean: {mean_ms:.2}ms (Std Dev: {std_dev_ms:.2}ms) | Median: {median_ms:.2}ms");
                     println!("{}", stat_line.blue());
                 }
             }
