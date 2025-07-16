@@ -105,11 +105,12 @@ where
     }
 }
 
-/// Starts synchronization with the ability to receive target updates during the process.
-/// Returns the synchronized database and a channel for sending updates.
-pub async fn sync_with_updates<E, K, V, H, T, R>(
+/// Starts synchronization with the ability to receive sync target updates on `update_receiver`
+/// during the process.
+pub async fn sync_with_updater<E, K, V, H, T, R>(
     config: Config<E, K, V, H, T, R>,
-) -> Result<(Any<E, K, V, H, T>, SyncTargetUpdateSender<H::Digest>), Error>
+    update_receiver: SyncTargetUpdateReceiver<H::Digest>,
+) -> Result<Any<E, K, V, H, T>, Error>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -118,13 +119,10 @@ where
     T: Translator,
     R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
-    let (update_sender, update_receiver) = mpsc::unbounded();
-
     let client = Client::new_with_updater(config, Some(update_receiver)).await?;
     let db = match client {
         Client::Done { db } => db,
         _ => client.sync().await?,
     };
-
-    Ok((db, update_sender))
+    Ok(db)
 }
