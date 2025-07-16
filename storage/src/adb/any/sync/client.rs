@@ -369,7 +369,7 @@ where
         // Update the target
         config.target = new_target;
 
-        // Return the new client state
+        // Discard any pending updates, since they may be stale now.
         Ok(Client::FetchData {
             config,
             log,
