@@ -1,8 +1,8 @@
 propose id=0
-wait id=0 threshold=1 delay=10
+wait id=0 threshold=1 delay=(0.0001,0.001)
 reply id=1
-collect id=1 threshold=67% delay=5
+collect id=1 threshold=67% delay=(0.0001,0.001)
 propose id=1
-wait id=1 threshold=1 delay=1
+wait id=1 threshold=1 delay=(0.0001,0.001)
 reply id=2
-collect id=2 threshold=67% delay=5
+collect id=2 threshold=67% delay=(0.0001,0.001)

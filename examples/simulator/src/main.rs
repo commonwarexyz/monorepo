@@ -116,8 +116,8 @@ enum SimCommand {
     Propose(u32),
     Broadcast(u32),
     Reply(u32),
-    Collect(u32, Threshold, Option<Duration>),
-    Wait(u32, Threshold, Option<Duration>),
+    Collect(u32, Threshold, Option<(Duration, Duration)>),
+    Wait(u32, Threshold, Option<(Duration, Duration)>),
 }
 
 #[derive(Clone)]
@@ -175,7 +175,13 @@ fn parse_task(content: &str) -> Vec<(usize, SimCommand)> {
                     Threshold::Count(c)
                 };
                 let delay = args.get("delay").map(|delay_str| {
-                    Duration::from_millis(delay_str.parse::<u64>().expect("Invalid delay"))
+                    let delay_str = delay_str.trim_matches('(').trim_matches(')');
+                    let parts: Vec<&str> = delay_str.split(',').collect();
+                    let message =
+                        Duration::from_secs_f64(parts[0].parse::<f64>().expect("Invalid delay"));
+                    let completion =
+                        Duration::from_secs_f64(parts[1].parse::<f64>().expect("Invalid delay"));
+                    (message, completion)
                 });
                 if command == "collect" {
                     cmds.push((line_num + 1, SimCommand::Collect(id, thresh, delay)));
@@ -419,6 +425,9 @@ fn main() {
                                                         }
                                                         Threshold::Count(c) => *c,
                                                     };
+                                                    if let Some((message, _)) = delay {
+                                                        ctx.sleep(*message).await;
+                                                    }
                                                     if count >= required {
                                                         let duration = ctx
                                                             .current()
@@ -426,8 +435,8 @@ fn main() {
                                                             .unwrap();
                                                         completions
                                                             .push((dsl[current_index].0, duration));
-                                                        if let Some(delay) = delay {
-                                                            ctx.sleep(*delay).await;
+                                                        if let Some((_, completion)) = delay {
+                                                            ctx.sleep(*completion).await;
                                                         }
                                                         current_index += 1;
                                                         advanced = true;
@@ -445,6 +454,9 @@ fn main() {
                                                     }
                                                     Threshold::Count(c) => *c,
                                                 };
+                                                if let Some((message, _)) = delay {
+                                                    ctx.sleep(*message).await;
+                                                }
                                                 if count >= required {
                                                     let duration = ctx
                                                         .current()
@@ -452,8 +464,8 @@ fn main() {
                                                         .unwrap();
                                                     completions
                                                         .push((dsl[current_index].0, duration));
-                                                    if let Some(delay) = delay {
-                                                        ctx.sleep(*delay).await;
+                                                    if let Some((_, completion)) = delay {
+                                                        ctx.sleep(*completion).await;
                                                     }
                                                     current_index += 1;
                                                     advanced = true;

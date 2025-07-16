@@ -1,5 +1,5 @@
 propose id=0
-wait id=0 threshold=1 delay=10
+wait id=0 threshold=1 delay=(0.0001,0.001)
 broadcast id=1
-wait id=1 threshold=40% delay=1
-wait id=1 threshold=80% delay=1
+wait id=1 threshold=40% delay=(0.0001,0.001)
+wait id=1 threshold=80% delay=(0.0001,0.001)
