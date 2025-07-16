@@ -237,14 +237,6 @@ fn main() {
                 .value_parser(value_parser!(String))
                 .help("Path to DSL file defining the simulation behavior"),
         )
-        .arg(
-            Arg::new("concurrency")
-                .long("concurrency")
-                .required(false)
-                .value_parser(value_parser!(usize))
-                .default_value("4")
-                .help("Number of concurrent simulations to run"),
-        )
         .get_matches();
     let region_counts = matches
         .get_many::<String>("regions")
@@ -278,306 +270,261 @@ fn main() {
         debug!("loading latency data");
         load_latency_data()
     };
-    let concurrency = *matches.get_one::<usize>("concurrency").unwrap_or(&4);
     let leaders: Vec<usize> = (0..peers).collect();
     let mut results: Vec<SimResult> = Vec::new();
     let mut all_wait_latencies: BTreeMap<usize, BTreeMap<String, Vec<f64>>> = BTreeMap::new();
-    for chunk in leaders.chunks(concurrency) {
-        let mut chunk_handles: Vec<std::thread::JoinHandle<SimResult>> = Vec::new();
-        for &leader_idx in chunk {
+    for &leader_idx in leaders {
+        let (tx, rx) = channel();
+        let runtime_cfg = deterministic::Config::default().with_seed(leader_idx as u64);
+        let executor = deterministic::Runner::new(runtime_cfg);
+        executor.start({
             let dsl_clone = dsl.clone();
             let latency_map_clone = latency_map.clone();
             let region_counts_clone = region_counts.clone();
-            let peers_clone = peers;
-            let handle = std::thread::spawn(move || {
-                let leader_idx_clone = leader_idx;
-                let (tx, rx) = channel();
-                let runtime_cfg = deterministic::Config::default().with_seed(leader_idx as u64);
-                let executor = deterministic::Runner::new(runtime_cfg);
-                executor.start({
-                    let region_counts_clone = region_counts_clone.clone();
-                    async move |context| {
-                        let (network, mut oracle) = Network::new(
-                            context.with_label("network"),
-                            Config {
-                                max_size: usize::MAX,
-                            },
-                        );
-                        network.start();
-                        let mut identities = Vec::with_capacity(peers_clone);
-                        let mut peer_idx = 0;
-                        for (region, count) in &region_counts_clone {
-                            for _ in 0..*count {
-                                let identity =
-                                    ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
-                                let (sender, receiver) = oracle
-                                    .register(identity.clone(), DEFAULT_CHANNEL)
-                                    .await
-                                    .unwrap();
-                                let (sender, receiver) = wrap::<_, _, u32>((), sender, receiver);
-                                identities.push((identity, region.clone(), sender, receiver));
-                                peer_idx += 1;
-                            }
+            async move |context| {
+                let (network, mut oracle) = Network::new(
+                    context.with_label("network"),
+                    Config {
+                        max_size: usize::MAX,
+                    },
+                );
+                network.start();
+                let mut identities = Vec::with_capacity(peers);
+                let mut peer_idx = 0;
+                for (region, count) in &region_counts_clone {
+                    for _ in 0..*count {
+                        let identity = ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
+                        let (sender, receiver) = oracle
+                            .register(identity.clone(), DEFAULT_CHANNEL)
+                            .await
+                            .unwrap();
+                        let (sender, receiver) = wrap::<_, _, u32>((), sender, receiver);
+                        identities.push((identity, region.clone(), sender, receiver));
+                        peer_idx += 1;
+                    }
+                }
+                for (i, (identity, region, _, _)) in identities.iter().enumerate() {
+                    for (j, (other_identity, other_region, _, _)) in identities.iter().enumerate() {
+                        if i == j {
+                            continue;
                         }
-                        for (i, (identity, region, _, _)) in identities.iter().enumerate() {
-                            for (j, (other_identity, other_region, _, _)) in
-                                identities.iter().enumerate()
-                            {
-                                if i == j {
-                                    continue;
+                        let latency = latency_map_clone[region][other_region];
+                        let link = Link {
+                            latency: latency.0,
+                            jitter: latency.1,
+                            success_rate: DEFAULT_SUCCESS_RATE,
+                        };
+                        oracle
+                            .add_link(identity.clone(), other_identity.clone(), link)
+                            .await
+                            .unwrap();
+                    }
+                }
+                let mut jobs = Vec::new();
+                for (i, (identity, region, mut sender, mut receiver)) in
+                    identities.into_iter().enumerate()
+                {
+                    let job = context.with_label("job");
+                    let dsl = dsl_clone.clone();
+                    jobs.push(job.spawn(move |ctx| async move {
+                        let is_leader = i == leader_idx_clone;
+                        let start = ctx.current();
+                        let mut completions: Vec<(usize, Duration)> = Vec::new();
+                        let mut current_index = 0;
+                        let mut received: BTreeMap<u32, BTreeSet<ed25519::PublicKey>> =
+                            BTreeMap::new();
+                        loop {
+                            if current_index >= dsl.len() {
+                                break;
+                            }
+                            let mut advanced = true;
+                            while advanced {
+                                advanced = false;
+                                if current_index >= dsl.len() {
+                                    break;
                                 }
-                                let latency = latency_map_clone[region][other_region];
-                                let link = Link {
-                                    latency: latency.0,
-                                    jitter: latency.1,
-                                    success_rate: DEFAULT_SUCCESS_RATE,
-                                };
-                                oracle
-                                    .add_link(identity.clone(), other_identity.clone(), link)
-                                    .await
-                                    .unwrap();
-                            }
-                        }
-                        let mut jobs = Vec::new();
-                        for (i, (identity, region, mut sender, mut receiver)) in
-                            identities.into_iter().enumerate()
-                        {
-                            let job = context.with_label("job");
-                            let dsl = dsl_clone.clone();
-                            jobs.push(job.spawn(move |ctx| async move {
-                                let is_leader = i == leader_idx_clone;
-                                let start = ctx.current();
-                                let mut completions: Vec<(usize, Duration)> = Vec::new();
-                                let mut current_index = 0;
-                                let mut received: BTreeMap<u32, BTreeSet<ed25519::PublicKey>> =
-                                    BTreeMap::new();
-                                loop {
-                                    if current_index >= dsl.len() {
-                                        break;
+                                match &dsl[current_index].1 {
+                                    SimCommand::Propose(id) => {
+                                        if is_leader {
+                                            sender
+                                                .send(commonware_p2p::Recipients::All, *id, true)
+                                                .await
+                                                .unwrap();
+                                            received
+                                                .entry(*id)
+                                                .or_default()
+                                                .insert(identity.clone());
+                                        }
+                                        current_index += 1;
+                                        advanced = true;
                                     }
-                                    let mut advanced = true;
-                                    while advanced {
-                                        advanced = false;
-                                        if current_index >= dsl.len() {
+                                    SimCommand::Broadcast(id) => {
+                                        sender
+                                            .send(commonware_p2p::Recipients::All, *id, true)
+                                            .await
+                                            .unwrap();
+                                        received.entry(*id).or_default().insert(identity.clone());
+                                        current_index += 1;
+                                        advanced = true;
+                                    }
+                                    SimCommand::Reply(id) => {
+                                        let leader_identity =
+                                            ed25519::PrivateKey::from_seed(leader_idx_clone as u64)
+                                                .public_key();
+                                        if is_leader {
+                                            received
+                                                .entry(*id)
+                                                .or_default()
+                                                .insert(identity.clone());
+                                        } else {
+                                            sender
+                                                .send(
+                                                    commonware_p2p::Recipients::One(
+                                                        leader_identity,
+                                                    ),
+                                                    *id,
+                                                    true,
+                                                )
+                                                .await
+                                                .unwrap();
+                                        }
+                                        current_index += 1;
+                                        advanced = true;
+                                    }
+                                    SimCommand::Collect(id, thresh, delay) => {
+                                        if is_leader {
+                                            let count = received.get(id).map_or(0, |s| s.len());
+                                            let required = match thresh {
+                                                Threshold::Percent(p) => {
+                                                    ((peers_clone as f64) * *p).ceil() as usize
+                                                }
+                                                Threshold::Count(c) => *c,
+                                            };
+                                            if let Some((message, _)) = delay {
+                                                ctx.sleep(*message).await;
+                                            }
+                                            if count >= required {
+                                                let duration =
+                                                    ctx.current().duration_since(start).unwrap();
+                                                completions.push((dsl[current_index].0, duration));
+                                                if let Some((_, completion)) = delay {
+                                                    ctx.sleep(*completion).await;
+                                                }
+                                                current_index += 1;
+                                                advanced = true;
+                                            }
+                                        } else {
+                                            current_index += 1;
+                                            advanced = true;
+                                        }
+                                    }
+                                    SimCommand::Wait(id, thresh, delay) => {
+                                        let count = received.get(id).map_or(0, |s| s.len());
+                                        let required = match thresh {
+                                            Threshold::Percent(p) => {
+                                                ((peers_clone as f64) * *p).ceil() as usize
+                                            }
+                                            Threshold::Count(c) => *c,
+                                        };
+                                        if let Some((message, _)) = delay {
+                                            ctx.sleep(*message).await;
+                                        }
+                                        if count >= required {
+                                            let duration =
+                                                ctx.current().duration_since(start).unwrap();
+                                            completions.push((dsl[current_index].0, duration));
+                                            if let Some((_, completion)) = delay {
+                                                ctx.sleep(*completion).await;
+                                            }
+                                            current_index += 1;
+                                            advanced = true;
+                                        }
+                                    }
+                                }
+                            }
+                            if current_index >= dsl.len() {
+                                break;
+                            }
+                            let (other_identity, message) = receiver.recv().await.unwrap();
+                            let msg_id = message.unwrap();
+                            received.entry(msg_id).or_default().insert(other_identity);
+                        }
+                        let maybe_leader = if is_leader {
+                            Some(completions.clone())
+                        } else {
+                            None
+                        };
+                        (region, completions, maybe_leader, receiver)
+                    }));
+                }
+                let results_with_receivers = try_join_all(jobs).await.unwrap();
+                let mut drain_jobs = Vec::new();
+                let mut processed_results = Vec::new();
+                let mut leader_completions: Option<Vec<(usize, Duration)>> = None;
+                for (region, completions, maybe_leader, mut receiver) in
+                    results_with_receivers.into_iter()
+                {
+                    drain_jobs.push(context.with_label("drain").spawn(move |ctx| async move {
+                        let drain_until = ctx.current() + Duration::from_millis(1000);
+                        loop {
+                            select! {
+                                _ = ctx.sleep_until(drain_until) => {
+                                    break;
+                                },
+                                msg = receiver.recv() => {
+                                    match msg {
+                                        Ok(_) => {
+                                            // Discard message
+                                        }
+                                        Err(_) => {
                                             break;
-                                        }
-                                        match &dsl[current_index].1 {
-                                            SimCommand::Propose(id) => {
-                                                if is_leader {
-                                                    sender
-                                                        .send(
-                                                            commonware_p2p::Recipients::All,
-                                                            *id,
-                                                            true,
-                                                        )
-                                                        .await
-                                                        .unwrap();
-                                                    received
-                                                        .entry(*id)
-                                                        .or_default()
-                                                        .insert(identity.clone());
-                                                }
-                                                current_index += 1;
-                                                advanced = true;
-                                            }
-                                            SimCommand::Broadcast(id) => {
-                                                sender
-                                                    .send(
-                                                        commonware_p2p::Recipients::All,
-                                                        *id,
-                                                        true,
-                                                    )
-                                                    .await
-                                                    .unwrap();
-                                                received
-                                                    .entry(*id)
-                                                    .or_default()
-                                                    .insert(identity.clone());
-                                                current_index += 1;
-                                                advanced = true;
-                                            }
-                                            SimCommand::Reply(id) => {
-                                                let leader_identity =
-                                                    ed25519::PrivateKey::from_seed(
-                                                        leader_idx_clone as u64,
-                                                    )
-                                                    .public_key();
-                                                if is_leader {
-                                                    received
-                                                        .entry(*id)
-                                                        .or_default()
-                                                        .insert(identity.clone());
-                                                } else {
-                                                    sender
-                                                        .send(
-                                                            commonware_p2p::Recipients::One(
-                                                                leader_identity,
-                                                            ),
-                                                            *id,
-                                                            true,
-                                                        )
-                                                        .await
-                                                        .unwrap();
-                                                }
-                                                current_index += 1;
-                                                advanced = true;
-                                            }
-                                            SimCommand::Collect(id, thresh, delay) => {
-                                                if is_leader {
-                                                    let count =
-                                                        received.get(id).map_or(0, |s| s.len());
-                                                    let required = match thresh {
-                                                        Threshold::Percent(p) => {
-                                                            ((peers_clone as f64) * *p).ceil()
-                                                                as usize
-                                                        }
-                                                        Threshold::Count(c) => *c,
-                                                    };
-                                                    if let Some((message, _)) = delay {
-                                                        ctx.sleep(*message).await;
-                                                    }
-                                                    if count >= required {
-                                                        let duration = ctx
-                                                            .current()
-                                                            .duration_since(start)
-                                                            .unwrap();
-                                                        completions
-                                                            .push((dsl[current_index].0, duration));
-                                                        if let Some((_, completion)) = delay {
-                                                            ctx.sleep(*completion).await;
-                                                        }
-                                                        current_index += 1;
-                                                        advanced = true;
-                                                    }
-                                                } else {
-                                                    current_index += 1;
-                                                    advanced = true;
-                                                }
-                                            }
-                                            SimCommand::Wait(id, thresh, delay) => {
-                                                let count = received.get(id).map_or(0, |s| s.len());
-                                                let required = match thresh {
-                                                    Threshold::Percent(p) => {
-                                                        ((peers_clone as f64) * *p).ceil() as usize
-                                                    }
-                                                    Threshold::Count(c) => *c,
-                                                };
-                                                if let Some((message, _)) = delay {
-                                                    ctx.sleep(*message).await;
-                                                }
-                                                if count >= required {
-                                                    let duration = ctx
-                                                        .current()
-                                                        .duration_since(start)
-                                                        .unwrap();
-                                                    completions
-                                                        .push((dsl[current_index].0, duration));
-                                                    if let Some((_, completion)) = delay {
-                                                        ctx.sleep(*completion).await;
-                                                    }
-                                                    current_index += 1;
-                                                    advanced = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if current_index >= dsl.len() {
-                                        break;
-                                    }
-                                    let (other_identity, message) = receiver.recv().await.unwrap();
-                                    let msg_id = message.unwrap();
-                                    received.entry(msg_id).or_default().insert(other_identity);
-                                }
-                                let maybe_leader = if is_leader {
-                                    Some(completions.clone())
-                                } else {
-                                    None
-                                };
-                                (region, completions, maybe_leader, receiver)
-                            }));
-                        }
-                        let results_with_receivers = try_join_all(jobs).await.unwrap();
-                        let mut drain_jobs = Vec::new();
-                        let mut processed_results = Vec::new();
-                        let mut leader_completions: Option<Vec<(usize, Duration)>> = None;
-                        for (region, completions, maybe_leader, mut receiver) in
-                            results_with_receivers.into_iter()
-                        {
-                            drain_jobs.push(context.with_label("drain").spawn(
-                                move |ctx| async move {
-                                    let drain_until = ctx.current() + Duration::from_millis(1000);
-                                    loop {
-                                        select! {
-                                            _ = ctx.sleep_until(drain_until) => {
-                                                break;
-                                            },
-                                            msg = receiver.recv() => {
-                                                match msg {
-                                                    Ok(_) => {
-                                                        // Discard message
-                                                    }
-                                                    Err(_) => {
-                                                        break;
-                                                    }
-                                                }
-                                            },
                                         }
                                     }
                                 },
-                            ));
-                            if let Some(comps) = maybe_leader {
-                                leader_completions = Some(comps);
-                            }
-                            processed_results.push((region, completions));
-                        }
-                        try_join_all(drain_jobs).await.unwrap();
-                        let mut wait_latencies: BTreeMap<usize, BTreeMap<Region, Vec<f64>>> =
-                            BTreeMap::new();
-                        for (region, completions) in processed_results {
-                            for (line, duration) in completions {
-                                wait_latencies
-                                    .entry(line)
-                                    .or_default()
-                                    .entry(region.clone())
-                                    .or_default()
-                                    .push(duration.as_millis() as f64);
                             }
                         }
-                        let leader_latencies: BTreeMap<usize, f64> = leader_completions
-                            .unwrap()
-                            .into_iter()
-                            .map(|(line, dur)| (line, dur.as_millis() as f64))
-                            .collect();
-                        tx.send((wait_latencies, leader_latencies)).unwrap();
+                    }));
+                    if let Some(comps) = maybe_leader {
+                        leader_completions = Some(comps);
                     }
-                });
-                let (wait_latencies, leader_latencies) = rx.recv().unwrap();
-                let mut current = 0;
-                let leader_region = region_counts_clone
-                    .iter()
-                    .find_map(|(reg, cnt)| {
-                        let start = current;
-                        current += *cnt;
-                        if leader_idx_clone >= start && leader_idx_clone < current {
-                            Some(reg.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap();
-                (
-                    leader_idx_clone,
-                    leader_region,
-                    wait_latencies,
-                    leader_latencies,
-                )
-            });
-            chunk_handles.push(handle);
-        }
-        for handle in chunk_handles {
-            let res = handle.join().unwrap();
-            results.push(res);
-        }
+                    processed_results.push((region, completions));
+                }
+                try_join_all(drain_jobs).await.unwrap();
+                let mut wait_latencies: BTreeMap<usize, BTreeMap<Region, Vec<f64>>> =
+                    BTreeMap::new();
+                for (region, completions) in processed_results {
+                    for (line, duration) in completions {
+                        wait_latencies
+                            .entry(line)
+                            .or_default()
+                            .entry(region.clone())
+                            .or_default()
+                            .push(duration.as_millis() as f64);
+                    }
+                }
+                let leader_latencies: BTreeMap<usize, f64> = leader_completions
+                    .unwrap()
+                    .into_iter()
+                    .map(|(line, dur)| (line, dur.as_millis() as f64))
+                    .collect();
+                tx.send((wait_latencies, leader_latencies)).unwrap();
+            }
+        });
+        let (wait_latencies, leader_latencies) = rx.recv().unwrap();
+        let mut current = 0;
+        let leader_region = region_counts
+            .iter()
+            .find_map(|(reg, cnt)| {
+                let start = current;
+                current += *cnt;
+                if leader_idx >= start && leader_idx < current {
+                    Some(reg.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        results.push((leader_idx, leader_region, wait_latencies, leader_latencies));
     }
     results.sort_by_key(|(idx, _, _, _)| *idx);
     for tuple in &results {
