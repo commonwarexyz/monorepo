@@ -19,7 +19,6 @@ use common::{
     arbitrary_vec_of_vec_eval_g1, arbitrary_vec_of_vec_eval_g2, arbitrary_vec_pending_minpk,
     arbitrary_vec_pending_minsig, arbitrary_weights,
 };
-use commonware_cryptography::bls12381::primitives::group::Scalar;
 
 type Message = (Option<Vec<u8>>, Vec<u8>);
 
