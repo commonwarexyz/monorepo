@@ -8,13 +8,40 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
+use futures::channel::mpsc;
 use std::fmt;
 
 pub mod client;
 pub mod resolver;
+
+/// Represents a synchronization target with hash and operation bounds
+#[derive(Debug, Clone)]
+pub struct SyncTarget<D: Digest> {
+    /// Target hash of the database
+    pub hash: D,
+    /// Lower bound of operations to sync (inclusive)
+    /// This will be the inactivity floor and pruning boundary
+    /// of the synced database.
+    pub lower_bound_ops: u64,
+    /// Upper bound of operations to sync (inclusive)
+    pub upper_bound_ops: u64,
+}
+
+/// Update message for changing the sync target during synchronization
+#[derive(Debug, Clone)]
+pub struct SyncTargetUpdate<D: Digest> {
+    /// New sync target
+    pub target: SyncTarget<D>,
+}
+
+/// Channel for sending sync target updates
+pub type SyncTargetUpdateSender<D> = mpsc::UnboundedSender<SyncTargetUpdate<D>>;
+
+/// Channel for receiving sync target updates
+pub type SyncTargetUpdateReceiver<D> = mpsc::UnboundedReceiver<SyncTargetUpdate<D>>;
 
 /// Synchronization errors
 #[derive(Debug, thiserror::Error)]
@@ -34,6 +61,15 @@ pub enum Error {
     /// Invalid client state
     #[error("Invalid client state")]
     InvalidState,
+    /// Sync target hash unchanged
+    #[error("Sync target hash unchanged")]
+    SyncTargetHashUnchanged,
+    /// Sync target moved backward
+    #[error("Sync target moved backward: {old:?} -> {new:?}")]
+    SyncTargetMovedBackward {
+        old: Box<dyn fmt::Debug + Send + Sync>,
+        new: Box<dyn fmt::Debug + Send + Sync>,
+    },
     /// Sync already completed
     #[error("Sync already completed")]
     AlreadyComplete,
@@ -74,4 +110,28 @@ where
         Client::Done { db } => Ok(db),
         _ => client.sync().await,
     }
+}
+
+/// Starts synchronization with the ability to receive target updates during the process.
+/// Returns the synchronized database and a channel for sending updates.
+pub async fn sync_with_updates<E, K, V, H, T, R>(
+    config: Config<E, K, V, H, T, R>,
+) -> Result<(Any<E, K, V, H, T>, SyncTargetUpdateSender<H::Digest>), Error>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
+    let (update_sender, update_receiver) = mpsc::unbounded();
+
+    let client = Client::new_with_updater(config, Some(update_receiver)).await?;
+    let db = match client {
+        Client::Done { db } => db,
+        _ => client.sync().await?,
+    };
+
+    Ok((db, update_sender))
 }
