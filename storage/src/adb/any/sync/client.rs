@@ -1052,7 +1052,7 @@ pub(crate) mod tests {
                 .unwrap();
 
             // Send target update with decreased lower bound
-            let _ = update_sender
+            update_sender
                 .send(SyncTargetUpdate {
                     target: SyncTarget {
                         hash: initial_hash,
@@ -1107,7 +1107,7 @@ pub(crate) mod tests {
                 .unwrap();
 
             // Send target update with decreased upper bound
-            let _ = update_sender
+            update_sender
                 .send(SyncTargetUpdate {
                     target: SyncTarget {
                         hash: initial_hash,
