@@ -10,10 +10,9 @@ use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
     future::try_join_all,
-    FutureExt, SinkExt, StreamExt,
+    SinkExt, StreamExt,
 };
 use reqwest::blocking::Client;
-use std::sync::mpsc::channel;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     time::Duration,
@@ -461,7 +460,7 @@ fn main() {
                         };
 
                         // Notify that we're done
-                        let (shutter, listener) = oneshot::channel::<()>();
+                        let (shutter, mut listener) = oneshot::channel::<()>();
                         tx.send(shutter).await.unwrap();
 
                         // Process messages until we're done
@@ -470,7 +469,7 @@ fn main() {
                                 _ = receiver.recv() => {
                                     // Discard message
                                 },
-                                _ = listener => {
+                                _ = &mut listener => {
                                     break;
                                 }
                             }
