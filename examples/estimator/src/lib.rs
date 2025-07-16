@@ -9,7 +9,7 @@ use tracing::debug;
 // Constants
 // =============================================================================
 
-const BASE: &str = "https://www.cloudping.co/api/latencies";
+const CLOUDPING_BASE: &str = "https://www.cloudping.co/api/latencies";
 
 // =============================================================================
 // Type Definitions
@@ -151,13 +151,13 @@ fn download_latency_data() -> Latencies {
 
     // Pull P50 and P90 matrices (time-frame: last 1 year)
     let p50: CloudPing = cli
-        .get(format!("{BASE}?percentile=p_50&timeframe=1Y"))
+        .get(format!("{CLOUDPING_BASE}?percentile=p_50&timeframe=1Y"))
         .send()
         .unwrap()
         .json()
         .unwrap();
     let p90: CloudPing = cli
-        .get(format!("{BASE}?percentile=p_90&timeframe=1Y"))
+        .get(format!("{CLOUDPING_BASE}?percentile=p_90&timeframe=1Y"))
         .send()
         .unwrap()
         .json()
