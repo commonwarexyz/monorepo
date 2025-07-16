@@ -336,13 +336,14 @@ where
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
         let log = if log_size <= new_target.lower_bound_ops {
+            // Log is stale (last element is before the new lower bound)
+            // Reinitialize the log with the new sync range
+
             log.close()
                 .await
                 .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
-            // Log is stale (last element is before the new lower bound)
-            // Reinitialize the log with the new sync range
-            let new_log = Journal::<E, Operation<K, V>>::init_sync(
+            Journal::<E, Operation<K, V>>::init_sync(
                 config.context.clone().with_label("log"),
                 JConfig {
                     partition: config.db_config.log_journal_partition.clone(),
@@ -355,9 +356,7 @@ where
             )
             .await
             .map_err(adb::Error::JournalError)
-            .map_err(Error::Adb)?;
-
-            new_log
+            .map_err(Error::Adb)?
         } else {
             // Log contains data in the updated sync range, prune normally
             log.prune(new_target.lower_bound_ops)
