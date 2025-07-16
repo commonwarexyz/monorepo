@@ -1,9 +1,14 @@
 use std::collections::HashMap;
 
+use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
-use commonware_p2p::simulated::{Config, Link, Network};
-use commonware_runtime::{deterministic, Metrics, Runner};
+use commonware_p2p::{
+    simulated::{Config, Link, Network},
+    Receiver, Sender,
+};
+use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
+use futures::future::try_join_all;
 use reqwest::blocking::Client;
 use serde_json;
 use tracing::info;
@@ -191,5 +196,40 @@ fn main() {
                     .unwrap();
             }
         }
+
+        // For each peer, see how long it takes to send a message (and hear back from all other peers)
+        let mut jobs = Vec::new();
+        for (i, (identity, region, sender, receiver)) in identities.iter().enumerate() {
+            let mut job = context.with_label("job");
+            jobs.push(job.spawn(move |ctx| async move {
+                let start = ctx.current();
+
+                for (j, (other_identity, other_region, other_sender, other_receiver)) in
+                    identities.iter().enumerate()
+                {
+                    if i == j {
+                        continue;
+                    }
+
+                    // Send message
+                    sender
+                        .send(
+                            commonware_p2p::Recipients::One(other_identity.clone()),
+                            Bytes::from("Hello, world!"),
+                            true,
+                        )
+                        .await
+                        .unwrap();
+                }
+
+                // Loop until all messages are received
+                while let Ok((other_identity, message)) = receiver.recv().await {
+                    info!(?other_identity, "message received");
+                }
+            }));
+        }
+
+        // Wait for all jobs to complete
+        try_join_all(jobs).await.unwrap();
     });
 }
