@@ -5,9 +5,14 @@ use commonware_p2p::{
     utils::codec::wrap,
 };
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
+use commonware_utils::quorum;
 use futures::future::try_join_all;
 use reqwest::blocking::Client;
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tracing::info;
 
 const DEFAULT_CHANNEL: u32 = 0;
@@ -197,7 +202,8 @@ fn main() {
                 .await
                 .unwrap();
             let region = regions[i % regions.len()].clone();
-            let (sender, receiver) = wrap::<_, _, u8>((), sender, receiver);
+            let (sender, receiver) =
+                wrap::<_, _, (ed25519::PublicKey, u8)>(((), ()), sender, receiver);
             identities.push((identity, region, sender, receiver));
         }
 
@@ -233,28 +239,50 @@ fn main() {
 
                 // Send message
                 sender
-                    .send(commonware_p2p::Recipients::All, 0, true)
+                    .send(commonware_p2p::Recipients::All, (identity.clone(), 0), true)
                     .await
                     .unwrap();
 
                 // Loop until all messages are received
-                let mut sent = 0;
-                let mut received = 0;
-                let mut completed = None;
+                let inbound_notarized = 0;
+                let outbound_notarized = 0;
+                let inbound_finalized = 0;
+                let outbound_finalized = 0;
                 loop {
                     if let Ok((other_identity, message)) = receiver.recv().await {
+                        // Wait for message to be processed
+                        ctx.sleep(Duration::from_millis(message_processing_time))
+                            .await;
+
+                        // Handle inbound message
                         match message {
-                            Ok(0) => {
+                            // Handle propose message
+                            Ok((_, 0)) => {
                                 sender
                                     .send(commonware_p2p::Recipients::One(other_identity), 1, true)
                                     .await
                                     .unwrap();
-                                sent += 1;
+                                outbound_notarized += 1;
                             }
-                            Ok(1) => {
-                                received += 1;
-                                if received == peers - 1 {
-                                    completed = Some(ctx.current());
+                            // Handle notarize message
+                            Ok((proposal, 1)) => {
+                                inbound_notarized += 1;
+
+                                // Send finalize message
+                                if inbound_notarized != quorum(peers as u32 - 1) {
+                                    continue;
+                                }
+                                sender
+                                    .send(commonware_p2p::Recipients::All, 2, true)
+                                    .await
+                                    .unwrap();
+                            }
+                            // Handle finalize message
+                            Ok(2) => {
+                                // Check if we have enough to finalize
+                                inbound_finalized += 1;
+                                if inbound_finalized != quorum(peers as u32 - 1) {
+                                    continue;
                                 }
                             }
                             Ok(message) => {
