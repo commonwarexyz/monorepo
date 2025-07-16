@@ -23,19 +23,30 @@ use std::{
 };
 use tracing::debug;
 
+/// The channel to use for all messages
 const DEFAULT_CHANNEL: u32 = 0;
+
+/// The success rate over all links (1.0 = 100%)
 const DEFAULT_SUCCESS_RATE: f64 = 1.0;
 
-// Type aliases for better readability
+/// A map of region names to the number of peers in that region
 type RegionCounts = Vec<(String, usize)>;
+
+/// A map of line numbers to the latencies of all regions for that line
 type WaitLatencies = BTreeMap<usize, BTreeMap<String, Vec<f64>>>;
+
+/// A map of line numbers to the latency of the leader for that line
 type LeaderLatencies = BTreeMap<usize, f64>;
+
+/// A tuple containing an identity, region, sender, and receiver
 type PeerIdentity = (
     ed25519::PublicKey,
     String,
     WrappedSender<Sender<ed25519::PublicKey>, u32>,
     WrappedReceiver<Receiver<ed25519::PublicKey>, u32>,
 );
+
+/// A handle to a peer job
 type PeerJobHandle = commonware_runtime::Handle<(
     String,
     Vec<(usize, Duration)>,
@@ -49,7 +60,7 @@ struct PeerContext {
     peers: usize,
     identity: ed25519::PublicKey,
     region: String,
-    dsl: Vec<(usize, Command)>,
+    commands: Vec<(usize, Command)>,
 }
 
 /// Context data for command processing
@@ -346,7 +357,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
     leader_idx: usize,
     peers: usize,
     identities: Vec<PeerIdentity>,
-    dsl: &[(usize, Command)],
+    commands: &[(usize, Command)],
     tx: mpsc::Sender<oneshot::Sender<()>>,
 ) -> Vec<PeerJobHandle> {
     let mut jobs = Vec::new();
@@ -354,7 +365,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
     for (i, (identity, region, sender, receiver)) in identities.into_iter().enumerate() {
         let tx = tx.clone();
         let job = context.with_label("job");
-        let dsl = dsl.to_vec();
+        let commands = commands.to_vec();
 
         jobs.push(job.spawn(move |ctx| async move {
             let peer_context = PeerContext {
@@ -363,7 +374,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
                 peers,
                 identity,
                 region,
-                dsl,
+                commands,
             };
             run_peer_logic(ctx, peer_context, sender, receiver, tx).await
         }));
@@ -390,7 +401,7 @@ async fn run_peer_logic(
         peers,
         identity,
         region,
-        dsl,
+        commands,
     } = peer_context;
     let is_leader = peer_idx == leader_idx;
     let start = ctx.current();
@@ -408,19 +419,19 @@ async fn run_peer_logic(
 
     // Main simulation loop
     loop {
-        if current_index >= dsl.len() {
+        if current_index >= commands.len() {
             break;
         }
 
         // Process commands that can be executed immediately
         let mut advanced = true;
         while advanced {
-            if current_index >= dsl.len() {
+            if current_index >= commands.len() {
                 break;
             }
 
             advanced = process_command(
-                &dsl[current_index],
+                &commands[current_index],
                 &mut current_index,
                 &process_ctx,
                 &mut sender,
@@ -431,7 +442,7 @@ async fn run_peer_logic(
             .await;
         }
 
-        if current_index >= dsl.len() {
+        if current_index >= commands.len() {
             break;
         }
 
