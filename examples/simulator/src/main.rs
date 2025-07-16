@@ -115,6 +115,8 @@ fn std_dev(data: &[f64]) -> Option<f64> {
 enum SimCommand {
     Propose(u32),
     Broadcast(u32),
+    Reply(u32),
+    Collect(u32, Threshold),
     Wait(u32, Threshold),
 }
 
@@ -140,6 +142,26 @@ fn parse_task(content: &str) -> Vec<(usize, SimCommand)> {
             "broadcast" => {
                 let id = parts[1].parse::<u32>().expect("Invalid broadcast id");
                 cmds.push((line_num + 1, SimCommand::Broadcast(id)));
+            }
+            "reply" => {
+                let id = parts[1].parse::<u32>().expect("Invalid reply id");
+                cmds.push((line_num + 1, SimCommand::Reply(id)));
+            }
+            "collect" => {
+                let id = parts[1].parse::<u32>().expect("Invalid collect id");
+                let thresh_str = parts[2];
+                let thresh = if thresh_str.ends_with('%') {
+                    let p = thresh_str
+                        .trim_end_matches('%')
+                        .parse::<f64>()
+                        .expect("Invalid percent")
+                        / 100.0;
+                    Threshold::Percent(p)
+                } else {
+                    let c = thresh_str.parse::<usize>().expect("Invalid count");
+                    Threshold::Count(c)
+                };
+                cmds.push((line_num + 1, SimCommand::Collect(id, thresh)));
             }
             "wait" => {
                 let id = parts[1].parse::<u32>().expect("Invalid wait id");
@@ -334,6 +356,34 @@ fn main() {
                                     current_index += 1;
                                     advanced = true;
                                 }
+                                SimCommand::Reply(id) => {
+                                    let leader_identity = ed25519::PrivateKey::from_seed(leader_idx as u64).public_key();
+                                    if is_leader {
+                                        received.entry(*id).or_default().insert(identity.clone());
+                                    } else {
+                                        sender.send(commonware_p2p::Recipients::One(leader_identity), *id, true).await.unwrap();
+                                    }
+                                    current_index += 1;
+                                    advanced = true;
+                                }
+                                SimCommand::Collect(id, thresh) => {
+                                    if is_leader {
+                                        let count = received.get(id).map_or(0, |s| s.len());
+                                        let required = match thresh {
+                                            Threshold::Percent(p) => ((peers as f64) * p).ceil() as usize,
+                                            Threshold::Count(c) => *c,
+                                        };
+                                        if count >= required {
+                                            let duration = ctx.current().duration_since(start).unwrap();
+                                            completions.push((dsl[current_index].0, duration));
+                                            current_index += 1;
+                                            advanced = true;
+                                        }
+                                    } else {
+                                        current_index += 1;
+                                        advanced = true;
+                                    }
+                                }
                                 SimCommand::Wait(id, thresh) => {
                                     let count = received.get(id).map_or(0, |s| s.len());
                                     let required = match thresh {
@@ -350,6 +400,11 @@ fn main() {
                                     }
                                 }
                             }
+                        }
+
+                        // If we've completed the DSL, break
+                        if current_index >= dsl.len() {
+                            break;
                         }
 
                         // Process messages from other peers
