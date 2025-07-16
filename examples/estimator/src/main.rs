@@ -8,8 +8,8 @@ use commonware_p2p::{
 };
 use commonware_runtime::{deterministic, Clock, Metrics, Network as RNetwork, Runner, Spawner};
 use estimator::{
-    calculate_threshold, crate_version, download_latency_data, load_latency_data, mean, median,
-    parse_task, std_dev, Command, Latencies,
+    calculate_threshold, count_peers, crate_version, get_latency_data, mean, median, parse_task,
+    std_dev, Command, Distribution, Latencies,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -28,9 +28,6 @@ const DEFAULT_CHANNEL: u32 = 0;
 
 /// The success rate over all links (1.0 = 100%)
 const DEFAULT_SUCCESS_RATE: f64 = 1.0;
-
-/// A map of region names to the number of peers in that region
-type RegionCounts = Vec<(String, usize)>;
 
 /// A map of line numbers to the latencies of all regions for that line
 type WaitLatencies = BTreeMap<usize, BTreeMap<String, Vec<f64>>>;
@@ -73,37 +70,35 @@ struct SimulationResult {
 
 /// Command line arguments parsed from user input
 struct Arguments {
-    region_counts: RegionCounts,
+    distribution: Distribution,
     task_content: String,
     reload_latency_data: bool,
 }
 
 fn main() {
-    setup_logging();
-
-    let args = parse_arguments();
-    let peers = calculate_total_peers(&args.region_counts);
-    let dsl = parse_task(&args.task_content);
-
-    debug!(peers, ?args.region_counts, "Initializing simulator");
-
-    let latency_map = get_latency_data(args.reload_latency_data);
-    let simulation_results = run_all_simulations(
-        peers,
-        &args.region_counts,
-        &dsl,
-        &latency_map,
-        &args.task_content,
-    );
-
-    print_aggregated_results(&simulation_results, &args.task_content);
-}
-
-/// Initialize logging with debug level
-fn setup_logging() {
+    // Initialize logging
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .init();
+
+    // Parse command line arguments
+    let args = parse_arguments();
+    let peers = count_peers(&args.distribution);
+    let commands = parse_task(&args.task_content);
+    debug!(peers, ?args.distribution, "Initializing simulator");
+
+    // Get latency data
+    let latency_map = get_latency_data(args.reload_latency_data);
+
+    // Run simulations
+    let simulation_results = run_all_simulations(
+        peers,
+        &args.distribution,
+        &commands,
+        &latency_map,
+        &args.task_content,
+    );
+    print_aggregated_results(&simulation_results, &args.task_content);
 }
 
 /// Parse command line arguments and return structured data
@@ -135,7 +130,7 @@ fn parse_arguments() -> Arguments {
         )
         .get_matches();
 
-    let region_counts = matches
+    let distribution = matches
         .get_many::<String>("regions")
         .unwrap()
         .map(|s| {
@@ -148,7 +143,7 @@ fn parse_arguments() -> Arguments {
                 .expect("invalid count");
             (region, count)
         })
-        .collect::<Vec<_>>();
+        .collect();
 
     let task_path = matches
         .get_one::<String>("task")
@@ -159,34 +154,16 @@ fn parse_arguments() -> Arguments {
     let reload_latency_data = matches.get_flag("reload-latency-data");
 
     Arguments {
-        region_counts,
+        distribution,
         task_content,
         reload_latency_data,
-    }
-}
-
-/// Calculate total number of peers across all regions
-fn calculate_total_peers(region_counts: &RegionCounts) -> usize {
-    let peers: usize = region_counts.iter().map(|(_, count)| *count).sum();
-    assert!(peers > 1, "must have at least 2 peers");
-    peers
-}
-
-/// Get latency data either by downloading or loading from cache
-fn get_latency_data(reload: bool) -> Latencies {
-    if reload {
-        debug!("downloading latency data");
-        download_latency_data()
-    } else {
-        debug!("loading latency data");
-        load_latency_data()
     }
 }
 
 /// Run simulations for all possible leaders and return results
 fn run_all_simulations(
     peers: usize,
-    region_counts: &RegionCounts,
+    region_counts: &BTreeMap<String, usize>,
     dsl: &[(usize, Command)],
     latency_map: &Latencies,
     task_content: &str,
@@ -206,33 +183,27 @@ fn run_all_simulations(
 /// Run a single simulation with the specified leader
 fn run_single_simulation(
     leader_idx: usize,
-    region_counts: &RegionCounts,
-    dsl: &[(usize, Command)],
-    latency_map: &Latencies,
+    distribution: &Distribution,
+    commands: &[(usize, Command)],
+    latencies: &Latencies,
 ) -> SimulationResult {
-    let peers = calculate_total_peers(region_counts);
+    let leader_region = calculate_leader_region(leader_idx, distribution);
+    let peers = count_peers(distribution);
     let runtime_cfg = deterministic::Config::default().with_seed(leader_idx as u64);
     let executor = deterministic::Runner::new(runtime_cfg);
 
-    let (wait_latencies, leader_latencies) = executor.start({
-        let dsl_clone = dsl.to_vec();
-        let latency_map_clone = latency_map.clone();
-        let region_counts_clone = region_counts.to_vec();
-
-        async move |context| {
-            run_simulation_logic(
-                context,
-                leader_idx,
-                peers,
-                &region_counts_clone,
-                &dsl_clone,
-                &latency_map_clone,
-            )
-            .await
-        }
+    // Run the simulation
+    let (wait_latencies, leader_latencies) = executor.start(async move |context| {
+        run_simulation_logic(
+            context,
+            leader_idx,
+            peers,
+            distribution,
+            commands,
+            latencies,
+        )
+        .await
     });
-
-    let leader_region = calculate_leader_region(leader_idx, region_counts);
 
     SimulationResult {
         leader_idx,
@@ -243,9 +214,9 @@ fn run_single_simulation(
 }
 
 /// Calculate which region a leader belongs to based on their index
-fn calculate_leader_region(leader_idx: usize, region_counts: &RegionCounts) -> String {
+fn calculate_leader_region(leader_idx: usize, distribution: &Distribution) -> String {
     let mut current = 0;
-    for (region, count) in region_counts {
+    for (region, count) in distribution {
         let start = current;
         current += *count;
         if leader_idx >= start && leader_idx < current {
@@ -260,9 +231,9 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
     context: C,
     leader_idx: usize,
     peers: usize,
-    region_counts: &RegionCounts,
-    dsl: &[(usize, Command)],
-    latency_map: &Latencies,
+    distribution: &Distribution,
+    commands: &[(usize, Command)],
+    latencies: &Latencies,
 ) -> (WaitLatencies, LeaderLatencies) {
     let (network, mut oracle) = Network::new(
         context.with_label("network"),
@@ -272,11 +243,11 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
     );
     network.start();
 
-    let identities = setup_network_identities(&mut oracle, region_counts).await;
-    setup_network_links(&mut oracle, &identities, latency_map).await;
+    let identities = setup_network_identities(&mut oracle, distribution).await;
+    setup_network_links(&mut oracle, &identities, latencies).await;
 
     let (tx, mut rx) = mpsc::channel(peers);
-    let jobs = spawn_peer_jobs(&context, leader_idx, peers, identities, dsl, tx);
+    let jobs = spawn_peer_jobs(&context, leader_idx, peers, identities, commands, tx);
 
     // Wait for all jobs to indicate they're done
     let responders = collect_job_responses(&mut rx, peers).await;
@@ -294,13 +265,12 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
 /// Set up network identities for all peers across regions
 async fn setup_network_identities(
     oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey>,
-    region_counts: &RegionCounts,
+    distribution: &Distribution,
 ) -> Vec<PeerIdentity> {
-    let peers = calculate_total_peers(region_counts);
+    let peers = count_peers(distribution);
     let mut identities = Vec::with_capacity(peers);
     let mut peer_idx = 0;
-
-    for (region, count) in region_counts {
+    for (region, count) in distribution {
         for _ in 0..*count {
             let identity = ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
             let (sender, receiver) = oracle

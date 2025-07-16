@@ -3,8 +3,10 @@ use std::{
     collections::{BTreeMap, HashMap},
     time::Duration,
 };
+use tracing::debug;
 
 pub type Region = String;
+pub type Distribution = BTreeMap<Region, usize>;
 pub type Behavior = (f64, f64); // (avg_latency_ms, jitter_ms)
 pub type Latencies = BTreeMap<Region, BTreeMap<Region, Behavior>>;
 
@@ -36,7 +38,7 @@ pub fn crate_version() -> &'static str {
 }
 
 /// Downloads latency data from cloudping.co API
-pub fn download_latency_data() -> Latencies {
+fn download_latency_data() -> Latencies {
     let cli = Client::builder().build().unwrap();
 
     // Pull P50 and P90 matrices (time-frame: last 1 year)
@@ -57,7 +59,7 @@ pub fn download_latency_data() -> Latencies {
 }
 
 /// Loads latency data from local JSON files
-pub fn load_latency_data() -> Latencies {
+fn load_latency_data() -> Latencies {
     let p50 = include_str!("p50.json");
     let p90 = include_str!("p90.json");
     let p50: CloudPing = serde_json::from_str(p50).unwrap();
@@ -81,6 +83,24 @@ fn populate_latency_map(p50: CloudPing, p90: CloudPing) -> Latencies {
     }
 
     map
+}
+
+/// Get latency data either by downloading or loading from cache
+pub fn get_latency_data(reload: bool) -> Latencies {
+    if reload {
+        debug!("downloading latency data");
+        download_latency_data()
+    } else {
+        debug!("loading latency data");
+        load_latency_data()
+    }
+}
+
+/// Calculate total number of peers across all regions
+pub fn count_peers(distribution: &Distribution) -> usize {
+    let peers = distribution.values().sum();
+    assert!(peers > 1, "must have at least 2 peers");
+    peers
 }
 
 /// Calculates the mean of a slice of f64 values
