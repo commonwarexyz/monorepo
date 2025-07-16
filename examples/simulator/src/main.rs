@@ -274,7 +274,7 @@ fn main() {
             let handle = std::thread::spawn(move || {
                 let leader_idx_clone = leader_idx;
                 let (tx, rx) = channel();
-                let runtime_cfg = deterministic::Config::new();
+                let runtime_cfg = deterministic::Config::default().with_seed(leader_idx as u64);
                 let executor = deterministic::Runner::new(runtime_cfg);
                 executor.start({
                     let region_counts_clone = region_counts_clone.clone();
