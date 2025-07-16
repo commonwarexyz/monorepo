@@ -36,5 +36,5 @@ anyhow  = "1.0"
 colored = "2"
 
 [[bin]]
-name = "commonware-simulator"
+name = "commonware-estimator"
 bench = false

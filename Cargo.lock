@@ -1167,6 +1167,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-estimator"
+version = "0.0.56"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "chrono",
+ "clap",
+ "colored",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "crossterm 0.28.1",
+ "futures",
+ "governor",
+ "prometheus-client",
+ "rand 0.8.5",
+ "ratatui",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "commonware-flood"
 version = "0.0.56"
 dependencies = [
@@ -1297,35 +1326,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-opentelemetry",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "commonware-simulator"
-version = "0.0.56"
-dependencies = [
- "anyhow",
- "bytes",
- "chrono",
- "clap",
- "colored",
- "commonware-consensus",
- "commonware-cryptography",
- "commonware-macros",
- "commonware-p2p",
- "commonware-runtime",
- "commonware-storage",
- "commonware-utils",
- "crossterm 0.28.1",
- "futures",
- "governor",
- "prometheus-client",
- "rand 0.8.5",
- "ratatui",
- "reqwest",
- "serde",
- "serde_json",
- "tracing",
  "tracing-subscriber",
 ]
 
