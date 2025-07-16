@@ -462,7 +462,6 @@ fn main() {
                 stats.push((region.clone(), count, mean_ms, median_ms, std_dev_ms));
             }
             stats.sort_by(|a, b| a.0.cmp(&b.0));
-            println!("  Averaged wait completion stats for line {}:", line_num);
             for (region, count, mean_ms, median_ms, std_dev_ms) in stats {
                 let stat_line = format!(
                     "    - Region: {}, Count: {}, Mean: {:.2}ms, Median: {:.2}ms, Std Dev: {:.2}ms",
