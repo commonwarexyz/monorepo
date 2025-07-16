@@ -8,8 +8,8 @@ use commonware_p2p::{
 };
 use commonware_runtime::{deterministic, Clock, Metrics, Network as RNetwork, Runner, Spawner};
 use estimator::{
-    crate_version, download_latency_data, load_latency_data, mean, median, parse_task, std_dev,
-    Command, Latencies, Threshold,
+    calculate_threshold, crate_version, download_latency_data, load_latency_data, mean, median,
+    parse_task, std_dev, Command, Latencies,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -385,13 +385,14 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
                         break;
                     }
 
+                    let command = &commands[current_index];
                     advanced = process_command(
-                        &commands[current_index],
-                        &mut current_index,
+                        &ctx,
                         &process_ctx,
+                        &mut current_index,
+                        command,
                         &mut sender,
                         &mut received,
-                        &ctx,
                         &mut completions,
                     )
                     .await;
@@ -438,12 +439,12 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
 
 /// Process a single command in the DSL
 async fn process_command<C: Spawner + Clock>(
-    command: &(usize, Command),
-    current_index: &mut usize,
+    ctx: &C,
     process_ctx: &ProcessContext,
+    current_index: &mut usize,
+    command: &(usize, Command),
     sender: &mut WrappedSender<Sender<ed25519::PublicKey>, u32>,
     received: &mut BTreeMap<u32, BTreeSet<ed25519::PublicKey>>,
-    ctx: &C,
     completions: &mut Vec<(usize, Duration)>,
 ) -> bool {
     match &command.1 {
@@ -531,14 +532,6 @@ async fn process_command<C: Spawner + Clock>(
                 false
             }
         }
-    }
-}
-
-/// Calculate required count based on threshold
-fn calculate_threshold(thresh: &Threshold, peers: usize) -> usize {
-    match thresh {
-        Threshold::Percent(p) => ((peers as f64) * *p).ceil() as usize,
-        Threshold::Count(c) => *c,
     }
 }
 

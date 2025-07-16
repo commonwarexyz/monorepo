@@ -124,6 +124,14 @@ pub fn std_dev(data: &[f64]) -> Option<f64> {
     Some(variance.sqrt())
 }
 
+/// Calculate required count based on threshold
+pub fn calculate_threshold(thresh: &Threshold, peers: usize) -> usize {
+    match thresh {
+        Threshold::Percent(p) => ((peers as f64) * *p).ceil() as usize,
+        Threshold::Count(c) => *c,
+    }
+}
+
 /// Parses a DSL task file into a vector of simulation commands
 pub fn parse_task(content: &str) -> Vec<(usize, Command)> {
     let mut cmds = Vec::new();
@@ -233,6 +241,12 @@ mod tests {
         assert!(result.is_some());
         let std = result.unwrap();
         assert!((std - std::f64::consts::SQRT_2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_calculate_threshold() {
+        assert_eq!(calculate_threshold(&Threshold::Count(5), 10), 5);
+        assert_eq!(calculate_threshold(&Threshold::Percent(0.5), 10), 5);
     }
 
     #[test]
