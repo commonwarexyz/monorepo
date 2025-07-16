@@ -1057,12 +1057,10 @@ name = "commonware-coding-fuzz"
 version = "0.0.56"
 dependencies = [
  "arbitrary",
- "bytes",
  "commonware-coding",
  "commonware-cryptography",
  "libfuzzer-sys",
- "paste",
- "thiserror 2.0.12",
+ "rand",
 ]
 
 [[package]]

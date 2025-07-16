@@ -4,6 +4,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_coding::reed_solomon::{decode, encode, Chunk};
 use commonware_cryptography::Sha256;
 use libfuzzer_sys::fuzz_target;
+use rand::{seq::SliceRandom, thread_rng};
 
 #[derive(Debug)]
 struct FuzzInput {
@@ -45,7 +46,12 @@ fn fuzz(input: FuzzInput) {
     };
     assert_eq!(decoded, payload, "decode with all chunks failed");
 
-    let subset: Vec<Chunk<Sha256>> = chunks.into_iter().take(min as usize).collect();
+    let subset: Vec<Chunk<Sha256>> = {
+        let mut temp: Vec<_> = chunks.into_iter().collect();
+        temp.shuffle(&mut thread_rng());
+        temp
+    };
+
     let decoded_subset = match decode::<Sha256>(total, min, &root, subset) {
         Ok(data) => data,
         Err(e) => panic!("decode with min chunks failed: {e:?}"),

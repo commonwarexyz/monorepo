@@ -10,10 +10,8 @@ cargo-fuzz = true
 [dependencies]
 commonware-cryptography = { workspace = true }
 libfuzzer-sys = { workspace = true }
-bytes = { workspace = true }
 arbitrary = { workspace = true, features = ["derive"] }
-thiserror = { workspace = true }
-paste = { workspace = true }
+rand = { workspace = true }
 
 [dependencies.commonware-coding]
 path = ".."
