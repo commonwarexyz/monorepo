@@ -121,8 +121,8 @@ fn parse_arguments() -> Arguments {
                 .help("Distribution of peers across regions in the form <region>:<count>, e.g. us-east-1:3,eu-west-1:2"),
         )
         .arg(
-            Arg::new("reload-latency-data")
-                .long("reload-latency-data")
+            Arg::new("reload")
+                .long("reload")
                 .required(false)
                 .num_args(0)
                 .help("Reload latency data from cloudping.co"),
@@ -157,7 +157,7 @@ fn parse_arguments() -> Arguments {
         .clone();
 
     let task_content = std::fs::read_to_string(&task_path).expect("Failed to read task file");
-    let reload_latency_data = matches.get_flag("reload-latency-data");
+    let reload_latency_data = matches.get_flag("reload");
 
     Arguments {
         distribution,

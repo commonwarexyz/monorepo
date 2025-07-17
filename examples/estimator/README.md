@@ -28,7 +28,7 @@ cargo run -- [OPTIONS]
 
 - `--distribution <DISTRIBUTION>` (required): Specify the distribution of peers across regions in the format `<region>:<count>`, comma-separated. Example: `us-east-1:10,eu-west-1:5`. Regions must match AWS regions from the latency data (e.g., us-east-1, eu-west-1).
 - `--task <PATH>` (required): Path to the DSL file defining the simulation behavior (e.g., `minimmit.lazy`).
-- `--reload-latency-data` (optional flag): Download fresh latency data from cloudping.co instead of using embedded data.
+- `--reload` (optional flag): Download fresh latency data from cloudping.co instead of using embedded data.
 
 ### Example
 
