@@ -270,9 +270,8 @@ where
         Ok(())
     }
 
-    /// Apply a target update to the client
+    /// Update the sync target to the most recent target update, if any.
     async fn handle_target_updates(mut self) -> Result<Self, Error> {
-        // Get the latest target update, if any
         let update_receiver = match &mut self {
             Client::FetchData {
                 update_receiver, ..
@@ -1336,7 +1335,7 @@ pub(crate) mod tests {
             // Create and populate target database with 20 operations
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(20);
-            apply_ops(&mut target_db, target_ops).await;
+            apply_ops(&mut target_db, target_ops.clone()).await;
             target_db.commit().await.unwrap();
 
             // Capture initial target state
@@ -1438,6 +1437,18 @@ pub(crate) mod tests {
                     target_db.inactivity_floor_loc
                 );
                 assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
+            }
+
+            // Verify the expected operations are present in the synced database.
+            for i in synced_db.inactivity_floor_loc..synced_db.op_count() {
+                let got = synced_db.log.read(i).await.unwrap();
+                let expected = target_db.log.read(i).await.unwrap();
+                assert_eq!(got, expected);
+            }
+            for i in synced_db.ops.oldest_retained_pos().unwrap()..synced_db.ops.size() {
+                let got = synced_db.ops.get_node(i).await.unwrap();
+                let expected = target_db.ops.get_node(i).await.unwrap();
+                assert_eq!(got, expected);
             }
 
             synced_db.destroy().await.unwrap();
