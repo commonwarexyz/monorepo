@@ -110,8 +110,14 @@ fn main() {
 /// Parse command line arguments and return structured data
 fn parse_arguments() -> Arguments {
     let matches = ClapCommand::new("commonware-simulator")
-        .about("TBA")
+        .about("Simulate mechanism performance under realistic network conditions")
         .version(crate_version())
+        .arg(
+            Arg::new("task")
+                .value_parser(value_parser!(String))
+                .required(true)
+                .help("Path to .lazy file defining the simulation behavior"),
+        )
         .arg(
             Arg::new("distribution")
                 .long("distribution")
@@ -121,18 +127,11 @@ fn parse_arguments() -> Arguments {
                 .help("Distribution of peers across regions in the form <region>:<count>, e.g. us-east-1:3,eu-west-1:2"),
         )
         .arg(
-            Arg::new("reload-latency-data")
-                .long("reload-latency-data")
+            Arg::new("reload")
+                .long("reload")
                 .required(false)
                 .num_args(0)
                 .help("Reload latency data from cloudping.co"),
-        )
-        .arg(
-            Arg::new("task")
-                .long("task")
-                .required(true)
-                .value_parser(value_parser!(String))
-                .help("Path to DSL file defining the simulation behavior"),
         )
         .get_matches();
 
@@ -157,7 +156,7 @@ fn parse_arguments() -> Arguments {
         .clone();
 
     let task_content = std::fs::read_to_string(&task_path).expect("Failed to read task file");
-    let reload_latency_data = matches.get_flag("reload-latency-data");
+    let reload_latency_data = matches.get_flag("reload");
 
     Arguments {
         distribution,
@@ -250,7 +249,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
     }
 
     // Ensure any messages in the simulator are queued (this is virtual time)
-    context.sleep(Duration::from_millis(10_000)).await;
+    context.sleep(Duration::from_secs(10)).await;
 
     // Send the shutdown signal to all jobs
     for responder in responders {
@@ -687,16 +686,16 @@ fn print_regional_statistics(steps: &Steps, line: usize) {
     let mut stats: Vec<(String, f64, f64, f64)> = Vec::new();
     for (region, latencies) in regional.iter() {
         let mut lats = latencies.clone();
-        let mean_ms = mean(&lats);
-        let median_ms = median(&mut lats);
-        let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
-        stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
+        let mean = mean(&lats);
+        let median = median(&mut lats);
+        let stdv = std_dev(&lats).unwrap_or(0.0);
+        stats.push((region.clone(), mean, median, stdv));
     }
     stats.sort_by(|a, b| a.0.cmp(&b.0));
-    for (region, mean_ms, median_ms, std_dev_ms) in stats {
+    for (region, mean, median, stdv) in stats {
         let stat_line = format!(
-                "    [{region}] mean: {mean_ms:.2}ms (dev: {std_dev_ms:.2}ms) | median: {median_ms:.2}ms",
-            );
+            "    [{region}] mean: {mean:.2}ms (stdv: {stdv:.2}ms) | median: {median:.2}ms",
+        );
         println!("{}", stat_line.cyan());
     }
 }
@@ -775,12 +774,11 @@ fn print_aggregated_proposer_statistics(
 
     // Calculate statistics
     let mut lats_sorted = lats.clone();
-    let mean_ms = mean(lats);
-    let median_ms = median(&mut lats_sorted);
-    let std_dev_ms = std_dev(lats).unwrap_or(0.0);
-    let stat_line = format!(
-        "    [proposer] mean: {mean_ms:.2}ms (dev: {std_dev_ms:.2}ms) | median: {median_ms:.2}ms"
-    );
+    let mean = mean(lats);
+    let median = median(&mut lats_sorted);
+    let stdv = std_dev(lats).unwrap_or(0.0);
+    let stat_line =
+        format!("    [proposer] mean: {mean:.2}ms (stdv: {stdv:.2}ms) | median: {median:.2}ms");
     println!("{}", stat_line.magenta());
 }
 
@@ -796,19 +794,19 @@ fn print_aggregated_regional_statistics(observations: &Observations, line_num: u
     // Calculate regional statistics
     for (region, latencies) in regional.iter() {
         let mut lats = latencies.clone();
-        let mean_ms = mean(&lats);
-        let median_ms = median(&mut lats);
-        let std_dev_ms = std_dev(&lats).unwrap_or(0.0);
-        stats.push((region.clone(), mean_ms, median_ms, std_dev_ms));
+        let mean = mean(&lats);
+        let median = median(&mut lats);
+        let stdv = std_dev(&lats).unwrap_or(0.0);
+        stats.push((region.clone(), mean, median, stdv));
         all_lats.extend_from_slice(latencies);
     }
 
     // Print regional statistics
     stats.sort_by(|a, b| a.0.cmp(&b.0));
-    for (region, mean_ms, median_ms, std_dev_ms) in stats {
+    for (region, mean, median, stdv) in stats {
         let stat_line = format!(
-                "    [{region}] mean: {mean_ms:.2}ms (dev: {std_dev_ms:.2}ms) | median: {median_ms:.2}ms",
-            );
+            "    [{region}] mean: {mean:.2}ms (stdv: {stdv:.2}ms) | median: {median:.2}ms",
+        );
         println!("{}", stat_line.blue());
     }
 
@@ -819,7 +817,7 @@ fn print_aggregated_regional_statistics(observations: &Observations, line_num: u
         let overall_median = median(&mut all_lats_sorted);
         let overall_std = std_dev(&all_lats).unwrap_or(0.0);
         let stat_line = format!(
-                "    [all] mean: {overall_mean:.2}ms (dev: {overall_std:.2}ms) | median: {overall_median:.2}ms"
+                "    [all] mean: {overall_mean:.2}ms (stdv: {overall_std:.2}ms) | median: {overall_median:.2}ms"
             );
         println!("{}", stat_line.white());
     }

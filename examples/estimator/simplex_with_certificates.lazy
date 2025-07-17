@@ -1,17 +1,17 @@
 # Simplex with Notarizations(id=2)/Finalizations(id=4)
 
 ## Propose a block
-propose id=0
+propose{0}
 
 ## Multicast notarize
-wait id=0 threshold=1 delay=(0.0001,0.001) || wait id=2 threshold=1 delay=(0.0001,0.001) || wait id=4 threshold=1 delay=(0.0001,0.001)
-broadcast id=1
+wait{0, threshold=1, delay=(0.1,1)} || wait{2, threshold=1, delay=(0.1,1)} || wait{4, threshold=1, delay=(0.1,1)}
+broadcast{1}
 
 ## Multicast finalize after observing 2f+1 notarize OR wait for single backup signal
-wait id=1 threshold=67% delay=(0.0001,0.001) || wait id=2 threshold=1 delay=(0.0001,0.001) || wait id=4 threshold=1 delay=(0.0001,0.001)
-broadcast id=2
-broadcast id=3
+wait{1, threshold=67%, delay=(0.1,1)} || wait{2, threshold=1, delay=(0.1,1)} || wait{4, threshold=1, delay=(0.1,1)}
+broadcast{2}
+broadcast{3}
 
 ## Wait for 2f+1 finalize OR wait for single backup finalize
-wait id=3 threshold=67% delay=(0.0001,0.001) || wait id=4 threshold=1 delay=(0.0001,0.001)
-broadcast id=4
+wait{3, threshold=67%, delay=(0.1,1)} || wait{4, threshold=1, delay=(0.1,1)}
+broadcast{4}

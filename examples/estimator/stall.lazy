@@ -1,7 +1,7 @@
 # Stall
 
 ## Propose a message
-propose id=0
+propose{0}
 
 ## Wait for all peers to send unsent messages
-wait id=1 threshold=100% delay=(0.0001,0.001)
+wait{1, threshold=100%, delay=(0.1,1)}
