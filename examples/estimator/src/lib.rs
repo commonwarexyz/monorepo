@@ -339,6 +339,44 @@ pub fn calculate_threshold(thresh: &Threshold, peers: usize) -> usize {
     }
 }
 
+/// Check if a command would advance given current state (shared validation logic)
+pub fn can_command_advance(
+    cmd: &Command,
+    is_proposer: bool,
+    peers: usize,
+    received: &BTreeMap<u32, BTreeSet<PublicKey>>,
+) -> bool {
+    match cmd {
+        Command::Propose(_) => true, // Propose always advances (proposer check handled by caller)
+        Command::Broadcast(_) => true, // Broadcast always advances
+        Command::Reply(_) => true,   // Reply always advances
+        Command::Collect(id, thresh, _) => {
+            if is_proposer {
+                let count = received.get(id).map_or(0, |s| s.len());
+                let required = calculate_threshold(thresh, peers);
+                count >= required
+            } else {
+                true // Non-proposers always advance on collect
+            }
+        }
+        Command::Wait(id, thresh, _) => {
+            let count = received.get(id).map_or(0, |s| s.len());
+            let required = calculate_threshold(thresh, peers);
+            count >= required
+        }
+        Command::Or(cmd1, cmd2) => {
+            // OR succeeds if either sub-command would succeed
+            can_command_advance(cmd1, is_proposer, peers, received)
+                || can_command_advance(cmd2, is_proposer, peers, received)
+        }
+        Command::And(cmd1, cmd2) => {
+            // AND succeeds only if both sub-commands would succeed
+            can_command_advance(cmd1, is_proposer, peers, received)
+                && can_command_advance(cmd2, is_proposer, peers, received)
+        }
+    }
+}
+
 /// Validate a DSL task file can be executed
 pub fn validate(commands: &[(usize, Command)], peers: usize, proposer: usize) -> bool {
     // Initialize peer states
@@ -372,51 +410,40 @@ pub fn validate(commands: &[(usize, Command)], peers: usize, proposer: usize) ->
                 let cmd = &commands[state.current_index].1;
                 let is_proposer = p == proposer;
                 let identity = keys[p].clone();
-                let advanced = match cmd {
-                    Command::Propose(id) => {
-                        if is_proposer {
+
+                // Check if command can advance using shared logic
+                let advanced = can_command_advance(cmd, is_proposer, peers, &state.received);
+
+                // If command advances, execute side effects (message sending, state updates)
+                if advanced {
+                    match cmd {
+                        Command::Propose(id) => {
+                            if is_proposer {
+                                messages.push((p, Recipients::All, *id));
+                                state.received.entry(*id).or_default().insert(identity);
+                            }
+                        }
+                        Command::Broadcast(id) => {
                             messages.push((p, Recipients::All, *id));
                             state.received.entry(*id).or_default().insert(identity);
                         }
-                        true
-                    }
-                    Command::Broadcast(id) => {
-                        messages.push((p, Recipients::All, *id));
-                        state.received.entry(*id).or_default().insert(identity);
-                        true
-                    }
-                    Command::Reply(id) => {
-                        let proposer_key = keys[proposer].clone();
-                        if is_proposer {
-                            state.received.entry(*id).or_default().insert(identity);
-                        } else {
-                            messages.push((p, Recipients::One(proposer_key), *id));
+                        Command::Reply(id) => {
+                            let proposer_key = keys[proposer].clone();
+                            if is_proposer {
+                                state.received.entry(*id).or_default().insert(identity);
+                            } else {
+                                messages.push((p, Recipients::One(proposer_key), *id));
+                            }
                         }
-                        true
-                    }
-                    Command::Collect(id, thresh, _) => {
-                        if is_proposer {
-                            let count = state.received.get(id).map_or(0, |s| s.len());
-                            let required = calculate_threshold(thresh, peers);
-                            count >= required
-                        } else {
-                            true
+                        Command::Collect(_, _, _) | Command::Wait(_, _, _) => {
+                            // No side effects for collect/wait - just advancement
+                        }
+                        Command::Or(_, _) | Command::And(_, _) => {
+                            // No direct side effects for compound commands
+                            // Side effects come from their sub-commands when they execute
                         }
                     }
-                    Command::Wait(id, thresh, _) => {
-                        let count = state.received.get(id).map_or(0, |s| s.len());
-                        let required = calculate_threshold(thresh, peers);
-                        count >= required
-                    }
-                    Command::Or(_cmd1, _cmd2) => {
-                        // For validation, treat OR as always advancing
-                        true
-                    }
-                    Command::And(_cmd1, _cmd2) => {
-                        // For validation, treat AND as always advancing
-                        true
-                    }
-                };
+                }
 
                 // If the peer advanced, continue
                 if advanced {
@@ -736,6 +763,22 @@ propose id=1
             }
             _ => panic!("Expected Or command"),
         }
+    }
+
+    #[test]
+    fn test_validate_or_and_logic() {
+        let content = r#"
+## Propose a block
+propose id=0
+
+## This should fail because we wait for id=0 (which gets 1 message)
+## AND id=99 (which never gets any messages), so the AND cannot be satisfied
+wait id=0 threshold=1 && wait id=99 threshold=1
+broadcast id=1
+        "#;
+        let commands = parse_task(content);
+        let completed = validate(&commands, 3, 0);
+        assert!(!completed);
     }
 
     #[test]

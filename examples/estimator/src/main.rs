@@ -408,30 +408,19 @@ async fn process_single_command_check<C: Spawner + Clock>(
     received: &BTreeMap<u32, BTreeSet<ed25519::PublicKey>>,
 ) -> bool {
     let is_proposer = command_ctx.identity == command_ctx.proposer_identity;
+
+    // Handle delays for time-sensitive commands before checking conditions
     match &command.1 {
-        Command::Propose(_) => true,   // Propose always succeeds
-        Command::Broadcast(_) => true, // Broadcast always succeeds
-        Command::Reply(_) => true,     // Reply always succeeds
-        Command::Collect(id, thresh, delay) => {
-            if is_proposer {
-                let count = received.get(id).map_or(0, |s| s.len());
-                let required = calculate_threshold(thresh, command_ctx.peers);
-                if let Some((message, _)) = delay {
-                    ctx.sleep(*message).await;
-                }
-                count >= required
-            } else {
-                true // Non-proposers always advance on collect
-            }
-        }
-        Command::Wait(id, thresh, delay) => {
-            let count = received.get(id).map_or(0, |s| s.len());
-            let required = calculate_threshold(thresh, command_ctx.peers);
+        Command::Collect(_, _, delay) | Command::Wait(_, _, delay) => {
             if let Some((message, _)) = delay {
                 ctx.sleep(*message).await;
             }
-            count >= required
         }
+        _ => {} // No delays for other commands
+    }
+
+    // For compound commands, we need to handle recursion with delays
+    match &command.1 {
         Command::Or(cmd1, cmd2) => {
             let cmd1_test = (command.0, cmd1.as_ref().clone());
             let cmd2_test = (command.0, cmd2.as_ref().clone());
@@ -469,6 +458,10 @@ async fn process_single_command_check<C: Spawner + Clock>(
             ))
             .await;
             result1 && result2
+        }
+        _ => {
+            // Use shared logic for basic command evaluation
+            estimator::can_command_advance(&command.1, is_proposer, command_ctx.peers, received)
         }
     }
 }
