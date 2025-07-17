@@ -19,7 +19,7 @@ use commonware_runtime::{
     telemetry::metrics::histogram::{Buckets, Timed},
     Clock, Metrics as MetricsTrait, Storage,
 };
-use commonware_utils::Array;
+use commonware_utils::{Array, NZU64};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, info, warn};
@@ -358,11 +358,45 @@ where
         // Update the target
         config.target = new_target;
 
+        // Request a minimal proof for the new lower bound to extract correct pinned nodes
+        let GetOperationsResult {
+            proof,
+            operations: _,
+            success_tx,
+        } = {
+            let target_size = config.target.upper_bound_ops + 1;
+            config
+                .resolver
+                .get_operations(target_size, config.target.lower_bound_ops, NZU64!(1))
+                .await?
+        };
+
+        // Extract pinned nodes for the new pruning boundary
+        let start_pos = leaf_num_to_pos(config.target.lower_bound_ops);
+        let end_pos = leaf_num_to_pos(config.target.lower_bound_ops);
+        let new_pinned_nodes = match proof.extract_pinned_nodes(start_pos, end_pos) {
+            Ok(nodes) => {
+                let _ = success_tx.send(true);
+                nodes
+            }
+            Err(e) => {
+                warn!(error = ?e, "Failed to extract pinned nodes for new target");
+                let _ = success_tx.send(false);
+                return Err(Error::InvalidState);
+            }
+        };
+
+        debug!(
+            lower_bound_ops = config.target.lower_bound_ops,
+            pinned_nodes_count = new_pinned_nodes.len(),
+            "Extracted pinned nodes for new target"
+        );
+
         // Discard any pending updates, since they may be stale now.
         Ok(Client::FetchData {
             config,
             log,
-            pinned_nodes: None,
+            pinned_nodes: Some(new_pinned_nodes),
             metrics,
         })
     }
@@ -1370,8 +1404,8 @@ pub(crate) mod tests {
                 "Expected at least one batch to be processed"
             );
 
-            // Modify the target database by adding 15 more operations
-            let additional_ops = create_test_ops(15);
+            // Modify the target database by adding more operations
+            let additional_ops = create_test_ops(10);
             let new_hash = {
                 let mut db = target_db.write().await;
                 apply_ops(&mut db, additional_ops).await;
