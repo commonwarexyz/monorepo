@@ -104,25 +104,3 @@ where
         _ => client.sync().await,
     }
 }
-
-/// Starts synchronization with the ability to receive sync target updates on `update_receiver`
-/// during the process.
-pub async fn sync_with_updater<E, K, V, H, T, R>(
-    config: Config<E, K, V, H, T, R>,
-    update_receiver: SyncTargetUpdateReceiver<H::Digest>,
-) -> Result<Any<E, K, V, H, T>, Error>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
-{
-    let client = Client::new_with_updater(config, Some(update_receiver)).await?;
-    let db = match client {
-        Client::Done { db } => db,
-        _ => client.sync().await?,
-    };
-    Ok(db)
-}

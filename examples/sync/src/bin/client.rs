@@ -186,6 +186,7 @@ where
         resolver,
         hasher: Standard::new(),
         apply_batch_size: 1024,
+        update_receiver: None,
     };
 
     info!(

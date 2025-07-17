@@ -37,6 +37,9 @@ where
     /// Context for the database.
     pub context: E,
 
+    /// Channel for receiving target updates.
+    pub update_receiver: Option<SyncTargetUpdateReceiver<H::Digest>>,
+
     /// Database configuration.
     pub db_config: adb::any::Config<T>,
 
@@ -147,8 +150,6 @@ where
         /// Extracted pinned nodes from first batch proof
         pinned_nodes: Option<Vec<H::Digest>>,
         metrics: Metrics<E>,
-        /// Channel for receiving target updates
-        update_receiver: Option<SyncTargetUpdateReceiver<H::Digest>>,
     },
     /// Next step is to apply fetched operations to the log.
     ApplyData {
@@ -157,8 +158,6 @@ where
         pinned_nodes: Option<Vec<H::Digest>>,
         batch_ops: Vec<Operation<K, V>>,
         metrics: Metrics<E>,
-        /// Channel for receiving target updates
-        update_receiver: Option<SyncTargetUpdateReceiver<H::Digest>>,
     },
     /// Sync completed. Database is fully constructed.
     Done { db: adb::any::Any<E, K, V, H, T> },
@@ -175,14 +174,6 @@ where
 {
     /// Create a new sync client
     pub(crate) async fn new(config: Config<E, K, V, H, T, R>) -> Result<Self, Error> {
-        Self::new_with_updater(config, None).await
-    }
-
-    /// Create a new sync client whose target can be updated
-    pub(crate) async fn new_with_updater(
-        config: Config<E, K, V, H, T, R>,
-        update_receiver: Option<SyncTargetUpdateReceiver<H::Digest>>,
-    ) -> Result<Self, Error> {
         // Validate bounds (inclusive)
         if config.target.lower_bound_ops > config.target.upper_bound_ops {
             return Err(Error::InvalidTarget {
@@ -241,7 +232,6 @@ where
             config,
             log,
             pinned_nodes: None,
-            update_receiver,
         })
     }
 
@@ -273,19 +263,18 @@ where
     /// Update the sync target to the most recent target update, if any.
     async fn handle_target_updates(mut self) -> Result<Self, Error> {
         let update_receiver = match &mut self {
-            Client::FetchData {
-                update_receiver, ..
-            } => update_receiver,
-            Client::ApplyData {
-                update_receiver, ..
-            } => update_receiver,
-            Client::Done { .. } => return Ok(self),
+            Client::FetchData { config, .. } => &mut config.update_receiver,
+            Client::ApplyData { config, .. } => &mut config.update_receiver,
+            Client::Done { .. } => {
+                warn!("Ignoring target update - sync already completed");
+                return Ok(self);
+            }
         };
         let mut new_target = None;
         if let Some(ref mut receiver) = update_receiver {
             // Only apply the last update, if any.
-            while let Ok(Some(update_)) = receiver.try_next() {
-                new_target = Some(update_);
+            while let Ok(Some(new_target_)) = receiver.try_next() {
+                new_target = Some(new_target_);
             }
         }
 
@@ -294,33 +283,24 @@ where
             return Ok(self);
         };
 
-        let config = match &self {
-            Client::FetchData { config, .. } => config,
-            Client::ApplyData { config, .. } => config,
-            Client::Done { .. } => {
-                warn!("Ignoring target update - sync already completed");
-                return Ok(self);
-            }
-        };
-        Self::validate_target_update(&config.target, &new_target)?;
-
-        let (mut config, mut log, metrics, update_receiver) = match self {
+        let (mut config, mut log, metrics) = match self {
             Client::FetchData {
                 config,
                 log,
                 metrics,
-                update_receiver,
                 ..
-            } => (config, log, metrics, update_receiver),
+            } => (config, log, metrics),
             Client::ApplyData {
                 config,
                 log,
                 metrics,
-                update_receiver,
                 ..
-            } => (config, log, metrics, update_receiver),
-            Client::Done { .. } => unreachable!(),
+            } => (config, log, metrics),
+            Client::Done { .. } => {
+                return Ok(self);
+            }
         };
+        Self::validate_target_update(&config.target, &new_target)?;
 
         info!(
             old_target = ?config.target,
@@ -337,11 +317,16 @@ where
         let log = if log_size <= new_target.lower_bound_ops {
             // Log is stale (last element is before the new lower bound)
             // Reinitialize the log with the new sync range
-
             log.close()
                 .await
                 .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
+            debug!(
+                log_size,
+                old_bounds = ?config.target,
+                new_bounds = ?new_target,
+                "Log is stale, reinitializing"
+            );
             Journal::<E, Operation<K, V>>::init_sync(
                 config.context.clone().with_label("log"),
                 JConfig {
@@ -357,6 +342,12 @@ where
             .map_err(adb::Error::JournalError)
             .map_err(Error::Adb)?
         } else {
+            debug!(
+                log_size,
+                old_bounds = ?config.target,
+                new_bounds = ?new_target,
+                "Pruning log"
+            );
             // Log contains data in the updated sync range, prune normally
             log.prune(new_target.lower_bound_ops)
                 .await
@@ -373,7 +364,6 @@ where
             log,
             pinned_nodes: None,
             metrics,
-            update_receiver,
         })
     }
 
@@ -388,7 +378,6 @@ where
                 log,
                 mut pinned_nodes,
                 metrics,
-                update_receiver,
             } => {
                 // Get current position in the log
                 let log_size = log
@@ -454,7 +443,6 @@ where
                         log,
                         pinned_nodes,
                         metrics,
-                        update_receiver,
                     });
                 }
 
@@ -481,7 +469,6 @@ where
                         log,
                         pinned_nodes,
                         metrics,
-                        update_receiver,
                     });
                 }
 
@@ -498,7 +485,6 @@ where
                             log,
                             pinned_nodes,
                             metrics,
-                            update_receiver,
                         });
                     };
                     pinned_nodes = Some(new_pinned_nodes);
@@ -514,7 +500,6 @@ where
                     pinned_nodes,
                     batch_ops: operations,
                     metrics,
-                    update_receiver,
                 })
             }
 
@@ -524,7 +509,6 @@ where
                 pinned_nodes,
                 batch_ops,
                 metrics,
-                update_receiver,
             } => {
                 // Apply operations to the log
                 {
@@ -602,7 +586,6 @@ where
                     log,
                     pinned_nodes,
                     metrics,
-                    update_receiver,
                 })
             }
 
@@ -624,7 +607,6 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-
     use super::*;
     use crate::{
         adb::any::{
@@ -724,6 +706,7 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher,
                 apply_batch_size: 1024,
+                update_receiver: None,
             };
             let mut got_db = sync(config).await.unwrap();
 
@@ -795,6 +778,7 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                update_receiver: None,
             };
 
             let result = Client::new(config).await;
@@ -846,6 +830,7 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                update_receiver: None,
             };
 
             let synced_db = sync(config).await.unwrap();
@@ -920,6 +905,7 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                update_receiver: None,
             };
             let sync_db = sync(config).await.unwrap();
 
@@ -1014,6 +1000,7 @@ pub(crate) mod tests {
                 resolver,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                update_receiver: None,
             };
             let sync_db = sync(config).await.unwrap();
 
@@ -1065,6 +1052,7 @@ pub(crate) mod tests {
             let initial_hash = target_db.root(&mut hasher);
 
             // Create client with initial target
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
@@ -1077,11 +1065,9 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                update_receiver: Some(update_receiver),
             };
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
-            let client = Client::new_with_updater(config, Some(update_receiver))
-                .await
-                .unwrap();
+            let client = Client::new(config).await.unwrap();
 
             // Send target update with decreased lower bound
             update_sender
@@ -1118,6 +1104,7 @@ pub(crate) mod tests {
             let initial_hash = target_db.root(&mut hasher);
 
             // Create client with initial target
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
@@ -1130,11 +1117,9 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                update_receiver: Some(update_receiver),
             };
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
-            let client = Client::new_with_updater(config, Some(update_receiver))
-                .await
-                .unwrap();
+            let client = Client::new(config).await.unwrap();
 
             // Send target update with decreased upper bound
             update_sender
@@ -1171,6 +1156,8 @@ pub(crate) mod tests {
             let final_hash = target_db.root(&mut hasher);
 
             // Create client with placeholder initial target (stale compared to final target)
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
+
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
@@ -1183,11 +1170,9 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                update_receiver: Some(update_receiver),
             };
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
-            let client = Client::new_with_updater(config, Some(update_receiver))
-                .await
-                .unwrap();
+            let client = Client::new(config).await.unwrap();
 
             // Send target update with increased bounds
             let _ = update_sender
@@ -1231,6 +1216,7 @@ pub(crate) mod tests {
             let initial_hash = target_db.root(&mut hasher);
 
             // Create client with initial target
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
@@ -1243,11 +1229,9 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                update_receiver: Some(update_receiver),
             };
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
-            let client = Client::new_with_updater(config, Some(update_receiver))
-                .await
-                .unwrap();
+            let client = Client::new(config).await.unwrap();
 
             // Send target update with invalid bounds (lower > upper)
             let _ = update_sender
@@ -1283,6 +1267,7 @@ pub(crate) mod tests {
             let target_hash = target_db.root(&mut hasher);
 
             // Create client with target that will complete immediately
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
@@ -1295,13 +1280,11 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                update_receiver: Some(update_receiver),
             };
 
             // Complete the sync
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
-            let client = Client::new_with_updater(config, Some(update_receiver))
-                .await
-                .unwrap();
+            let client = Client::new(config).await.unwrap();
             let synced_db = client.sync().await.unwrap();
 
             // Attempt to apply a target update after sync is complete to verify
@@ -1348,6 +1331,7 @@ pub(crate) mod tests {
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
 
             // Create client with initial target and small batch size
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
@@ -1360,11 +1344,9 @@ pub(crate) mod tests {
                 resolver: target_db.clone(),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                update_receiver: Some(update_receiver),
             };
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
-            let mut client = Client::new_with_updater(config, Some(update_receiver))
-                .await
-                .unwrap();
+            let mut client = Client::new(config).await.unwrap();
 
             // Capture initial log size before processing any batches
             let initial_log_size = match &client {
