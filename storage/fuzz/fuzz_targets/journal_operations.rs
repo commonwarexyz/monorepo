@@ -131,8 +131,7 @@ fn fuzz(input: FuzzInput) {
                 JournalOperation::Prune { min_pos } => {
                     if *min_pos <= journal_size {
                         journal.prune(*min_pos).await.unwrap();
-                        oldest_retained_pos =
-                            journal.oldest_retained_pos().await.unwrap().unwrap_or(0);
+                        oldest_retained_pos = oldest_retained_pos.max(*min_pos);
                     }
                 }
 
