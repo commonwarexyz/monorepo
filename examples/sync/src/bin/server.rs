@@ -3,6 +3,7 @@
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
+use commonware_macros::select;
 use commonware_runtime::{
     tokio as tokio_runtime, Listener, Metrics as _, Network, Runner, RwLock, Spawner as _,
 };
@@ -10,20 +11,23 @@ use commonware_storage::mmr::hasher::Standard;
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     crate_version, create_adb_config, create_test_operations, Database, ErrorResponse,
-    GetOperationsRequest, GetOperationsResponse, GetServerMetadataResponse, Message, Operation,
-    ProtocolError, MAX_MESSAGE_SIZE,
+    GetOperationsRequest, GetOperationsResponse, GetServerMetadataResponse,
+    GetTargetUpdateResponse, Message, Operation, ProtocolError, MAX_MESSAGE_SIZE,
 };
 use prometheus_client::metrics::counter::Counter;
+use rand::Rng;
 use std::{
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
+    time::Duration,
 };
+use tokio::time::{interval, Instant};
 use tracing::{error, info, warn};
 
 const MAX_BATCH_SIZE: u64 = 100;
 
 /// Server configuration.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Config {
     /// Port to listen on.
     port: u16,
@@ -35,6 +39,10 @@ struct Config {
     seed: u64,
     /// Port on which metrics are exposed.
     metrics_port: u16,
+    /// Interval for adding new operations (in milliseconds).
+    operation_interval_ms: u64,
+    /// Number of operations to add each interval.
+    ops_per_interval: usize,
 }
 
 /// Server state containing the database and metrics.
@@ -48,17 +56,29 @@ where
     request_counter: Counter,
     /// Error counter for metrics.
     error_counter: Counter,
+    /// Counter for continuous operations added (currently unused).
+    continuous_ops_counter: Counter,
+    /// Last known target hash for tracking changes.
+    last_target_hash: Arc<RwLock<Option<commonware_cryptography::sha256::Digest>>>,
+    /// Last time we added continuous operations.
+    last_operation_time: Arc<RwLock<Instant>>,
+    /// Seed for generating continuous operations.
+    operation_seed: Arc<RwLock<u64>>,
 }
 
 impl<E> State<E>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
-    fn new(context: E, database: Database<E>) -> Self {
+    fn new(context: E, database: Database<E>, initial_seed: u64) -> Self {
         let state = Self {
             database: Arc::new(RwLock::new(database)),
             request_counter: Counter::default(),
             error_counter: Counter::default(),
+            continuous_ops_counter: Counter::default(),
+            last_target_hash: Arc::new(RwLock::new(None)),
+            last_operation_time: Arc::new(RwLock::new(Instant::now())),
+            operation_seed: Arc::new(RwLock::new(initial_seed)),
         };
         context.register(
             "request",
@@ -66,7 +86,59 @@ where
             state.request_counter.clone(),
         );
         context.register("error", "Number of errors", state.error_counter.clone());
+        context.register(
+            "continuous_ops",
+            "Number of continuous operations added",
+            state.continuous_ops_counter.clone(),
+        );
         state
+    }
+
+    /// Add an operation to the database if the interval has passed.
+    async fn maybe_add_operation(&self, config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+        let mut last_time = self.last_operation_time.write().await;
+        let now = Instant::now();
+
+        if now.duration_since(*last_time).as_millis() >= config.operation_interval_ms as u128 {
+            *last_time = now;
+
+            // Generate new operations
+            let mut seed_guard = self.operation_seed.write().await;
+            let current_seed = *seed_guard;
+            *seed_guard += 1;
+            drop(seed_guard);
+
+            let new_operations = create_test_operations(config.ops_per_interval, current_seed);
+
+            // Add operations to database (no async boundaries crossed)
+            {
+                let mut database = self.database.write().await;
+                for operation in new_operations.iter() {
+                    let result = match operation {
+                        Operation::Update(key, value) => database
+                            .update(key.clone(), value.clone())
+                            .await
+                            .map(|_| ()),
+                        Operation::Deleted(key) => database.delete(key.clone()).await.map(|_| ()),
+                        Operation::Commit(_) => database.commit().await.map(|_| ()),
+                    };
+
+                    if let Err(e) = result {
+                        error!(error = %e, "Failed to add continuous operation");
+                    }
+                }
+            }
+
+            self.continuous_ops_counter
+                .inc_by(new_operations.len() as u64);
+            info!(
+                operations_added = new_operations.len(),
+                current_seed = current_seed,
+                "Added continuous operations"
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -122,6 +194,42 @@ where
         latest_op_loc,
     };
     info!(?response, "Serving metadata");
+    Ok(response)
+}
+
+/// Handle a request for target update.
+async fn handle_get_target_update_request<E>(
+    state: &State<E>,
+) -> Result<GetTargetUpdateResponse, ProtocolError>
+where
+    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+{
+    state.request_counter.inc();
+
+    let database = state.database.read().await;
+
+    // Get the current database state
+    let lower_bound_ops = database.inactivity_floor_loc();
+    let upper_bound_ops = database.op_count().saturating_sub(1);
+    let target_hash = {
+        let mut hasher = Standard::new();
+        database.root(&mut hasher)
+    };
+
+    drop(database);
+
+    // Update the stored target hash
+    let mut last_hash_guard = state.last_target_hash.write().await;
+    *last_hash_guard = Some(target_hash);
+    drop(last_hash_guard);
+
+    let response = GetTargetUpdateResponse {
+        hash: target_hash,
+        lower_bound_ops,
+        upper_bound_ops,
+    };
+
+    info!(?response, "Serving target update");
     Ok(response)
 }
 
@@ -239,6 +347,16 @@ where
                     }
                 }
             }
+            Message::GetTargetUpdateRequest => {
+                match handle_get_target_update_request(&state).await {
+                    Ok(response) => Message::GetTargetUpdateResponse(response),
+                    Err(e) => {
+                        warn!(client_addr = %client_addr, error = %e, "❌ GetTargetUpdate failed");
+                        state.error_counter.inc();
+                        Message::Error(e.into())
+                    }
+                }
+            }
             _ => {
                 warn!(client_addr = %client_addr, "❌ Unexpected message type");
                 state.error_counter.inc();
@@ -306,6 +424,22 @@ fn main() {
                 .help("Port on which metrics are exposed")
                 .default_value("9090"),
         )
+        .arg(
+            Arg::new("operation-interval")
+                .short('t')
+                .long("operation-interval")
+                .value_name("SECONDS")
+                .help("Interval for adding new operations (in seconds, supports decimals)")
+                .default_value("0.1"),
+        )
+        .arg(
+            Arg::new("ops-per-interval")
+                .short('o')
+                .long("ops-per-interval")
+                .value_name("COUNT")
+                .help("Number of operations to add each interval")
+                .default_value("5"),
+        )
         .get_matches();
 
     let config = Config {
@@ -325,10 +459,14 @@ fn main() {
                 eprintln!("❌ Invalid initial operations count: {e}");
                 std::process::exit(1);
             }),
-        storage_dir: matches
-            .get_one::<String>("storage-dir")
-            .unwrap()
-            .to_string(),
+        storage_dir: {
+            let base_dir = matches
+                .get_one::<String>("storage-dir")
+                .unwrap()
+                .to_string();
+            let suffix: u64 = rand::thread_rng().gen();
+            format!("{}-{}", base_dir, suffix)
+        },
         seed: matches
             .get_one::<String>("seed")
             .unwrap()
@@ -345,6 +483,23 @@ fn main() {
                 eprintln!("❌ Invalid metrics port: {e}");
                 std::process::exit(1);
             }),
+        operation_interval_ms: (matches
+            .get_one::<String>("operation-interval")
+            .unwrap()
+            .parse::<f64>()
+            .unwrap_or_else(|e| {
+                eprintln!("❌ Invalid operation interval: {e}");
+                std::process::exit(1);
+            })
+            * 1000.0) as u64, // Convert seconds to milliseconds
+        ops_per_interval: matches
+            .get_one::<String>("ops-per-interval")
+            .unwrap()
+            .parse()
+            .unwrap_or_else(|e| {
+                eprintln!("❌ Invalid ops per interval: {e}");
+                std::process::exit(1);
+            }),
     };
 
     info!(
@@ -353,7 +508,9 @@ fn main() {
         storage_dir = %config.storage_dir,
         seed = %config.seed,
         metrics_port = config.metrics_port,
-        "Configuration"
+        operation_interval = config.operation_interval_ms,
+        ops_per_interval = config.ops_per_interval,
+        "Configuration - using unique storage directory with random suffix"
     );
 
     let executor_config =
@@ -422,25 +579,41 @@ fn main() {
             }
         };
 
-        info!(addr = %addr, "Server listening");
+        info!(
+            addr = %addr,
+            operation_interval = config.operation_interval_ms,
+            ops_per_interval = config.ops_per_interval,
+            "Server listening - continuous operation generator enabled"
+        );
 
         // Handle each client connection in a separate task.
-        let state = Arc::new(State::new(context.with_label("server"), database));
+         // Create server state
+        let state = Arc::new(State::new(context.with_label("server"), database, config.seed));
+        let mut operation_timer = interval(Duration::from_millis(config.operation_interval_ms));
         loop {
-            match listener.accept().await {
-                Ok((client_addr, sink, stream)) => {
-                    let state = state.clone();
-                    context.with_label("client").spawn(move|_|async move {
-                        if let Err(e) =
-                            handle_client(state.clone(), sink, stream, client_addr).await
-                        {
-                            error!(client_addr = %client_addr, error = %e, "❌ Error handling client");
+            select! {
+                _ = operation_timer.tick() => {
+                    // Add operations to the database
+                    if let Err(e) = state.maybe_add_operation(&config).await {
+                        warn!(error = %e, "Failed to add continuous operations");
+                    }
+                },
+                client_result = listener.accept() => {
+                    match client_result {
+                        Ok((client_addr, sink, stream)) => {
+                            let state = state.clone();
+                            context.with_label("client").spawn(move|_|async move {
+                                if let Err(e) =
+                                    handle_client(state.clone(), sink, stream, client_addr).await
+                                {
+                                    error!(client_addr = %client_addr, error = %e, "❌ Error handling client");
+                                }
+                            });
                         }
-                    });
-                }
-                Err(e) => {
-                    error!(error = %e, "❌ Failed to accept connection");
-                    break;
+                        Err(e) => {
+                            error!(error = %e, "❌ Failed to accept client");
+                        }
+                    }
                 }
             }
         }

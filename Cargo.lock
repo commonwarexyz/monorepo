@@ -1377,6 +1377,7 @@ dependencies = [
  "clap",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-macros",
  "commonware-runtime",
  "commonware-storage",
  "commonware-stream",

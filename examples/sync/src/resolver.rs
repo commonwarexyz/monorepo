@@ -4,6 +4,7 @@
 use crate::{GetOperationsRequest, GetServerMetadataResponse, Message, MAX_MESSAGE_SIZE};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_runtime::RwLock;
+use commonware_storage::adb::any::sync::SyncTarget;
 use commonware_storage::adb::any::sync::{
     resolver::{GetOperationsResult, Resolver as ResolverTrait},
     Error as SyncError,
@@ -105,6 +106,33 @@ where
             Message::GetServerMetadataResponse(response) => {
                 info!("Received server metadata");
                 Ok(response)
+            }
+            Message::Error(err) => {
+                error!(error = %err.message, "❌ Server error");
+                Err(ResolverError::ServerError(err.message))
+            }
+            _ => {
+                error!("❌ Unexpected response type");
+                Err(ResolverError::UnexpectedResponse)
+            }
+        }
+    }
+
+    /// Get target update from server
+    pub async fn get_target_update(
+        &self,
+    ) -> Result<SyncTarget<commonware_cryptography::sha256::Digest>, ResolverError> {
+        info!("Requesting target update from server");
+
+        match self.send_request(Message::GetTargetUpdateRequest).await? {
+            Message::GetTargetUpdateResponse(response) => {
+                info!(
+                    hash = format!("{:?}", response.hash),
+                    lower_bound_ops = response.lower_bound_ops,
+                    upper_bound_ops = response.upper_bound_ops,
+                    "Received target update"
+                );
+                Ok(response.to_sync_target())
             }
             Message::Error(err) => {
                 error!(error = %err.message, "❌ Server error");
