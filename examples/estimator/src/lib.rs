@@ -410,12 +410,10 @@ pub fn validate(commands: &[(usize, Command)], peers: usize, proposer: usize) ->
                     }
                     Command::Or(_cmd1, _cmd2) => {
                         // For validation, treat OR as always advancing
-                        // This is a simplified implementation for proof of concept
                         true
                     }
                     Command::And(_cmd1, _cmd2) => {
                         // For validation, treat AND as always advancing
-                        // This is a simplified implementation for proof of concept
                         true
                     }
                 };
@@ -746,6 +744,11 @@ propose id=1
             ("stall.lazy", include_str!("../stall.lazy"), false),
             ("echo.lazy", include_str!("../echo.lazy"), true),
             ("simplex.lazy", include_str!("../simplex.lazy"), true),
+            (
+                "simplex_with_certificates.lazy",
+                include_str!("../simplex_with_certificates.lazy"),
+                true,
+            ),
             ("minimmit.lazy", include_str!("../minimmit.lazy"), true),
             ("hotstuff.lazy", include_str!("../hotstuff.lazy"), true),
         ];
