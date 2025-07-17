@@ -4,16 +4,15 @@
 use crate::{GetOperationsRequest, GetServerMetadataResponse, Message, MAX_MESSAGE_SIZE};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_runtime::RwLock;
-use commonware_storage::adb::any::sync::SyncTarget;
 use commonware_storage::adb::any::sync::{
     resolver::{GetOperationsResult, Resolver as ResolverTrait},
-    Error as SyncError,
+    Error as SyncError, SyncTarget,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::channel::oneshot;
 use std::{net::SocketAddr, num::NonZeroU64, sync::Arc};
 use thiserror::Error;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 /// Connection state for persistent networking.
 struct Connection<E>
@@ -166,7 +165,7 @@ where
             max_ops,
         };
 
-        info!(
+        debug!(
             max_ops = max_ops.get(),
             start_loc, "Requesting operations from server"
         );
@@ -187,7 +186,7 @@ where
             }
         };
 
-        info!(
+        debug!(
             operations_len = response.operations.len(),
             proof_len = response.proof.digests.len(),
             "Received operations and proof"

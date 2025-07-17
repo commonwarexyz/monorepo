@@ -10,7 +10,7 @@ use commonware_storage::{
     adb::any::sync::{self, client::Config as SyncConfig, SyncTarget},
     mmr::hasher::Standard,
 };
-use commonware_sync::{crate_version, create_adb_config, Database, Resolver};
+use commonware_sync::{crate_version, create_adb_config, parse_duration, Database, Resolver};
 use futures::channel::mpsc;
 use rand::Rng;
 use std::{
@@ -18,7 +18,6 @@ use std::{
     num::NonZeroU64,
     time::Duration,
 };
-use tokio::time::interval;
 use tracing::{error, info, warn};
 
 /// Default server address.
@@ -34,8 +33,8 @@ struct Config {
     storage_dir: String,
     /// Port on which metrics are exposed.
     metrics_port: u16,
-    /// Interval for requesting target updates (in seconds).
-    target_update_interval: u64,
+    /// Interval for requesting target updates.
+    target_update_interval: Duration,
 }
 
 #[derive(Debug)]
@@ -64,24 +63,25 @@ where
     Ok(metadata)
 }
 
-/// Periodically request target updates from server and send them to sync client.
+/// Periodically request target updates from server and send them to sync client
+/// on `update_sender`.
 async fn target_update_task<E>(
+    context: E,
     resolver: Resolver<E>,
     update_sender: mpsc::Sender<SyncTarget<Digest>>,
-    interval_seconds: u64,
+    interval_duration: Duration,
     initial_target: SyncTarget<Digest>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
-    E: commonware_runtime::Network + Clone,
+    E: commonware_runtime::Network + commonware_runtime::Clock + Clone,
 {
-    let mut interval = interval(Duration::from_secs(interval_seconds));
     let mut current_target = initial_target;
 
-    // Skip first tick since we already have the initial target
-    interval.tick().await;
+    // Initial sleep before first update check
+    context.sleep(interval_duration).await;
 
     loop {
-        interval.tick().await;
+        context.sleep(interval_duration).await;
 
         // Request target update from server
         match resolver.get_target_update().await {
@@ -159,8 +159,10 @@ where
     let target_resolver = Resolver::new(context.clone(), config.server);
     let target_update_interval = config.target_update_interval;
     let initial_target_clone = initial_target.clone();
-    let _target_update_handle = context.clone().spawn(move |_| {
+    let target_context = context.clone();
+    let _target_update_handle = context.with_label("target-update").spawn(move |_| {
         target_update_task(
+            target_context,
             target_resolver,
             update_sender,
             target_update_interval,
@@ -190,9 +192,8 @@ where
         batch_size = config.batch_size,
         lower_bound = sync_config.target.lower_bound_ops,
         upper_bound = sync_config.target.upper_bound_ops,
-        target_update_interval = config.target_update_interval,
-        "Sync configuration - will check for target updates every {} seconds",
-        config.target_update_interval
+        target_update_interval = ?config.target_update_interval,
+        "Sync configuration",
     );
 
     // Do the sync with target updates
@@ -258,9 +259,9 @@ fn main() {
             Arg::new("target-update-interval")
                 .short('t')
                 .long("target-update-interval")
-                .value_name("SECONDS")
-                .help("Interval for requesting target updates (in seconds)")
-                .default_value("1"),
+                .value_name("DURATION")
+                .help("Interval for requesting target updates in 's' or 'ms'")
+                .default_value("1s"),
         )
         .get_matches();
 
@@ -287,7 +288,7 @@ fn main() {
                 .unwrap()
                 .to_string();
             let suffix: u64 = rand::thread_rng().gen();
-            format!("{}-{}", base_dir, suffix)
+            format!("{base_dir}-{suffix}")
         },
         metrics_port: matches
             .get_one::<String>("metrics-port")
@@ -297,14 +298,13 @@ fn main() {
                 eprintln!("❌ Invalid metrics port: {e}");
                 std::process::exit(1);
             }),
-        target_update_interval: matches
-            .get_one::<String>("target-update-interval")
-            .unwrap()
-            .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid target update interval: {e}");
-                std::process::exit(1);
-            }),
+        target_update_interval: parse_duration(
+            matches.get_one::<String>("target-update-interval").unwrap(),
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("❌ Invalid target update interval: {e}");
+            std::process::exit(1);
+        }),
     };
 
     info!("Sync Client starting");
@@ -313,7 +313,7 @@ fn main() {
         batch_size = config.batch_size,
         storage_dir = %config.storage_dir,
         metrics_port = config.metrics_port,
-        target_update_interval = config.target_update_interval,
+        target_update_interval = ?config.target_update_interval,
         "Configuration"
     );
 

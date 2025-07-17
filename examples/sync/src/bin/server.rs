@@ -5,13 +5,13 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_macros::select;
 use commonware_runtime::{
-    tokio as tokio_runtime, Listener, Metrics as _, Network, Runner, RwLock, Spawner as _,
+    tokio as tokio_runtime, Clock, Listener, Metrics as _, Network, Runner, RwLock, Spawner as _,
 };
 use commonware_storage::mmr::hasher::Standard;
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    crate_version, create_adb_config, create_test_operations, Database, ErrorResponse,
-    GetOperationsRequest, GetOperationsResponse, GetServerMetadataResponse,
+    crate_version, create_adb_config, create_test_operations, parse_duration, Database,
+    ErrorResponse, GetOperationsRequest, GetOperationsResponse, GetServerMetadataResponse,
     GetTargetUpdateResponse, Message, Operation, ProtocolError, MAX_MESSAGE_SIZE,
 };
 use prometheus_client::metrics::counter::Counter;
@@ -19,10 +19,9 @@ use rand::Rng;
 use std::{
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
-use tokio::time::{interval, Instant};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 const MAX_BATCH_SIZE: u64 = 100;
 
@@ -39,8 +38,8 @@ struct Config {
     seed: u64,
     /// Port on which metrics are exposed.
     metrics_port: u16,
-    /// Interval for adding new operations (in milliseconds).
-    operation_interval_ms: u64,
+    /// Interval for adding new operations.
+    operation_interval: Duration,
     /// Number of operations to add each interval.
     ops_per_interval: usize,
 }
@@ -61,7 +60,7 @@ where
     /// Last known target hash for tracking changes.
     last_target_hash: Arc<RwLock<Option<commonware_cryptography::sha256::Digest>>>,
     /// Last time we added continuous operations.
-    last_operation_time: Arc<RwLock<Instant>>,
+    last_operation_time: Arc<RwLock<SystemTime>>,
     /// Seed for generating continuous operations.
     operation_seed: Arc<RwLock<u64>>,
 }
@@ -77,7 +76,7 @@ where
             error_counter: Counter::default(),
             continuous_ops_counter: Counter::default(),
             last_target_hash: Arc::new(RwLock::new(None)),
-            last_operation_time: Arc::new(RwLock::new(Instant::now())),
+            last_operation_time: Arc::new(RwLock::new(SystemTime::now())),
             operation_seed: Arc::new(RwLock::new(initial_seed)),
         };
         context.register(
@@ -95,11 +94,15 @@ where
     }
 
     /// Add an operation to the database if the interval has passed.
-    async fn maybe_add_operation(&self, config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    async fn maybe_add_operation(
+        &self,
+        config: &Config,
+        context: &impl commonware_runtime::Clock,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut last_time = self.last_operation_time.write().await;
-        let now = Instant::now();
+        let now = context.current();
 
-        if now.duration_since(*last_time).as_millis() >= config.operation_interval_ms as u128 {
+        if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.operation_interval {
             *last_time = now;
 
             // Generate new operations
@@ -111,15 +114,14 @@ where
             let new_operations = create_test_operations(config.ops_per_interval, current_seed);
 
             // Add operations to database (no async boundaries crossed)
-            {
+            let hash = {
                 let mut database = self.database.write().await;
                 for operation in new_operations.iter() {
                     let result = match operation {
-                        Operation::Update(key, value) => database
-                            .update(key.clone(), value.clone())
-                            .await
-                            .map(|_| ()),
-                        Operation::Deleted(key) => database.delete(key.clone()).await.map(|_| ()),
+                        Operation::Update(key, value) => {
+                            database.update(*key, *value).await.map(|_| ())
+                        }
+                        Operation::Deleted(key) => database.delete(*key).await.map(|_| ()),
                         Operation::Commit(_) => database.commit().await.map(|_| ()),
                     };
 
@@ -127,14 +129,15 @@ where
                         error!(error = %e, "Failed to add continuous operation");
                     }
                 }
-            }
+                database.root(&mut Standard::new())
+            };
 
             self.continuous_ops_counter
                 .inc_by(new_operations.len() as u64);
             info!(
                 operations_added = new_operations.len(),
-                current_seed = current_seed,
-                "Added continuous operations"
+                hash = %hash,
+                "Added operations"
             );
         }
 
@@ -178,7 +181,7 @@ where
     let database = state.database.read().await;
 
     // Get the current database state
-    let oldest_retained_loc = database.oldest_retained_loc().unwrap_or(0);
+    let oldest_retained_loc = database.inactivity_floor_loc();
     let latest_op_loc = database.op_count().saturating_sub(1);
 
     let target_hash = {
@@ -261,7 +264,7 @@ where
     let max_ops = std::cmp::min(request.max_ops.get(), db_size - request.start_loc);
     let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
 
-    info!(
+    debug!(
         max_ops,
         start_loc = request.start_loc,
         db_size,
@@ -280,7 +283,7 @@ where
         ProtocolError::DatabaseError(e)
     })?;
 
-    info!(
+    debug!(
         operations_len = operations.len(),
         proof_len = proof.digests.len(),
         "Sending operations and proof"
@@ -428,9 +431,9 @@ fn main() {
             Arg::new("operation-interval")
                 .short('t')
                 .long("operation-interval")
-                .value_name("SECONDS")
-                .help("Interval for adding new operations (in seconds, supports decimals)")
-                .default_value("0.1"),
+                .value_name("DURATION")
+                .help("Interval for adding new operations in 's' or 'ms'")
+                .default_value("100ms"),
         )
         .arg(
             Arg::new("ops-per-interval")
@@ -465,7 +468,7 @@ fn main() {
                 .unwrap()
                 .to_string();
             let suffix: u64 = rand::thread_rng().gen();
-            format!("{}-{}", base_dir, suffix)
+            format!("{base_dir}-{suffix}")
         },
         seed: matches
             .get_one::<String>("seed")
@@ -483,15 +486,13 @@ fn main() {
                 eprintln!("❌ Invalid metrics port: {e}");
                 std::process::exit(1);
             }),
-        operation_interval_ms: (matches
-            .get_one::<String>("operation-interval")
-            .unwrap()
-            .parse::<f64>()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid operation interval: {e}");
-                std::process::exit(1);
-            })
-            * 1000.0) as u64, // Convert seconds to milliseconds
+        operation_interval: parse_duration(
+            matches.get_one::<String>("operation-interval").unwrap(),
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("❌ Invalid operation interval: {e}");
+            std::process::exit(1);
+        }),
         ops_per_interval: matches
             .get_one::<String>("ops-per-interval")
             .unwrap()
@@ -508,7 +509,7 @@ fn main() {
         storage_dir = %config.storage_dir,
         seed = %config.seed,
         metrics_port = config.metrics_port,
-        operation_interval = config.operation_interval_ms,
+        operation_interval = ?config.operation_interval,
         ops_per_interval = config.ops_per_interval,
         "Configuration - using unique storage directory with random suffix"
     );
@@ -581,7 +582,7 @@ fn main() {
 
         info!(
             addr = %addr,
-            operation_interval = config.operation_interval_ms,
+            operation_interval = ?config.operation_interval,
             ops_per_interval = config.ops_per_interval,
             "Server listening - continuous operation generator enabled"
         );
@@ -589,14 +590,21 @@ fn main() {
         // Handle each client connection in a separate task.
          // Create server state
         let state = Arc::new(State::new(context.with_label("server"), database, config.seed));
-        let mut operation_timer = interval(Duration::from_millis(config.operation_interval_ms));
+        let operation_interval = config.operation_interval;
+        let operation_context = context.with_label("operations");
+
+        // Create a sleep future for operation timing
+        let mut operation_sleep = Box::pin(operation_context.sleep(operation_interval));
+
         loop {
             select! {
-                _ = operation_timer.tick() => {
+                _ = &mut operation_sleep => {
                     // Add operations to the database
-                    if let Err(e) = state.maybe_add_operation(&config).await {
+                    if let Err(e) = state.maybe_add_operation(&config, &operation_context).await {
                         warn!(error = %e, "Failed to add continuous operations");
                     }
+                    // Reset the sleep future for next iteration
+                    operation_sleep = Box::pin(operation_context.sleep(operation_interval));
                 },
                 client_result = listener.accept() => {
                     match client_result {

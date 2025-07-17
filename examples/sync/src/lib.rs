@@ -12,6 +12,7 @@
 
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_storage::adb::any::Config;
+use std::time::Duration;
 
 pub mod protocol;
 pub use protocol::*;
@@ -39,6 +40,29 @@ pub type Translator = commonware_storage::translator::EightCap;
 /// Returns the version of the crate.
 pub fn crate_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// Parse a duration string with suffix "s" or "ms" like "1s" or "500ms"
+pub fn parse_duration(s: &str) -> Result<Duration, String> {
+    let s = s.trim();
+
+    if let Some(num_str) = s.strip_suffix("ms") {
+        let millis: u64 = num_str
+            .parse()
+            .map_err(|_| format!("Invalid milliseconds: {num_str}"))?;
+        Ok(Duration::from_millis(millis))
+    } else if let Some(num_str) = s.strip_suffix("s") {
+        let secs: u64 = num_str
+            .parse()
+            .map_err(|_| format!("Invalid seconds: {num_str}"))?;
+        Ok(Duration::from_secs(secs))
+    } else {
+        // Try to parse as seconds without suffix
+        let secs: u64 = s.parse().map_err(|_| {
+            format!("Invalid duration format: {s}. Use 's' for seconds or 'ms' for milliseconds",)
+        })?;
+        Ok(Duration::from_secs(secs))
+    }
 }
 
 /// Create a database configuration with appropriate partitioning.
