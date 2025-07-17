@@ -10,11 +10,11 @@ Simulate mechanism performance under realistic network conditions.
 
 Key features:
 - Simulates peers distributed across specified AWS regions with real-world latency/jitter.
-- Supports defining simulation tasks via a simple DSL.
+- Supports defining simulation tasks via a simple DSL with logical operators (AND/OR) and parentheses for complex conditional logic.
 - Outputs latency statistics (mean, median, std dev) at intermediate points in the simulation, both per-proposer and averaged across all runs.
 - Deterministic runtime for reproducible results.
 
-With built-in handling for message passing (proposes, broadcasts, replies) and waiting/collecting thresholds, it's suitable for testing new consensus algorithms or other broadcast-based protocols.
+With built-in handling for message passing (proposes, broadcasts, replies), waiting/collecting thresholds, and compound conditional expressions, it's suitable for testing new consensus algorithms or other broadcast-based protocols.
 
 ## Usage
 
@@ -89,7 +89,7 @@ wait id=3 threshold=1 delay=(0.0001,0.001)
 
 ## DSL Style Guide
 
-The DSL is a plain text file where each non-empty line represents a command. Commands are executed sequentially by each simulated peer, but blocking commands (`wait` and `collect`) pause until their conditions are met. Empty lines are ignored.
+The DSL is a plain text file where each non-empty line represents a command or compound expression. Commands are executed sequentially by each simulated peer, but blocking commands (`wait` and `collect`) pause until their conditions are met. Compound expressions using logical operators are evaluated based on the current state of each peer. Empty lines are ignored.
 
 ### General Rules
 
@@ -102,6 +102,7 @@ The DSL is a plain text file where each non-empty line represents a command. Com
 - Each command must have a unique `id` (u32) for tracking messages.
 - Execution is per-peer: Proposers (current proposer) may behave differently (e.g., in `propose` or `collect`).
 - Peers process commands in lockstep but use async selects for receiving messages when blocked on `wait`/`collect`.
+- AND (`&&`) has higher precedence than OR (`||`). Use parentheses to override.
 
 ### Supported Commands
 
@@ -140,6 +141,31 @@ The DSL is a plain text file where each non-empty line represents a command. Com
    - Parameters: Same as `collect`.
    - Example: `wait id=0 threshold=40%`
    - Use case: Peers wait for a certain fraction of the network to acknowledge or respond.
+
+### Compound Commands with Logical Operators
+
+The DSL supports complex conditional logic using AND (`&&`) and OR (`||`) operators, along with parentheses for grouping.
+
+#### AND Operator (`&&`)
+- **Syntax**: `command1 && command2`
+- **Behavior**: Advances only when BOTH sub-commands would advance given the current state
+- **Example**: `wait id=1 threshold=1 && wait id=2 threshold=1`
+- **Use case**: Wait for multiple conditions to be satisfied simultaneously
+
+#### OR Operator (`||`)
+- **Syntax**: `command1 || command2`
+- **Behavior**: Advances when EITHER sub-command would advance given the current state
+- **Example**: `wait id=1 threshold=67% || wait id=2 threshold=1`
+- **Use case**: Wait for any one of multiple conditions to be satisfied
+
+#### Parentheses and Precedence
+- **Precedence**: AND (`&&`) has higher precedence than OR (`||`)
+- **Grouping**: Use parentheses to override precedence and create complex expressions
+- **Examples**:
+  - `wait id=1 threshold=1 || wait id=2 threshold=1 && wait id=3 threshold=1`
+    - Equivalent to: `wait id=1 threshold=1 || (wait id=2 threshold=1 && wait id=3 threshold=1)`
+  - `(wait id=1 threshold=1 || wait id=2 threshold=1) && wait id=3 threshold=1`
+    - Forces OR to be evaluated first
 
 ### Example DSL (hotstuff.lazy)
 
