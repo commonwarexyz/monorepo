@@ -148,21 +148,21 @@ The DSL is a plain text file where each non-empty line represents a command or c
 The DSL supports complex conditional logic using AND (`&&`) and OR (`||`) operators, along with parentheses for grouping.
 
 #### AND Operator (`&&`)
-- **Syntax**: `command1 && command2`
-- **Behavior**: Advances only when BOTH sub-commands would advance given the current state
-- **Example**: `wait id=1 threshold=1 && wait id=2 threshold=1`
-- **Use case**: Wait for multiple conditions to be satisfied simultaneously
+- Syntax: `command1 && command2`
+- Behavior: Advances only when BOTH sub-commands would advance given the current state
+- Example: `wait id=1 threshold=1 && wait id=2 threshold=1`
+- Use case: Wait for multiple conditions to be satisfied simultaneously
 
 #### OR Operator (`||`)
-- **Syntax**: `command1 || command2`
-- **Behavior**: Advances when EITHER sub-command would advance given the current state
-- **Example**: `wait id=1 threshold=67% || wait id=2 threshold=1`
-- **Use case**: Wait for any one of multiple conditions to be satisfied
+- Syntax: `command1 || command2`
+- Behavior: Advances when EITHER sub-command would advance given the current state
+- Example: `wait id=1 threshold=67% || wait id=2 threshold=1`
+- Use case: Wait for any one of multiple conditions to be satisfied
 
 #### Parentheses and Precedence
-- **Precedence**: AND (`&&`) has higher precedence than OR (`||`)
-- **Grouping**: Use parentheses to override precedence and create complex expressions
-- **Examples**:
+- Precedence: AND (`&&`) has higher precedence than OR (`||`)
+- Grouping: Use parentheses to override precedence and create complex expressions
+- Examples:
   - `wait id=1 threshold=1 || wait id=2 threshold=1 && wait id=3 threshold=1`
     - Equivalent to: `wait id=1 threshold=1 || (wait id=2 threshold=1 && wait id=3 threshold=1)`
   - `(wait id=1 threshold=1 || wait id=2 threshold=1) && wait id=3 threshold=1`
