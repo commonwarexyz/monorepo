@@ -195,7 +195,9 @@ fn run_single_simulation(
 ) -> Simulation {
     let proposer_region = calculate_proposer_region(proposer_idx, distribution);
     let peers = count_peers(distribution);
-    let runtime_cfg = deterministic::Config::default().with_seed(proposer_idx as u64);
+    let runtime_cfg = deterministic::Config::default()
+        .with_seed(proposer_idx as u64)
+        .with_cycle(Duration::from_micros(1));
     let executor = deterministic::Runner::new(runtime_cfg);
 
     // Run the simulation
