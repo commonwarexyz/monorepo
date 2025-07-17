@@ -280,16 +280,6 @@ where
             return Ok(self);
         };
 
-        let config = match &self {
-            Client::FetchData { config, .. } => config,
-            Client::ApplyData { config, .. } => config,
-            Client::Done { .. } => {
-                warn!("Ignoring target update - sync already completed");
-                return Ok(self);
-            }
-        };
-        Self::validate_target_update(&config.target, &new_target)?;
-
         let (mut config, mut log, metrics) = match self {
             Client::FetchData {
                 config,
@@ -303,8 +293,12 @@ where
                 metrics,
                 ..
             } => (config, log, metrics),
-            Client::Done { .. } => unreachable!(),
+            Client::Done { .. } => {
+                warn!("Ignoring target update - sync already completed");
+                return Ok(self);
+            }
         };
+        Self::validate_target_update(&config.target, &new_target)?;
 
         info!(
             old_target = ?config.target,
