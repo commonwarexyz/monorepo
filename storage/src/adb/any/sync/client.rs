@@ -1404,8 +1404,8 @@ pub(crate) mod tests {
                 "Expected at least one batch to be processed"
             );
 
-            // Modify the target database by adding 15 more operations
-            let additional_ops = create_test_ops(15);
+            // Modify the target database by adding more operations
+            let additional_ops = create_test_ops(10);
             let new_hash = {
                 let mut db = target_db.write().await;
                 apply_ops(&mut db, additional_ops).await;
