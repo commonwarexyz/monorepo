@@ -265,7 +265,10 @@ where
         let update_receiver = match &mut self {
             Client::FetchData { config, .. } => &mut config.update_receiver,
             Client::ApplyData { config, .. } => &mut config.update_receiver,
-            Client::Done { .. } => return Ok(self),
+            Client::Done { .. } => {
+                warn!("Ignoring target update - sync already completed");
+                return Ok(self);
+            }
         };
         let mut new_target = None;
         if let Some(ref mut receiver) = update_receiver {
@@ -294,7 +297,6 @@ where
                 ..
             } => (config, log, metrics),
             Client::Done { .. } => {
-                warn!("Ignoring target update - sync already completed");
                 return Ok(self);
             }
         };
