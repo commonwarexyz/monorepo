@@ -97,11 +97,13 @@ pub fn parse_task(content: &str) -> Vec<(usize, Command)> {
             continue;
         }
 
-        // Check for OR and AND operators
-        let command = if line.contains(" || ") {
-            parse_or_command(line)
-        } else if line.contains(" && ") {
-            parse_and_command(line)
+        // Check if line contains operators or parentheses
+        let command = if line.contains(" || ")
+            || line.contains(" && ")
+            || line.contains('(')
+            || line.contains(')')
+        {
+            parse_expression(line)
         } else {
             parse_single_command(line)
         };
@@ -173,42 +175,175 @@ fn parse_single_command(line: &str) -> Command {
     }
 }
 
-/// Parse a command with OR operator
-fn parse_or_command(line: &str) -> Command {
-    let parts: Vec<&str> = line.split(" || ").collect();
-    if parts.len() < 2 {
-        panic!("OR command must have at least two parts separated by ' || '");
-    }
+/// Parse a complex expression with parentheses and operators
+fn parse_expression(line: &str) -> Command {
+    let mut parser = ExpressionParser::new(line);
+    let result = parser.parse_or_expression();
 
-    // Parse first command
-    let mut result = parse_single_command(parts[0].trim());
-
-    // Chain remaining commands with nested OR structures
-    for part in &parts[1..] {
-        let next_cmd = parse_single_command(part.trim());
-        result = Command::Or(Box::new(result), Box::new(next_cmd));
+    // Validate that we've consumed all input
+    parser.skip_whitespace();
+    if !parser.is_at_end() {
+        panic!(
+            "Unexpected character '{}' at position {}",
+            parser.peek_char().unwrap_or('\0'),
+            parser.position
+        );
     }
 
     result
 }
 
-/// Parse a command with AND operator
-fn parse_and_command(line: &str) -> Command {
-    let parts: Vec<&str> = line.split(" && ").collect();
-    if parts.len() < 2 {
-        panic!("AND command must have at least two parts separated by ' && '");
+/// Expression parser that handles parentheses and operator precedence
+struct ExpressionParser<'a> {
+    input: &'a str,
+    position: usize,
+}
+
+impl<'a> ExpressionParser<'a> {
+    fn new(input: &'a str) -> Self {
+        Self { input, position: 0 }
     }
 
-    // Parse first command
-    let mut result = parse_single_command(parts[0].trim());
+    /// Parse OR expression (lowest precedence)
+    fn parse_or_expression(&mut self) -> Command {
+        let mut expr = self.parse_and_expression();
 
-    // Chain remaining commands with nested AND structures
-    for part in &parts[1..] {
-        let next_cmd = parse_single_command(part.trim());
-        result = Command::And(Box::new(result), Box::new(next_cmd));
+        while self.peek_operator() == Some("||") {
+            self.consume_operator("||");
+            let right = self.parse_and_expression();
+            expr = Command::Or(Box::new(expr), Box::new(right));
+        }
+
+        expr
     }
 
-    result
+    /// Parse AND expression (higher precedence than OR)
+    fn parse_and_expression(&mut self) -> Command {
+        let mut expr = self.parse_primary();
+
+        while self.peek_operator() == Some("&&") {
+            self.consume_operator("&&");
+            let right = self.parse_primary();
+            expr = Command::And(Box::new(expr), Box::new(right));
+        }
+
+        expr
+    }
+
+    /// Parse primary expression (parentheses or atomic command)
+    fn parse_primary(&mut self) -> Command {
+        self.skip_whitespace();
+
+        if self.peek_char() == Some('(') {
+            self.consume_char('(');
+            let expr = self.parse_or_expression();
+            self.skip_whitespace();
+            self.consume_char(')');
+            expr
+        } else {
+            // Parse atomic command
+            let command_text = self.extract_atomic_command();
+            parse_single_command(&command_text)
+        }
+    }
+
+    /// Extract the text for an atomic command (until we hit an operator or closing paren)
+    fn extract_atomic_command(&mut self) -> String {
+        let start = self.position;
+        let mut paren_depth = 0;
+
+        while self.position < self.input.len() {
+            let ch = self.input.chars().nth(self.position).unwrap();
+
+            if ch == '(' {
+                paren_depth += 1;
+            } else if ch == ')' {
+                if paren_depth == 0 {
+                    break; // Hit closing paren for parent expression
+                }
+                paren_depth -= 1;
+            } else if paren_depth == 0 {
+                // Check for operators at top level
+                if self.input[self.position..].starts_with(" || ")
+                    || self.input[self.position..].starts_with(" && ")
+                {
+                    break;
+                }
+            }
+
+            self.position += ch.len_utf8();
+        }
+
+        self.input[start..self.position].trim().to_string()
+    }
+
+    /// Peek at the next operator without consuming it
+    fn peek_operator(&self) -> Option<&'static str> {
+        let remaining = &self.input[self.position..];
+        let trimmed = remaining.trim_start();
+
+        if trimmed.starts_with("||") {
+            Some("||")
+        } else if trimmed.starts_with("&&") {
+            Some("&&")
+        } else {
+            None
+        }
+    }
+
+    /// Consume a specific operator
+    fn consume_operator(&mut self, op: &str) {
+        self.skip_whitespace();
+
+        let remaining = &self.input[self.position..];
+        if remaining.starts_with(op) {
+            self.position += op.len();
+            self.skip_whitespace();
+        } else {
+            panic!("Expected operator '{}' at position {}", op, self.position);
+        }
+    }
+
+    /// Peek at the next character without consuming it
+    fn peek_char(&self) -> Option<char> {
+        self.input[self.position..].chars().next()
+    }
+
+    /// Consume a specific character
+    fn consume_char(&mut self, expected: char) {
+        self.skip_whitespace();
+
+        if let Some(ch) = self.input[self.position..].chars().next() {
+            if ch == expected {
+                self.position += ch.len_utf8();
+                self.skip_whitespace();
+            } else {
+                panic!(
+                    "Expected '{}' but found '{}' at position {}",
+                    expected, ch, self.position
+                );
+            }
+        } else {
+            panic!("Expected '{}' but reached end of input", expected);
+        }
+    }
+
+    /// Skip whitespace characters
+    fn skip_whitespace(&mut self) {
+        while self.position < self.input.len() {
+            let ch = self.input.chars().nth(self.position).unwrap();
+            if ch.is_whitespace() {
+                self.position += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Check if we are at the end of the input string
+    fn is_at_end(&self) -> bool {
+        self.position >= self.input.len()
+    }
 }
 
 // =============================================================================
@@ -575,8 +710,8 @@ mod tests {
         let result = populate_latency_map(p50, p90);
         assert_eq!(result.len(), 1);
         let us_east = &result["us-east-1"];
-        assert_eq!(us_east["us-west-1"], (50.0, 30.0)); // P50=50, jitter=P90-P50=30
-        assert_eq!(us_east["eu-west-1"], (100.0, 50.0)); // P50=100, jitter=P90-P50=50
+        assert_eq!(us_east["us-west-1"], (25.0, 15.0)); // P50=50/2=25, jitter=(P90-P50)/2=(80-50)/2=15
+        assert_eq!(us_east["eu-west-1"], (50.0, 25.0)); // P50=100/2=50, jitter=(P90-P50)/2=(150-100)/2=25
     }
 
     #[test]
@@ -808,5 +943,249 @@ broadcast id=1
             let completed = validate(&task, 3, 0);
             assert_eq!(completed, expected, "{name}");
         }
+    }
+
+    #[test]
+    fn test_parse_task_simple_parentheses() {
+        let content =
+            "(wait id=1 threshold=67% && wait id=2 threshold=1) || wait id=3 threshold=50%";
+        let commands = parse_task(content);
+        assert_eq!(commands.len(), 1);
+
+        match &commands[0].1 {
+            Command::Or(cmd1, cmd2) => {
+                // First part should be an AND command
+                match cmd1.as_ref() {
+                    Command::And(and_cmd1, and_cmd2) => {
+                        match and_cmd1.as_ref() {
+                            Command::Wait(id, threshold, _) => {
+                                assert_eq!(*id, 1);
+                                match threshold {
+                                    Threshold::Percent(p) => assert_eq!(*p, 0.67),
+                                    _ => panic!("Expected Percent threshold"),
+                                }
+                            }
+                            _ => panic!("Expected Wait command in first part of AND"),
+                        }
+                        match and_cmd2.as_ref() {
+                            Command::Wait(id, threshold, _) => {
+                                assert_eq!(*id, 2);
+                                match threshold {
+                                    Threshold::Count(c) => assert_eq!(*c, 1),
+                                    _ => panic!("Expected Count threshold"),
+                                }
+                            }
+                            _ => panic!("Expected Wait command in second part of AND"),
+                        }
+                    }
+                    _ => panic!("Expected And command in first part of OR"),
+                }
+                // Second part should be a simple Wait command
+                match cmd2.as_ref() {
+                    Command::Wait(id, threshold, _) => {
+                        assert_eq!(*id, 3);
+                        match threshold {
+                            Threshold::Percent(p) => assert_eq!(*p, 0.50),
+                            _ => panic!("Expected Percent threshold"),
+                        }
+                    }
+                    _ => panic!("Expected Wait command in second part of OR"),
+                }
+            }
+            _ => panic!("Expected Or command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_task_nested_parentheses() {
+        let content = "((wait id=1 threshold=1 || wait id=2 threshold=1) && wait id=3 threshold=1) || wait id=4 threshold=1";
+        let commands = parse_task(content);
+        assert_eq!(commands.len(), 1);
+
+        match &commands[0].1 {
+            Command::Or(cmd1, cmd2) => {
+                // First part should be an AND with nested OR
+                match cmd1.as_ref() {
+                    Command::And(and_cmd1, and_cmd2) => {
+                        // First part of AND should be an OR
+                        match and_cmd1.as_ref() {
+                            Command::Or(or_cmd1, or_cmd2) => {
+                                match or_cmd1.as_ref() {
+                                    Command::Wait(id, _, _) => assert_eq!(*id, 1),
+                                    _ => panic!("Expected Wait id=1"),
+                                }
+                                match or_cmd2.as_ref() {
+                                    Command::Wait(id, _, _) => assert_eq!(*id, 2),
+                                    _ => panic!("Expected Wait id=2"),
+                                }
+                            }
+                            _ => panic!("Expected Or command in first part of AND"),
+                        }
+                        // Second part of AND should be a Wait
+                        match and_cmd2.as_ref() {
+                            Command::Wait(id, _, _) => assert_eq!(*id, 3),
+                            _ => panic!("Expected Wait id=3"),
+                        }
+                    }
+                    _ => panic!("Expected And command in first part of OR"),
+                }
+                // Second part should be a Wait
+                match cmd2.as_ref() {
+                    Command::Wait(id, _, _) => assert_eq!(*id, 4),
+                    _ => panic!("Expected Wait id=4"),
+                }
+            }
+            _ => panic!("Expected Or command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_task_complex_expression() {
+        let content = "(wait id=1 threshold=1 && wait id=2 threshold=1) || (wait id=3 threshold=1 && wait id=4 threshold=1)";
+        let commands = parse_task(content);
+        assert_eq!(commands.len(), 1);
+
+        match &commands[0].1 {
+            Command::Or(cmd1, cmd2) => {
+                // Both parts should be AND commands
+                match cmd1.as_ref() {
+                    Command::And(and_cmd1, and_cmd2) => {
+                        match and_cmd1.as_ref() {
+                            Command::Wait(id, _, _) => assert_eq!(*id, 1),
+                            _ => panic!("Expected Wait id=1"),
+                        }
+                        match and_cmd2.as_ref() {
+                            Command::Wait(id, _, _) => assert_eq!(*id, 2),
+                            _ => panic!("Expected Wait id=2"),
+                        }
+                    }
+                    _ => panic!("Expected And command in first part"),
+                }
+                match cmd2.as_ref() {
+                    Command::And(and_cmd1, and_cmd2) => {
+                        match and_cmd1.as_ref() {
+                            Command::Wait(id, _, _) => assert_eq!(*id, 3),
+                            _ => panic!("Expected Wait id=3"),
+                        }
+                        match and_cmd2.as_ref() {
+                            Command::Wait(id, _, _) => assert_eq!(*id, 4),
+                            _ => panic!("Expected Wait id=4"),
+                        }
+                    }
+                    _ => panic!("Expected And command in second part"),
+                }
+            }
+            _ => panic!("Expected Or command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_task_operator_precedence() {
+        // Without parentheses: AND should have higher precedence than OR
+        let content = "wait id=1 threshold=1 || wait id=2 threshold=1 && wait id=3 threshold=1";
+        let commands = parse_task(content);
+        assert_eq!(commands.len(), 1);
+
+        match &commands[0].1 {
+            Command::Or(cmd1, cmd2) => {
+                // First part should be a simple Wait
+                match cmd1.as_ref() {
+                    Command::Wait(id, _, _) => assert_eq!(*id, 1),
+                    _ => panic!("Expected Wait id=1"),
+                }
+                // Second part should be an AND
+                match cmd2.as_ref() {
+                    Command::And(and_cmd1, and_cmd2) => {
+                        match and_cmd1.as_ref() {
+                            Command::Wait(id, _, _) => assert_eq!(*id, 2),
+                            _ => panic!("Expected Wait id=2"),
+                        }
+                        match and_cmd2.as_ref() {
+                            Command::Wait(id, _, _) => assert_eq!(*id, 3),
+                            _ => panic!("Expected Wait id=3"),
+                        }
+                    }
+                    _ => panic!("Expected And command"),
+                }
+            }
+            _ => panic!("Expected Or command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_task_parentheses_override_precedence() {
+        // With parentheses: should force different precedence
+        let content = "(wait id=1 threshold=1 || wait id=2 threshold=1) && wait id=3 threshold=1";
+        let commands = parse_task(content);
+        assert_eq!(commands.len(), 1);
+
+        match &commands[0].1 {
+            Command::And(cmd1, cmd2) => {
+                // First part should be an OR
+                match cmd1.as_ref() {
+                    Command::Or(or_cmd1, or_cmd2) => {
+                        match or_cmd1.as_ref() {
+                            Command::Wait(id, _, _) => assert_eq!(*id, 1),
+                            _ => panic!("Expected Wait id=1"),
+                        }
+                        match or_cmd2.as_ref() {
+                            Command::Wait(id, _, _) => assert_eq!(*id, 2),
+                            _ => panic!("Expected Wait id=2"),
+                        }
+                    }
+                    _ => panic!("Expected Or command"),
+                }
+                // Second part should be a simple Wait
+                match cmd2.as_ref() {
+                    Command::Wait(id, _, _) => assert_eq!(*id, 3),
+                    _ => panic!("Expected Wait id=3"),
+                }
+            }
+            _ => panic!("Expected And command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_task_mixed_commands_with_parentheses() {
+        let content = "(propose id=1 && broadcast id=2) || reply id=3";
+        let commands = parse_task(content);
+        assert_eq!(commands.len(), 1);
+
+        match &commands[0].1 {
+            Command::Or(cmd1, cmd2) => {
+                match cmd1.as_ref() {
+                    Command::And(and_cmd1, and_cmd2) => {
+                        match and_cmd1.as_ref() {
+                            Command::Propose(id) => assert_eq!(*id, 1),
+                            _ => panic!("Expected Propose id=1"),
+                        }
+                        match and_cmd2.as_ref() {
+                            Command::Broadcast(id) => assert_eq!(*id, 2),
+                            _ => panic!("Expected Broadcast id=2"),
+                        }
+                    }
+                    _ => panic!("Expected And command"),
+                }
+                match cmd2.as_ref() {
+                    Command::Reply(id) => assert_eq!(*id, 3),
+                    _ => panic!("Expected Reply id=3"),
+                }
+            }
+            _ => panic!("Expected Or command"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected ')' but reached end of input")]
+    fn test_parse_task_unmatched_parentheses() {
+        let content = "(wait id=1 threshold=1 && wait id=2 threshold=1";
+        parse_task(content);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unexpected character ')' at position")]
+    fn test_parse_task_extra_closing_paren() {
+        let content = "wait id=1 threshold=1 && wait id=2 threshold=1)";
+        parse_task(content);
     }
 }
