@@ -42,8 +42,8 @@ This runs simulations with 5 peers (3 in us-east-1, 2 in eu-west-1), using the D
 
 For each possible proposer (peer index), the simulator prints:
 - The DSL lines with interleaved latency statistics for `wait` and `collect` commands.
-- Proposer latencies (for `collect`).
-- Regional latencies (mean, median, std dev in ms) for `wait`.
+- Proposer latency (for `collect`).
+- Regional latencies (for `wait`).
 
 Finally, it prints averaged results across all proposer simulations.
 
