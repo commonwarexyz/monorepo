@@ -9,7 +9,7 @@ Simulate mechanism performance under realistic network conditions.
 `commonware-estimator` shortens the time from idea to data when experimenting with new mechanisms. With a basic DSL, you can simulate the performance of arbitrary mechanisms under realistic network conditions (AWS region-to-region latencies from cloudping.co).
 
 Key features:
-- Simulates peers distributed across specified AWS regions with real-world latency/jitter.
+- Simulates peers distributed across specified AWS regions with real-world latency/jitter in virtual time.
 - Supports defining simulation tasks via a simple DSL with logical operators (AND/OR) and parentheses for complex conditional logic.
 - Outputs latency statistics (mean, median, std dev) at intermediate points in the simulation, both per-proposer and averaged across all runs.
 - Deterministic runtime for reproducible results.
