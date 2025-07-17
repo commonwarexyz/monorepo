@@ -321,11 +321,16 @@ where
         let log = if log_size <= new_target.lower_bound_ops {
             // Log is stale (last element is before the new lower bound)
             // Reinitialize the log with the new sync range
-
             log.close()
                 .await
                 .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
+            debug!(
+                log_size,
+                old_bounds = ?config.target,
+                new_bounds = ?new_target,
+                "Log is stale, reinitializing"
+            );
             Journal::<E, Operation<K, V>>::init_sync(
                 config.context.clone().with_label("log"),
                 JConfig {
@@ -341,6 +346,12 @@ where
             .map_err(adb::Error::JournalError)
             .map_err(Error::Adb)?
         } else {
+            debug!(
+                log_size,
+                old_bounds = ?config.target,
+                new_bounds = ?new_target,
+                "Pruning log"
+            );
             // Log contains data in the updated sync range, prune normally
             log.prune(new_target.lower_bound_ops)
                 .await
@@ -600,7 +611,6 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-
     use super::*;
     use crate::{
         adb::any::{
