@@ -45,7 +45,7 @@ For each possible proposer (peer index), the simulator prints:
 - Proposer latency (for `collect`).
 - Regional latencies (for `wait`).
 
-Finally, it prints averaged results across all proposer simulations.
+Finally, it prints averaged results across all simulations.
 
 ```
 # HotStuff
@@ -94,8 +94,7 @@ The DSL is a plain text file where each non-empty line represents a command or c
 ### General Rules
 
 - Commands are case-sensitive.
-- Parameters are specified as `key=value` pairs, separated by spaces.
-- No quotes are needed for values unless they contain spaces (but currently, values shouldn't contain spaces).
+- Parameters are specified as `key=value` pairs, separated by commas.
 - Lines must not end with semicolons or other terminators.
 - Thresholds can be absolute counts (e.g., `5`) or percentages (e.g., `80%`). Percentages are relative to the total number of peers.
 - Delays are optional and specified as `delay=(<message_delay>,<completion_delay>)`, where delays are floats in milliseconds (e.g., `(0.1,1)`). The message delay is incurred for each processed message and completion delay is incurred once after the threshold is met.
