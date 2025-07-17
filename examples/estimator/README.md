@@ -103,6 +103,7 @@ The DSL is a plain text file where each non-empty line represents a command or c
 - Execution is per-peer: Proposers (current proposer) may behave differently (e.g., in `propose` or `collect`).
 - Peers process commands in lockstep but use async selects for receiving messages when blocked on `wait`/`collect`.
 - AND (`&&`) has higher precedence than OR (`||`). Use parentheses to override.
+- If a `wait` or `collect` has a per-message delay and it is used in an AND or OR expression, the delay is additive for the entire expression (i.e., the message delay for each op is applied during the check).
 
 ### Supported Commands
 
