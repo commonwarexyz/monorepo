@@ -1,5 +1,4 @@
 # Comprehensive OR and AND Example
-# Demonstrates the new syntax requested by the user
 
 ## Propose a block
 propose id=0
@@ -9,7 +8,7 @@ wait id=0 threshold=1 delay=(0.0001,0.001)
 broadcast id=1
 
 ## Multicast finalize after observing 2f+1 notarize OR wait for backup signal
-wait id=1 threshold=67% delay=(0.0001,0.001) || wait id=2 threshold=1 delay=(0.0001,0.001)
+wait id=1 threshold=67% delay=(0.0001,0.001) || wait id=2 threshold=1 delay=(0.0001,0.001) && wait id=0 threshold=1
 broadcast id=2
 broadcast id=3
 
