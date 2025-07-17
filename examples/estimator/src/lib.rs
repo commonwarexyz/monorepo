@@ -173,7 +173,7 @@ fn parse_single_command(line: &str) -> Command {
             let value = arg[eq_pos + 1..].trim().to_string();
             parsed_args.insert(key, value);
         } else {
-            panic!("Invalid argument format (expected key=value): {}", arg);
+            panic!("Invalid argument format (expected key=value): {arg}");
         }
     }
 
@@ -195,17 +195,14 @@ fn parse_single_command(line: &str) -> Command {
                     Threshold::Count(c)
                 }
             } else {
-                panic!("Missing threshold for {}", command);
+                panic!("Missing threshold for {command}");
             };
 
             let delay = parsed_args.get("delay").map(|delay_str| {
                 let delay_str = delay_str.trim_matches('(').trim_matches(')');
                 let parts: Vec<&str> = delay_str.split(',').collect();
                 if parts.len() != 2 {
-                    panic!(
-                        "Invalid delay format (expected (value1,value2)): {}",
-                        delay_str
-                    );
+                    panic!("Invalid delay format (expected (value1,value2)): {delay_str}");
                 }
                 let message =
                     Duration::from_secs_f64(parts[0].parse::<f64>().expect("Invalid delay"));
@@ -220,7 +217,7 @@ fn parse_single_command(line: &str) -> Command {
                 Command::Wait(id, thresh, delay)
             }
         }
-        _ => panic!("Unknown command: {}", command),
+        _ => panic!("Unknown command: {command}"),
     }
 }
 
