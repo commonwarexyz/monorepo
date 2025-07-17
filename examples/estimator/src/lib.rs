@@ -17,6 +17,7 @@ use tracing::debug;
 // =============================================================================
 
 const CLOUDPING_BASE: &str = "https://www.cloudping.co/api/latencies";
+const CLOUDPING_DIVISOR: f64 = 2.0; // cloudping.co reports ping times not latency
 
 // =============================================================================
 // Type Definitions
@@ -253,7 +254,13 @@ fn populate_latency_map(p50: CloudPing, p90: CloudPing) -> Latencies {
         let mut dest_map = BTreeMap::new();
         for (to, lat50) in inner_p50 {
             if let Some(lat90) = inner_p90.get(&to) {
-                dest_map.insert(to.clone(), (lat50, lat90 - lat50));
+                dest_map.insert(
+                    to.clone(),
+                    (
+                        lat50 / CLOUDPING_DIVISOR,
+                        (lat90 - lat50) / CLOUDPING_DIVISOR,
+                    ),
+                );
             }
         }
         map.insert(from, dest_map);
