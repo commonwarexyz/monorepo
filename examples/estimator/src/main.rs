@@ -250,7 +250,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
     }
 
     // Ensure any messages in the simulator are queued (this is virtual time)
-    context.sleep(Duration::from_millis(10_000)).await;
+    context.sleep(Duration::from_secs(10)).await;
 
     // Send the shutdown signal to all jobs
     for responder in responders {

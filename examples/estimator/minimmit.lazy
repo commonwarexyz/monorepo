@@ -4,11 +4,11 @@
 propose{0}
 
 ## Multicast notarize
-wait{0, threshold=1, delay=(0.0001,0.001)}
+wait{0, threshold=1, delay=(0.1,1)}
 broadcast{1}
 
 ## Wait for 40% of the network to notarize
-wait{1, threshold=40%, delay=(0.0001,0.001)}
+wait{1, threshold=40%, delay=(0.1,1)}
 
 ## Wait for 80% of the network to notarize
-wait{1, threshold=80%, delay=(0.0001,0.001)}
+wait{1, threshold=80%, delay=(0.1,1)}

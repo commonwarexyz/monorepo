@@ -18,6 +18,7 @@ use tracing::debug;
 
 const CLOUDPING_BASE: &str = "https://www.cloudping.co/api/latencies";
 const CLOUDPING_DIVISOR: f64 = 2.0; // cloudping.co reports ping times not latency
+const MILLISECONDS_TO_SECONDS: f64 = 1000.0;
 
 // =============================================================================
 // Type Definitions
@@ -204,10 +205,12 @@ fn parse_single_command(line: &str) -> Command {
                 if parts.len() != 2 {
                     panic!("Invalid delay format (expected (value1,value2)): {delay_str}");
                 }
-                let message =
-                    Duration::from_secs_f64(parts[0].parse::<f64>().expect("Invalid delay"));
-                let completion =
-                    Duration::from_secs_f64(parts[1].parse::<f64>().expect("Invalid delay"));
+                let message = parts[0].parse::<f64>().expect("Invalid message delay")
+                    / MILLISECONDS_TO_SECONDS;
+                let message = Duration::from_secs_f64(message);
+                let completion = parts[1].parse::<f64>().expect("Invalid completion delay")
+                    / MILLISECONDS_TO_SECONDS;
+                let completion = Duration::from_secs_f64(completion);
                 (message, completion)
             });
 
@@ -822,8 +825,8 @@ reply{3}
                 }
                 assert!(delay.is_some());
                 let (msg, comp) = delay.unwrap();
-                assert_eq!(msg, Duration::from_secs_f64(0.5));
-                assert_eq!(comp, Duration::from_secs_f64(1.0));
+                assert_eq!(msg, Duration::from_micros(500));
+                assert_eq!(comp, Duration::from_millis(1));
             }
             _ => panic!("Expected Wait command"),
         }
@@ -882,7 +885,8 @@ propose{1}
 
     #[test]
     fn test_parse_task_curly_brace_or_command() {
-        let content = "wait{1, threshold=67%, delay=(0.0001,0.001)} || wait{2, threshold=1, delay=(0.0001,0.001)}";
+        let content =
+            "wait{1, threshold=67%, delay=(0.1,1)} || wait{2, threshold=1, delay=(0.1,1)}";
         let commands = parse_task(content);
         assert_eq!(commands.len(), 1);
 
