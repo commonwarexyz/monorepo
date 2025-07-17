@@ -115,6 +115,12 @@ pub fn parse_task(content: &str) -> Vec<(usize, Command)> {
 
 /// Parse a single command (no operators)
 fn parse_single_command(line: &str) -> Command {
+    // Check if this uses the new curly brace syntax
+    if line.contains('{') && line.contains('}') {
+        return parse_curly_brace_command(line);
+    }
+
+    // Fall back to old syntax for backwards compatibility
     let parts: Vec<&str> = line.split_whitespace().collect();
     let command = parts[0];
     let mut args: HashMap<&str, &str> = HashMap::new();
@@ -172,6 +178,117 @@ fn parse_single_command(line: &str) -> Command {
             }
         }
         _ => panic!("Unknown command: {command}"),
+    }
+}
+
+/// Parse a command using the new curly brace syntax
+fn parse_curly_brace_command(line: &str) -> Command {
+    let brace_start = line.find('{').expect("Missing opening brace");
+    let brace_end = line.rfind('}').expect("Missing closing brace");
+
+    let command = line[..brace_start].trim();
+    let args_str = &line[brace_start + 1..brace_end];
+
+    // Parse arguments - first argument is always the ID (no key)
+    let mut args = Vec::new();
+    let mut current_arg = String::new();
+    let mut paren_depth = 0;
+    let mut in_quotes = false;
+
+    for ch in args_str.chars() {
+        match ch {
+            '(' => {
+                paren_depth += 1;
+                current_arg.push(ch);
+            }
+            ')' => {
+                paren_depth -= 1;
+                current_arg.push(ch);
+            }
+            '"' => {
+                in_quotes = !in_quotes;
+                current_arg.push(ch);
+            }
+            ',' if paren_depth == 0 && !in_quotes => {
+                if !current_arg.trim().is_empty() {
+                    args.push(current_arg.trim().to_string());
+                }
+                current_arg.clear();
+            }
+            _ => {
+                current_arg.push(ch);
+            }
+        }
+    }
+
+    // Don't forget the last argument
+    if !current_arg.trim().is_empty() {
+        args.push(current_arg.trim().to_string());
+    }
+
+    if args.is_empty() {
+        panic!("Missing arguments in curly braces");
+    }
+
+    // First argument is always the ID
+    let id = args[0].parse::<u32>().expect("Invalid id");
+
+    // Parse remaining arguments as key=value pairs
+    let mut parsed_args: HashMap<String, String> = HashMap::new();
+    for arg in &args[1..] {
+        if let Some(eq_pos) = arg.find('=') {
+            let key = arg[..eq_pos].trim().to_string();
+            let value = arg[eq_pos + 1..].trim().to_string();
+            parsed_args.insert(key, value);
+        } else {
+            panic!("Invalid argument format (expected key=value): {}", arg);
+        }
+    }
+
+    match command {
+        "propose" => Command::Propose(id),
+        "broadcast" => Command::Broadcast(id),
+        "reply" => Command::Reply(id),
+        "collect" | "wait" => {
+            let thresh = if let Some(thresh_str) = parsed_args.get("threshold") {
+                if thresh_str.ends_with('%') {
+                    let p = thresh_str
+                        .trim_end_matches('%')
+                        .parse::<f64>()
+                        .expect("Invalid percent")
+                        / 100.0;
+                    Threshold::Percent(p)
+                } else {
+                    let c = thresh_str.parse::<usize>().expect("Invalid count");
+                    Threshold::Count(c)
+                }
+            } else {
+                panic!("Missing threshold for {}", command);
+            };
+
+            let delay = parsed_args.get("delay").map(|delay_str| {
+                let delay_str = delay_str.trim_matches('(').trim_matches(')');
+                let parts: Vec<&str> = delay_str.split(',').collect();
+                if parts.len() != 2 {
+                    panic!(
+                        "Invalid delay format (expected (value1,value2)): {}",
+                        delay_str
+                    );
+                }
+                let message =
+                    Duration::from_secs_f64(parts[0].parse::<f64>().expect("Invalid delay"));
+                let completion =
+                    Duration::from_secs_f64(parts[1].parse::<f64>().expect("Invalid delay"));
+                (message, completion)
+            });
+
+            if command == "collect" {
+                Command::Collect(id, thresh, delay)
+            } else {
+                Command::Wait(id, thresh, delay)
+            }
+        }
+        _ => panic!("Unknown command: {}", command),
     }
 }
 
@@ -743,6 +860,34 @@ reply id=3
     }
 
     #[test]
+    fn test_parse_task_curly_brace_commands() {
+        let content = r#"
+# This is a comment with new syntax
+propose{1}
+broadcast{2}
+reply{3}
+"#;
+
+        let commands = parse_task(content);
+        assert_eq!(commands.len(), 3);
+
+        match &commands[0].1 {
+            Command::Propose(id) => assert_eq!(*id, 1),
+            _ => panic!("Expected Propose command"),
+        }
+
+        match &commands[1].1 {
+            Command::Broadcast(id) => assert_eq!(*id, 2),
+            _ => panic!("Expected Broadcast command"),
+        }
+
+        match &commands[2].1 {
+            Command::Reply(id) => assert_eq!(*id, 3),
+            _ => panic!("Expected Reply command"),
+        }
+    }
+
+    #[test]
     fn test_parse_task_collect_command() {
         let content = "collect id=1 threshold=75%";
         let commands = parse_task(content);
@@ -762,8 +907,49 @@ reply id=3
     }
 
     #[test]
+    fn test_parse_task_curly_brace_collect_command() {
+        let content = "collect{1, threshold=75%}";
+        let commands = parse_task(content);
+        assert_eq!(commands.len(), 1);
+
+        match &commands[0].1 {
+            Command::Collect(id, threshold, delay) => {
+                assert_eq!(*id, 1);
+                match threshold {
+                    Threshold::Percent(p) => assert_eq!(*p, 0.75),
+                    _ => panic!("Expected Percent threshold"),
+                }
+                assert!(delay.is_none());
+            }
+            _ => panic!("Expected Collect command"),
+        }
+    }
+
+    #[test]
     fn test_parse_task_wait_with_delay() {
         let content = "wait id=2 threshold=5 delay=(0.5,1.0)";
+        let commands = parse_task(content);
+        assert_eq!(commands.len(), 1);
+
+        match &commands[0].1 {
+            Command::Wait(id, threshold, delay) => {
+                assert_eq!(*id, 2);
+                match threshold {
+                    Threshold::Count(c) => assert_eq!(*c, 5),
+                    _ => panic!("Expected Count threshold"),
+                }
+                assert!(delay.is_some());
+                let (msg, comp) = delay.unwrap();
+                assert_eq!(msg, Duration::from_secs_f64(0.5));
+                assert_eq!(comp, Duration::from_secs_f64(1.0));
+            }
+            _ => panic!("Expected Wait command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_task_curly_brace_wait_with_delay() {
+        let content = "wait{2, threshold=5, delay=(0.5,1.0)}";
         let commands = parse_task(content);
         assert_eq!(commands.len(), 1);
 
@@ -823,6 +1009,41 @@ propose id=1
     #[test]
     fn test_parse_task_or_command() {
         let content = "wait id=1 threshold=67% delay=(0.0001,0.001) || wait id=2 threshold=1 delay=(0.0001,0.001)";
+        let commands = parse_task(content);
+        assert_eq!(commands.len(), 1);
+
+        match &commands[0].1 {
+            Command::Or(cmd1, cmd2) => {
+                match cmd1.as_ref() {
+                    Command::Wait(id, threshold, delay) => {
+                        assert_eq!(*id, 1);
+                        match threshold {
+                            Threshold::Percent(p) => assert_eq!(*p, 0.67),
+                            _ => panic!("Expected Percent threshold"),
+                        }
+                        assert!(delay.is_some());
+                    }
+                    _ => panic!("Expected Wait command in first part of OR"),
+                }
+                match cmd2.as_ref() {
+                    Command::Wait(id, threshold, delay) => {
+                        assert_eq!(*id, 2);
+                        match threshold {
+                            Threshold::Count(c) => assert_eq!(*c, 1),
+                            _ => panic!("Expected Count threshold"),
+                        }
+                        assert!(delay.is_some());
+                    }
+                    _ => panic!("Expected Wait command in second part of OR"),
+                }
+            }
+            _ => panic!("Expected Or command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_task_curly_brace_or_command() {
+        let content = "wait{1, threshold=67%, delay=(0.0001,0.001)} || wait{2, threshold=1, delay=(0.0001,0.001)}";
         let commands = parse_task(content);
         assert_eq!(commands.len(), 1);
 

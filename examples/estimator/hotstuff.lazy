@@ -1,23 +1,23 @@
 # HotStuff
 
 ## Send PREPARE
-propose id=0
+propose{0}
 
 ## Reply to proposer PREPARE with VOTE(PREPARE)
-wait id=0 threshold=1 delay=(0.0001,0.001)
-reply id=1
+wait{0, threshold=1, delay=(0.0001,0.001)}
+reply{1}
 
 ## Collect VOTE(PREPARE) from 67% of the network and then broadcast (PRECOMMIT, QC_PREPARE)
-collect id=1 threshold=67% delay=(0.0001,0.001)
-propose id=1
+collect{1, threshold=67%, delay=(0.0001,0.001)}
+propose{1}
 
 ## Reply to proposer (PRECOMMIT, QC_PREPARE) with VOTE(PRECOMMIT)
-wait id=1 threshold=1 delay=(0.0001,0.001)
-reply id=2
+wait{1, threshold=1, delay=(0.0001,0.001)}
+reply{2}
 
 ## Collect VOTE(PRECOMMIT) from 67% of the network and then broadcast (COMMIT, QC_PRECOMMIT)
-collect id=2 threshold=67% delay=(0.0001,0.001)
-propose id=3
+collect{2, threshold=67%, delay=(0.0001,0.001)}
+propose{3}
 
 ## Wait for proposer (COMMIT, QC_PRECOMMIT)
-wait id=3 threshold=1 delay=(0.0001,0.001)
+wait{3, threshold=1, delay=(0.0001,0.001)}
