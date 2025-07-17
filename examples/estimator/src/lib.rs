@@ -119,15 +119,13 @@ fn parse_single_command(line: &str) -> Command {
     let brace_start = line.find('{').expect("Missing opening brace");
     let brace_end = line.rfind('}').expect("Missing closing brace");
 
+    // Parse arguments - first argument is always the ID (no key)
     let command = line[..brace_start].trim();
     let args_str = &line[brace_start + 1..brace_end];
-
-    // Parse arguments - first argument is always the ID (no key)
     let mut args = Vec::new();
     let mut current_arg = String::new();
     let mut paren_depth = 0;
     let mut in_quotes = false;
-
     for ch in args_str.chars() {
         match ch {
             '(' => {
@@ -158,7 +156,6 @@ fn parse_single_command(line: &str) -> Command {
     if !current_arg.trim().is_empty() {
         args.push(current_arg.trim().to_string());
     }
-
     if args.is_empty() {
         panic!("Missing arguments in curly braces");
     }
@@ -764,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_task_curly_brace_commands() {
+    fn test_parse_task_commands() {
         let content = r#"
 # This is a comment with new syntax
 propose{1}
@@ -792,7 +789,7 @@ reply{3}
     }
 
     #[test]
-    fn test_parse_task_curly_brace_collect_command() {
+    fn test_parse_task_collect_command() {
         let content = "collect{1, threshold=75%}";
         let commands = parse_task(content);
         assert_eq!(commands.len(), 1);
@@ -811,7 +808,7 @@ reply{3}
     }
 
     #[test]
-    fn test_parse_task_curly_brace_wait_with_delay() {
+    fn test_parse_task_wait_with_delay() {
         let content = "wait{2, threshold=5, delay=(0.5,1.0)}";
         let commands = parse_task(content);
         assert_eq!(commands.len(), 1);
@@ -884,7 +881,7 @@ propose{1}
     }
 
     #[test]
-    fn test_parse_task_curly_brace_or_command() {
+    fn test_parse_task_or_command() {
         let content =
             "wait{1, threshold=67%, delay=(0.1,1)} || wait{2, threshold=1, delay=(0.1,1)}";
         let commands = parse_task(content);
