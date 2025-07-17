@@ -110,8 +110,14 @@ fn main() {
 /// Parse command line arguments and return structured data
 fn parse_arguments() -> Arguments {
     let matches = ClapCommand::new("commonware-simulator")
-        .about("TBA")
+        .about("Simulate mechanism performance under realistic network conditions")
         .version(crate_version())
+        .arg(
+            Arg::new("task")
+                .value_parser(value_parser!(String))
+                .required(true)
+                .help("Path to .lazy file defining the simulation behavior"),
+        )
         .arg(
             Arg::new("distribution")
                 .long("distribution")
@@ -126,13 +132,6 @@ fn parse_arguments() -> Arguments {
                 .required(false)
                 .num_args(0)
                 .help("Reload latency data from cloudping.co"),
-        )
-        .arg(
-            Arg::new("task")
-                .long("task")
-                .required(true)
-                .value_parser(value_parser!(String))
-                .help("Path to DSL file defining the simulation behavior"),
         )
         .get_matches();
 

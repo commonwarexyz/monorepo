@@ -26,17 +26,17 @@ cargo run -- [OPTIONS]
 
 ### Command-Line Options
 
+- `<TASK>` (required): Path to the .lazy file defining the simulation behavior (e.g., `minimmit.lazy`).
 - `--distribution <DISTRIBUTION>` (required): Specify the distribution of peers across regions in the format `<region>:<count>`, comma-separated. Example: `us-east-1:10,eu-west-1:5`. Regions must match AWS regions from the latency data (e.g., us-east-1, eu-west-1).
-- `--task <PATH>` (required): Path to the DSL file defining the simulation behavior (e.g., `minimmit.lazy`).
 - `--reload` (optional flag): Download fresh latency data from cloudping.co instead of using embedded data.
 
 ### Example
 
 ```
-cargo run -- --distribution us-east-1:3,eu-west-1:2 --task examples/estimator/hotstuff.lazy
+cargo run -- hotstuff.lazy --distribution us-east-1:3,eu-west-1:2
 ```
 
-This runs simulations with 5 peers (3 in us-east-1, 2 in eu-west-1), using the DSL from `minimmit.lazy`.
+This runs simulations with 5 peers (3 in us-east-1, 2 in eu-west-1), using the DSL from `hotstuff.lazy`.
 
 ### Output
 
@@ -173,7 +173,7 @@ The DSL supports complex conditional logic using AND (`&&`) and OR (`||`) operat
 To simulate the performance of HotStuff, Simplicity, and Minimmit on an [Alto-like Network](https://alto.commonware.xyz), run the following commands:
 
 ```
-cargo run -- --distribution us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 --task hotstuff.lazy
-cargo run -- --distribution us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 --task simplex.lazy
-cargo run -- --distribution us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 --task minimmit.lazy
+cargo run -- --distribution us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 hotstuff.lazy
+cargo run -- --distribution us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 simplex.lazy
+cargo run -- --distribution us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 minimmit.lazy
 ```
