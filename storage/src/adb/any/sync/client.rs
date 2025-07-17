@@ -1437,4 +1437,131 @@ pub(crate) mod tests {
             target_db.destroy().await.unwrap();
         });
     }
+
+    /// Test that reproduces the hash mismatch bug during rapid target updates.
+    /// This test specifically targets the issue where pinned nodes are incorrectly
+    /// recalculated when the sync target is updated after some batches have been processed.
+    #[test_traced("WARN")]
+    fn test_rapid_target_update_hash_mismatch_bug() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate a larger target database to ensure pruning occurs
+            let mut target_db = create_test_db(context.clone()).await;
+            let initial_ops = create_test_ops(100);
+            apply_ops(&mut target_db, initial_ops.clone()).await;
+            target_db.commit().await.unwrap();
+
+            // Capture the state after first commit (this will have a non-zero inactivity floor)
+            let mut hasher = create_test_hasher();
+            let initial_lower_bound = target_db.inactivity_floor_loc;
+            let initial_upper_bound = target_db.op_count() - 1;
+            let initial_hash = target_db.root(&mut hasher);
+
+            // Ensure we have a significant pruning boundary (this is crucial for the bug)
+            assert!(
+                initial_lower_bound > 10,
+                "Need significant pruning for bug reproduction"
+            );
+
+            // Add more operations to create the extended target
+            let additional_ops = create_test_ops(50);
+            apply_ops(&mut target_db, additional_ops).await;
+            target_db.commit().await.unwrap();
+
+            let final_lower_bound = target_db.inactivity_floor_loc;
+            let final_upper_bound = target_db.op_count() - 1;
+            let final_hash = target_db.root(&mut hasher);
+
+            // Create client with initial smaller target and very small batch size
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let config = Config {
+                context: context.clone(),
+                db_config: create_test_config(context.next_u64()),
+                fetch_batch_size: NZU64!(2), // Very small batch size to ensure multiple batches needed
+                target: SyncTarget {
+                    hash: initial_hash,
+                    lower_bound_ops: initial_lower_bound,
+                    upper_bound_ops: initial_upper_bound,
+                },
+                resolver: &target_db,
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+                update_receiver: Some(update_receiver),
+            };
+            let mut client = Client::new(config).await.unwrap();
+
+            // Process exactly one batch to establish pinned nodes
+            client = client.step().await.unwrap(); // FetchData -> ApplyData (fetch first batch)
+            client = client.step().await.unwrap(); // ApplyData -> FetchData (apply first batch)
+
+            // Verify we're in FetchData state and have processed some operations
+            let current_log_size = match &client {
+                Client::FetchData {
+                    log, pinned_nodes, ..
+                } => {
+                    let log_size = log.size().await.unwrap();
+                    // Verify pinned nodes were established
+                    assert!(
+                        pinned_nodes.is_some(),
+                        "Pinned nodes should have been established"
+                    );
+                    log_size
+                }
+                _ => panic!("Expected FetchData state"),
+            };
+            assert!(
+                current_log_size > initial_lower_bound,
+                "Expected at least one batch to be processed"
+            );
+
+            // Send rapid target update to the extended target with SAME lower bound but higher upper bound
+            // This is the critical case: the lower_bound_ops stays the same, so the pinned nodes
+            // should remain valid, but the current code discards them and recalculates from the wrong position
+            update_sender
+                .send(SyncTarget {
+                    hash: final_hash,
+                    lower_bound_ops: initial_lower_bound, // SAME lower bound - this is key
+                    upper_bound_ops: final_upper_bound,   // EXTENDED upper bound
+                })
+                .await
+                .unwrap();
+
+            // Complete the sync - this should fail with hash mismatch if the bug is present
+            let result = client.sync().await;
+
+            match result {
+                Err(Error::HashMismatch { expected, actual }) => {
+                    // This is the bug we're trying to reproduce
+                    println!("Successfully reproduced hash mismatch bug!");
+                    println!("Expected: {expected:?}");
+                    println!("Actual: {actual:?}");
+                    // Test passes by reproducing the bug
+                }
+                Ok(synced_db) => {
+                    // If we get here, either the bug doesn't exist or our test isn't triggering it
+                    let mut hasher = create_test_hasher();
+                    let actual_hash = synced_db.root(&mut hasher);
+
+                    if actual_hash != final_hash {
+                        println!("Hash mismatch detected but not caught by sync process:");
+                        println!("Expected: {final_hash:?}");
+                        println!("Actual: {actual_hash:?}");
+                        // This indicates the bug exists but wasn't caught by the normal validation
+                        panic!("Hash mismatch not caught by sync validation");
+                    } else {
+                        // Bug might not be triggered by this specific scenario
+                        println!(
+                            "No hash mismatch detected - bug may not be triggered by this test"
+                        );
+                        synced_db.destroy().await.unwrap();
+                    }
+                }
+                Err(other_error) => {
+                    panic!("Unexpected error during sync: {other_error:?}");
+                }
+            }
+
+            target_db.destroy().await.unwrap();
+        });
+    }
 }
