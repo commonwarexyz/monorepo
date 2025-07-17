@@ -400,6 +400,79 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
     jobs
 }
 
+/// Check if a single command would succeed without executing side effects
+async fn process_single_command_check<C: Spawner + Clock>(
+    ctx: &C,
+    command_ctx: &CommandContext,
+    command: &(usize, Command),
+    received: &BTreeMap<u32, BTreeSet<ed25519::PublicKey>>,
+) -> bool {
+    let is_proposer = command_ctx.identity == command_ctx.proposer_identity;
+    match &command.1 {
+        Command::Propose(_) => true,   // Propose always succeeds
+        Command::Broadcast(_) => true, // Broadcast always succeeds
+        Command::Reply(_) => true,     // Reply always succeeds
+        Command::Collect(id, thresh, delay) => {
+            if is_proposer {
+                let count = received.get(id).map_or(0, |s| s.len());
+                let required = calculate_threshold(thresh, command_ctx.peers);
+                if let Some((message, _)) = delay {
+                    ctx.sleep(*message).await;
+                }
+                count >= required
+            } else {
+                true // Non-proposers always advance on collect
+            }
+        }
+        Command::Wait(id, thresh, delay) => {
+            let count = received.get(id).map_or(0, |s| s.len());
+            let required = calculate_threshold(thresh, command_ctx.peers);
+            if let Some((message, _)) = delay {
+                ctx.sleep(*message).await;
+            }
+            count >= required
+        }
+        Command::Or(cmd1, cmd2) => {
+            let cmd1_test = (command.0, cmd1.as_ref().clone());
+            let cmd2_test = (command.0, cmd2.as_ref().clone());
+            let result1 = Box::pin(process_single_command_check(
+                ctx,
+                command_ctx,
+                &cmd1_test,
+                received,
+            ))
+            .await;
+            let result2 = Box::pin(process_single_command_check(
+                ctx,
+                command_ctx,
+                &cmd2_test,
+                received,
+            ))
+            .await;
+            result1 || result2
+        }
+        Command::And(cmd1, cmd2) => {
+            let cmd1_test = (command.0, cmd1.as_ref().clone());
+            let cmd2_test = (command.0, cmd2.as_ref().clone());
+            let result1 = Box::pin(process_single_command_check(
+                ctx,
+                command_ctx,
+                &cmd1_test,
+                received,
+            ))
+            .await;
+            let result2 = Box::pin(process_single_command_check(
+                ctx,
+                command_ctx,
+                &cmd2_test,
+                received,
+            ))
+            .await;
+            result1 && result2
+        }
+    }
+}
+
 /// Process a single command in the DSL
 async fn process_command<C: Spawner + Clock>(
     ctx: &C,
@@ -492,6 +565,48 @@ async fn process_command<C: Spawner + Clock>(
                 if let Some((_, completion)) = delay {
                     ctx.sleep(*completion).await;
                 }
+                *current_index += 1;
+                true
+            } else {
+                false
+            }
+        }
+        Command::Or(cmd1, cmd2) => {
+            // For OR: succeed if either command would succeed
+            // Create temporary command structs for testing
+            let cmd1_test = (command.0, cmd1.as_ref().clone());
+            let cmd2_test = (command.0, cmd2.as_ref().clone());
+
+            // Test first command
+            let result1 =
+                process_single_command_check(ctx, command_ctx, &cmd1_test, received).await;
+            let result2 =
+                process_single_command_check(ctx, command_ctx, &cmd2_test, received).await;
+
+            if result1 || result2 {
+                let duration = ctx.current().duration_since(command_ctx.start).unwrap();
+                completions.push((command.0, duration));
+                *current_index += 1;
+                true
+            } else {
+                false
+            }
+        }
+        Command::And(cmd1, cmd2) => {
+            // For AND: succeed only if both commands would succeed
+            // Create temporary command structs for testing
+            let cmd1_test = (command.0, cmd1.as_ref().clone());
+            let cmd2_test = (command.0, cmd2.as_ref().clone());
+
+            // Test both commands
+            let result1 =
+                process_single_command_check(ctx, command_ctx, &cmd1_test, received).await;
+            let result2 =
+                process_single_command_check(ctx, command_ctx, &cmd2_test, received).await;
+
+            if result1 && result2 {
+                let duration = ctx.current().duration_since(command_ctx.start).unwrap();
+                completions.push((command.0, duration));
                 *current_index += 1;
                 true
             } else {

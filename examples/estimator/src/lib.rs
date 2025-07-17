@@ -54,6 +54,8 @@ pub enum Command {
     Reply(u32),
     Collect(u32, Threshold, Option<(Duration, Duration)>),
     Wait(u32, Threshold, Option<(Duration, Duration)>),
+    Or(Box<Command>, Box<Command>),
+    And(Box<Command>, Box<Command>),
 }
 
 #[derive(Clone)]
@@ -93,66 +95,103 @@ pub fn parse_task(content: &str) -> Vec<(usize, Command)> {
         if line.starts_with("#") {
             continue;
         }
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        let command = parts[0];
-        let mut args: HashMap<&str, &str> = HashMap::new();
-        for &arg in &parts[1..] {
-            let kv: Vec<&str> = arg.splitn(2, '=').collect();
-            if kv.len() != 2 {
-                panic!("Invalid argument format: {arg}");
-            }
-            args.insert(kv[0], kv[1]);
-        }
-        match command {
-            "propose" => {
-                let id_str = args.get("id").expect("Missing id for propose");
-                let id = id_str.parse::<u32>().expect("Invalid id");
-                cmds.push((line_num + 1, Command::Propose(id)));
-            }
-            "broadcast" => {
-                let id_str = args.get("id").expect("Missing id for broadcast");
-                let id = id_str.parse::<u32>().expect("Invalid id");
-                cmds.push((line_num + 1, Command::Broadcast(id)));
-            }
-            "reply" => {
-                let id_str = args.get("id").expect("Missing id for reply");
-                let id = id_str.parse::<u32>().expect("Invalid id");
-                cmds.push((line_num + 1, Command::Reply(id)));
-            }
-            "collect" | "wait" => {
-                let id_str = args.get("id").expect("Missing id");
-                let id = id_str.parse::<u32>().expect("Invalid id");
-                let thresh_str = args.get("threshold").expect("Missing threshold");
-                let thresh = if thresh_str.ends_with('%') {
-                    let p = thresh_str
-                        .trim_end_matches('%')
-                        .parse::<f64>()
-                        .expect("Invalid percent")
-                        / 100.0;
-                    Threshold::Percent(p)
-                } else {
-                    let c = thresh_str.parse::<usize>().expect("Invalid count");
-                    Threshold::Count(c)
-                };
-                let delay = args.get("delay").map(|delay_str| {
-                    let delay_str = delay_str.trim_matches('(').trim_matches(')');
-                    let parts: Vec<&str> = delay_str.split(',').collect();
-                    let message =
-                        Duration::from_secs_f64(parts[0].parse::<f64>().expect("Invalid delay"));
-                    let completion =
-                        Duration::from_secs_f64(parts[1].parse::<f64>().expect("Invalid delay"));
-                    (message, completion)
-                });
-                if command == "collect" {
-                    cmds.push((line_num + 1, Command::Collect(id, thresh, delay)));
-                } else {
-                    cmds.push((line_num + 1, Command::Wait(id, thresh, delay)));
-                }
-            }
-            _ => panic!("Unknown command: {command}"),
-        }
+
+        // Check for OR and AND operators
+        let command = if line.contains(" || ") {
+            parse_or_command(line)
+        } else if line.contains(" && ") {
+            parse_and_command(line)
+        } else {
+            parse_single_command(line)
+        };
+
+        cmds.push((line_num + 1, command));
     }
     cmds
+}
+
+/// Parse a single command (no operators)
+fn parse_single_command(line: &str) -> Command {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let command = parts[0];
+    let mut args: HashMap<&str, &str> = HashMap::new();
+    for &arg in &parts[1..] {
+        let kv: Vec<&str> = arg.splitn(2, '=').collect();
+        if kv.len() != 2 {
+            panic!("Invalid argument format: {arg}");
+        }
+        args.insert(kv[0], kv[1]);
+    }
+    match command {
+        "propose" => {
+            let id_str = args.get("id").expect("Missing id for propose");
+            let id = id_str.parse::<u32>().expect("Invalid id");
+            Command::Propose(id)
+        }
+        "broadcast" => {
+            let id_str = args.get("id").expect("Missing id for broadcast");
+            let id = id_str.parse::<u32>().expect("Invalid id");
+            Command::Broadcast(id)
+        }
+        "reply" => {
+            let id_str = args.get("id").expect("Missing id for reply");
+            let id = id_str.parse::<u32>().expect("Invalid id");
+            Command::Reply(id)
+        }
+        "collect" | "wait" => {
+            let id_str = args.get("id").expect("Missing id");
+            let id = id_str.parse::<u32>().expect("Invalid id");
+            let thresh_str = args.get("threshold").expect("Missing threshold");
+            let thresh = if thresh_str.ends_with('%') {
+                let p = thresh_str
+                    .trim_end_matches('%')
+                    .parse::<f64>()
+                    .expect("Invalid percent")
+                    / 100.0;
+                Threshold::Percent(p)
+            } else {
+                let c = thresh_str.parse::<usize>().expect("Invalid count");
+                Threshold::Count(c)
+            };
+            let delay = args.get("delay").map(|delay_str| {
+                let delay_str = delay_str.trim_matches('(').trim_matches(')');
+                let parts: Vec<&str> = delay_str.split(',').collect();
+                let message =
+                    Duration::from_secs_f64(parts[0].parse::<f64>().expect("Invalid delay"));
+                let completion =
+                    Duration::from_secs_f64(parts[1].parse::<f64>().expect("Invalid delay"));
+                (message, completion)
+            });
+            if command == "collect" {
+                Command::Collect(id, thresh, delay)
+            } else {
+                Command::Wait(id, thresh, delay)
+            }
+        }
+        _ => panic!("Unknown command: {command}"),
+    }
+}
+
+/// Parse a command with OR operator
+fn parse_or_command(line: &str) -> Command {
+    let parts: Vec<&str> = line.split(" || ").collect();
+    if parts.len() != 2 {
+        panic!("OR command must have exactly two parts separated by ' || '");
+    }
+    let cmd1 = parse_single_command(parts[0].trim());
+    let cmd2 = parse_single_command(parts[1].trim());
+    Command::Or(Box::new(cmd1), Box::new(cmd2))
+}
+
+/// Parse a command with AND operator
+fn parse_and_command(line: &str) -> Command {
+    let parts: Vec<&str> = line.split(" && ").collect();
+    if parts.len() != 2 {
+        panic!("AND command must have exactly two parts separated by ' && '");
+    }
+    let cmd1 = parse_single_command(parts[0].trim());
+    let cmd2 = parse_single_command(parts[1].trim());
+    Command::And(Box::new(cmd1), Box::new(cmd2))
 }
 
 // =============================================================================
@@ -352,6 +391,16 @@ pub fn validate(commands: &[(usize, Command)], peers: usize, proposer: usize) ->
                         let count = state.received.get(id).map_or(0, |s| s.len());
                         let required = calculate_threshold(thresh, peers);
                         count >= required
+                    }
+                    Command::Or(_cmd1, _cmd2) => {
+                        // For validation, treat OR as always advancing
+                        // This is a simplified implementation for proof of concept
+                        true
+                    }
+                    Command::And(_cmd1, _cmd2) => {
+                        // For validation, treat AND as always advancing
+                        // This is a simplified implementation for proof of concept
+                        true
                     }
                 };
 
@@ -586,6 +635,76 @@ propose id=1
     fn test_parse_task_unknown_command() {
         let content = "unknown_command id=1";
         parse_task(content);
+    }
+
+    #[test]
+    fn test_parse_task_or_command() {
+        let content = "wait id=1 threshold=67% delay=(0.0001,0.001) || wait id=2 threshold=1 delay=(0.0001,0.001)";
+        let commands = parse_task(content);
+        assert_eq!(commands.len(), 1);
+
+        match &commands[0].1 {
+            Command::Or(cmd1, cmd2) => {
+                match cmd1.as_ref() {
+                    Command::Wait(id, threshold, delay) => {
+                        assert_eq!(*id, 1);
+                        match threshold {
+                            Threshold::Percent(p) => assert_eq!(*p, 0.67),
+                            _ => panic!("Expected Percent threshold"),
+                        }
+                        assert!(delay.is_some());
+                    }
+                    _ => panic!("Expected Wait command in first part of OR"),
+                }
+                match cmd2.as_ref() {
+                    Command::Wait(id, threshold, delay) => {
+                        assert_eq!(*id, 2);
+                        match threshold {
+                            Threshold::Count(c) => assert_eq!(*c, 1),
+                            _ => panic!("Expected Count threshold"),
+                        }
+                        assert!(delay.is_some());
+                    }
+                    _ => panic!("Expected Wait command in second part of OR"),
+                }
+            }
+            _ => panic!("Expected Or command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_task_and_command() {
+        let content = "wait id=3 threshold=67% && wait id=4 threshold=1";
+        let commands = parse_task(content);
+        assert_eq!(commands.len(), 1);
+
+        match &commands[0].1 {
+            Command::And(cmd1, cmd2) => {
+                match cmd1.as_ref() {
+                    Command::Wait(id, threshold, delay) => {
+                        assert_eq!(*id, 3);
+                        match threshold {
+                            Threshold::Percent(p) => assert_eq!(*p, 0.67),
+                            _ => panic!("Expected Percent threshold"),
+                        }
+                        assert!(delay.is_none());
+                    }
+                    _ => panic!("Expected Wait command in first part of AND"),
+                }
+                match cmd2.as_ref() {
+                    Command::Wait(id, threshold, delay) => {
+                        assert_eq!(*id, 4);
+                        match threshold {
+                            Threshold::Count(c) => assert_eq!(*c, 1),
+                            _ => panic!("Expected Count threshold"),
+                        }
+                        assert!(delay.is_none());
+                    }
+                    _ => panic!("Expected Wait command in second part of AND"),
+                }
+            }
+            _ => panic!("Expected And command"),
+        }
     }
 
     #[test]
