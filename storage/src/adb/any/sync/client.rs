@@ -1438,11 +1438,9 @@ pub(crate) mod tests {
         });
     }
 
-    /// Test that reproduces the hash mismatch bug during rapid target updates.
-    /// This test specifically targets the issue where pinned nodes are incorrectly
-    /// recalculated when the sync target is updated after some batches have been processed.
+    /// Test that the client can handle target updates with the same lower bound.
     #[test_traced("WARN")]
-    fn test_rapid_target_update_hash_mismatch_bug() {
+    fn test_target_same_lower_bound() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate a larger target database to ensure pruning occurs
@@ -1457,20 +1455,15 @@ pub(crate) mod tests {
             let initial_upper_bound = target_db.op_count() - 1;
             let initial_hash = target_db.root(&mut hasher);
 
-            // Ensure we have a significant pruning boundary (this is crucial for the bug)
-            assert!(
-                initial_lower_bound > 10,
-                "Need significant pruning for bug reproduction"
-            );
-
             // Add more operations to create the extended target
             let additional_ops = create_test_ops(50);
             apply_ops(&mut target_db, additional_ops).await;
             target_db.commit().await.unwrap();
-
-            let final_lower_bound = target_db.inactivity_floor_loc;
             let final_upper_bound = target_db.op_count() - 1;
             let final_hash = target_db.root(&mut hasher);
+
+            // Wrap target database for shared mutable access
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
 
             // Create client with initial smaller target and very small batch size
             let (mut update_sender, update_receiver) = mpsc::channel(1);
@@ -1483,7 +1476,7 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                resolver: &target_db,
+                resolver: target_db.clone(),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: Some(update_receiver),
@@ -1515,52 +1508,53 @@ pub(crate) mod tests {
             );
 
             // Send rapid target update to the extended target with SAME lower bound but higher upper bound
-            // This is the critical case: the lower_bound_ops stays the same, so the pinned nodes
-            // should remain valid, but the current code discards them and recalculates from the wrong position
             update_sender
                 .send(SyncTarget {
                     hash: final_hash,
-                    lower_bound_ops: initial_lower_bound, // SAME lower bound - this is key
-                    upper_bound_ops: final_upper_bound,   // EXTENDED upper bound
+                    lower_bound_ops: initial_lower_bound,
+                    upper_bound_ops: final_upper_bound,
                 })
                 .await
                 .unwrap();
 
             // Complete the sync - this should fail with hash mismatch if the bug is present
-            let result = client.sync().await;
+            let synced_db = client.sync().await.unwrap();
 
-            match result {
-                Err(Error::HashMismatch { expected, actual }) => {
-                    // This is the bug we're trying to reproduce
-                    println!("Successfully reproduced hash mismatch bug!");
-                    println!("Expected: {expected:?}");
-                    println!("Actual: {actual:?}");
-                    // Test passes by reproducing the bug
-                }
-                Ok(synced_db) => {
-                    // If we get here, either the bug doesn't exist or our test isn't triggering it
-                    let mut hasher = create_test_hasher();
-                    let actual_hash = synced_db.root(&mut hasher);
+            // Verify the synced database has the expected final state
+            let mut hasher = create_test_hasher();
+            assert_eq!(synced_db.root(&mut hasher), final_hash);
 
-                    if actual_hash != final_hash {
-                        println!("Hash mismatch detected but not caught by sync process:");
-                        println!("Expected: {final_hash:?}");
-                        println!("Actual: {actual_hash:?}");
-                        // This indicates the bug exists but wasn't caught by the normal validation
-                        panic!("Hash mismatch not caught by sync validation");
-                    } else {
-                        // Bug might not be triggered by this specific scenario
-                        println!(
-                            "No hash mismatch detected - bug may not be triggered by this test"
-                        );
-                        synced_db.destroy().await.unwrap();
-                    }
-                }
-                Err(other_error) => {
-                    panic!("Unexpected error during sync: {other_error:?}");
-                }
+            // Verify the target database matches the synced database
+            let target_db = match Arc::try_unwrap(target_db) {
+                Ok(rw_lock) => rw_lock.into_inner(),
+                Err(_) => panic!("Failed to unwrap Arc - still has references"),
+            };
+            {
+                assert_eq!(synced_db.op_count(), target_db.op_count());
+                assert_eq!(
+                    synced_db.inactivity_floor_loc,
+                    target_db.inactivity_floor_loc
+                );
+                assert_eq!(
+                    synced_db.oldest_retained_loc().unwrap(),
+                    target_db.inactivity_floor_loc
+                );
+                assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
             }
 
+            // Verify the expected operations are present in the synced database.
+            for i in synced_db.inactivity_floor_loc..synced_db.op_count() {
+                let got = synced_db.log.read(i).await.unwrap();
+                let expected = target_db.log.read(i).await.unwrap();
+                assert_eq!(got, expected);
+            }
+            for i in synced_db.ops.oldest_retained_pos().unwrap()..synced_db.ops.size() {
+                let got = synced_db.ops.get_node(i).await.unwrap();
+                let expected = target_db.ops.get_node(i).await.unwrap();
+                assert_eq!(got, expected);
+            }
+
+            synced_db.destroy().await.unwrap();
             target_db.destroy().await.unwrap();
         });
     }
