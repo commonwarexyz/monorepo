@@ -1075,7 +1075,7 @@ dependencies = [
  "commonware-coding",
  "commonware-cryptography",
  "libfuzzer-sys",
- "rand",
+ "rand 0.8.5",
 ]
 
 [[package]]
