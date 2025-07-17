@@ -324,7 +324,7 @@ impl<'a> ExpressionParser<'a> {
                 );
             }
         } else {
-            panic!("Expected '{}' but reached end of input", expected);
+            panic!("Expected '{expected}' but reached end of input");
         }
     }
 
