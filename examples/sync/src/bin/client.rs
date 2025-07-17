@@ -186,7 +186,7 @@ where
         resolver,
         hasher: Standard::new(),
         apply_batch_size: 1024,
-        update_receiver: None,
+        update_receiver: Some(update_receiver),
     };
 
     info!(
@@ -199,7 +199,7 @@ where
 
     // Do the sync with target updates
     info!("Beginning sync operation...");
-    let database = sync::sync_with_updater(sync_config, update_receiver).await?;
+    let database = sync::sync(sync_config).await?;
 
     // Get the root hash of the synced database
     let mut hasher = Standard::new();
