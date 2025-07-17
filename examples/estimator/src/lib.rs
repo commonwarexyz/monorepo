@@ -115,74 +115,6 @@ pub fn parse_task(content: &str) -> Vec<(usize, Command)> {
 
 /// Parse a single command (no operators)
 fn parse_single_command(line: &str) -> Command {
-    // Check if this uses the new curly brace syntax
-    if line.contains('{') && line.contains('}') {
-        return parse_curly_brace_command(line);
-    }
-
-    // Fall back to old syntax for backwards compatibility
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    let command = parts[0];
-    let mut args: HashMap<&str, &str> = HashMap::new();
-    for &arg in &parts[1..] {
-        let kv: Vec<&str> = arg.splitn(2, '=').collect();
-        if kv.len() != 2 {
-            panic!("Invalid argument format: {arg}");
-        }
-        args.insert(kv[0], kv[1]);
-    }
-    match command {
-        "propose" => {
-            let id_str = args.get("id").expect("Missing id for propose");
-            let id = id_str.parse::<u32>().expect("Invalid id");
-            Command::Propose(id)
-        }
-        "broadcast" => {
-            let id_str = args.get("id").expect("Missing id for broadcast");
-            let id = id_str.parse::<u32>().expect("Invalid id");
-            Command::Broadcast(id)
-        }
-        "reply" => {
-            let id_str = args.get("id").expect("Missing id for reply");
-            let id = id_str.parse::<u32>().expect("Invalid id");
-            Command::Reply(id)
-        }
-        "collect" | "wait" => {
-            let id_str = args.get("id").expect("Missing id");
-            let id = id_str.parse::<u32>().expect("Invalid id");
-            let thresh_str = args.get("threshold").expect("Missing threshold");
-            let thresh = if thresh_str.ends_with('%') {
-                let p = thresh_str
-                    .trim_end_matches('%')
-                    .parse::<f64>()
-                    .expect("Invalid percent")
-                    / 100.0;
-                Threshold::Percent(p)
-            } else {
-                let c = thresh_str.parse::<usize>().expect("Invalid count");
-                Threshold::Count(c)
-            };
-            let delay = args.get("delay").map(|delay_str| {
-                let delay_str = delay_str.trim_matches('(').trim_matches(')');
-                let parts: Vec<&str> = delay_str.split(',').collect();
-                let message =
-                    Duration::from_secs_f64(parts[0].parse::<f64>().expect("Invalid delay"));
-                let completion =
-                    Duration::from_secs_f64(parts[1].parse::<f64>().expect("Invalid delay"));
-                (message, completion)
-            });
-            if command == "collect" {
-                Command::Collect(id, thresh, delay)
-            } else {
-                Command::Wait(id, thresh, delay)
-            }
-        }
-        _ => panic!("Unknown command: {command}"),
-    }
-}
-
-/// Parse a command using the new curly brace syntax
-fn parse_curly_brace_command(line: &str) -> Command {
     let brace_start = line.find('{').expect("Missing opening brace");
     let brace_end = line.rfind('}').expect("Missing closing brace");
 
@@ -832,34 +764,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_task_simple_commands() {
-        let content = r#"
-# This is a comment
-propose id=1
-broadcast id=2
-reply id=3
-"#;
-
-        let commands = parse_task(content);
-        assert_eq!(commands.len(), 3);
-
-        match &commands[0].1 {
-            Command::Propose(id) => assert_eq!(*id, 1),
-            _ => panic!("Expected Propose command"),
-        }
-
-        match &commands[1].1 {
-            Command::Broadcast(id) => assert_eq!(*id, 2),
-            _ => panic!("Expected Broadcast command"),
-        }
-
-        match &commands[2].1 {
-            Command::Reply(id) => assert_eq!(*id, 3),
-            _ => panic!("Expected Reply command"),
-        }
-    }
-
-    #[test]
     fn test_parse_task_curly_brace_commands() {
         let content = r#"
 # This is a comment with new syntax
@@ -888,25 +792,6 @@ reply{3}
     }
 
     #[test]
-    fn test_parse_task_collect_command() {
-        let content = "collect id=1 threshold=75%";
-        let commands = parse_task(content);
-        assert_eq!(commands.len(), 1);
-
-        match &commands[0].1 {
-            Command::Collect(id, threshold, delay) => {
-                assert_eq!(*id, 1);
-                match threshold {
-                    Threshold::Percent(p) => assert_eq!(*p, 0.75),
-                    _ => panic!("Expected Percent threshold"),
-                }
-                assert!(delay.is_none());
-            }
-            _ => panic!("Expected Collect command"),
-        }
-    }
-
-    #[test]
     fn test_parse_task_curly_brace_collect_command() {
         let content = "collect{1, threshold=75%}";
         let commands = parse_task(content);
@@ -922,28 +807,6 @@ reply{3}
                 assert!(delay.is_none());
             }
             _ => panic!("Expected Collect command"),
-        }
-    }
-
-    #[test]
-    fn test_parse_task_wait_with_delay() {
-        let content = "wait id=2 threshold=5 delay=(0.5,1.0)";
-        let commands = parse_task(content);
-        assert_eq!(commands.len(), 1);
-
-        match &commands[0].1 {
-            Command::Wait(id, threshold, delay) => {
-                assert_eq!(*id, 2);
-                match threshold {
-                    Threshold::Count(c) => assert_eq!(*c, 5),
-                    _ => panic!("Expected Count threshold"),
-                }
-                assert!(delay.is_some());
-                let (msg, comp) = delay.unwrap();
-                assert_eq!(msg, Duration::from_secs_f64(0.5));
-                assert_eq!(comp, Duration::from_secs_f64(1.0));
-            }
-            _ => panic!("Expected Wait command"),
         }
     }
 
@@ -975,7 +838,7 @@ reply{3}
 # Comment line
 
 # Another comment
-propose id=1
+propose{1}
 
 # Final comment
 "#;
@@ -986,14 +849,14 @@ propose id=1
     }
 
     #[test]
-    #[should_panic(expected = "Invalid argument format")]
+    #[should_panic(expected = "Missing opening brace")]
     fn test_parse_task_invalid_format() {
         let content = "propose invalid_arg_format";
         parse_task(content);
     }
 
     #[test]
-    #[should_panic(expected = "Missing id for propose")]
+    #[should_panic(expected = "Missing opening brace")]
     fn test_parse_task_missing_id() {
         let content = "propose threshold=50%";
         parse_task(content);
@@ -1002,43 +865,22 @@ propose id=1
     #[test]
     #[should_panic(expected = "Unknown command")]
     fn test_parse_task_unknown_command() {
-        let content = "unknown_command id=1";
+        let content = "unknown_command{1}";
         parse_task(content);
     }
 
     #[test]
-    fn test_parse_task_or_command() {
-        let content = "wait id=1 threshold=67% delay=(0.0001,0.001) || wait id=2 threshold=1 delay=(0.0001,0.001)";
-        let commands = parse_task(content);
-        assert_eq!(commands.len(), 1);
+    #[should_panic(expected = "Missing arguments in curly braces")]
+    fn test_parse_task_empty_braces() {
+        let content = "propose{}";
+        parse_task(content);
+    }
 
-        match &commands[0].1 {
-            Command::Or(cmd1, cmd2) => {
-                match cmd1.as_ref() {
-                    Command::Wait(id, threshold, delay) => {
-                        assert_eq!(*id, 1);
-                        match threshold {
-                            Threshold::Percent(p) => assert_eq!(*p, 0.67),
-                            _ => panic!("Expected Percent threshold"),
-                        }
-                        assert!(delay.is_some());
-                    }
-                    _ => panic!("Expected Wait command in first part of OR"),
-                }
-                match cmd2.as_ref() {
-                    Command::Wait(id, threshold, delay) => {
-                        assert_eq!(*id, 2);
-                        match threshold {
-                            Threshold::Count(c) => assert_eq!(*c, 1),
-                            _ => panic!("Expected Count threshold"),
-                        }
-                        assert!(delay.is_some());
-                    }
-                    _ => panic!("Expected Wait command in second part of OR"),
-                }
-            }
-            _ => panic!("Expected Or command"),
-        }
+    #[test]
+    #[should_panic(expected = "Missing threshold for wait")]
+    fn test_parse_task_missing_threshold() {
+        let content = "wait{1}";
+        parse_task(content);
     }
 
     #[test]
@@ -1078,7 +920,7 @@ propose id=1
 
     #[test]
     fn test_parse_task_and_command() {
-        let content = "wait id=3 threshold=67% && wait id=4 threshold=1";
+        let content = "wait{3, threshold=67%} && wait{4, threshold=1}";
         let commands = parse_task(content);
         assert_eq!(commands.len(), 1);
 
@@ -1113,7 +955,7 @@ propose id=1
 
     #[test]
     fn test_parse_task_chained_or_command() {
-        let content = "wait id=1 threshold=67% || wait id=2 threshold=1 || wait id=3 threshold=50%";
+        let content = "wait{1, threshold=67%} || wait{2, threshold=1} || wait{3, threshold=50%}";
         let commands = parse_task(content);
         assert_eq!(commands.len(), 1);
 
@@ -1132,12 +974,12 @@ propose id=1
     fn test_validate_or_and_logic() {
         let content = r#"
 ## Propose a block
-propose id=0
+propose{0}
 
 ## This should fail because we wait for id=0 (which gets 1 message)
 ## AND id=99 (which never gets any messages), so the AND cannot be satisfied
-wait id=0 threshold=1 && wait id=99 threshold=1
-broadcast id=1
+wait{0, threshold=1} && wait{99, threshold=1}
+broadcast{1}
         "#;
         let commands = parse_task(content);
         let completed = validate(&commands, 3, 0);
@@ -1148,13 +990,13 @@ broadcast id=1
     fn test_parse_task_or_and_logic() {
         let content = r#"
 ## Propose a block
-propose id=0
-broadcast id=6
+propose{0}
+broadcast{6}
 
 ## This should fail because we wait for id=0 (which gets 1 message)
 ## AND id=99 (which never gets any messages), so the AND cannot be satisfied
-wait id=0 threshold=1 && (wait id=99 threshold=1 || wait id=6 threshold=2)
-broadcast id=1
+wait{0, threshold=1} && (wait{99, threshold=1} || wait{6, threshold=2})
+broadcast{1}
         "#;
         let commands = parse_task(content);
         let completed = validate(&commands, 3, 0);
@@ -1185,8 +1027,7 @@ broadcast id=1
 
     #[test]
     fn test_parse_task_simple_parentheses() {
-        let content =
-            "(wait id=1 threshold=67% && wait id=2 threshold=1) || wait id=3 threshold=50%";
+        let content = "(wait{1, threshold=67%} && wait{2, threshold=1}) || wait{3, threshold=50%}";
         let commands = parse_task(content);
         assert_eq!(commands.len(), 1);
 
@@ -1236,7 +1077,7 @@ broadcast id=1
 
     #[test]
     fn test_parse_task_nested_parentheses() {
-        let content = "((wait id=1 threshold=1 || wait id=2 threshold=1) && wait id=3 threshold=1) || wait id=4 threshold=1";
+        let content = "((wait{1, threshold=1} || wait{2, threshold=1}) && wait{3, threshold=1}) || wait{4, threshold=1}";
         let commands = parse_task(content);
         assert_eq!(commands.len(), 1);
 
@@ -1279,7 +1120,7 @@ broadcast id=1
 
     #[test]
     fn test_parse_task_complex_expression() {
-        let content = "(wait id=1 threshold=1 && wait id=2 threshold=1) || (wait id=3 threshold=1 && wait id=4 threshold=1)";
+        let content = "(wait{1, threshold=1} && wait{2, threshold=1}) || (wait{3, threshold=1} && wait{4, threshold=1})";
         let commands = parse_task(content);
         assert_eq!(commands.len(), 1);
 
@@ -1320,7 +1161,7 @@ broadcast id=1
     #[test]
     fn test_parse_task_operator_precedence() {
         // Without parentheses: AND should have higher precedence than OR
-        let content = "wait id=1 threshold=1 || wait id=2 threshold=1 && wait id=3 threshold=1";
+        let content = "wait{1, threshold=1} || wait{2, threshold=1} && wait{3, threshold=1}";
         let commands = parse_task(content);
         assert_eq!(commands.len(), 1);
 
@@ -1353,7 +1194,7 @@ broadcast id=1
     #[test]
     fn test_parse_task_parentheses_override_precedence() {
         // With parentheses: should force different precedence
-        let content = "(wait id=1 threshold=1 || wait id=2 threshold=1) && wait id=3 threshold=1";
+        let content = "(wait{1, threshold=1} || wait{2, threshold=1}) && wait{3, threshold=1}";
         let commands = parse_task(content);
         assert_eq!(commands.len(), 1);
 
@@ -1385,7 +1226,7 @@ broadcast id=1
 
     #[test]
     fn test_parse_task_mixed_commands_with_parentheses() {
-        let content = "(propose id=1 && broadcast id=2) || reply id=3";
+        let content = "(propose{1} && broadcast{2}) || reply{3}";
         let commands = parse_task(content);
         assert_eq!(commands.len(), 1);
 
@@ -1416,14 +1257,14 @@ broadcast id=1
     #[test]
     #[should_panic(expected = "Expected ')' but reached end of input")]
     fn test_parse_task_unmatched_parentheses() {
-        let content = "(wait id=1 threshold=1 && wait id=2 threshold=1";
+        let content = "(wait{1, threshold=1} && wait{2, threshold=1}";
         parse_task(content);
     }
 
     #[test]
     #[should_panic(expected = "Unexpected character ')' at position")]
     fn test_parse_task_extra_closing_paren() {
-        let content = "wait id=1 threshold=1 && wait id=2 threshold=1)";
+        let content = "wait{1, threshold=1} && wait{2, threshold=1})";
         parse_task(content);
     }
 }
