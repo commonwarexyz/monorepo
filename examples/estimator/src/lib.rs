@@ -924,6 +924,23 @@ broadcast id=1
     }
 
     #[test]
+    fn test_parse_task_or_and_logic() {
+        let content = r#"
+## Propose a block
+propose id=0
+broadcast id=6
+
+## This should fail because we wait for id=0 (which gets 1 message)
+## AND id=99 (which never gets any messages), so the AND cannot be satisfied
+wait id=0 threshold=1 && (wait id=99 threshold=1 || wait id=6 threshold=2)
+broadcast id=1
+        "#;
+        let commands = parse_task(content);
+        let completed = validate(&commands, 3, 0);
+        assert!(completed);
+    }
+
+    #[test]
     fn test_example_files() {
         let files = vec![
             ("stall.lazy", include_str!("../stall.lazy"), false),
