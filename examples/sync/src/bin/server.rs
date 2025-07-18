@@ -463,12 +463,17 @@ fn main() {
                 std::process::exit(1);
             }),
         storage_dir: {
-            let base_dir = matches
+            let storage_dir = matches
                 .get_one::<String>("storage-dir")
                 .unwrap()
                 .to_string();
-            let suffix: u64 = rand::thread_rng().gen();
-            format!("{base_dir}-{suffix}")
+            // Only add suffix if using the default value
+            if storage_dir == "/tmp/commonware-sync/server" {
+                let suffix: u64 = rand::thread_rng().gen();
+                format!("{storage_dir}-{suffix}")
+            } else {
+                storage_dir
+            }
         },
         seed: matches
             .get_one::<String>("seed")
@@ -584,7 +589,7 @@ fn main() {
             addr = %addr,
             operation_interval = ?config.operation_interval,
             ops_per_interval = config.ops_per_interval,
-            "server listening and adding operations"
+            "server listening and continuously adding operations"
         );
 
         // Handle each client connection in a separate task.

@@ -22,6 +22,7 @@ use tracing::{error, info, warn};
 
 /// Default server address.
 const DEFAULT_SERVER: &str = "127.0.0.1:8080";
+const DEFAULT_CLIENT_DIR_PREFIX: &str = "/tmp/commonware-sync/client";
 
 #[derive(Debug)]
 struct Config {
@@ -246,7 +247,7 @@ fn main() {
                 .long("storage-dir")
                 .value_name("PATH")
                 .help("Storage directory for local database")
-                .default_value("/tmp/commonware-sync/client"),
+                .default_value(DEFAULT_CLIENT_DIR_PREFIX),
         )
         .arg(
             Arg::new("metrics-port")
@@ -284,12 +285,17 @@ fn main() {
                 std::process::exit(1);
             }),
         storage_dir: {
-            let base_dir = matches
+            let storage_dir = matches
                 .get_one::<String>("storage-dir")
                 .unwrap()
                 .to_string();
-            let suffix: u64 = rand::thread_rng().gen();
-            format!("{base_dir}-{suffix}")
+            // Only add suffix if using the default value
+            if storage_dir == DEFAULT_CLIENT_DIR_PREFIX {
+                let suffix: u64 = rand::thread_rng().gen();
+                format!("{storage_dir}-{suffix}")
+            } else {
+                storage_dir
+            }
         },
         metrics_port: matches
             .get_one::<String>("metrics-port")

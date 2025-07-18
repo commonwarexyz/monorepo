@@ -38,7 +38,7 @@ cargo run --bin server -- --port 8080 --initial-ops 50 --storage-dir /tmp/my_ser
 Server options:
 - `-p, --port <PORT>`: Port to listen on (default: 8080)
 - `-i, --initial-ops <COUNT>`: Number of initial operations to create (default: 100)
-- `-d, --storage-dir <PATH>`: Storage directory for database (default: /tmp/commonware-sync/server)
+- `-d, --storage-dir <PATH>`: Storage directory for database (default: /tmp/commonware-sync/server-{RANDOM_SUFFIX})
 - `-s, --seed <SEED>`: Seed for generating test operations (default: 1337)
 - `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9090)
 - `-t, --operation-interval <DURATION>`: Interval for adding new operations in 's' or 'ms' (default: 100ms)
@@ -57,7 +57,7 @@ cargo run --bin client -- --server 127.0.0.1:8080 --batch-size 25 --storage-dir 
 Client options:
 - `-s, --server <ADDRESS>`: Server address to connect to (default: 127.0.0.1:8080)
 - `-b, --batch-size <SIZE>`: Batch size for fetching operations (default: 50)
-- `-d, --storage-dir <PATH>`: Storage directory for local database (default: /tmp/commonware-sync/client)
+- `-d, --storage-dir <PATH>`: Storage directory for local database (default: /tmp/commonware-sync/client-{RANDOM_SUFFIX})
 - `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9091)
 - `-t, --target-update-interval <DURATION>`: Interval for requesting target updates in 's' or 'ms' (default: 1s)
 
