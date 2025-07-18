@@ -84,8 +84,8 @@ Client options:
 
    You should see output like:
    ```
-   INFO Starting sync to server's database state server=127.0.0.1:8080
-   INFO requesting server metadata...
+   INFO starting sync to server server=127.0.0.1:8080
+   INFO requesting server metadata
    INFO establishing connection server_addr=127.0.0.1:8080
    INFO connected server_addr=127.0.0.1:8080
    INFO received server metadata

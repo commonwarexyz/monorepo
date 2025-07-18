@@ -18,7 +18,7 @@ use std::{
     num::NonZeroU64,
     time::Duration,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Default server address.
 const DEFAULT_SERVER: &str = "127.0.0.1:8080";
@@ -52,7 +52,7 @@ async fn get_server_metadata<E>(
 where
     E: commonware_runtime::Network + Clone,
 {
-    info!("requesting server metadata...");
+    debug!("requesting server metadata");
 
     let metadata = resolver.get_server_metadata().await?;
     let metadata = ServerMetadata {
@@ -60,7 +60,7 @@ where
         oldest_retained_loc: metadata.oldest_retained_loc,
         latest_op_loc: metadata.latest_op_loc,
     };
-    info!(?metadata, "received server metadata");
+    debug!(?metadata, "received server metadata");
     Ok(metadata)
 }
 
@@ -92,7 +92,7 @@ where
                     info!(
                         old_target = ?current_target,
                         new_target = ?new_target,
-                        "target updated from server"
+                        "target updated"
                     );
 
                     // Send new target to sync client
@@ -102,7 +102,7 @@ where
                         current_target = new_target;
                     }
                 } else {
-                    info!("target unchanged from server");
+                    debug!("sync target unchanged");
                 }
             }
             Err(e) => {
@@ -127,7 +127,7 @@ where
         + commonware_runtime::Spawner
         + Clone,
 {
-    info!(server = %config.server, "starting sync to server's database state");
+    info!(server = %config.server, "starting sync to server");
 
     // Get server metadata to determine sync parameters
     let ServerMetadata {
@@ -144,7 +144,7 @@ where
 
     // Create database configuration
     let db_config = create_adb_config();
-    info!("created local database");
+    debug!("created local database");
 
     // Create channel for target updates
     let (update_sender, update_receiver) = mpsc::channel(16);
@@ -314,14 +314,13 @@ fn main() {
         }),
     };
 
-    info!("sync client starting");
     info!(
         server = %config.server,
         batch_size = config.batch_size,
         storage_dir = %config.storage_dir,
         metrics_port = config.metrics_port,
         target_update_interval = ?config.target_update_interval,
-        "configuration"
+        "client starting with configuration"
     );
 
     let executor_config =
