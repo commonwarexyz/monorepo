@@ -32,17 +32,17 @@ cargo test
 cargo run --bin server
 
 # Start server with custom settings
-cargo run --bin server -- --port 8080 --initial-ops 50 --storage-dir /tmp/my_server --seed 1337 --metrics-port 9090 --operation-interval 5 --ops-per-interval 10
+cargo run --bin server -- --port 8080 --initial-ops 50 --storage-dir /tmp/my_server --seed 1337 --metrics-port 9090 --operation-interval 2s --ops-per-interval 10
 ```
 
 Server options:
 - `-p, --port <PORT>`: Port to listen on (default: 8080)
 - `-i, --initial-ops <COUNT>`: Number of initial operations to create (default: 100)
-- `-d, --storage-dir <PATH>`: Storage directory (default: /tmp/commonware-sync/server)
+- `-d, --storage-dir <PATH>`: Storage directory for database (default: /tmp/commonware-sync/server)
 - `-s, --seed <SEED>`: Seed for generating test operations (default: 1337)
 - `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9090)
-- `-t, --operation-interval <SECONDS>`: Interval for adding new operations (default: 5)
-- `-o, --ops-per-interval <COUNT>`: Number of operations to add each interval (default: 10)
+- `-t, --operation-interval <DURATION>`: Interval for adding new operations in 's' or 'ms' (default: 100ms)
+- `-o, --ops-per-interval <COUNT>`: Number of operations to add each interval (default: 5)
 
 ### Running the Client
 
@@ -51,49 +51,52 @@ Server options:
 cargo run --bin client
 
 # Connect with custom settings
-cargo run --bin client -- --server 127.0.0.1:8080 --batch-size 25 --storage-dir /tmp/my_client --metrics-port 9091 --target-update-interval 3
+cargo run --bin client -- --server 127.0.0.1:8080 --batch-size 25 --storage-dir /tmp/my_client --metrics-port 9091 --target-update-interval 3s
 ```
 
 Client options:
 - `-s, --server <ADDRESS>`: Server address to connect to (default: 127.0.0.1:8080)
 - `-b, --batch-size <SIZE>`: Batch size for fetching operations (default: 50)
-- `-d, --storage-dir <PATH>`: Storage directory (default: /tmp/commonware-sync/client)
+- `-d, --storage-dir <PATH>`: Storage directory for local database (default: /tmp/commonware-sync/client)
 - `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9091)
-- `-t, --target-update-interval <SECONDS>`: Interval for requesting target updates (default: 3)
+- `-t, --target-update-interval <DURATION>`: Interval for requesting target updates in 's' or 'ms' (default: 1s)
 
 ## Example Session
 
 1. **Start the server:**
    ```bash
-   cargo run --bin server -- --initial-ops 50
+   cargo run --bin server -- --initial-ops 50 --operation-interval 2s --ops-per-interval 3
    ```
 
    You should see output like:
    ```
-   INFO  Sync Server starting
-   INFO  Configuration port=8080 initial_ops=50 storage_dir=/tmp/commonware-sync/server seed=1337 metrics_port=9090 operation_interval=5 ops_per_interval=10
-   INFO  Initializing database
-   INFO  Database ready op_count=51 root_hash=abc123...
-   INFO  Server listening - will continuously add operations addr=127.0.0.1:8080 operation_interval=5 ops_per_interval=10
+   INFO  initializing database
+   INFO  creating initial operations operations_len=56
+   INFO  database ready op_count=112 root_hash=8837dd38704093f65b8c9ca4041daa57b3df20fac95474a86580f57bd6ee6bd9
+   INFO  server listening and continuously adding operations addr=127.0.0.1:8080 operation_interval=2s ops_per_interval=3
+   INFO  added operations operations_added=4 hash=c63b04a06ea36be9e7b82a2f70b28578fd940e8b8f5b8d616bfafa7471508514
    ```
 
 2. **In another terminal, run the client:**
    ```bash
-   cargo run --bin client -- --batch-size 25 --target-update-interval 3
+   cargo run --bin client -- --batch-size 25 --target-update-interval 3s
    ```
 
    You should see output like:
    ```
-   INFO Sync Client starting
-   INFO Configuration server=127.0.0.1:8080 batch_size=25 storage_dir=/tmp/commonware-sync/client metrics_port=9091 target_update_interval=3
    INFO Starting sync to server's database state server=127.0.0.1:8080
-   INFO Establishing connection server_addr=127.0.0.1:8080
-   INFO Connected server_addr=127.0.0.1:8080
-   INFO Received server metadata
-   INFO Sync configuration - will check for target updates every 3 seconds batch_size=25 lower_bound=0 upper_bound=50 target_update_interval=3
+   INFO requesting server metadata...
+   INFO establishing connection server_addr=127.0.0.1:8080
+   INFO connected server_addr=127.0.0.1:8080
+   INFO received server metadata
+   INFO received server metadata metadata=ServerMetadata { target_hash: 94b9d7b53badbb4827b34cb96c07a28704da82c5dbb72e5052b57a9db8441fe4, oldest_retained_loc: 66, latest_op_loc: 128 }
+   INFO sync parameters lower_bound=66 upper_bound=128
+   INFO created local database
+   INFO sync configuration batch_size=25 lower_bound=66 upper_bound=128 target_update_interval=3s
    INFO Beginning sync operation...
-   INFO Target unchanged from server
-   INFO ✅ Sync completed successfully database_ops=51 root_hash=abc123...
+   INFO starting sync
+   INFO sync completed successfully target_hash=94b9d7b53badbb4827b34cb96c07a28704da82c5dbb72e5052b57a9db8441fe4 lower_bound_ops=66 upper_bound_ops=128 log_size=129 valid_batches_received=3 invalid_batches_received=0
+   INFO ✅ sync completed successfully database_ops=129 root_hash=94b9d7b53badbb4827b34cb96c07a28704da82c5dbb72e5052b57a9db8441fe4
    ```
 
 ## Metrics
@@ -109,12 +112,13 @@ curl http://localhost:9090/metrics
 
 ## Sync Process
 
-1. **Server Setup**: Server starts, populates database, and listens for connections
-2. **Client Connection**: Client establishes connection to server
-3. **Initial Sync Target**: Client requests server metadata to determine initial sync target
-4. **Dynamic Target Updates**: Client periodically requests target updates during sync
-5. **Completion**: Client continues until all operations applied, state matches server's latest target
-6. **Cleanup**: Client disconnects and stops; Server keeps running
+1. **Server Setup**: Server starts, populates database with initial operations, and listens for connections
+2. **Continuous Operation Generation**: Server continuously adds new operations at the specified interval
+3. **Client Connection**: Client establishes connection to server
+4. **Initial Sync Target**: Client requests server metadata to determine initial sync target (inactivity floor, size and digest of the server's database)
+5. **Dynamic Target Updates**: Client periodically requests target updates during sync to handle new operations added by the server
+6. **Completion**: Client continues until all operations are applied and state matches server's target
+7. **Cleanup**: Client disconnects and stops; Server keeps running and adding operations
 
 ## Adapting to Production
 

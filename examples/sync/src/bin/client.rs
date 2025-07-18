@@ -51,7 +51,7 @@ async fn get_server_metadata<E>(
 where
     E: commonware_runtime::Network + Clone,
 {
-    info!("Requesting server metadata...");
+    info!("requesting server metadata...");
 
     let metadata = resolver.get_server_metadata().await?;
     let metadata = ServerMetadata {
@@ -59,7 +59,7 @@ where
         oldest_retained_loc: metadata.oldest_retained_loc,
         latest_op_loc: metadata.latest_op_loc,
     };
-    info!(?metadata, "Received server metadata");
+    info!(?metadata, "received server metadata");
     Ok(metadata)
 }
 
@@ -91,21 +91,21 @@ where
                     info!(
                         old_target = ?current_target,
                         new_target = ?new_target,
-                        "Target updated from server"
+                        "target updated from server"
                     );
 
                     // Send new target to sync client
                     if let Err(e) = update_sender.clone().try_send(new_target.clone()) {
-                        warn!(error = %e, "Failed to send target update to sync client");
+                        warn!(error = %e, "failed to send target update to sync client");
                     } else {
                         current_target = new_target;
                     }
                 } else {
-                    info!("Target unchanged from server");
+                    info!("target unchanged from server");
                 }
             }
             Err(e) => {
-                warn!(error = %e, "Failed to get target update from server");
+                warn!(error = %e, "failed to get target update from server");
                 // Continue trying on next interval
             }
         }
@@ -126,7 +126,7 @@ where
         + commonware_runtime::Spawner
         + Clone,
 {
-    info!(server = %config.server, "Starting sync to server's database state");
+    info!(server = %config.server, "starting sync to server's database state");
 
     // Get server metadata to determine sync parameters
     let ServerMetadata {
@@ -138,12 +138,12 @@ where
     info!(
         lower_bound = oldest_retained_loc,
         upper_bound = latest_op_loc,
-        "Sync parameters"
+        "sync parameters"
     );
 
     // Create database configuration
     let db_config = create_adb_config();
-    info!("Created local database");
+    info!("created local database");
 
     // Create channel for target updates
     let (update_sender, update_receiver) = mpsc::channel(16);
@@ -194,11 +194,11 @@ where
         lower_bound = sync_config.target.lower_bound_ops,
         upper_bound = sync_config.target.upper_bound_ops,
         target_update_interval = ?config.target_update_interval,
-        "Sync configuration",
+        "sync configuration",
     );
 
     // Do the sync with target updates
-    info!("Beginning sync operation...");
+    info!("beginning sync operation...");
     let database = sync::sync(sync_config).await?;
 
     // Get the root hash of the synced database
@@ -213,7 +213,7 @@ where
     info!(
         database_ops = database.op_count(),
         root_hash = %root_hash_hex,
-        "✅ Sync completed successfully"
+        "✅ sync completed successfully"
     );
 
     Ok(database)
@@ -308,14 +308,14 @@ fn main() {
         }),
     };
 
-    info!("Sync Client starting");
+    info!("sync client starting");
     info!(
         server = %config.server,
         batch_size = config.batch_size,
         storage_dir = %config.storage_dir,
         metrics_port = config.metrics_port,
         target_update_interval = ?config.target_update_interval,
-        "Configuration"
+        "configuration"
     );
 
     let executor_config =
@@ -342,7 +342,7 @@ fn main() {
                 // We don't use it in this example, but at this point it's ready to be used.
             }
             Err(e) => {
-                error!(error = %e, "❌ Sync failed");
+                error!(error = %e, "❌ sync failed");
                 std::process::exit(1);
             }
         }

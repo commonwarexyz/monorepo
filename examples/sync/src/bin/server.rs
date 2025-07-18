@@ -584,7 +584,7 @@ fn main() {
             addr = %addr,
             operation_interval = ?config.operation_interval,
             ops_per_interval = config.ops_per_interval,
-            "server listening - continuous operation generator enabled"
+            "server listening and adding operations"
         );
 
         // Handle each client connection in a separate task.
