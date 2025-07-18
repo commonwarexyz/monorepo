@@ -7,6 +7,7 @@
 //! The protocol supports:
 //! - Getting server metadata (database size, target hash, operation bounds)
 //! - Fetching operations with cryptographic proofs
+//! - Getting target updates for dynamic sync
 //! - Error handling
 
 use crate::Operation;
@@ -15,9 +16,21 @@ use commonware_codec::{
     EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, ReadRangeExt as _, Write,
 };
 use commonware_cryptography::sha256::Digest;
-use commonware_storage::mmr::verification::Proof;
+use commonware_storage::{adb::any::sync::SyncTarget, mmr::verification::Proof};
 use std::num::NonZeroU64;
 use thiserror::Error;
+
+/// Response with updated target information.
+// TODO replace with SyncTarget
+#[derive(Debug, Clone)]
+pub struct GetTargetUpdateResponse {
+    /// Target hash to sync to.
+    pub hash: Digest,
+    /// Lower bound of operations to sync (inclusive).
+    pub lower_bound_ops: u64,
+    /// Upper bound of operations to sync (inclusive).
+    pub upper_bound_ops: u64,
+}
 
 /// Maximum message size in bytes (10MB).
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
@@ -36,6 +49,10 @@ pub enum Message {
     GetServerMetadataRequest,
     /// Response with server metadata.
     GetServerMetadataResponse(GetServerMetadataResponse),
+    /// Request target update from current client position.
+    GetTargetUpdateRequest,
+    /// Response with updated target information.
+    GetTargetUpdateResponse(GetTargetUpdateResponse),
     /// Error response.
     /// Note that, in this example, the server sends an error response to the client in the event
     /// of an invalid request or internal error. In a real-world application, this may be inadvisable.
@@ -130,8 +147,15 @@ impl Write for Message {
                 3u8.write(buf);
                 resp.write(buf);
             }
-            Message::Error(err) => {
+            Message::GetTargetUpdateRequest => {
                 4u8.write(buf);
+            }
+            Message::GetTargetUpdateResponse(resp) => {
+                5u8.write(buf);
+                resp.write(buf);
+            }
+            Message::Error(err) => {
+                6u8.write(buf);
                 err.write(buf);
             }
         }
@@ -146,6 +170,8 @@ impl EncodeSize for Message {
             Message::GetOperationsResponse(resp) => resp.encode_size(),
             Message::GetServerMetadataRequest => 0,
             Message::GetServerMetadataResponse(resp) => resp.encode_size(),
+            Message::GetTargetUpdateRequest => 0,
+            Message::GetTargetUpdateResponse(resp) => resp.encode_size(),
             Message::Error(err) => err.encode_size(),
         }
     }
@@ -167,7 +193,11 @@ impl Read for Message {
             3 => Ok(Message::GetServerMetadataResponse(
                 GetServerMetadataResponse::read(buf)?,
             )),
-            4 => Ok(Message::Error(ErrorResponse::read(buf)?)),
+            4 => Ok(Message::GetTargetUpdateRequest),
+            5 => Ok(Message::GetTargetUpdateResponse(
+                GetTargetUpdateResponse::read(buf)?,
+            )),
+            6 => Ok(Message::Error(ErrorResponse::read(buf)?)),
             _ => Err(CodecError::InvalidEnum(discriminant)),
         }
     }
@@ -258,6 +288,37 @@ impl Read for GetServerMetadataResponse {
             target_hash,
             oldest_retained_loc,
             latest_op_loc,
+        })
+    }
+}
+
+impl Write for GetTargetUpdateResponse {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.hash.write(buf);
+        self.lower_bound_ops.write(buf);
+        self.upper_bound_ops.write(buf);
+    }
+}
+
+impl EncodeSize for GetTargetUpdateResponse {
+    fn encode_size(&self) -> usize {
+        self.hash.encode_size()
+            + self.lower_bound_ops.encode_size()
+            + self.upper_bound_ops.encode_size()
+    }
+}
+
+impl Read for GetTargetUpdateResponse {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let hash = Digest::read(buf)?;
+        let lower_bound_ops = u64::read(buf)?;
+        let upper_bound_ops = u64::read(buf)?;
+        Ok(Self {
+            hash,
+            lower_bound_ops,
+            upper_bound_ops,
         })
     }
 }
@@ -357,6 +418,26 @@ impl GetOperationsRequest {
         }
 
         Ok(())
+    }
+}
+
+impl GetTargetUpdateResponse {
+    /// Convert to SyncTarget.
+    pub fn to_sync_target(self) -> SyncTarget<Digest> {
+        SyncTarget {
+            hash: self.hash,
+            lower_bound_ops: self.lower_bound_ops,
+            upper_bound_ops: self.upper_bound_ops,
+        }
+    }
+
+    /// Create from SyncTarget.
+    pub fn from_sync_target(target: SyncTarget<Digest>) -> Self {
+        Self {
+            hash: target.hash,
+            lower_bound_ops: target.lower_bound_ops,
+            upper_bound_ops: target.upper_bound_ops,
+        }
     }
 }
 
