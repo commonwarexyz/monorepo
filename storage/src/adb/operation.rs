@@ -123,7 +123,7 @@ impl<K: Array, V: Array> Read for Operation<K, V> {
                 // Check that the value is all zeroes
                 for _ in 0..V::SIZE {
                     if buf.get_u8() != 0 {
-                        return Err(CodecError::Invalid("Operation", "Delete value non-zero"));
+                        return Err(CodecError::Invalid("operation", "delete value non-zero"));
                     }
                 }
                 Ok(Self::Deleted(key))
@@ -132,7 +132,7 @@ impl<K: Array, V: Array> Read for Operation<K, V> {
                 let loc = u64::read(buf)?;
                 for _ in 0..(Self::SIZE - 1 - u64::SIZE) {
                     if buf.get_u8() != 0 {
-                        return Err(CodecError::Invalid("Operation", "Commit value non-zero"));
+                        return Err(CodecError::Invalid("operation", "commit value non-zero"));
                     }
                 }
                 Ok(Self::Commit(loc))
