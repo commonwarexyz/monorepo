@@ -137,7 +137,7 @@ where
             info!(
                 operations_added = new_operations.len(),
                 hash = %hash,
-                "Added operations"
+                "added operations"
             );
         }
 
@@ -196,7 +196,7 @@ where
         oldest_retained_loc,
         latest_op_loc,
     };
-    info!(?response, "Serving metadata");
+    info!(?response, "serving metadata");
     Ok(response)
 }
 
@@ -232,7 +232,7 @@ where
         upper_bound_ops,
     };
 
-    info!(?response, "Serving target update");
+    info!(?response, "serving target update");
     Ok(response)
 }
 
@@ -268,7 +268,7 @@ where
         max_ops,
         start_loc = request.start_loc,
         db_size,
-        "Operations request"
+        "operations request"
     );
 
     // Get the historical proof and operations
@@ -279,14 +279,14 @@ where
     drop(database);
 
     let (proof, operations) = result.map_err(|e| {
-        warn!(error = %e, "❌ Failed to generate historical proof");
+        warn!(error = %e, "❌ failed to generate historical proof");
         ProtocolError::DatabaseError(e)
     })?;
 
     debug!(
         operations_len = operations.len(),
         proof_len = proof.digests.len(),
-        "Sending operations and proof"
+        "sending operations and proof"
     );
 
     Ok(GetOperationsResponse { proof, operations })
@@ -305,14 +305,14 @@ where
         + commonware_runtime::Metrics
         + commonware_runtime::Network,
 {
-    info!(client_addr = %client_addr, "Client connected");
+    info!(client_addr = %client_addr, "client connected");
 
     loop {
         // Read length-prefixed message
         let message_data = match recv_frame(&mut stream, MAX_MESSAGE_SIZE).await {
             Ok(data) => data,
             Err(e) => {
-                info!(client_addr = %client_addr, error = %e, "Recv failed (likely because client disconnected)");
+                info!(client_addr = %client_addr, error = %e, "recv failed (likely because client disconnected)");
                 state.error_counter.inc();
                 break;
             }
@@ -322,7 +322,7 @@ where
         let message: Message = match Message::decode(&message_data[..]) {
             Ok(msg) => msg,
             Err(e) => {
-                error!(client_addr = %client_addr, error = %e, "❌ Failed to parse message");
+                error!(client_addr = %client_addr, error = %e, "❌ failed to parse message");
                 state.error_counter.inc();
                 continue;
             }
@@ -334,7 +334,7 @@ where
                 match handle_get_operations_request(&state, request).await {
                     Ok(response) => Message::GetOperationsResponse(response),
                     Err(e) => {
-                        warn!(client_addr = %client_addr, error = %e, "❌ GetOperations failed");
+                        warn!(client_addr = %client_addr, error = %e, "❌ getOperations failed");
                         state.error_counter.inc();
                         Message::Error(e.into())
                     }
@@ -344,7 +344,7 @@ where
                 match handle_get_server_metadata_request(&state).await {
                     Ok(response) => Message::GetServerMetadataResponse(response),
                     Err(e) => {
-                        warn!(client_addr = %client_addr, error = %e, "❌ GetServerMetadata failed");
+                        warn!(client_addr = %client_addr, error = %e, "❌ getServerMetadata failed");
                         state.error_counter.inc();
                         Message::Error(e.into())
                     }
@@ -354,18 +354,18 @@ where
                 match handle_get_target_update_request(&state).await {
                     Ok(response) => Message::GetTargetUpdateResponse(response),
                     Err(e) => {
-                        warn!(client_addr = %client_addr, error = %e, "❌ GetTargetUpdate failed");
+                        warn!(client_addr = %client_addr, error = %e, "❌ getTargetUpdate failed");
                         state.error_counter.inc();
                         Message::Error(e.into())
                     }
                 }
             }
             _ => {
-                warn!(client_addr = %client_addr, "❌ Unexpected message type");
+                warn!(client_addr = %client_addr, "❌ unexpected message type");
                 state.error_counter.inc();
                 Message::Error(ErrorResponse {
                     error_code: commonware_sync::ErrorCode::InvalidRequest,
-                    message: "Unexpected message type".to_string(),
+                    message: "unexpected message type".to_string(),
                 })
             }
         };
@@ -373,7 +373,7 @@ where
         // Send the response with length prefix
         let response_data = response.encode().to_vec();
         if let Err(e) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
-            info!(client_addr = %client_addr, error = %e, "Send failed (likely because client disconnected)");
+            info!(client_addr = %client_addr, error = %e, "send failed (likely because client disconnected)");
             state.error_counter.inc();
             break;
         }
@@ -511,7 +511,7 @@ fn main() {
         metrics_port = config.metrics_port,
         operation_interval = ?config.operation_interval,
         ops_per_interval = config.ops_per_interval,
-        "Configuration - using unique storage directory with random suffix"
+        "configuration"
     );
 
     let executor_config =
@@ -530,28 +530,28 @@ fn main() {
 
         // Create and initialize database
         let db_config = create_adb_config();
-        info!("Initializing database");
+        info!("initializing database");
 
         let mut database = match Database::init(context.with_label("database"), db_config).await {
             Ok(db) => db,
             Err(e) => {
-                error!(error = %e, "❌ Failed to initialize database");
+                error!(error = %e, "❌ failed to initialize database");
                 return;
             }
         };
 
         // Create and add initial operations
         let initial_ops = create_test_operations(config.initial_ops, config.seed);
-        info!(operations_len = initial_ops.len(), "Creating initial operations");
+        info!(operations_len = initial_ops.len(), "creating initial operations");
 
         if let Err(e) = add_operations(&mut database, initial_ops).await {
-            error!(error = %e, "❌ Failed to add initial operations");
+            error!(error = %e, "❌ failed to add initial operations");
             return;
         }
 
         // Commit the database to ensure operations are persisted
         if let Err(e) = database.commit().await {
-            error!(error = %e, "❌ Failed to commit database");
+            error!(error = %e, "❌ failed to commit database");
             return;
         }
 
@@ -567,7 +567,7 @@ fn main() {
         info!(
             op_count = database.op_count(),
             root_hash = %root_hash_hex,
-            "Database ready"
+            "database ready"
         );
 
         // Create listener to accept connections
@@ -575,7 +575,7 @@ fn main() {
         let mut listener = match context.with_label("listener").bind(addr).await {
             Ok(listener) => listener,
             Err(e) => {
-                error!(addr = %addr, error = %e, "❌ Failed to bind");
+                error!(addr = %addr, error = %e, "❌ failed to bind");
                 return;
             }
         };
@@ -584,7 +584,7 @@ fn main() {
             addr = %addr,
             operation_interval = ?config.operation_interval,
             ops_per_interval = config.ops_per_interval,
-            "Server listening - continuous operation generator enabled"
+            "server listening - continuous operation generator enabled"
         );
 
         // Handle each client connection in a separate task.
@@ -601,7 +601,7 @@ fn main() {
                 _ = &mut operation_sleep => {
                     // Add operations to the database
                     if let Err(e) = state.maybe_add_operation(&config, &operation_context).await {
-                        warn!(error = %e, "Failed to add continuous operations");
+                        warn!(error = %e, "failed to add continuous operations");
                     }
                     // Reset the sleep future for next iteration
                     operation_sleep = Box::pin(operation_context.sleep(operation_interval));
@@ -614,12 +614,12 @@ fn main() {
                                 if let Err(e) =
                                     handle_client(state.clone(), sink, stream, client_addr).await
                                 {
-                                    error!(client_addr = %client_addr, error = %e, "❌ Error handling client");
+                                    error!(client_addr = %client_addr, error = %e, "❌ error handling client");
                                 }
                             });
                         }
                         Err(e) => {
-                            error!(error = %e, "❌ Failed to accept client");
+                            error!(error = %e, "❌ failed to accept client");
                         }
                     }
                 }

@@ -59,7 +59,7 @@ where
         }
 
         // Create new connection
-        info!(server_addr = %self.server_addr, "Establishing connection");
+        info!(server_addr = %self.server_addr, "establishing connection");
         let (sink, stream) = self
             .context
             .dial(self.server_addr)
@@ -67,7 +67,7 @@ where
             .map_err(|e| ResolverError::ConnectionError(format!("Failed to connect: {e}")))?;
 
         *connection_guard = Some(Connection { sink, stream });
-        info!(server_addr = %self.server_addr, "Connected");
+        info!(server_addr = %self.server_addr, "connected");
 
         Ok(())
     }
@@ -103,15 +103,15 @@ where
     pub async fn get_server_metadata(&self) -> Result<GetServerMetadataResponse, ResolverError> {
         match self.send_request(Message::GetServerMetadataRequest).await? {
             Message::GetServerMetadataResponse(response) => {
-                info!("Received server metadata");
+                info!("received server metadata");
                 Ok(response)
             }
             Message::Error(err) => {
-                error!(error = %err.message, "❌ Server error");
+                error!(error = %err.message, "❌ server error");
                 Err(ResolverError::ServerError(err.message))
             }
             _ => {
-                error!("❌ Unexpected response type");
+                error!("❌ unexpected response type");
                 Err(ResolverError::UnexpectedResponse)
             }
         }
@@ -121,7 +121,7 @@ where
     pub async fn get_target_update(
         &self,
     ) -> Result<SyncTarget<commonware_cryptography::sha256::Digest>, ResolverError> {
-        info!("Requesting target update from server");
+        info!("requesting target update from server");
 
         match self.send_request(Message::GetTargetUpdateRequest).await? {
             Message::GetTargetUpdateResponse(response) => {
@@ -129,16 +129,16 @@ where
                     hash = format!("{:?}", response.hash),
                     lower_bound_ops = response.lower_bound_ops,
                     upper_bound_ops = response.upper_bound_ops,
-                    "Received target update"
+                    "received target update"
                 );
                 Ok(response.to_sync_target())
             }
             Message::Error(err) => {
-                error!(error = %err.message, "❌ Server error");
+                error!(error = %err.message, "❌ server error");
                 Err(ResolverError::ServerError(err.message))
             }
             _ => {
-                error!("❌ Unexpected response type");
+                error!("❌ unexpected response type");
                 Err(ResolverError::UnexpectedResponse)
             }
         }
@@ -167,7 +167,7 @@ where
 
         debug!(
             max_ops = max_ops.get(),
-            start_loc, "Requesting operations from server"
+            start_loc, "requesting operations from server"
         );
 
         let response = self
@@ -177,19 +177,19 @@ where
         let response = match response {
             Message::GetOperationsResponse(response) => response,
             Message::Error(err) => {
-                error!(error = %err.message, "❌ Server error");
+                error!(error = %err.message, "❌ server error");
                 return Err(SyncError::Resolver(Box::new(err)));
             }
             _ => {
-                error!("❌ Unexpected response type");
-                return Err(SyncError::Resolver(Box::new("Unexpected response type")));
+                error!("❌ unexpected response type");
+                return Err(SyncError::Resolver(Box::new("unexpected response type")));
             }
         };
 
         debug!(
             operations_len = response.operations.len(),
             proof_len = response.proof.digests.len(),
-            "Received operations and proof"
+            "received operations and proof"
         );
 
         // Create a oneshot channel for proof verification feedback.
