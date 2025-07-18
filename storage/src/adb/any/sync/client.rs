@@ -1345,13 +1345,25 @@ pub(crate) mod tests {
     }
 
     /// Test that the client can handle target updates during sync execution
+    #[test_case(1, 1)]
+    #[test_case(1, 2)]
+    #[test_case(1, 100)]
+    #[test_case(2, 1)]
+    #[test_case(2, 2)]
+    #[test_case(2, 100)]
+    // Regression test: panicked when we didn't set pinned nodes after updating target
+    #[test_case(20, 10)]
+    #[test_case(100, 1)]
+    #[test_case(100, 2)]
+    #[test_case(100, 100)]
+    #[test_case(100, 1000)]
     #[test_traced("WARN")]
-    fn test_target_update_during_sync() {
+    fn test_target_update_during_sync(initial_ops: usize, additional_ops: usize) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            // Create and populate target database with 20 operations
+            // Create and populate target database with initial operations
             let mut target_db = create_test_db(context.clone()).await;
-            let target_ops = create_test_ops(20);
+            let target_ops = create_test_ops(initial_ops);
             apply_ops(&mut target_db, target_ops.clone()).await;
             target_db.commit().await.unwrap();
 
@@ -1369,7 +1381,7 @@ pub(crate) mod tests {
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
-                fetch_batch_size: NZU64!(5), // Small batch size to ensure multiple batches needed
+                fetch_batch_size: NZU64!(1), // Small batch size so we don't finish after one batch
                 target: SyncTarget {
                     hash: initial_hash,
                     lower_bound_ops: initial_lower_bound,
@@ -1405,7 +1417,7 @@ pub(crate) mod tests {
             );
 
             // Modify the target database by adding more operations
-            let additional_ops = create_test_ops(10);
+            let additional_ops = create_test_ops(additional_ops);
             let new_hash = {
                 let mut db = target_db.write().await;
                 apply_ops(&mut db, additional_ops).await;

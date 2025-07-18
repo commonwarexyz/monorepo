@@ -1,0 +1,17 @@
+# Simplex with Notarizations(id=2)/Finalizations(id=4)
+
+## Propose a block
+propose{0}
+
+## Multicast notarize
+wait{0, threshold=1, delay=(0.1,1)} || wait{2, threshold=1, delay=(0.1,1)} || wait{4, threshold=1, delay=(0.1,1)}
+broadcast{1}
+
+## Multicast finalize after observing 2f+1 notarize OR wait for single backup signal
+wait{1, threshold=67%, delay=(0.1,1)} || wait{2, threshold=1, delay=(0.1,1)} || wait{4, threshold=1, delay=(0.1,1)}
+broadcast{2}
+broadcast{3}
+
+## Wait for 2f+1 finalize OR wait for single backup finalize
+wait{3, threshold=67%, delay=(0.1,1)} || wait{4, threshold=1, delay=(0.1,1)}
+broadcast{4}

@@ -1,0 +1,37 @@
+[package]
+name = "commonware-estimator"
+edition = "2021"
+publish = true
+version = "0.0.56"
+license = "MIT OR Apache-2.0"
+description = "Simulate mechanism performance under realistic network conditions."
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/estimator"
+documentation = "https://docs.rs/commonware-estimator"
+
+[dependencies]
+commonware-cryptography = { workspace = true }
+commonware-macros = { workspace = true }
+commonware-p2p = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
+bytes = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+clap = { workspace = true }
+prometheus-client = { workspace = true }
+governor = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
+serde_json = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls-tls", "blocking"] }
+serde   = { workspace = true, features = ["derive"] }
+colored = "3.0.0"
+
+[lib]
+name = "estimator"
+
+[[bin]]
+name = "commonware-estimator"
+bench = false

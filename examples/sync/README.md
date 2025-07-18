@@ -1,7 +1,6 @@
 # commonware-sync
 
  [![Crates.io](https://img.shields.io/crates/v/commonware-sync.svg)](https://crates.io/crates/commonware-sync)
- [![Docs.rs](https://docs.rs/commonware-sync/badge.svg)](https://docs.rs/commonware-sync)
 
 Synchronize state between a server and client with [adb::any::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/struct.Any.html).
 
