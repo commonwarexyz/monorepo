@@ -23,8 +23,7 @@ pub struct SyncTarget<D: Digest> {
     /// Target hash of the database
     pub hash: D,
     /// Lower bound of operations to sync (inclusive)
-    /// This will be the inactivity floor and pruning boundary
-    /// of the synced database.
+    /// This will be the pruning boundary of the synced database.
     pub lower_bound_ops: u64,
     /// Upper bound of operations to sync (inclusive)
     pub upper_bound_ops: u64,
