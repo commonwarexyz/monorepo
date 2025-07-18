@@ -284,13 +284,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             0, /* UNUSED_N */
         >(cfg.lower_bound, &cfg.log, &mut snapshot, None)
         .await?;
-        assert_eq!(inactivity_floor_loc, cfg.lower_bound);
 
         let mut db = Any {
             ops: mmr,
             log: cfg.log,
             snapshot,
-            inactivity_floor_loc: cfg.lower_bound,
+            inactivity_floor_loc,
             uncommitted_ops: 0,
             hasher: Standard::<H>::new(),
             pruning_delay: cfg.db_config.pruning_delay,
@@ -963,7 +962,7 @@ pub(super) mod test {
     }
 
     /// Applies the given operations to the database.
-    pub(crate) async fn apply_ops(mut db: AnyTest, ops: Vec<Operation<Digest, Digest>>) -> AnyTest {
+    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
                 Operation::Update(key, value) => {
@@ -977,7 +976,6 @@ pub(super) mod test {
                 }
             }
         }
-        db
     }
 
     #[test_traced("WARN")]
@@ -1594,7 +1592,7 @@ pub(super) mod test {
             // Create and populate a source database
             let mut source_db = create_test_db(context.clone()).await;
             let ops = create_test_ops(NUM_OPS);
-            source_db = apply_ops(source_db, ops.clone()).await;
+            apply_ops(&mut source_db, ops.clone()).await;
             source_db.commit().await.unwrap();
 
             let lower_bound_ops = source_db.inactivity_floor_loc;
@@ -1695,7 +1693,7 @@ pub(super) mod test {
             // Create and populate a source database
             let mut source_db = create_test_db(context.clone()).await;
             let ops = create_test_ops(200);
-            source_db = apply_ops(source_db, ops.clone()).await;
+            apply_ops(&mut source_db, ops.clone()).await;
             source_db.commit().await.unwrap();
 
             let total_ops = source_db.op_count();
@@ -1798,9 +1796,9 @@ pub(super) mod test {
                 .await
                 .unwrap();
             let original_ops = create_test_ops(NUM_OPS);
-            target_db = apply_ops(target_db, original_ops.clone()).await;
+            apply_ops(&mut target_db, original_ops.clone()).await;
             target_db.commit().await.unwrap();
-            sync_db = apply_ops(sync_db, original_ops.clone()).await;
+            apply_ops(&mut sync_db, original_ops.clone()).await;
             sync_db.commit().await.unwrap();
 
             // Close the sync db
@@ -1808,7 +1806,7 @@ pub(super) mod test {
 
             // Add one more operation to the target db
             let more_ops = create_test_ops(NUM_ADDITIONAL_OPS);
-            target_db = apply_ops(target_db, more_ops.clone()).await;
+            apply_ops(&mut target_db, more_ops.clone()).await;
             target_db.commit().await.unwrap();
 
             // Capture target db state for comparison
@@ -1893,7 +1891,7 @@ pub(super) mod test {
             let db_config = create_test_config(context.next_u64());
             let mut db = Any::init(context.clone(), db_config.clone()).await.unwrap();
             let ops = create_test_ops(100);
-            db = apply_ops(db, ops.clone()).await;
+            apply_ops(&mut db, ops.clone()).await;
             db.commit().await.unwrap();
 
             let sync_lower_bound = db.inactivity_floor_loc;
@@ -1944,7 +1942,7 @@ pub(super) mod test {
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(20);
-            db = apply_ops(db, ops.clone()).await;
+            apply_ops(&mut db, ops.clone()).await;
             db.commit().await.unwrap();
             let mut hasher = Standard::<Sha256>::new();
             let root_hash = db.root(&mut hasher);
@@ -1969,7 +1967,7 @@ pub(super) mod test {
 
             // Add more operations to the database
             let more_ops = create_test_ops(5);
-            db = apply_ops(db, more_ops.clone()).await;
+            apply_ops(&mut db, more_ops.clone()).await;
             db.commit().await.unwrap();
 
             // Historical proof should remain the same even though database has grown
@@ -1998,7 +1996,7 @@ pub(super) mod test {
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(50);
-            db = apply_ops(db, ops.clone()).await;
+            apply_ops(&mut db, ops.clone()).await;
             db.commit().await.unwrap();
 
             let mut hasher = Standard::<Sha256>::new();
@@ -2010,7 +2008,7 @@ pub(super) mod test {
 
             // Create historical database with single operation
             let mut single_db = create_test_db(context.clone()).await;
-            single_db = apply_ops(single_db, ops[0..1].to_vec()).await;
+            apply_ops(&mut single_db, ops[0..1].to_vec()).await;
             // Don't commit - this changes the root due to commit operations
             single_db.sync().await.unwrap();
             let single_root = single_db.root(&mut hasher);
@@ -2045,7 +2043,7 @@ pub(super) mod test {
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(100);
-            db = apply_ops(db, ops.clone()).await;
+            apply_ops(&mut db, ops.clone()).await;
             db.commit().await.unwrap();
 
             let mut hasher = Standard::<Sha256>::new();
@@ -2063,7 +2061,7 @@ pub(super) mod test {
 
                 // Create  reference database at the given historical size
                 let mut ref_db = create_test_db(context.clone()).await;
-                ref_db = apply_ops(ref_db, ops[0..end_loc as usize].to_vec()).await;
+                apply_ops(&mut ref_db, ops[0..end_loc as usize].to_vec()).await;
                 // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
                 ref_db.sync().await.unwrap();
 
@@ -2097,7 +2095,7 @@ pub(super) mod test {
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(10);
-            db = apply_ops(db, ops).await;
+            apply_ops(&mut db, ops).await;
             db.commit().await.unwrap();
             let op_count = db.op_count();
 
@@ -2124,7 +2122,7 @@ pub(super) mod test {
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(10);
-            db = apply_ops(db, ops).await;
+            apply_ops(&mut db, ops).await;
             db.commit().await.unwrap();
             let op_count = db.op_count();
 
@@ -2164,7 +2162,7 @@ pub(super) mod test {
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(10);
-            db = apply_ops(db, ops).await;
+            apply_ops(&mut db, ops).await;
             db.commit().await.unwrap();
 
             let (proof, ops) = db.historical_proof(5, 1, 10).await.unwrap();
