@@ -1541,7 +1541,7 @@ pub(crate) mod tests {
                 "Expected at least one batch to be processed"
             );
 
-            // Send rapid target update to the extended target with SAME lower bound but higher upper bound
+            // Send target update with SAME lower bound but higher upper bound
             update_sender
                 .send(SyncTarget {
                     hash: final_hash,
@@ -1551,7 +1551,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            // Complete the sync - this should fail with hash mismatch if the bug is present
+            // Complete the sync
             let synced_db = client.sync().await.unwrap();
 
             // Verify the synced database has the expected final state
@@ -1570,8 +1570,12 @@ pub(crate) mod tests {
                     target_db.inactivity_floor_loc
                 );
                 assert_eq!(
+                    synced_db.oldest_retained_loc(),
+                    target_db.oldest_retained_loc()
+                );
+                assert_eq!(
                     synced_db.oldest_retained_loc().unwrap(),
-                    target_db.inactivity_floor_loc
+                    initial_lower_bound
                 );
                 assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
             }
