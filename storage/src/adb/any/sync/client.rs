@@ -19,7 +19,7 @@ use commonware_runtime::{
     telemetry::metrics::histogram::{Buckets, Timed},
     Clock, Metrics as MetricsTrait, Storage,
 };
-use commonware_utils::Array;
+use commonware_utils::{Array, NZU64};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, info, warn};
@@ -358,11 +358,45 @@ where
         // Update the target
         config.target = new_target;
 
+        // Request a minimal proof for the new lower bound to extract correct pinned nodes
+        let GetOperationsResult {
+            proof,
+            operations: _,
+            success_tx,
+        } = {
+            let target_size = config.target.upper_bound_ops + 1;
+            config
+                .resolver
+                .get_operations(target_size, config.target.lower_bound_ops, NZU64!(1))
+                .await?
+        };
+
+        // Extract pinned nodes for the new pruning boundary
+        let start_pos = leaf_num_to_pos(config.target.lower_bound_ops);
+        let end_pos = leaf_num_to_pos(config.target.lower_bound_ops);
+        let new_pinned_nodes = match proof.extract_pinned_nodes(start_pos, end_pos) {
+            Ok(nodes) => {
+                let _ = success_tx.send(true);
+                nodes
+            }
+            Err(e) => {
+                warn!(error = ?e, "Failed to extract pinned nodes for new target");
+                let _ = success_tx.send(false);
+                return Err(Error::InvalidState);
+            }
+        };
+
+        debug!(
+            lower_bound_ops = config.target.lower_bound_ops,
+            pinned_nodes_count = new_pinned_nodes.len(),
+            "Extracted pinned nodes for new target"
+        );
+
         // Discard any pending updates, since they may be stale now.
         Ok(Client::FetchData {
             config,
             log,
-            pinned_nodes: None,
+            pinned_nodes: Some(new_pinned_nodes),
             metrics,
         })
     }
@@ -1370,8 +1404,8 @@ pub(crate) mod tests {
                 "Expected at least one batch to be processed"
             );
 
-            // Modify the target database by adding 15 more operations
-            let additional_ops = create_test_ops(15);
+            // Modify the target database by adding more operations
+            let additional_ops = create_test_ops(10);
             let new_hash = {
                 let mut db = target_db.write().await;
                 apply_ops(&mut db, additional_ops).await;
@@ -1417,6 +1451,131 @@ pub(crate) mod tests {
                 assert_eq!(
                     synced_db.oldest_retained_loc().unwrap(),
                     target_db.inactivity_floor_loc
+                );
+                assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
+            }
+
+            // Verify the expected operations are present in the synced database.
+            for i in synced_db.inactivity_floor_loc..synced_db.op_count() {
+                let got = synced_db.log.read(i).await.unwrap();
+                let expected = target_db.log.read(i).await.unwrap();
+                assert_eq!(got, expected);
+            }
+            for i in synced_db.ops.oldest_retained_pos().unwrap()..synced_db.ops.size() {
+                let got = synced_db.ops.get_node(i).await.unwrap();
+                let expected = target_db.ops.get_node(i).await.unwrap();
+                assert_eq!(got, expected);
+            }
+
+            synced_db.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that the client can handle target updates with the same lower bound.
+    #[test_traced("WARN")]
+    fn test_target_same_lower_bound() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate a larger target database to ensure pruning occurs
+            let mut target_db = create_test_db(context.clone()).await;
+            let initial_ops = create_test_ops(100);
+            apply_ops(&mut target_db, initial_ops.clone()).await;
+            target_db.commit().await.unwrap();
+
+            // Capture the state after first commit (this will have a non-zero inactivity floor)
+            let mut hasher = create_test_hasher();
+            let initial_lower_bound = target_db.inactivity_floor_loc;
+            let initial_upper_bound = target_db.op_count() - 1;
+            let initial_hash = target_db.root(&mut hasher);
+
+            // Add more operations to create the extended target
+            let additional_ops = create_test_ops(50);
+            apply_ops(&mut target_db, additional_ops).await;
+            target_db.commit().await.unwrap();
+            let final_upper_bound = target_db.op_count() - 1;
+            let final_hash = target_db.root(&mut hasher);
+
+            // Wrap target database for shared mutable access
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+
+            // Create client with initial smaller target and very small batch size
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let config = Config {
+                context: context.clone(),
+                db_config: create_test_config(context.next_u64()),
+                fetch_batch_size: NZU64!(2), // Very small batch size to ensure multiple batches needed
+                target: SyncTarget {
+                    hash: initial_hash,
+                    lower_bound_ops: initial_lower_bound,
+                    upper_bound_ops: initial_upper_bound,
+                },
+                resolver: target_db.clone(),
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+                update_receiver: Some(update_receiver),
+            };
+            let mut client = Client::new(config).await.unwrap();
+
+            // Process exactly one batch to establish pinned nodes
+            client = client.step().await.unwrap(); // FetchData -> ApplyData (fetch first batch)
+            client = client.step().await.unwrap(); // ApplyData -> FetchData (apply first batch)
+
+            // Verify we're in FetchData state and have processed some operations
+            let current_log_size = match &client {
+                Client::FetchData {
+                    log, pinned_nodes, ..
+                } => {
+                    let log_size = log.size().await.unwrap();
+                    // Verify pinned nodes were established
+                    assert!(
+                        pinned_nodes.is_some(),
+                        "Pinned nodes should have been established"
+                    );
+                    log_size
+                }
+                _ => panic!("Expected FetchData state"),
+            };
+            assert!(
+                current_log_size > initial_lower_bound,
+                "Expected at least one batch to be processed"
+            );
+
+            // Send target update with SAME lower bound but higher upper bound
+            update_sender
+                .send(SyncTarget {
+                    hash: final_hash,
+                    lower_bound_ops: initial_lower_bound,
+                    upper_bound_ops: final_upper_bound,
+                })
+                .await
+                .unwrap();
+
+            // Complete the sync
+            let synced_db = client.sync().await.unwrap();
+
+            // Verify the synced database has the expected final state
+            let mut hasher = create_test_hasher();
+            assert_eq!(synced_db.root(&mut hasher), final_hash);
+
+            // Verify the target database matches the synced database
+            let target_db = match Arc::try_unwrap(target_db) {
+                Ok(rw_lock) => rw_lock.into_inner(),
+                Err(_) => panic!("Failed to unwrap Arc - still has references"),
+            };
+            {
+                assert_eq!(synced_db.op_count(), target_db.op_count());
+                assert_eq!(
+                    synced_db.inactivity_floor_loc,
+                    target_db.inactivity_floor_loc
+                );
+                assert_eq!(
+                    synced_db.oldest_retained_loc(),
+                    target_db.oldest_retained_loc()
+                );
+                assert_eq!(
+                    synced_db.oldest_retained_loc().unwrap(),
+                    initial_lower_bound
                 );
                 assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
             }

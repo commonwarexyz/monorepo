@@ -284,13 +284,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             0, /* UNUSED_N */
         >(cfg.lower_bound, &cfg.log, &mut snapshot, None)
         .await?;
-        assert_eq!(inactivity_floor_loc, cfg.lower_bound);
 
         let mut db = Any {
             ops: mmr,
             log: cfg.log,
             snapshot,
-            inactivity_floor_loc: cfg.lower_bound,
+            inactivity_floor_loc,
             uncommitted_ops: 0,
             hasher: Standard::<H>::new(),
             pruning_delay: cfg.db_config.pruning_delay,
