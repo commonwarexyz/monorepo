@@ -76,17 +76,17 @@ fn fuzz(data: FuzzInput) {
                     let update_result = db.update(k, v).await.expect("Update should not fail");
 
                     match update_result {
-                        commonware_storage::adb::any::UpdateResult::Inserted(_) => {
+                        commonware_storage::store::UpdateResult::Inserted(_) => {
                             expected_state.insert(*key, Some(*value));
                             all_keys.insert(*key);
                             uncommitted_ops += 1;
                         }
-                        commonware_storage::adb::any::UpdateResult::Updated(..) => {
+                        commonware_storage::store::UpdateResult::Updated(..) => {
                             expected_state.insert(*key, Some(*value));
                             all_keys.insert(*key);
                             uncommitted_ops += 1;
                         }
-                        commonware_storage::adb::any::UpdateResult::NoOp => {
+                        commonware_storage::store::UpdateResult::NoOp => {
                         }
                     }
                 }

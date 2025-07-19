@@ -1,4 +1,4 @@
-//! Operations that can be applied to an authenticated database.
+//! Operations that can be applied to a database.
 //!
 //! The `Operation` enum implements the `Array` trait, allowing for a persistent log of operations
 //! based on a `crate::Journal`.
@@ -32,7 +32,7 @@ pub enum Error {
     InvalidCommitOp,
 }
 
-/// An operation applied to an authenticated database with a fixed size value.
+/// An operation applied to an database with a fixed size value.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Fixed<K: Array, V: Array> {
     /// Indicates the key no longer has a value.
@@ -46,7 +46,7 @@ pub enum Fixed<K: Array, V: Array> {
     Commit(u64),
 }
 
-/// An operation applied to an authenticated database with a variable size value.
+/// An operation applied to an database with a variable size value.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Variable<K: Array, V: Codec> {
     Set(K, V),

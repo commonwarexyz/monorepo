@@ -8,7 +8,7 @@
 //! and cannot be updated after.
 
 use crate::{
-    adb::{operation::Fixed, Error},
+    adb::Error,
     index::Index,
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
@@ -18,6 +18,7 @@ use crate::{
         journaled::{Config as MmrConfig, Mmr},
         verification::Proof,
     },
+    store::{operation::Fixed, UpdateResult},
     translator::Translator,
 };
 use commonware_codec::Encode as _;
@@ -152,16 +153,6 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T:
     /// which is useful for serving state sync clients, who may request operations
     /// below the inactivity floor.
     pub(super) pruning_delay: u64,
-}
-
-/// The result of a database `update` operation.
-pub enum UpdateResult {
-    /// Tried to set a key to its current value.
-    NoOp,
-    /// Key was not previously in the snapshot & its new loc is the wrapped value.
-    Inserted(u64),
-    /// Key was previously in the snapshot & its (old, new) loc pair is wrapped.
-    Updated(u64, u64),
 }
 
 impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator>
