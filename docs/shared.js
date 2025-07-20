@@ -131,6 +131,7 @@ function insertFooter() {
             <a href="https://github.com/commonwarexyz/monorepo">GitHub</a>
             <a href="https://x.com/commonwarexyz">X</a>
             <a href="https://youtube.com/playlist?list=PLnVJ5S1DIyuFQ9cIE_oE-U3Wl3JDgZQ8A">Podcast</a>
+            <a style="cursor:pointer" id="theme-toggle" />
         </div>
         &copy; ${currentYear} Commonware, Inc. All rights reserved.
     </div>
@@ -138,9 +139,79 @@ function insertFooter() {
     footerPlaceholder.innerHTML = footerHTML;
 }
 
+function getCurrentTheme() {
+    // Override the theme if the OS prefers dark mode.
+    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const storedTheme = localStorage.getItem('theme');
+    if (prefersDark && !storedTheme) {
+        localStorage.setItem('theme', 'dark');
+        storedTheme = 'dark';
+    }
+
+    return storedTheme || 'light';
+}
+
+function updateTheme(theme) {
+    if (!(theme === 'light' || theme === 'dark')) {
+        console.error('Invalid theme:', theme);
+        return;
+    }
+
+    const globalThemeStyle = document.getElementById('theme-style');
+    if (!globalThemeStyle) {
+        return;
+    }
+
+    // Update the global theme style based on the selected theme.
+    const darkThemeStyle = `
+        html, body {
+            background-color: #202124;
+            color: #fff;
+        }
+
+        a {
+            color: #04a5e5;
+        }
+    `;
+    globalThemeStyle.innerHTML = theme === 'light' ? '' : darkThemeStyle;
+
+    const themeToggle = document.getElementById('theme-toggle');
+    if (!themeToggle) {
+        return;
+    }
+
+    // Update the theme toggle button text
+    themeToggle.innerHTML = `Theme: ${theme === 'light' ? '☀️' : '🌙'}`;
+}
+
+function initTheme() {
+    // Initialize the theme based on localStorage or default to light mode.
+    const currentTheme = getCurrentTheme();
+    updateTheme(currentTheme);
+
+    const themeToggle = document.getElementById('theme-toggle');
+    if (!themeToggle) {
+        return;
+    }
+
+    // Register the click event listener for the theme toggle button.
+    themeToggle.addEventListener("click", function() {
+        const currentTheme = getCurrentTheme();
+
+        if (currentTheme === 'light') {
+            updateTheme('dark');
+            localStorage.setItem('theme', 'dark');
+        } else {
+            updateTheme('light');
+            localStorage.setItem('theme', 'light');
+        }
+    });
+}
+
 // Load the logo when the DOM content is loaded
 document.addEventListener('DOMContentLoaded', () => {
     insertLogo();
     insertFooter();
     setExternalLinksToOpenInNewTab();
+    initTheme();
 });
