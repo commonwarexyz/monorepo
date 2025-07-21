@@ -843,7 +843,7 @@ pub(crate) mod tests {
 
             let mut hasher = create_test_hasher();
             let upper_bound_ops = target_db.op_count() - 1;
-            let target_root_digest = target_db.root(&mut hasher);
+            let root_digest = target_db.root(&mut hasher);
             let lower_bound_ops = target_db.inactivity_floor_loc;
 
             // Add another operation after the sync range
@@ -856,7 +856,7 @@ pub(crate) mod tests {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(10),
                 target: SyncTarget {
-                    root_digest: target_root_digest,
+                    root_digest,
                     lower_bound_ops,
                     upper_bound_ops,
                 },
@@ -879,7 +879,7 @@ pub(crate) mod tests {
             assert_eq!(synced_db.op_count(), upper_bound_ops + 1);
 
             // Verify the final digest matches our target
-            assert_eq!(synced_db.root(&mut hasher), target_root_digest);
+            assert_eq!(synced_db.root(&mut hasher), root_digest);
 
             // Verify the synced database doesn't have any operations beyond the sync range.
             assert_eq!(
@@ -922,7 +922,7 @@ pub(crate) mod tests {
             apply_ops(&mut target_db, last_op.clone()).await;
             target_db.commit().await.unwrap();
             let mut hasher = create_test_hasher();
-            let target_root_digest = target_db.root(&mut hasher);
+            let root_digest = target_db.root(&mut hasher);
             let lower_bound_ops = target_db.inactivity_floor_loc;
             let upper_bound_ops = target_db.op_count() - 1; // Up to the last operation
 
@@ -931,7 +931,7 @@ pub(crate) mod tests {
                 db_config: sync_db_config, // Use same config as before
                 fetch_batch_size: NZU64!(10),
                 target: SyncTarget {
-                    root_digest: target_root_digest,
+                    root_digest,
                     lower_bound_ops,
                     upper_bound_ops,
                 },
@@ -956,7 +956,7 @@ pub(crate) mod tests {
                 leaf_num_to_pos(lower_bound_ops)
             );
             // Verify the root digest matches the target
-            assert_eq!(sync_db.root(&mut hasher), target_root_digest);
+            assert_eq!(sync_db.root(&mut hasher), root_digest);
 
             // Verify that the operations in the overlapping range are present and correct
             for i in lower_bound_ops..original_db_op_count {
@@ -1015,7 +1015,7 @@ pub(crate) mod tests {
 
             // Reopen sync_db
             let mut hasher = create_test_hasher();
-            let target_root_digest = target_db.root(&mut hasher);
+            let root_digest = target_db.root(&mut hasher);
             let lower_bound_ops = target_db.inactivity_floor_loc;
             let upper_bound_ops = target_db.op_count() - 1;
             // sync_db should never ask the resolver for operations
@@ -1026,7 +1026,7 @@ pub(crate) mod tests {
                 db_config: sync_config, // Use same config to access same partitions
                 fetch_batch_size: NZU64!(10),
                 target: SyncTarget {
-                    root_digest: target_root_digest,
+                    root_digest,
                     lower_bound_ops,
                     upper_bound_ops,
                 },
@@ -1052,7 +1052,7 @@ pub(crate) mod tests {
             );
 
             // Verify the root digest matches the target
-            assert_eq!(sync_db.root(&mut hasher), target_root_digest);
+            assert_eq!(sync_db.root(&mut hasher), root_digest);
 
             // Verify state matches for sample operations
             for target_op in &target_ops {
@@ -1296,9 +1296,9 @@ pub(crate) mod tests {
 
             // Capture target state
             let mut hasher = create_test_hasher();
-            let target_lower_bound = target_db.inactivity_floor_loc;
-            let target_upper_bound = target_db.op_count() - 1;
-            let target_root_digest = target_db.root(&mut hasher);
+            let lower_bound = target_db.inactivity_floor_loc;
+            let upper_bound = target_db.op_count() - 1;
+            let root_digest = target_db.root(&mut hasher);
 
             // Create client with target that will complete immediately
             let (mut update_sender, update_receiver) = mpsc::channel(1);
@@ -1307,9 +1307,9 @@ pub(crate) mod tests {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(20),
                 target: SyncTarget {
-                    root_digest: target_root_digest,
-                    lower_bound_ops: target_lower_bound,
-                    upper_bound_ops: target_upper_bound,
+                    root_digest: root_digest,
+                    lower_bound_ops: lower_bound,
+                    upper_bound_ops: upper_bound,
                 },
                 resolver: &target_db,
                 hasher: create_test_hasher(),
@@ -1327,17 +1327,17 @@ pub(crate) mod tests {
                 .send(SyncTarget {
                     // Dummy target update
                     root_digest: Digest::from([2u8; 32]),
-                    lower_bound_ops: target_lower_bound + 1,
-                    upper_bound_ops: target_upper_bound + 1,
+                    lower_bound_ops: lower_bound + 1,
+                    upper_bound_ops: upper_bound + 1,
                 })
                 .await;
 
             // Verify the synced database has the expected state
             let mut hasher = create_test_hasher();
-            assert_eq!(synced_db.root(&mut hasher), target_root_digest);
-            assert_eq!(synced_db.op_count(), target_upper_bound + 1);
-            assert_eq!(synced_db.inactivity_floor_loc, target_lower_bound);
-            assert_eq!(synced_db.oldest_retained_loc().unwrap(), target_lower_bound);
+            assert_eq!(synced_db.root(&mut hasher), root_digest);
+            assert_eq!(synced_db.op_count(), upper_bound + 1);
+            assert_eq!(synced_db.inactivity_floor_loc, lower_bound);
+            assert_eq!(synced_db.oldest_retained_loc().unwrap(), lower_bound);
 
             synced_db.destroy().await.unwrap();
             target_db.destroy().await.unwrap();
