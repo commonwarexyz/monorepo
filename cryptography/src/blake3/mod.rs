@@ -148,6 +148,12 @@ impl AsRef<[u8]> for Digest {
     }
 }
 
+impl AsRef<[u8; DIGEST_LENGTH]> for Digest {
+    fn as_ref(&self) -> &[u8; DIGEST_LENGTH] {
+        &self.0
+    }
+}
+
 impl Deref for Digest {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
@@ -249,7 +255,7 @@ mod tests {
 
         let encoded = digest.encode();
         assert_eq!(encoded.len(), DIGEST_LENGTH);
-        assert_eq!(encoded, digest.as_ref());
+        assert_eq!(encoded, digest.as_ref() as &[u8]);
 
         let decoded = Digest::decode(encoded).unwrap();
         assert_eq!(digest, decoded);

@@ -75,10 +75,8 @@ mod hash {
         let mut input = b"h2".to_vec();
         input.extend_from_slice(&gt.to_bytes());
         let digest = crate::sha256::hash(&input);
-        // Convert Digest to Block by copying the bytes
-        let mut result = Block::default();
-        result.copy_from_slice(digest.as_ref());
-        result
+        // Convert Digest to Block without copying
+        *digest.as_ref()
     }
 
     /// H3: (sigma, M) -> Scalar
@@ -102,10 +100,8 @@ mod hash {
         let mut input = b"h4".to_vec();
         input.extend_from_slice(sigma);
         let digest = crate::sha256::hash(&input);
-        // Convert Digest to Block by copying the bytes
-        let mut result = Block::default();
-        result.copy_from_slice(digest.as_ref());
-        result
+        // Convert Digest to Block without copying
+        *digest.as_ref()
     }
 }
 
