@@ -68,7 +68,7 @@ pub struct GetOperationsResponse {
 #[derive(Debug, Clone)]
 pub struct GetServerMetadataResponse {
     /// Target root digest of the database.
-    pub root_digest: Digest,
+    pub root: Digest,
     /// Oldest retained operation location.
     pub oldest_retained_loc: u64,
     /// Latest operation location.
@@ -233,7 +233,7 @@ impl Read for GetOperationsResponse {
 
 impl Write for GetServerMetadataResponse {
     fn write(&self, buf: &mut impl BufMut) {
-        self.root_digest.write(buf);
+        self.root.write(buf);
         self.oldest_retained_loc.write(buf);
         self.latest_op_loc.write(buf);
     }
@@ -241,7 +241,7 @@ impl Write for GetServerMetadataResponse {
 
 impl EncodeSize for GetServerMetadataResponse {
     fn encode_size(&self) -> usize {
-        self.root_digest.encode_size()
+        self.root.encode_size()
             + self.oldest_retained_loc.encode_size()
             + self.latest_op_loc.encode_size()
     }
@@ -251,11 +251,11 @@ impl Read for GetServerMetadataResponse {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let root_digest = Digest::read(buf)?;
+        let root = Digest::read(buf)?;
         let oldest_retained_loc = u64::read(buf)?;
         let latest_op_loc = u64::read(buf)?;
         Ok(Self {
-            root_digest,
+            root,
             oldest_retained_loc,
             latest_op_loc,
         })

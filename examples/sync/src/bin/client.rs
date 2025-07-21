@@ -34,7 +34,7 @@ struct Config {
 
 #[derive(Debug)]
 struct ServerMetadata {
-    root_digest: Digest,
+    root: Digest,
     oldest_retained_loc: u64,
     latest_op_loc: u64,
 }
@@ -50,7 +50,7 @@ where
 
     let metadata = resolver.get_server_metadata().await?;
     let metadata = ServerMetadata {
-        root_digest: metadata.root_digest,
+        root: metadata.root,
         oldest_retained_loc: metadata.oldest_retained_loc,
         latest_op_loc: metadata.latest_op_loc,
     };
@@ -74,7 +74,7 @@ where
 
     // Get server metadata to determine sync parameters
     let ServerMetadata {
-        root_digest,
+        root,
         oldest_retained_loc,
         latest_op_loc,
     } = get_server_metadata(&resolver).await?;
@@ -102,7 +102,7 @@ where
         db_config,
         fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
         target: SyncTarget {
-            root_digest,
+            root,
             lower_bound_ops: oldest_retained_loc,
             upper_bound_ops: latest_op_loc,
         },
@@ -125,21 +125,24 @@ where
 
     // Get the root digest of the synced database
     let mut hasher = Standard::new();
-    let got_root_digest = database.root(&mut hasher);
+    let got_root = database.root(&mut hasher);
 
     // Verify the digest matches the  target digest.
-    if got_root_digest != root_digest {
-        return Err(format!("Synced database root digest does not match target digest: {got_root_digest:?} != {root_digest:?}").into());
+    if got_root != root {
+        return Err(format!(
+            "Synced database root digest does not match target root digest: {got_root:?} != {root:?}"
+        )
+        .into());
     }
 
-    let root_digest_hex = got_root_digest
+    let root_hex = got_root
         .as_ref()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     info!(
         database_ops = database.op_count(),
-        root_digest = %root_digest_hex,
+        root = %root_hex,
         "✅ Sync completed successfully"
     );
 

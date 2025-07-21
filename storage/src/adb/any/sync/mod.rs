@@ -21,7 +21,7 @@ pub mod resolver;
 #[derive(Debug, Clone)]
 pub struct SyncTarget<D: Digest> {
     /// Root digest of the target database
-    pub root_digest: D,
+    pub root: D,
     /// Lower bound of operations to sync (inclusive)
     /// This will be the pruning boundary of the synced database.
     pub lower_bound_ops: u64,

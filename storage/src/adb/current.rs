@@ -488,7 +488,7 @@ impl<
         start_loc: u64,
         ops: &[Operation<K, V>],
         chunks: &[[u8; N]],
-        root_digest: &H::Digest,
+        root: &H::Digest,
     ) -> bool {
         let op_count = leaf_pos_to_num(proof.size);
         let Some(op_count) = op_count else {
@@ -519,7 +519,7 @@ impl<
         );
 
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
-            return proof.verify_range_inclusion(&mut verifier, &digests, start_pos, root_digest);
+            return proof.verify_range_inclusion(&mut verifier, &digests, start_pos, root);
         }
 
         // The proof must contain the partial chunk digest as its last hash.
@@ -547,7 +547,7 @@ impl<
             &last_chunk_digest,
         );
 
-        reconstructed_root == *root_digest
+        reconstructed_root == *root
     }
 
     /// Generate and return a proof of the current value of `key`, along with the other
@@ -600,7 +600,7 @@ impl<
         hasher: &mut H,
         proof: &Proof<H::Digest>,
         info: &KeyValueProofInfo<K, V, N>,
-        root_digest: &H::Digest,
+        root: &H::Digest,
     ) -> bool {
         let Some(op_count) = leaf_pos_to_num(proof.size) else {
             debug!("verification failed, invalid proof size");
@@ -626,7 +626,7 @@ impl<
         );
 
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
-            return proof.verify_element_inclusion(&mut verifier, &digest, pos, root_digest);
+            return proof.verify_element_inclusion(&mut verifier, &digest, pos, root);
         }
 
         // The proof must contain the partial chunk digest as its last hash.
@@ -663,7 +663,7 @@ impl<
         let reconstructed_root =
             Bitmap::<H, N>::partial_chunk_root(hasher, &mmr_root, next_bit, &last_chunk_digest);
 
-        reconstructed_root == *root_digest
+        reconstructed_root == *root
     }
 
     /// Close the db. Operations that have not been committed will be lost.

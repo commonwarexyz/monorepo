@@ -554,7 +554,7 @@ impl<H: CHasher> Mmr<H> {
             .peak_iterator()
             .map(|(peak_pos, _)| self.get_node_unchecked(peak_pos));
         let size = self.size();
-        hasher.root_digest(size, peaks)
+        hasher.root(size, peaks)
     }
 
     /// Return an inclusion proof for the specified element. Returns ElementPruned error if some
@@ -704,7 +704,7 @@ mod tests {
             mmr.prune_all();
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
 
-            assert_eq!(mmr.root(&mut hasher), hasher.root_digest(0, [].iter()));
+            assert_eq!(mmr.root(&mut hasher), hasher.root(0, [].iter()));
 
             let clone = mmr.clone_pruned();
             assert_eq!(clone.size(), 0);
@@ -787,7 +787,7 @@ mod tests {
             // verify root
             let root = mmr.root(&mut hasher);
             let peak_digests = [digest14, digest17, mmr.nodes[18]];
-            let expected_root = hasher.root_digest(19, peak_digests.iter());
+            let expected_root = hasher.root(19, peak_digests.iter());
             assert_eq!(root, expected_root, "incorrect root");
 
             // pruning tests

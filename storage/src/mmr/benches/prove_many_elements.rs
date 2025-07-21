@@ -23,7 +23,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                 elements.push(element);
             }
         });
-        let root_digest = mmr.root(&mut hasher);
+        let root = mmr.root(&mut hasher);
 
         // Generate SAMPLE_SIZE random starts without replacement and create/verify range proofs
         for range in [2, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000] {
@@ -62,7 +62,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                                         &mut hasher,
                                         &elements[start_index..=end_index],
                                         start_pos,
-                                        &root_digest,
+                                        &root,
                                     ));
                                 }
                             })
