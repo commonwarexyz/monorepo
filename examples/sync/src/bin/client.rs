@@ -39,30 +39,6 @@ struct Config {
     target_update_interval: Duration,
 }
 
-#[derive(Debug)]
-struct ServerMetadata {
-    root: Digest,
-    oldest_retained_loc: u64,
-    latest_op_loc: u64,
-}
-
-/// Get server metadata to determine sync parameters.
-async fn get_server_metadata<E>(
-    resolver: &Resolver<E>,
-) -> Result<ServerMetadata, Box<dyn std::error::Error>>
-where
-    E: commonware_runtime::Network + Clone,
-{
-    debug!("requesting server metadata");
-
-    let metadata = resolver.get_server_metadata().await?;
-    Ok(ServerMetadata {
-        root: metadata.root,
-        oldest_retained_loc: metadata.oldest_retained_loc,
-        latest_op_loc: metadata.latest_op_loc,
-    })
-}
-
 /// Periodically request target updates from server and send them to sync client
 /// on `update_sender`.
 async fn target_update_task<E>(
@@ -125,19 +101,9 @@ where
 {
     info!(server = %config.server, "starting sync to server");
 
-    // Get server metadata to determine sync parameters
-    let ServerMetadata {
-        root,
-        oldest_retained_loc,
-        latest_op_loc,
-    } = get_server_metadata(&resolver).await?;
-
-    info!(
-        root = %root,
-        lower_bound = oldest_retained_loc,
-        upper_bound = latest_op_loc,
-        "initial sync target"
-    );
+    // Get initial sync target
+    let initial_target = resolver.get_sync_target().await?;
+    info!(target = ?initial_target, "initial sync target");
 
     // Create database configuration
     let db_config = create_adb_config();
@@ -145,13 +111,6 @@ where
 
     // Create channel for target updates
     let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
-
-    // Create initial sync target
-    let initial_target = SyncTarget {
-        root,
-        lower_bound_ops: oldest_retained_loc,
-        upper_bound_ops: latest_op_loc,
-    };
 
     // Start target update task
     let target_resolver = Resolver::new(context.clone(), config.server);
@@ -202,26 +161,11 @@ where
     // Get the root digest of the synced database
     let mut hasher = Standard::new();
     let got_root = database.root(&mut hasher);
-
-    // Verify the digest matches the  target digest.
-    if got_root != root {
-        return Err(format!(
-            "Synced database root digest does not match target root digest: {got_root:?} != {root:?}"
-        )
-        .into());
-    }
-
-    let root_hex = got_root
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
     info!(
         database_ops = database.op_count(),
-        root = %root_hex,
+        root = %got_root,
         "✅ Sync completed successfully"
     );
-
     Ok(database)
 }
 

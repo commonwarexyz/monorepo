@@ -33,14 +33,10 @@ pub enum Message {
     GetOperationsRequest(GetOperationsRequest),
     /// Response with operations and proof.
     GetOperationsResponse(GetOperationsResponse),
-    /// Request server metadata (target root digest, bounds, etc.).
-    GetServerMetadataRequest,
-    /// Response with server metadata.
-    GetServerMetadataResponse(GetServerMetadataResponse),
-    /// Request target update from current client position.
-    GetTargetUpdateRequest,
-    /// Response with updated target information.
-    GetTargetUpdateResponse(SyncTarget<Digest>),
+    /// Request sync target from server.
+    GetSyncTargetRequest,
+    /// Response with sync target.
+    GetSyncTargetResponse(SyncTarget<Digest>),
     /// Error response.
     /// Note that, in this example, the server sends an error response to the client in the event
     /// of an invalid request or internal error. In a real-world application, this may be inadvisable.
@@ -67,17 +63,6 @@ pub struct GetOperationsResponse {
     pub proof: Proof<Digest>,
     /// Serialized operations in the requested range.
     pub operations: Vec<Operation>,
-}
-
-/// Response with server metadata.
-#[derive(Debug, Clone)]
-pub struct GetServerMetadataResponse {
-    /// Target root digest of the database.
-    pub root: Digest,
-    /// Oldest retained operation location.
-    pub oldest_retained_loc: u64,
-    /// Latest operation location.
-    pub latest_op_loc: u64,
 }
 
 /// Error response.
@@ -128,22 +113,15 @@ impl Write for Message {
                 1u8.write(buf);
                 resp.write(buf);
             }
-            Message::GetServerMetadataRequest => {
+            Message::GetSyncTargetRequest => {
                 2u8.write(buf);
             }
-            Message::GetServerMetadataResponse(resp) => {
+            Message::GetSyncTargetResponse(resp) => {
                 3u8.write(buf);
                 resp.write(buf);
             }
-            Message::GetTargetUpdateRequest => {
-                4u8.write(buf);
-            }
-            Message::GetTargetUpdateResponse(resp) => {
-                5u8.write(buf);
-                resp.write(buf);
-            }
             Message::Error(err) => {
-                6u8.write(buf);
+                4u8.write(buf);
                 err.write(buf);
             }
         }
@@ -156,10 +134,8 @@ impl EncodeSize for Message {
         1 + match self {
             Message::GetOperationsRequest(req) => req.encode_size(),
             Message::GetOperationsResponse(resp) => resp.encode_size(),
-            Message::GetServerMetadataRequest => 0,
-            Message::GetServerMetadataResponse(resp) => resp.encode_size(),
-            Message::GetTargetUpdateRequest => 0,
-            Message::GetTargetUpdateResponse(resp) => resp.encode_size(),
+            Message::GetSyncTargetRequest => 0,
+            Message::GetSyncTargetResponse(resp) => resp.encode_size(),
             Message::Error(err) => err.encode_size(),
         }
     }
@@ -177,13 +153,9 @@ impl Read for Message {
             1 => Ok(Message::GetOperationsResponse(GetOperationsResponse::read(
                 buf,
             )?)),
-            2 => Ok(Message::GetServerMetadataRequest),
-            3 => Ok(Message::GetServerMetadataResponse(
-                GetServerMetadataResponse::read(buf)?,
-            )),
-            4 => Ok(Message::GetTargetUpdateRequest),
-            5 => Ok(Message::GetTargetUpdateResponse(SyncTarget::read(buf)?)),
-            6 => Ok(Message::Error(ErrorResponse::read(buf)?)),
+            2 => Ok(Message::GetSyncTargetRequest),
+            3 => Ok(Message::GetSyncTargetResponse(SyncTarget::read(buf)?)),
+            4 => Ok(Message::Error(ErrorResponse::read(buf)?)),
             _ => Err(CodecError::InvalidEnum(discriminant)),
         }
     }
@@ -242,39 +214,7 @@ impl Read for GetOperationsResponse {
             let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
             Vec::<Operation>::read_cfg(buf, &(range_cfg, ()))?
         };
-
         Ok(Self { proof, operations })
-    }
-}
-
-impl Write for GetServerMetadataResponse {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.root.write(buf);
-        self.oldest_retained_loc.write(buf);
-        self.latest_op_loc.write(buf);
-    }
-}
-
-impl EncodeSize for GetServerMetadataResponse {
-    fn encode_size(&self) -> usize {
-        self.root.encode_size()
-            + self.oldest_retained_loc.encode_size()
-            + self.latest_op_loc.encode_size()
-    }
-}
-
-impl Read for GetServerMetadataResponse {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let root = Digest::read(buf)?;
-        let oldest_retained_loc = u64::read(buf)?;
-        let latest_op_loc = u64::read(buf)?;
-        Ok(Self {
-            root,
-            oldest_retained_loc,
-            latest_op_loc,
-        })
     }
 }
 
@@ -349,7 +289,6 @@ impl From<ProtocolError> for ErrorResponse {
             ProtocolError::DatabaseError(e) => (ErrorCode::DatabaseError, e.to_string()),
             ProtocolError::NetworkError(e) => (ErrorCode::NetworkError, e),
         };
-
         ErrorResponse {
             error_code,
             message,

@@ -12,8 +12,8 @@ use commonware_storage::{adb::any::sync::SyncTarget, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     crate_version, create_adb_config, create_test_operations, parse_duration, Database,
-    ErrorResponse, GetOperationsRequest, GetOperationsResponse, GetServerMetadataResponse, Message,
-    Operation, ProtocolError, MAX_MESSAGE_SIZE,
+    ErrorResponse, GetOperationsRequest, GetOperationsResponse, Message, Operation, ProtocolError,
+    MAX_MESSAGE_SIZE,
 };
 use prometheus_client::metrics::counter::Counter;
 use rand::Rng;
@@ -170,41 +170,8 @@ where
     Ok(())
 }
 
-/// Handle a request for server state information.
-async fn handle_get_server_metadata_request<E>(
-    state: &State<E>,
-) -> Result<GetServerMetadataResponse, ProtocolError>
-where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-{
-    state.request_counter.inc();
-
-    let database = state.database.read().await;
-
-    // Get the current database state
-    let oldest_retained_loc = database.inactivity_floor_loc();
-    let latest_op_loc = database.op_count().saturating_sub(1);
-
-    let root = {
-        let mut hasher = Standard::new();
-        database.root(&mut hasher)
-    };
-
-    drop(database);
-
-    let response = GetServerMetadataResponse {
-        root,
-        oldest_retained_loc,
-        latest_op_loc,
-    };
-    info!(?response, "serving metadata");
-    Ok(response)
-}
-
-/// Handle a request for target update.
-async fn handle_get_target_update_request<E>(
-    state: &State<E>,
-) -> Result<SyncTarget<Digest>, ProtocolError>
+/// Handle a request for sync target.
+async fn handle_get_sync_target<E>(state: &State<E>) -> Result<SyncTarget<Digest>, ProtocolError>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
@@ -340,26 +307,14 @@ where
                     }
                 }
             }
-            Message::GetServerMetadataRequest => {
-                match handle_get_server_metadata_request(&state).await {
-                    Ok(response) => Message::GetServerMetadataResponse(response),
-                    Err(e) => {
-                        warn!(client_addr = %client_addr, error = %e, "❌ getServerMetadata failed");
-                        state.error_counter.inc();
-                        Message::Error(e.into())
-                    }
+            Message::GetSyncTargetRequest => match handle_get_sync_target(&state).await {
+                Ok(response) => Message::GetSyncTargetResponse(response),
+                Err(e) => {
+                    warn!(client_addr = %client_addr, error = %e, "❌ getSyncTarget failed");
+                    state.error_counter.inc();
+                    Message::Error(e.into())
                 }
-            }
-            Message::GetTargetUpdateRequest => {
-                match handle_get_target_update_request(&state).await {
-                    Ok(response) => Message::GetTargetUpdateResponse(response),
-                    Err(e) => {
-                        warn!(client_addr = %client_addr, error = %e, "❌ getTargetUpdate failed");
-                        state.error_counter.inc();
-                        Message::Error(e.into())
-                    }
-                }
-            }
+            },
             _ => {
                 warn!(client_addr = %client_addr, "❌ unexpected message type");
                 state.error_counter.inc();

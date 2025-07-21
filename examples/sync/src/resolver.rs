@@ -1,8 +1,9 @@
 //! Provides a [Resolver] implementation that communicates with a remote server
 //! to fetch operations and proofs.
 
-use crate::{GetOperationsRequest, GetServerMetadataResponse, Message, MAX_MESSAGE_SIZE};
+use crate::{GetOperationsRequest, Message, MAX_MESSAGE_SIZE};
 use commonware_codec::{DecodeExt, Encode};
+use commonware_cryptography::sha256::Digest;
 use commonware_runtime::RwLock;
 use commonware_storage::adb::any::sync::{
     resolver::{GetOperationsResult, Resolver as ResolverTrait},
@@ -100,9 +101,9 @@ where
     }
 
     /// Get server metadata (target root digest and bounds)
-    pub async fn get_server_metadata(&self) -> Result<GetServerMetadataResponse, ResolverError> {
-        match self.send_request(Message::GetServerMetadataRequest).await? {
-            Message::GetServerMetadataResponse(response) => Ok(response),
+    pub async fn get_sync_target(&self) -> Result<SyncTarget<Digest>, ResolverError> {
+        match self.send_request(Message::GetSyncTargetRequest).await? {
+            Message::GetSyncTargetResponse(response) => Ok(response),
             Message::Error(err) => {
                 error!(error = %err.message, "❌ server error");
                 Err(ResolverError::ServerError(err.message))
@@ -120,8 +121,8 @@ where
     ) -> Result<SyncTarget<commonware_cryptography::sha256::Digest>, ResolverError> {
         debug!("requesting target update from server");
 
-        match self.send_request(Message::GetTargetUpdateRequest).await? {
-            Message::GetTargetUpdateResponse(response) => Ok(response),
+        match self.send_request(Message::GetSyncTargetRequest).await? {
+            Message::GetSyncTargetResponse(response) => Ok(response),
             Message::Error(err) => {
                 error!(error = %err.message, "❌ server error");
                 Err(ResolverError::ServerError(err.message))
