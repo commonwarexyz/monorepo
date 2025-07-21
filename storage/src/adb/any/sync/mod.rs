@@ -40,7 +40,7 @@ pub type SyncTargetUpdateReceiver<D> = mpsc::Receiver<SyncTarget<D>>;
 pub enum Error {
     /// Hash mismatch after sync
     #[error("Root digest mismatch - expected {expected:?}, got {actual:?}")]
-    RootDigestMismatch {
+    RootMismatch {
         expected: Box<dyn fmt::Debug + Send + Sync>,
         actual: Box<dyn fmt::Debug + Send + Sync>,
     },
@@ -55,7 +55,7 @@ pub enum Error {
     InvalidState,
     /// Sync target digest unchanged
     #[error("Sync target digest unchanged")]
-    SyncTargetRootDigestUnchanged,
+    SyncTargetRootUnchanged,
     /// Sync target moved backward
     #[error("Sync target moved backward: {old:?} -> {new:?}")]
     SyncTargetMovedBackward {
