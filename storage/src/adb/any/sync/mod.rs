@@ -53,9 +53,9 @@ pub enum Error {
     /// Invalid client state
     #[error("invalid client state")]
     InvalidState,
-    /// Sync target hash unchanged
-    #[error("sync target hash unchanged")]
-    SyncTargetHashUnchanged,
+    /// Sync target root unchanged
+    #[error("sync target root unchanged")]
+    SyncTargetRootUnchanged,
     /// Sync target moved backward
     #[error("sync target moved backward: {old:?} -> {new:?}")]
     SyncTargetMovedBackward {

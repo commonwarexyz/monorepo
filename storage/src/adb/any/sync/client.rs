@@ -255,7 +255,7 @@ where
             });
         }
         if new_target.hash == old_target.hash {
-            return Err(Error::SyncTargetHashUnchanged);
+            return Err(Error::SyncTargetRootUnchanged);
         }
         Ok(())
     }
