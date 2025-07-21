@@ -60,16 +60,15 @@ where
             Ok(new_target) => {
                 // Check if target has changed
                 if new_target.root != current_target.root {
-                    info!(
-                        old_target = ?current_target,
-                        new_target = ?new_target,
-                        "target updated"
-                    );
-
                     // Send new target to sync client
                     if let Err(e) = update_sender.clone().try_send(new_target.clone()) {
                         warn!(error = %e, "failed to send target update to sync client");
                     } else {
+                        info!(
+                            old_target = ?current_target,
+                            new_target = ?new_target,
+                            "target updated"
+                        );
                         current_target = new_target;
                     }
                 } else {
