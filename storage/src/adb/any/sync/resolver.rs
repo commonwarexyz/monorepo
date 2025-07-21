@@ -7,10 +7,10 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::{Digest, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_runtime::{Clock, Metrics, RwLock, Storage};
 use commonware_utils::Array;
 use futures::channel::oneshot;
-use std::{future::Future, num::NonZeroU64};
+use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// Result of a call to [Resolver::get_operations].
 pub struct GetOperationsResult<D: Digest, K: Array, V: Array> {
@@ -43,7 +43,7 @@ pub trait Resolver {
     ) -> impl Future<Output = Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error>>;
 }
 
-impl<E, K, V, H, T> Resolver for &Any<E, K, V, H, T>
+impl<E, K, V, H, T> Resolver for Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -70,6 +70,46 @@ where
                 // Result of proof verification isn't used by this implementation.
                 success_tx: oneshot::channel().0,
             })
+    }
+}
+
+/// Blanket implementation for any borrowed type that implements Resolver
+impl<T> Resolver for &T
+where
+    T: Resolver,
+{
+    type Digest = T::Digest;
+    type Key = T::Key;
+    type Value = T::Value;
+
+    async fn get_operations(
+        &self,
+        size: u64,
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error> {
+        (*self).get_operations(size, start_loc, max_ops).await
+    }
+}
+
+impl<T> Resolver for Arc<RwLock<T>>
+where
+    T: Resolver,
+{
+    type Digest = T::Digest;
+    type Key = T::Key;
+    type Value = T::Value;
+
+    async fn get_operations(
+        &self,
+        size: u64,
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error> {
+        self.read()
+            .await
+            .get_operations(size, start_loc, max_ops)
+            .await
     }
 }
 

@@ -8,13 +8,32 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
+use futures::channel::mpsc;
 use std::fmt;
 
 pub mod client;
 pub mod resolver;
+
+/// Represents a synchronization target with hash and operation bounds
+#[derive(Debug, Clone)]
+pub struct SyncTarget<D: Digest> {
+    /// Target hash of the database
+    pub hash: D,
+    /// Lower bound of operations to sync (inclusive)
+    /// This will be the pruning boundary of the synced database.
+    pub lower_bound_ops: u64,
+    /// Upper bound of operations to sync (inclusive)
+    pub upper_bound_ops: u64,
+}
+
+/// Channel for sending sync target updates
+pub type SyncTargetUpdateSender<D> = mpsc::Sender<SyncTarget<D>>;
+
+/// Channel for receiving sync target updates
+pub type SyncTargetUpdateReceiver<D> = mpsc::Receiver<SyncTarget<D>>;
 
 /// Synchronization errors
 #[derive(Debug, thiserror::Error)]
@@ -34,6 +53,15 @@ pub enum Error {
     /// Invalid client state
     #[error("Invalid client state")]
     InvalidState,
+    /// Sync target hash unchanged
+    #[error("Sync target hash unchanged")]
+    SyncTargetHashUnchanged,
+    /// Sync target moved backward
+    #[error("Sync target moved backward: {old:?} -> {new:?}")]
+    SyncTargetMovedBackward {
+        old: Box<dyn fmt::Debug + Send + Sync>,
+        new: Box<dyn fmt::Debug + Send + Sync>,
+    },
     /// Sync already completed
     #[error("Sync already completed")]
     AlreadyComplete,

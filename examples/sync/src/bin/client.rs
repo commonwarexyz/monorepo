@@ -7,7 +7,7 @@ use clap::{Arg, Command};
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
 use commonware_storage::{
-    adb::any::sync::{self, client::Config as SyncConfig},
+    adb::any::sync::{self, client::Config as SyncConfig, SyncTarget},
     mmr::hasher::Standard,
 };
 use commonware_sync::{crate_version, create_adb_config, Database, Resolver};
@@ -101,18 +101,21 @@ where
         context: context.clone(),
         db_config,
         fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
-        target_hash,
-        lower_bound_ops: oldest_retained_loc,
-        upper_bound_ops: latest_op_loc,
+        target: SyncTarget {
+            hash: target_hash,
+            lower_bound_ops: oldest_retained_loc,
+            upper_bound_ops: latest_op_loc,
+        },
         resolver,
         hasher: Standard::new(),
         apply_batch_size: 1024,
+        update_receiver: None,
     };
 
     info!(
         batch_size = config.batch_size,
-        lower_bound = sync_config.lower_bound_ops,
-        upper_bound = sync_config.upper_bound_ops,
+        lower_bound = sync_config.target.lower_bound_ops,
+        upper_bound = sync_config.target.upper_bound_ops,
         "Sync configuration"
     );
 
