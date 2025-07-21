@@ -70,11 +70,11 @@ Client options:
 
    You should see output like:
    ```
-   INFO  initializing database
-   INFO  creating initial operations operations_len=56
-   INFO  database ready op_count=112 root=8837dd38704093f65b8c9ca4041daa57b3df20fac95474a86580f57bd6ee6bd9
-   INFO  server listening and continuously adding operations addr=127.0.0.1:8080 operation_interval=2s ops_per_interval=3
-   INFO  added operations operations_added=4 root=c63b04a06ea36be9e7b82a2f70b28578fd940e8b8f5b8d616bfafa7471508514
+   INFO initializing database
+   INFO creating initial operations operations_len=56
+   INFO Database ready op_count=112 root=8837dd38704093f65b8c9ca4041daa57b3df20fac95474a86580f57bd6ee6bd9
+   INFO server listening and continuously adding operations addr=127.0.0.1:8080 operation_interval=2s ops_per_interval=3
+   INFO added operations operations_added=4 root=c63b04a06ea36be9e7b82a2f70b28578fd940e8b8f5b8d616bfafa7471508514
    ```
 
 2. **In another terminal, run the client:**
@@ -85,16 +85,14 @@ Client options:
    You should see output like:
    ```
    INFO starting sync to server server=127.0.0.1:8080
-   INFO requesting server metadata
    INFO establishing connection server_addr=127.0.0.1:8080
    INFO connected server_addr=127.0.0.1:8080
-   INFO sync target lower_bound=66 upper_bound=128
-   INFO created local database
-   INFO sync configuration batch_size=25 lower_bound=66 upper_bound=128 target_update_interval=3s
-   INFO Beginning sync operation...
+   INFO initial sync target target=SyncTarget { root: 234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3, lower_bound_ops: 74, upper_bound_ops: 144 }
+   INFO sync configuration batch_size=25 lower_bound=74 upper_bound=144 target_update_interval=3s
+   INFO beginning sync operation...
    INFO starting sync
-   INFO sync completed successfully root=94b9d7b53badbb4827b34cb96c07a28704da82c5dbb72e5052b57a9db8441fe4 lower_bound_ops=66 upper_bound_ops=128 log_size=129 valid_batches_received=3 invalid_batches_received=0
-   INFO ✅ sync completed successfully database_ops=129 root=94b9d7b53badbb4827b34cb96c07a28704da82c5dbb72e5052b57a9db8441fe4
+   INFO sync completed successfully target_root=234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3 lower_bound_ops=74 upper_bound_ops=144 log_size=145 valid_batches_received=3 invalid_batches_received=0
+   INFO ✅ Sync completed successfully database_ops=145 root=234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3
    ```
 
 ## Metrics
