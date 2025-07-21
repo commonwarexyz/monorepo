@@ -255,7 +255,7 @@ where
             });
         }
         if new_target.root == old_target.root {
-            return Err(Error::SyncTargetRootDigestUnchanged);
+            return Err(Error::SyncTargetRootUnchanged);
         }
         Ok(())
     }
@@ -596,7 +596,7 @@ where
                     let mut hasher = mmr::hasher::Standard::<H>::new();
                     let got_digest = db.root(&mut hasher);
                     if got_digest != config.target.root {
-                        return Err(Error::RootDigestMismatch {
+                        return Err(Error::RootMismatch {
                             expected: Box::new(config.target.root),
                             actual: Box::new(got_digest),
                         });
