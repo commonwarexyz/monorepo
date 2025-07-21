@@ -1,7 +1,6 @@
 //! This client demonstrates how to use the [commonware_storage::adb::any::sync] functionality
-//! to synchronize to the server's state. It fetches server metadata to determine sync parameters
-//! and then performs the actual sync operation. It uses the [Resolver] trait to fetch operations
-//! from the server and periodically requests target updates for dynamic sync.
+//! to synchronize to the server's state. It uses the [Resolver] to fetch operations and sync
+//! target updates from the server.
 
 use clap::{Arg, Command};
 use commonware_cryptography::sha256::Digest;
@@ -116,10 +115,9 @@ where
     let target_resolver = Resolver::new(context.clone(), config.server);
     let target_update_interval = config.target_update_interval;
     let initial_target_clone = initial_target.clone();
-    let target_context = context.clone();
-    let _target_update_handle = context.with_label("target-update").spawn(move |_| {
+    let _target_update_handle = context.with_label("target-update").spawn(move |context| {
         target_update_task(
-            target_context,
+            context,
             target_resolver,
             update_sender,
             target_update_interval,
