@@ -1,7 +1,8 @@
 //! Identity-Based Encryption (IBE) implementation for BLS12-381.
 //!
 //! This module provides timelock encryption functionality using identity-based
-//! encryption on the BLS12-381 elliptic curve.
+//! encryption on the BLS12-381 elliptic curve. The implementation uses the
+//! Fujisaki-Okamoto transform to achieve CCA-security.
 
 use super::primitives::{
     group::{Element, Scalar, GT},
@@ -111,12 +112,19 @@ fn xor(a: &[u8], b: &[u8]) -> Vec<u8> {
     a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect()
 }
 
-/// Encrypt a message using identity-based encryption.
+/// Encrypt a message using identity-based encryption with CCA-security.
+///
+/// This implements the Fujisaki-Okamoto transform for CCA-security by:
+/// 1. Generating random sigma
+/// 2. Deriving encryption randomness r = H3(sigma || message)
+/// 3. Creating commitment U = r * G
+/// 4. Masking sigma with the pairing result
+/// 5. Masking the message with H4(sigma)
 ///
 /// # Arguments
 /// * `rng` - Random number generator
 /// * `public` - Master public key
-/// * `message` - Message to encrypt (max 32 bytes)
+/// * `message` - Message to encrypt (must be exactly 32 bytes)
 /// * `target` - Identity/target to encrypt for
 ///
 /// # Returns
@@ -164,7 +172,13 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
     Ok(Ciphertext { u, v, w })
 }
 
-/// Decrypt a ciphertext using identity-based encryption.
+/// Decrypt a ciphertext using identity-based encryption with CCA-security.
+///
+/// The decryption verifies the ciphertext integrity by:
+/// 1. Recovering sigma from the pairing
+/// 2. Recovering the message
+/// 3. Recomputing r = H3(sigma || message)
+/// 4. Verifying that U = r * G matches the ciphertext
 ///
 /// # Arguments
 /// * `private` - Private key for the identity
@@ -368,5 +382,57 @@ mod tests {
             decrypt::<MinPk>(private_key, &ciphertext).expect("Decryption should succeed");
 
         assert_eq!(message, decrypted);
+    }
+
+    #[test]
+    fn test_cca_security_modified_u() {
+        let mut rng = thread_rng();
+
+        let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
+        let identity = b"cca@example.com";
+        let message = b"CCA security test message 32 byt"; // 32 bytes
+
+        // Generate private key
+        let id_point = hash_message::<MinPk>(MinPk::MESSAGE, identity);
+        let mut private_key = id_point;
+        private_key.mul(&master_secret);
+
+        // Encrypt
+        let mut ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, message, identity)
+            .expect("Encryption should succeed");
+
+        // Modify U component (this should make decryption fail due to FO transform)
+        let mut modified_u = ciphertext.u;
+        modified_u.mul(&Scalar::from_ikm(&[1u8; 64]));
+        ciphertext.u = modified_u;
+
+        // Try to decrypt - should fail
+        let result = decrypt::<MinPk>(private_key, &ciphertext);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cca_security_modified_v() {
+        let mut rng = thread_rng();
+
+        let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
+        let identity = b"cca2@example.com";
+        let message = b"Another CCA test message 32bytes"; // 32 bytes
+
+        // Generate private key
+        let id_point = hash_message::<MinPk>(MinPk::MESSAGE, identity);
+        let mut private_key = id_point;
+        private_key.mul(&master_secret);
+
+        // Encrypt
+        let mut ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, message, identity)
+            .expect("Encryption should succeed");
+
+        // Modify V component (encrypted sigma)
+        ciphertext.v[0] ^= 0x01;
+
+        // Try to decrypt - should fail due to verification
+        let result = decrypt::<MinPk>(private_key, &ciphertext);
+        assert!(result.is_err());
     }
 }
