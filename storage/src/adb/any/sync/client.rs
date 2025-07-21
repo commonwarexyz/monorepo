@@ -255,7 +255,7 @@ where
             });
         }
         if new_target.hash == old_target.hash {
-            return Err(Error::SyncTargetHashUnchanged);
+            return Err(Error::SyncTargetRootUnchanged);
         }
         Ok(())
     }
@@ -266,7 +266,7 @@ where
             Client::FetchData { config, .. } => &mut config.update_receiver,
             Client::ApplyData { config, .. } => &mut config.update_receiver,
             Client::Done { .. } => {
-                warn!("Ignoring target update - sync already completed");
+                warn!("ignoring target update - sync already completed");
                 return Ok(self);
             }
         };
@@ -305,7 +305,7 @@ where
         info!(
             old_target = ?config.target,
             new_target = ?new_target,
-            "Applying target update"
+            "applying target update"
         );
 
         // Check if the existing log contains data in the updated sync range
@@ -325,7 +325,7 @@ where
                 log_size,
                 old_bounds = ?config.target,
                 new_bounds = ?new_target,
-                "Log is stale, reinitializing"
+                "log is stale, reinitializing"
             );
             Journal::<E, Operation<K, V>>::init_sync(
                 config.context.clone().with_label("log"),
@@ -346,7 +346,7 @@ where
                 log_size,
                 old_bounds = ?config.target,
                 new_bounds = ?new_target,
-                "Pruning log"
+                "pruning log"
             );
             // Log contains data in the updated sync range, prune normally
             log.prune(new_target.lower_bound_ops)
@@ -380,7 +380,7 @@ where
                 nodes
             }
             Err(e) => {
-                warn!(error = ?e, "Failed to extract pinned nodes for new target");
+                warn!(error = ?e, "failed to extract pinned nodes for new target");
                 let _ = success_tx.send(false);
                 return Err(Error::InvalidState);
             }
@@ -389,7 +389,7 @@ where
         debug!(
             lower_bound_ops = config.target.lower_bound_ops,
             pinned_nodes_count = new_pinned_nodes.len(),
-            "Extracted pinned nodes for new target"
+            "extracted pinned nodes for new target"
         );
 
         // Discard any pending updates, since they may be stale now.
@@ -427,7 +427,7 @@ where
                     warn!(
                         log_size,
                         upper_bound = config.target.upper_bound_ops,
-                        "Sync target exceeded"
+                        "sync target exceeded"
                     );
                     return Err(Error::InvalidState);
                 };
@@ -442,7 +442,7 @@ where
                     current_pos = log_size,
                     remaining_ops = remaining_ops,
                     batch_size = batch_size.get(),
-                    "Fetching proof and operations"
+                    "fetching proof and operations"
                 );
 
                 // Get proof and operations from resolver
@@ -468,7 +468,7 @@ where
                     debug!(
                         operations_len,
                         batch_size = batch_size.get(),
-                        "Received invalid batch size from resolver"
+                        "received invalid batch size from resolver"
                     );
                     metrics.invalid_batches_received.inc();
                     let _ = success_tx.send(false);
@@ -480,7 +480,7 @@ where
                     });
                 }
 
-                debug!(operations_len, "Received operations from resolver");
+                debug!(operations_len, "received operations from resolver");
 
                 // Verify the proof is valid over the given operations
                 let proof_valid = {
@@ -496,7 +496,7 @@ where
                 let _ = success_tx.send(proof_valid);
 
                 if !proof_valid {
-                    debug!("Proof verification failed, retrying");
+                    debug!("proof verification failed, retrying");
                     metrics.invalid_batches_received.inc();
                     return Ok(Client::FetchData {
                         config,
@@ -512,7 +512,7 @@ where
                     let end_pos = leaf_num_to_pos(log_size + operations_len - 1);
                     let Ok(new_pinned_nodes) = proof.extract_pinned_nodes(start_pos, end_pos)
                     else {
-                        warn!("Failed to extract pinned nodes, retrying");
+                        warn!("failed to extract pinned nodes, retrying");
                         metrics.invalid_batches_received.inc();
                         return Ok(Client::FetchData {
                             config,
@@ -573,7 +573,7 @@ where
                 // Check if we've completed sync
                 if log_size >= target_log_size {
                     if log_size > target_log_size {
-                        warn!(log_size, target_log_size, "Log size exceeded sync target");
+                        warn!(log_size, target_log_size, "log size exceeded sync target");
                         return Err(Error::InvalidState);
                     }
 
@@ -609,7 +609,7 @@ where
                         log_size = log_size,
                         valid_batches_received = metrics.valid_batches_received.get(),
                         invalid_batches_received = metrics.invalid_batches_received.get(),
-                        "Sync completed successfully");
+                        "sync completed successfully");
 
                     return Ok(Client::Done { db });
                 }
@@ -629,7 +629,7 @@ where
 
     /// Run the complete sync process
     pub(crate) async fn sync(mut self) -> Result<adb::any::Any<E, K, V, H, T>, Error> {
-        info!("Starting sync");
+        info!("starting sync");
         loop {
             self = self.step().await?;
             if let Client::Done { db } = self {
@@ -823,7 +823,7 @@ pub(crate) mod tests {
                 }) => {
                     // Expected error
                 }
-                _ => panic!("Expected InvalidTarget error for invalid bounds"),
+                _ => panic!("expected InvalidTarget error for invalid bounds"),
             }
         });
     }
@@ -1397,7 +1397,7 @@ pub(crate) mod tests {
             // Capture initial log size before processing any batches
             let initial_log_size = match &client {
                 Client::FetchData { log, .. } => log.size().await.unwrap(),
-                _ => panic!("Expected FetchData state"),
+                _ => panic!("expected FetchData state"),
             };
 
             // Step the client twice to ensure it has processed at least one batch
@@ -1409,11 +1409,11 @@ pub(crate) mod tests {
             // Verify that at least one batch was processed
             let current_log_size = match &client {
                 Client::FetchData { log, .. } => log.size().await.unwrap(),
-                _ => panic!("Expected FetchData state"),
+                _ => panic!("expected FetchData state"),
             };
             assert!(
                 current_log_size > initial_log_size,
-                "Expected at least one batch to be processed"
+                "expected at least one batch to be processed"
             );
 
             // Modify the target database by adding more operations
@@ -1542,15 +1542,15 @@ pub(crate) mod tests {
                     // Verify pinned nodes were established
                     assert!(
                         pinned_nodes.is_some(),
-                        "Pinned nodes should have been established"
+                        "pinned nodes should have been established"
                     );
                     log_size
                 }
-                _ => panic!("Expected FetchData state"),
+                _ => panic!("expected FetchData state"),
             };
             assert!(
                 current_log_size > initial_lower_bound,
-                "Expected at least one batch to be processed"
+                "expected at least one batch to be processed"
             );
 
             // Send target update with SAME lower bound but higher upper bound

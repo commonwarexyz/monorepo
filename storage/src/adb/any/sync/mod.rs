@@ -39,40 +39,37 @@ pub type SyncTargetUpdateReceiver<D> = mpsc::Receiver<SyncTarget<D>>;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Hash mismatch after sync
-    #[error("Hash mismatch - expected {expected:?}, got {actual:?}")]
+    #[error("hash mismatch - expected {expected:?}, got {actual:?}")]
     HashMismatch {
         expected: Box<dyn fmt::Debug + Send + Sync>,
         actual: Box<dyn fmt::Debug + Send + Sync>,
     },
     /// Invalid target parameters
-    #[error("Invalid bounds: lower bound {lower_bound_pos} > upper bound {upper_bound_pos}")]
+    #[error("invalid bounds: lower bound {lower_bound_pos} > upper bound {upper_bound_pos}")]
     InvalidTarget {
         lower_bound_pos: u64,
         upper_bound_pos: u64,
     },
     /// Invalid client state
-    #[error("Invalid client state")]
+    #[error("invalid client state")]
     InvalidState,
-    /// Sync target hash unchanged
-    #[error("Sync target hash unchanged")]
-    SyncTargetHashUnchanged,
+    /// Sync target root unchanged
+    #[error("sync target root unchanged")]
+    SyncTargetRootUnchanged,
     /// Sync target moved backward
-    #[error("Sync target moved backward: {old:?} -> {new:?}")]
+    #[error("sync target moved backward: {old:?} -> {new:?}")]
     SyncTargetMovedBackward {
         old: Box<dyn fmt::Debug + Send + Sync>,
         new: Box<dyn fmt::Debug + Send + Sync>,
     },
     /// Sync already completed
-    #[error("Sync already completed")]
+    #[error("sync already completed")]
     AlreadyComplete,
     /// Error from the database
-    #[error("Database error: {0}")]
+    #[error("database error: {0}")]
     Adb(crate::adb::Error),
-    /// Maximum retries exceeded
-    #[error("Maximum retries exceeded")]
-    MaxRetriesExceeded,
     /// Resolver error
-    #[error("Resolver error: {0:?}")]
+    #[error("resolver error: {0:?}")]
     Resolver(Box<dyn fmt::Debug + Send + Sync>),
 }
 
