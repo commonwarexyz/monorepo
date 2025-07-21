@@ -59,7 +59,7 @@ where
     /// Counter for continuous operations added (currently unused).
     ops_counter: Counter,
     /// Last known target root digest for tracking changes.
-    last_target_root: Arc<RwLock<Option<commonware_cryptography::sha256::Digest>>>,
+    last_target_root: Arc<RwLock<Option<Digest>>>,
     /// Last time we added continuous operations.
     last_operation_time: Arc<RwLock<SystemTime>>,
     /// Seed for generating continuous operations.
