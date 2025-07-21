@@ -594,11 +594,11 @@ where
 
                     // Verify the final digest matches the target
                     let mut hasher = mmr::hasher::Standard::<H>::new();
-                    let got_digest = db.root(&mut hasher);
-                    if got_digest != config.target.root {
+                    let got_root = db.root(&mut hasher);
+                    if got_root != config.target.root {
                         return Err(Error::RootMismatch {
                             expected: Box::new(config.target.root),
-                            actual: Box::new(got_digest),
+                            actual: Box::new(got_root),
                         });
                     }
 
