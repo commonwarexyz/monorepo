@@ -102,11 +102,7 @@ where
         db_config,
         fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
         target: SyncTarget {
-<<<<<<< HEAD
             root,
-=======
-            hash: target_hash,
->>>>>>> origin/main
             lower_bound_ops: oldest_retained_loc,
             upper_bound_ops: latest_op_loc,
         },
