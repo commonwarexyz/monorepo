@@ -1307,7 +1307,7 @@ pub(crate) mod tests {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(20),
                 target: SyncTarget {
-                    root_digest: root_digest,
+                    root_digest,
                     lower_bound_ops: lower_bound,
                     upper_bound_ops: upper_bound,
                 },
