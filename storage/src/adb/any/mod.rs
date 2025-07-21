@@ -173,24 +173,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let mut snapshot: Index<T, u64> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
         let mut hasher = Standard::<H>::new();
-        let (mmr, log) = Self::init_mmr_and_log(
-            context,
-            Config {
-                mmr_journal_partition: cfg.mmr_journal_partition,
-                mmr_metadata_partition: cfg.mmr_metadata_partition,
-                mmr_items_per_blob: cfg.mmr_items_per_blob,
-                mmr_write_buffer: cfg.mmr_write_buffer,
-                log_journal_partition: cfg.log_journal_partition,
-                log_items_per_blob: cfg.log_items_per_blob,
-                log_write_buffer: cfg.log_write_buffer,
-                translator: cfg.translator,
-                thread_pool: cfg.thread_pool,
-                buffer_pool: cfg.buffer_pool,
-                pruning_delay: cfg.pruning_delay,
-            },
-            &mut hasher,
-        )
-        .await?;
+        let pruning_delay = cfg.pruning_delay;
+        let (mmr, log) = Self::init_mmr_and_log(context, cfg, &mut hasher).await?;
 
         let start_leaf_num = leaf_pos_to_num(mmr.pruned_to_pos()).unwrap();
         let inactivity_floor_loc = Self::build_snapshot_from_log(
@@ -208,7 +192,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             inactivity_floor_loc,
             uncommitted_ops: 0,
             hasher,
-            pruning_delay: cfg.pruning_delay,
+            pruning_delay,
         };
 
         Ok(db)
@@ -416,7 +400,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                         }
                         Operation::Update(key, _) => {
                             let result =
-                                Any::<E, K, V, H, T>::update_loc(snapshot, log, key, None, i)
+                                Any::<E, K, V, H, T>::update_loc(snapshot, log, &key, None, i)
                                     .await?;
                             if let Some(ref mut bitmap) = bitmap {
                                 match result {
@@ -452,20 +436,20 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     async fn update_loc(
         snapshot: &mut Index<T, u64>,
         log: &Journal<E, Operation<K, V>>,
-        key: K,
+        key: &K,
         value: Option<&V>,
         new_loc: u64,
     ) -> Result<UpdateResult, Error> {
         // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
         // cursor to look for the key.
-        let Some(mut cursor) = snapshot.get_mut_or_insert(&key, new_loc) else {
+        let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
             return Ok(UpdateResult::Inserted(new_loc));
         };
 
         // Iterate over conflicts in the snapshot.
         while let Some(&loc) = cursor.next() {
             let (k, v) = Self::get_update_op(log, loc).await?;
-            if k == key {
+            if k == *key {
                 // Found the key in the snapshot.
                 if let Some(value) = value {
                     if v == *value {
@@ -545,7 +529,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let res = Any::<_, _, _, H, T>::update_loc(
             &mut self.snapshot,
             &self.log,
-            key.clone(),
+            &key,
             Some(&value),
             new_loc,
         )
@@ -648,8 +632,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             .await
     }
 
-    /// Analagous to proof but for a previous database state.
-    /// Specifically, the state when the MMR had `size` elements.
+    /// Analogous to proof, but with respect to the state of the MMR when it had `size` elements.
     pub async fn historical_proof(
         &self,
         size: u64,
