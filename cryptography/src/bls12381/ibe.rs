@@ -16,13 +16,16 @@ use rand::{CryptoRng, Rng};
 /// Block size for encryption operations.
 const BLOCK_SIZE: usize = 32;
 
+/// Type alias for 32-byte blocks.
+type Block = [u8; 32];
+
 /// Ciphertext structure for IBE.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ciphertext<V: Variant> {
     /// First group element U = r * Public::one().
     pub u: V::Public,
     /// Encrypted random value V = sigma XOR H2(e(Q_id, r * P_pub)).
-    pub v: [u8; 16],
+    pub v: Block,
     /// Encrypted message W = M XOR H4(sigma).
     pub w: Vec<u8>,
 }
@@ -41,8 +44,8 @@ impl<V: Variant> Read for Ciphertext<V> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         let u = V::Public::read(buf)?;
-        let mut v = [0u8; 16];
-        if buf.remaining() < 16 {
+        let mut v = Block::default();
+        if buf.remaining() < 32 {
             return Err(commonware_codec::Error::EndOfBuffer);
         }
         buf.copy_to_slice(&mut v);
@@ -58,7 +61,7 @@ impl<V: Variant> Read for Ciphertext<V> {
 
 impl<V: Variant> EncodeSize for Ciphertext<V> {
     fn encode_size(&self) -> usize {
-        self.u.encode_size() + 16 + UInt(self.w.len() as u64).encode_size() + self.w.len()
+        self.u.encode_size() + 32 + UInt(self.w.len() as u64).encode_size() + self.w.len()
     }
 }
 
@@ -66,20 +69,21 @@ impl<V: Variant> EncodeSize for Ciphertext<V> {
 mod hash {
     use super::*;
 
-    /// H2: GT -> [u8; 16]
+    /// H2: GT -> Block
     /// Used to mask the random sigma value.
-    pub fn h2(gt: &GT) -> [u8; 16] {
+    pub fn h2(gt: &GT) -> Block {
         let mut input = b"h2".to_vec();
         input.extend_from_slice(&gt.to_bytes());
         let digest = crate::sha256::hash(&input);
-        let mut result = [0u8; 16];
-        result.copy_from_slice(&digest[..16]);
+        // Convert Digest to Block by copying the bytes
+        let mut result = Block::default();
+        result.copy_from_slice(digest.as_ref());
         result
     }
 
     /// H3: (sigma, M) -> Scalar
     /// Used to derive the random scalar r.
-    pub fn h3(sigma: &[u8; 16], message: &[u8]) -> Scalar {
+    pub fn h3(sigma: &Block, message: &[u8]) -> Scalar {
         let mut input = b"h3".to_vec();
         input.extend_from_slice(sigma);
         input.extend_from_slice(message);
@@ -92,14 +96,15 @@ mod hash {
         Scalar::from_ikm(&ikm)
     }
 
-    /// H4: sigma -> [u8; 32]
+    /// H4: sigma -> Block
     /// Used to mask the message.
-    pub fn h4(sigma: &[u8; 16]) -> [u8; BLOCK_SIZE] {
+    pub fn h4(sigma: &Block) -> Block {
         let mut input = b"h4".to_vec();
         input.extend_from_slice(sigma);
         let digest = crate::sha256::hash(&input);
-        let mut result = [0u8; BLOCK_SIZE];
-        result.copy_from_slice(&digest);
+        // Convert Digest to Block by copying the bytes
+        let mut result = Block::default();
+        result.copy_from_slice(digest.as_ref());
         result
     }
 }
@@ -134,8 +139,8 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
     // Hash target to get Q_id in signature group using the variant's message DST
     let q_id = hash_message::<V>(V::MESSAGE, target);
 
-    // Generate random 16-byte sigma
-    let mut sigma = [0u8; 16];
+    // Generate random sigma
+    let mut sigma = Block::default();
     rng.fill_bytes(&mut sigma);
 
     // Derive scalar r from sigma and message
@@ -152,9 +157,9 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
 
     // Compute V = sigma XOR H2(e(Q_id, r * P_pub))
     let h2_value = hash::h2(&gt);
-    let v: [u8; 16] = xor(&sigma, &h2_value)
+    let v: Block = xor(&sigma, &h2_value)
         .try_into()
-        .expect("XOR result should be 16 bytes");
+        .expect("XOR result should be Block");
 
     // Compute W = M XOR H4(sigma)
     let h4_value = hash::h4(&sigma);
@@ -180,9 +185,9 @@ pub fn decrypt<V: Variant>(
 
     // Recover sigma = V XOR H2(e(U, private))
     let h2_value = hash::h2(&gt);
-    let sigma: [u8; 16] = xor(&ciphertext.v, &h2_value)
+    let sigma: Block = xor(&ciphertext.v, &h2_value)
         .try_into()
-        .expect("XOR result should be 16 bytes");
+        .expect("XOR result should be Block");
 
     // Recover M = W XOR H4(sigma)
     let h4_value = hash::h4(&sigma);
