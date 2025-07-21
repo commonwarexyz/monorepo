@@ -88,8 +88,7 @@ Client options:
    INFO requesting server metadata
    INFO establishing connection server_addr=127.0.0.1:8080
    INFO connected server_addr=127.0.0.1:8080
-   INFO received server metadata metadata=ServerMetadata { root: 94b9d7b53badbb4827b34cb96c07a28704da82c5dbb72e5052b57a9db8441fe4, oldest_retained_loc: 66, latest_op_loc: 128 }
-   INFO sync parameters lower_bound=66 upper_bound=128
+   INFO sync target lower_bound=66 upper_bound=128
    INFO created local database
    INFO sync configuration batch_size=25 lower_bound=66 upper_bound=128 target_update_interval=3s
    INFO Beginning sync operation...
@@ -114,7 +113,7 @@ curl http://localhost:9090/metrics
 1. **Server Setup**: Server starts, populates database with initial operations, and listens for connections
 2. **Continuous Operation Generation**: Server continuously adds new operations at the specified interval
 3. **Client Connection**: Client establishes connection to server
-4. **Initial Sync Target**: Client requests server metadata to determine initial sync target (inactivity floor, size and digest of the server's database)
+4. **Initial Sync Target**: Client requests server metadata to determine initial sync target (inactivity floor, size, and digest of the server's database)
 5. **Dynamic Target Updates**: Client periodically requests target updates during sync to handle new operations added by the server
 6. **Completion**: Client continues until all operations are applied and state matches server's target
 7. **Cleanup**: Client disconnects and stops; Server keeps running and adding operations

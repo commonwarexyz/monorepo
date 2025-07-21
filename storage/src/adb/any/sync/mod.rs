@@ -8,6 +8,8 @@ use crate::{
     },
     translator::Translator,
 };
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -71,6 +73,37 @@ pub enum Error {
     /// Resolver error
     #[error("resolver error: {0:?}")]
     Resolver(Box<dyn fmt::Debug + Send + Sync>),
+}
+
+impl<D: Digest> Write for SyncTarget<D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.root.write(buf);
+        self.lower_bound_ops.write(buf);
+        self.upper_bound_ops.write(buf);
+    }
+}
+
+impl<D: Digest> EncodeSize for SyncTarget<D> {
+    fn encode_size(&self) -> usize {
+        self.root.encode_size()
+            + self.lower_bound_ops.encode_size()
+            + self.upper_bound_ops.encode_size()
+    }
+}
+
+impl<D: Digest> Read for SyncTarget<D> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let root = D::read(buf)?;
+        let lower_bound_ops = u64::read(buf)?;
+        let upper_bound_ops = u64::read(buf)?;
+        Ok(Self {
+            root,
+            lower_bound_ops,
+            upper_bound_ops,
+        })
+    }
 }
 
 /// Synchronizes a database by fetching, verifying, and applying operations from a remote source.

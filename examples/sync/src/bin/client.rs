@@ -23,6 +23,7 @@ use tracing::{debug, error, info, warn};
 /// Default server address.
 const DEFAULT_SERVER: &str = "127.0.0.1:8080";
 const DEFAULT_CLIENT_DIR_PREFIX: &str = "/tmp/commonware-sync/client";
+const UPDATE_CHANNEL_SIZE: usize = 16;
 
 #[derive(Debug)]
 struct Config {
@@ -55,13 +56,11 @@ where
     debug!("requesting server metadata");
 
     let metadata = resolver.get_server_metadata().await?;
-    let metadata = ServerMetadata {
+    Ok(ServerMetadata {
         root: metadata.root,
         oldest_retained_loc: metadata.oldest_retained_loc,
         latest_op_loc: metadata.latest_op_loc,
-    };
-    debug!(?metadata, "received server metadata");
-    Ok(metadata)
+    })
 }
 
 /// Periodically request target updates from server and send them to sync client
@@ -134,9 +133,10 @@ where
     } = get_server_metadata(&resolver).await?;
 
     info!(
+        root = %root,
         lower_bound = oldest_retained_loc,
         upper_bound = latest_op_loc,
-        "sync parameters"
+        "initial sync target"
     );
 
     // Create database configuration
@@ -144,7 +144,7 @@ where
     debug!("created local database");
 
     // Create channel for target updates
-    let (update_sender, update_receiver) = mpsc::channel(16);
+    let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
     // Create initial sync target
     let initial_target = SyncTarget {

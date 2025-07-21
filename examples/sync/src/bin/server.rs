@@ -3,16 +3,17 @@
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
+use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Listener, Metrics as _, Network, Runner, RwLock, Spawner as _,
 };
-use commonware_storage::mmr::hasher::Standard;
+use commonware_storage::{adb::any::sync::SyncTarget, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     crate_version, create_adb_config, create_test_operations, parse_duration, Database,
-    ErrorResponse, GetOperationsRequest, GetOperationsResponse, GetServerMetadataResponse,
-    GetTargetUpdateResponse, Message, Operation, ProtocolError, MAX_MESSAGE_SIZE,
+    ErrorResponse, GetOperationsRequest, GetOperationsResponse, GetServerMetadataResponse, Message,
+    Operation, ProtocolError, MAX_MESSAGE_SIZE,
 };
 use prometheus_client::metrics::counter::Counter;
 use rand::Rng;
@@ -203,7 +204,7 @@ where
 /// Handle a request for target update.
 async fn handle_get_target_update_request<E>(
     state: &State<E>,
-) -> Result<GetTargetUpdateResponse, ProtocolError>
+) -> Result<SyncTarget<Digest>, ProtocolError>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
@@ -226,13 +227,12 @@ where
     *last_root_guard = Some(root);
     drop(last_root_guard);
 
-    let response = GetTargetUpdateResponse {
+    let response = SyncTarget {
         root,
         lower_bound_ops,
         upper_bound_ops,
     };
-
-    info!(?response, "serving target update");
+    debug!(?response, "serving target update");
     Ok(response)
 }
 

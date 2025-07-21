@@ -118,18 +118,10 @@ where
     pub async fn get_target_update(
         &self,
     ) -> Result<SyncTarget<commonware_cryptography::sha256::Digest>, ResolverError> {
-        info!("requesting target update from server");
+        debug!("requesting target update from server");
 
         match self.send_request(Message::GetTargetUpdateRequest).await? {
-            Message::GetTargetUpdateResponse(response) => {
-                info!(
-                    root = format!("{:?}", response.root),
-                    lower_bound_ops = response.lower_bound_ops,
-                    upper_bound_ops = response.upper_bound_ops,
-                    "received target update"
-                );
-                Ok(response.to_sync_target())
-            }
+            Message::GetTargetUpdateResponse(response) => Ok(response),
             Message::Error(err) => {
                 error!(error = %err.message, "❌ server error");
                 Err(ResolverError::ServerError(err.message))
