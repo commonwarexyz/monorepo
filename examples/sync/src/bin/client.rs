@@ -78,9 +78,6 @@ where
 {
     let mut current_target = initial_target;
 
-    // Initial sleep before first update check
-    context.sleep(interval_duration).await;
-
     loop {
         context.sleep(interval_duration).await;
 
