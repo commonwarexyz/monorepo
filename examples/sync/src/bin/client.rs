@@ -34,7 +34,7 @@ struct Config {
 
 #[derive(Debug)]
 struct ServerMetadata {
-    target_hash: Digest,
+    root_digest: Digest,
     oldest_retained_loc: u64,
     latest_op_loc: u64,
 }
@@ -50,7 +50,7 @@ where
 
     let metadata = resolver.get_server_metadata().await?;
     let metadata = ServerMetadata {
-        target_hash: metadata.target_hash,
+        root_digest: metadata.root_digest,
         oldest_retained_loc: metadata.oldest_retained_loc,
         latest_op_loc: metadata.latest_op_loc,
     };
@@ -74,7 +74,7 @@ where
 
     // Get server metadata to determine sync parameters
     let ServerMetadata {
-        target_hash,
+        root_digest,
         oldest_retained_loc,
         latest_op_loc,
     } = get_server_metadata(&resolver).await?;
@@ -102,7 +102,7 @@ where
         db_config,
         fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
         target: SyncTarget {
-            hash: target_hash,
+            root_digest,
             lower_bound_ops: oldest_retained_loc,
             upper_bound_ops: latest_op_loc,
         },
@@ -123,23 +123,23 @@ where
     info!("Beginning sync operation...");
     let database = sync::sync(sync_config).await?;
 
-    // Get the root hash of the synced database
+    // Get the root digest of the synced database
     let mut hasher = Standard::new();
-    let root_hash = database.root(&mut hasher);
+    let got_root_digest = database.root(&mut hasher);
 
-    // Verify the hash matches the  target hash.
-    if root_hash != target_hash {
-        return Err(format!("Synced database root hash does not match target hash: {root_hash:?} != {target_hash:?}").into());
+    // Verify the digest matches the  target digest.
+    if got_root_digest != root_digest {
+        return Err(format!("Synced database root digest does not match target digest: {got_root_digest:?} != {root_digest:?}").into());
     }
 
-    let root_hash_hex = root_hash
+    let root_digest_hex = got_root_digest
         .as_ref()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     info!(
         database_ops = database.op_count(),
-        root_hash = %root_hash_hex,
+        root_digest = %root_digest_hex,
         "✅ Sync completed successfully"
     );
 

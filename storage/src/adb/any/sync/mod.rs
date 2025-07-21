@@ -17,11 +17,11 @@ use std::fmt;
 pub mod client;
 pub mod resolver;
 
-/// Represents a synchronization target with hash and operation bounds
+/// The target state to sync to.
 #[derive(Debug, Clone)]
 pub struct SyncTarget<D: Digest> {
-    /// Target hash of the database
-    pub hash: D,
+    /// Root digest of the target database
+    pub root_digest: D,
     /// Lower bound of operations to sync (inclusive)
     /// This will be the pruning boundary of the synced database.
     pub lower_bound_ops: u64,
@@ -39,8 +39,8 @@ pub type SyncTargetUpdateReceiver<D> = mpsc::Receiver<SyncTarget<D>>;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Hash mismatch after sync
-    #[error("Hash mismatch - expected {expected:?}, got {actual:?}")]
-    HashMismatch {
+    #[error("Root digest mismatch - expected {expected:?}, got {actual:?}")]
+    RootDigestMismatch {
         expected: Box<dyn fmt::Debug + Send + Sync>,
         actual: Box<dyn fmt::Debug + Send + Sync>,
     },
@@ -53,9 +53,9 @@ pub enum Error {
     /// Invalid client state
     #[error("Invalid client state")]
     InvalidState,
-    /// Sync target hash unchanged
-    #[error("Sync target hash unchanged")]
-    SyncTargetHashUnchanged,
+    /// Sync target digest unchanged
+    #[error("Sync target digest unchanged")]
+    SyncTargetRootDigestUnchanged,
     /// Sync target moved backward
     #[error("Sync target moved backward: {old:?} -> {new:?}")]
     SyncTargetMovedBackward {
