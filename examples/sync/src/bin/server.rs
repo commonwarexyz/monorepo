@@ -56,13 +56,13 @@ where
     request_counter: Counter,
     /// Error counter for metrics.
     error_counter: Counter,
-    /// Counter for continuous operations added (currently unused).
+    /// Counter for operations added.
     ops_counter: Counter,
     /// Last known target root digest for tracking changes.
     last_target_root: Arc<RwLock<Option<Digest>>>,
-    /// Last time we added continuous operations.
+    /// Last time we added operations.
     last_operation_time: Arc<RwLock<SystemTime>>,
-    /// Seed for generating continuous operations.
+    /// Seed for generating operations.
     operation_seed: Arc<RwLock<u64>>,
 }
 
