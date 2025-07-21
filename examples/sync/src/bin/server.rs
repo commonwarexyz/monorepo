@@ -527,7 +527,7 @@ fn main() {
         info!(
             op_count = database.op_count(),
             root = %root_hex,
-            "Database ready"
+            "database ready"
         );
 
         // Create listener to accept connections

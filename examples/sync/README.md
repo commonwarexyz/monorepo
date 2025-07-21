@@ -72,7 +72,7 @@ Client options:
    ```
    INFO initializing database
    INFO creating initial operations operations_len=56
-   INFO Database ready op_count=112 root=8837dd38704093f65b8c9ca4041daa57b3df20fac95474a86580f57bd6ee6bd9
+   INFO database ready op_count=112 root=8837dd38704093f65b8c9ca4041daa57b3df20fac95474a86580f57bd6ee6bd9
    INFO server listening and continuously adding operations addr=127.0.0.1:8080 operation_interval=2s ops_per_interval=3
    INFO added operations operations_added=4 root=c63b04a06ea36be9e7b82a2f70b28578fd940e8b8f5b8d616bfafa7471508514
    ```
