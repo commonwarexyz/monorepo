@@ -154,19 +154,8 @@ where
         "sync configuration",
     );
 
-    // Do the sync with target updates
-    info!("beginning sync operation...");
-    let database = sync::sync(sync_config).await?;
-
-    // Get the root digest of the synced database
-    let mut hasher = Standard::new();
-    let got_root = database.root(&mut hasher);
-    info!(
-        database_ops = database.op_count(),
-        root = %got_root,
-        "✅ Sync completed successfully"
-    );
-    Ok(database)
+    // Sync to the server's state
+    sync::sync(sync_config).await.map_err(|e| e.into())
 }
 
 fn main() {

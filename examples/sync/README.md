@@ -89,10 +89,8 @@ Client options:
    INFO connected server_addr=127.0.0.1:8080
    INFO initial sync target target=SyncTarget { root: 234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3, lower_bound_ops: 74, upper_bound_ops: 144 }
    INFO sync configuration batch_size=25 lower_bound=74 upper_bound=144 target_update_interval=3s
-   INFO beginning sync operation...
    INFO starting sync
    INFO sync completed successfully target_root=234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3 lower_bound_ops=74 upper_bound_ops=144 log_size=145 valid_batches_received=3 invalid_batches_received=0
-   INFO ✅ Sync completed successfully database_ops=145 root=234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3
    ```
 
 ## Metrics
