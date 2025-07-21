@@ -24,7 +24,7 @@ use thiserror::Error;
 // TODO replace with SyncTarget
 #[derive(Debug, Clone)]
 pub struct GetTargetUpdateResponse {
-    /// Target hash to sync to.
+    /// Target root digest to sync to.
     pub root: Digest,
     /// Lower bound of operations to sync (inclusive).
     pub lower_bound_ops: u64,

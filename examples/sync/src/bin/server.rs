@@ -57,8 +57,8 @@ where
     error_counter: Counter,
     /// Counter for continuous operations added (currently unused).
     continuous_ops_counter: Counter,
-    /// Last known target hash for tracking changes.
-    last_target_hash: Arc<RwLock<Option<commonware_cryptography::sha256::Digest>>>,
+    /// Last known target root digest for tracking changes.
+    last_target_root: Arc<RwLock<Option<commonware_cryptography::sha256::Digest>>>,
     /// Last time we added continuous operations.
     last_operation_time: Arc<RwLock<SystemTime>>,
     /// Seed for generating continuous operations.
@@ -75,7 +75,7 @@ where
             request_counter: Counter::default(),
             error_counter: Counter::default(),
             continuous_ops_counter: Counter::default(),
-            last_target_hash: Arc::new(RwLock::new(None)),
+            last_target_root: Arc::new(RwLock::new(None)),
             last_operation_time: Arc::new(RwLock::new(SystemTime::now())),
             operation_seed: Arc::new(RwLock::new(initial_seed)),
         };
@@ -114,7 +114,7 @@ where
             let new_operations = create_test_operations(config.ops_per_interval, current_seed);
 
             // Add operations to database (no async boundaries crossed)
-            let hash = {
+            let root = {
                 let mut database = self.database.write().await;
                 for operation in new_operations.iter() {
                     let result = match operation {
@@ -136,7 +136,7 @@ where
                 .inc_by(new_operations.len() as u64);
             info!(
                 operations_added = new_operations.len(),
-                hash = %hash,
+                root = %root,
                 "added operations"
             );
         }
@@ -214,20 +214,20 @@ where
     // Get the current database state
     let lower_bound_ops = database.inactivity_floor_loc();
     let upper_bound_ops = database.op_count().saturating_sub(1);
-    let target_hash = {
+    let root = {
         let mut hasher = Standard::new();
         database.root(&mut hasher)
     };
 
     drop(database);
 
-    // Update the stored target hash
-    let mut last_hash_guard = state.last_target_hash.write().await;
-    *last_hash_guard = Some(target_hash);
-    drop(last_hash_guard);
+    // Update the stored target root digest
+    let mut last_root_guard = state.last_target_root.write().await;
+    *last_root_guard = Some(root);
+    drop(last_root_guard);
 
     let response = GetTargetUpdateResponse {
-        root: target_hash,
+        root,
         lower_bound_ops,
         upper_bound_ops,
     };

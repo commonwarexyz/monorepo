@@ -102,10 +102,7 @@ where
     /// Get server metadata (target root digest and bounds)
     pub async fn get_server_metadata(&self) -> Result<GetServerMetadataResponse, ResolverError> {
         match self.send_request(Message::GetServerMetadataRequest).await? {
-            Message::GetServerMetadataResponse(response) => {
-                info!("received server metadata");
-                Ok(response)
-            }
+            Message::GetServerMetadataResponse(response) => Ok(response),
             Message::Error(err) => {
                 error!(error = %err.message, "❌ server error");
                 Err(ResolverError::ServerError(err.message))
@@ -126,7 +123,7 @@ where
         match self.send_request(Message::GetTargetUpdateRequest).await? {
             Message::GetTargetUpdateResponse(response) => {
                 info!(
-                    hash = format!("{:?}", response.root),
+                    root = format!("{:?}", response.root),
                     lower_bound_ops = response.lower_bound_ops,
                     upper_bound_ops = response.upper_bound_ops,
                     "received target update"

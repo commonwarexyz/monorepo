@@ -72,9 +72,9 @@ Client options:
    ```
    INFO  initializing database
    INFO  creating initial operations operations_len=56
-   INFO  database ready op_count=112 root_hash=8837dd38704093f65b8c9ca4041daa57b3df20fac95474a86580f57bd6ee6bd9
+   INFO  database ready op_count=112 root=8837dd38704093f65b8c9ca4041daa57b3df20fac95474a86580f57bd6ee6bd9
    INFO  server listening and continuously adding operations addr=127.0.0.1:8080 operation_interval=2s ops_per_interval=3
-   INFO  added operations operations_added=4 hash=c63b04a06ea36be9e7b82a2f70b28578fd940e8b8f5b8d616bfafa7471508514
+   INFO  added operations operations_added=4 root=c63b04a06ea36be9e7b82a2f70b28578fd940e8b8f5b8d616bfafa7471508514
    ```
 
 2. **In another terminal, run the client:**
@@ -88,15 +88,14 @@ Client options:
    INFO requesting server metadata
    INFO establishing connection server_addr=127.0.0.1:8080
    INFO connected server_addr=127.0.0.1:8080
-   INFO received server metadata
-   INFO received server metadata metadata=ServerMetadata { target_hash: 94b9d7b53badbb4827b34cb96c07a28704da82c5dbb72e5052b57a9db8441fe4, oldest_retained_loc: 66, latest_op_loc: 128 }
+   INFO received server metadata metadata=ServerMetadata { root: 94b9d7b53badbb4827b34cb96c07a28704da82c5dbb72e5052b57a9db8441fe4, oldest_retained_loc: 66, latest_op_loc: 128 }
    INFO sync parameters lower_bound=66 upper_bound=128
    INFO created local database
    INFO sync configuration batch_size=25 lower_bound=66 upper_bound=128 target_update_interval=3s
    INFO Beginning sync operation...
    INFO starting sync
-   INFO sync completed successfully target_hash=94b9d7b53badbb4827b34cb96c07a28704da82c5dbb72e5052b57a9db8441fe4 lower_bound_ops=66 upper_bound_ops=128 log_size=129 valid_batches_received=3 invalid_batches_received=0
-   INFO ✅ sync completed successfully database_ops=129 root_hash=94b9d7b53badbb4827b34cb96c07a28704da82c5dbb72e5052b57a9db8441fe4
+   INFO sync completed successfully root=94b9d7b53badbb4827b34cb96c07a28704da82c5dbb72e5052b57a9db8441fe4 lower_bound_ops=66 upper_bound_ops=128 log_size=129 valid_batches_received=3 invalid_batches_received=0
+   INFO ✅ sync completed successfully database_ops=129 root=94b9d7b53badbb4827b34cb96c07a28704da82c5dbb72e5052b57a9db8441fe4
    ```
 
 ## Metrics
@@ -134,12 +133,12 @@ to implement authenticated networking.
 
 ### Sourcing a Sync Target
 
-When instantiating the client, it asks the server for a target root hash (to sync to) and periodically
+When instantiating the client, it asks the server for a target root digest (to sync to) and periodically
 requests updates.
 
 In a real application, the client should source this information from a trusted source (like a [commonware_consensus::threshold_simplex](https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html)
 consensus certificate) and only use the server for data that can be cryptographically verified against
-this target root hash.
+this target root digest.
 
 ### Rate Limiting
 
