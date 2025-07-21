@@ -4,6 +4,8 @@
 //! encryption on the BLS12-381 elliptic curve. The implementation uses the
 //! Fujisaki-Okamoto transform to achieve CCA-security.
 
+use crate::bls12381::primitives::ops::hash_message_namespace;
+
 use super::primitives::{
     group::{Element, Scalar, GT},
     ops::hash_message,
@@ -133,7 +135,7 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
     rng: &mut R,
     public: V::Public,
     message: &[u8],
-    target: &[u8],
+    target: (Option<&[u8]>, &[u8]),
 ) -> Result<Ciphertext<V>, Error> {
     // Security check: message must be exactly 32 bytes
     if message.len() != BLOCK_SIZE {
@@ -141,7 +143,10 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
     }
 
     // Hash target to get Q_id in signature group using the variant's message DST
-    let q_id = hash_message::<V>(V::MESSAGE, target);
+    let q_id = match target {
+        (None, target) => hash_message::<V>(V::MESSAGE, target),
+        (Some(namespace), target) => hash_message_namespace::<V>(V::MESSAGE, namespace, target),
+    };
 
     // Generate random sigma
     let mut sigma = Block::default();
@@ -241,7 +246,7 @@ mod tests {
         private_key.mul(&master_secret);
 
         // Encrypt
-        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, message, identity)
+        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, message, (None, identity))
             .expect("Encryption should succeed");
 
         // Decrypt
@@ -268,7 +273,7 @@ mod tests {
         private_key.mul(&master_secret);
 
         // Encrypt
-        let ciphertext = encrypt::<_, MinSig>(&mut rng, master_public, message, identity)
+        let ciphertext = encrypt::<_, MinSig>(&mut rng, master_public, message, (None, identity))
             .expect("Encryption should succeed");
 
         // Decrypt
@@ -286,7 +291,7 @@ mod tests {
         let identity = b"test@example.com";
         let message = vec![0u8; 33]; // Not exactly 32
 
-        let result = encrypt::<_, MinPk>(&mut rng, master_public, &message, identity);
+        let result = encrypt::<_, MinPk>(&mut rng, master_public, &message, (None, identity));
         assert!(result.is_err());
         // Just check it's an error
     }
@@ -303,7 +308,7 @@ mod tests {
         let message = b"Secret message padded to 32bytes";
 
         // Encrypt with first master public key
-        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public1, message, identity)
+        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public1, message, (None, identity))
             .expect("Encryption should succeed");
 
         // Try to decrypt with private key from second master
@@ -330,8 +335,9 @@ mod tests {
         private_key.mul(&master_secret);
 
         // Encrypt
-        let mut ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, message, identity)
-            .expect("Encryption should succeed");
+        let mut ciphertext =
+            encrypt::<_, MinPk>(&mut rng, master_public, message, (None, identity))
+                .expect("Encryption should succeed");
 
         // Tamper with ciphertext
         ciphertext.w[0] ^= 0xFF;
@@ -354,7 +360,7 @@ mod tests {
         let mut private_key = id_point;
         private_key.mul(&master_secret);
 
-        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, &message, identity)
+        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, &message, (None, identity))
             .expect("Encryption should succeed");
 
         let decrypted =
@@ -375,7 +381,7 @@ mod tests {
         let mut private_key = id_point;
         private_key.mul(&master_secret);
 
-        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, &message, identity)
+        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, &message, (None, identity))
             .expect("Encryption should succeed");
 
         let decrypted =
@@ -398,8 +404,9 @@ mod tests {
         private_key.mul(&master_secret);
 
         // Encrypt
-        let mut ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, message, identity)
-            .expect("Encryption should succeed");
+        let mut ciphertext =
+            encrypt::<_, MinPk>(&mut rng, master_public, message, (None, identity))
+                .expect("Encryption should succeed");
 
         // Modify U component (this should make decryption fail due to FO transform)
         let mut modified_u = ciphertext.u;
@@ -425,8 +432,9 @@ mod tests {
         private_key.mul(&master_secret);
 
         // Encrypt
-        let mut ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, message, identity)
-            .expect("Encryption should succeed");
+        let mut ciphertext =
+            encrypt::<_, MinPk>(&mut rng, master_public, message, (None, identity))
+                .expect("Encryption should succeed");
 
         // Modify V component (encrypted sigma)
         ciphertext.v[0] ^= 0x01;
