@@ -1418,7 +1418,7 @@ pub(crate) mod tests {
 
             // Modify the target database by adding more operations
             let additional_ops = create_test_ops(additional_ops);
-            let new_digest = {
+            let new_root = {
                 let mut db = target_db.write().await;
                 apply_ops(&mut db, additional_ops).await;
                 db.commit().await.unwrap();
@@ -1427,19 +1427,19 @@ pub(crate) mod tests {
                 let mut hasher = create_test_hasher();
                 let new_lower_bound = db.inactivity_floor_loc;
                 let new_upper_bound = db.op_count() - 1;
-                let new_digest = db.root(&mut hasher);
+                let new_root = db.root(&mut hasher);
 
                 // Send target update with new target
                 update_sender
                     .send(SyncTarget {
-                        root: new_digest,
+                        root: new_root,
                         lower_bound_ops: new_lower_bound,
                         upper_bound_ops: new_upper_bound,
                     })
                     .await
                     .unwrap();
 
-                new_digest
+                new_root
             };
 
             // Complete the sync
@@ -1447,7 +1447,7 @@ pub(crate) mod tests {
 
             // Verify the synced database has the expected final state
             let mut hasher = create_test_hasher();
-            assert_eq!(synced_db.root(&mut hasher), new_digest);
+            assert_eq!(synced_db.root(&mut hasher), new_root);
 
             // Verify the target database matches the synced database
             let target_db = match Arc::try_unwrap(target_db) {
