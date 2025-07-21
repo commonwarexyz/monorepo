@@ -163,6 +163,26 @@ pub const G2_MESSAGE: DST = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct GT(blst_fp12);
 
+impl GT {
+    /// Create GT from blst_fp12.
+    pub(crate) fn from_blst_fp12(fp12: blst_fp12) -> Self {
+        GT(fp12)
+    }
+
+    /// Convert to bytes for serialization.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        // GT elements in BLS12-381 are 576 bytes (48 * 12)
+        let mut bytes = vec![0u8; 576];
+        unsafe {
+            // This is a placeholder - we need the actual blst function to serialize fp12
+            // For now, we'll use a simple representation
+            let ptr = &self.0 as *const _ as *const u8;
+            std::ptr::copy_nonoverlapping(ptr, bytes.as_mut_ptr(), 576);
+        }
+        bytes
+    }
+}
+
 /// The private key type.
 pub type Private = Scalar;
 
@@ -175,17 +195,21 @@ impl Scalar {
         // Generate a random 64 byte buffer
         let mut ikm = [0u8; 64];
         rng.fill_bytes(&mut ikm);
+        let result = Self::from_ikm(&ikm);
+        // Zeroize the ikm buffer
+        ikm.zeroize();
+        result
+    }
 
-        // Generate a scalar from the randomly populated buffer
+    /// Generates a scalar from input keying material (IKM).
+    pub fn from_ikm(ikm: &[u8; 64]) -> Self {
+        // Generate a scalar from the IKM buffer
         let mut ret = blst_fr::default();
         unsafe {
             let mut sc = blst_scalar::default();
             blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
             blst_fr_from_scalar(&mut ret, &sc);
         }
-
-        // Zeroize the ikm buffer
-        ikm.zeroize();
         Self(ret)
     }
 

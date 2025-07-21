@@ -7,6 +7,7 @@
 //! - `portable`: Enables `portable` feature on `blst` (<https://github.com/supranational/blst?tab=readme-ov-file#platform-and-language-compatibility>).
 
 pub mod dkg;
+pub mod ibe;
 pub mod primitives;
 mod scheme;
 pub use scheme::{Batch, PrivateKey, PublicKey, Signature};
