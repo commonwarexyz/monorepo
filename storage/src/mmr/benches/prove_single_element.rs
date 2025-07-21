@@ -20,7 +20,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
                 elements.push((pos, element));
             }
         });
-        let root_digest = mmr.root(&mut hasher);
+        let root = mmr.root(&mut hasher);
 
         // Select SAMPLE_SIZE random elements without replacement and create/verify proofs
         c.bench_function(
@@ -43,7 +43,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
                                     &mut hasher,
                                     &element,
                                     pos,
-                                    &root_digest,
+                                    &root,
                                 ));
                             }
                         });

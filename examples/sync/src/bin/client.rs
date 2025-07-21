@@ -40,7 +40,7 @@ struct Config {
 
 #[derive(Debug)]
 struct ServerMetadata {
-    target_hash: Digest,
+    root: Digest,
     oldest_retained_loc: u64,
     latest_op_loc: u64,
 }
@@ -56,7 +56,7 @@ where
 
     let metadata = resolver.get_server_metadata().await?;
     let metadata = ServerMetadata {
-        target_hash: metadata.target_hash,
+        root: metadata.root,
         oldest_retained_loc: metadata.oldest_retained_loc,
         latest_op_loc: metadata.latest_op_loc,
     };
@@ -88,7 +88,7 @@ where
         match resolver.get_target_update().await {
             Ok(new_target) => {
                 // Check if target has changed
-                if new_target.hash != current_target.hash {
+                if new_target.root != current_target.root {
                     info!(
                         old_target = ?current_target,
                         new_target = ?new_target,
@@ -131,7 +131,7 @@ where
 
     // Get server metadata to determine sync parameters
     let ServerMetadata {
-        target_hash,
+        root,
         oldest_retained_loc,
         latest_op_loc,
     } = get_server_metadata(&resolver).await?;
@@ -151,7 +151,7 @@ where
 
     // Create initial sync target
     let initial_target = SyncTarget {
-        hash: target_hash,
+        root,
         lower_bound_ops: oldest_retained_loc,
         upper_bound_ops: latest_op_loc,
     };
@@ -202,19 +202,27 @@ where
     info!("beginning sync operation...");
     let database = sync::sync(sync_config).await?;
 
-    // Get the root hash of the synced database
+    // Get the root digest of the synced database
     let mut hasher = Standard::new();
-    let root_hash = database.root(&mut hasher);
+    let got_root = database.root(&mut hasher);
 
-    let root_hash_hex = root_hash
+    // Verify the digest matches the  target digest.
+    if got_root != root {
+        return Err(format!(
+            "Synced database root digest does not match target root digest: {got_root:?} != {root:?}"
+        )
+        .into());
+    }
+
+    let root_hex = got_root
         .as_ref()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     info!(
         database_ops = database.op_count(),
-        root_hash = %root_hash_hex,
-        "✅ sync completed successfully"
+        root = %root_hex,
+        "✅ Sync completed successfully"
     );
 
     Ok(database)

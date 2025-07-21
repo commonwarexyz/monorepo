@@ -184,7 +184,7 @@ where
     let oldest_retained_loc = database.inactivity_floor_loc();
     let latest_op_loc = database.op_count().saturating_sub(1);
 
-    let target_hash = {
+    let root = {
         let mut hasher = Standard::new();
         database.root(&mut hasher)
     };
@@ -192,7 +192,7 @@ where
     drop(database);
 
     let response = GetServerMetadataResponse {
-        target_hash,
+        root,
         oldest_retained_loc,
         latest_op_loc,
     };
@@ -227,7 +227,7 @@ where
     drop(last_hash_guard);
 
     let response = GetTargetUpdateResponse {
-        hash: target_hash,
+        root: target_hash,
         lower_bound_ops,
         upper_bound_ops,
     };
@@ -562,8 +562,8 @@ fn main() {
 
         // Display database state
         let mut hasher = Standard::new();
-        let root_hash = database.root(&mut hasher);
-        let root_hash_hex = root_hash
+        let root = database.root(&mut hasher);
+        let root_hex = root
             .as_ref()
             .iter()
             .map(|b| format!("{b:02x}"))
@@ -571,8 +571,8 @@ fn main() {
 
         info!(
             op_count = database.op_count(),
-            root_hash = %root_hash_hex,
-            "database ready"
+            root = %root_hex,
+            "Database ready"
         );
 
         // Create listener to accept connections
