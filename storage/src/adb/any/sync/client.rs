@@ -46,13 +46,13 @@ where
     /// Maximum operations to fetch per batch.
     pub fetch_batch_size: NonZeroU64,
 
-    /// Synchronization target (hash and operation bounds).
+    /// Synchronization target (root digest and operation bounds).
     pub target: SyncTarget<H::Digest>,
 
     /// Resolves requests for proofs and operations.
     pub resolver: R,
 
-    /// Hasher for root hashes.
+    /// Hasher for root digests.
     pub hasher: mmr::hasher::Standard<H>,
 
     /// The maximum number of operations to keep in memory
@@ -254,7 +254,7 @@ where
                 new: Box::new(new_target.clone()),
             });
         }
-        if new_target.hash == old_target.hash {
+        if new_target.root == old_target.root {
             return Err(Error::SyncTargetRootUnchanged);
         }
         Ok(())
@@ -436,7 +436,7 @@ where
                 let batch_size = NonZeroU64::new(batch_size).ok_or(Error::InvalidState)?;
 
                 debug!(
-                    target_hash = ?config.target.hash,
+                    target_root = ?config.target.root,
                     lower_bound_pos = config.target.lower_bound_ops,
                     upper_bound_pos = config.target.upper_bound_ops,
                     current_pos = log_size,
@@ -490,7 +490,7 @@ where
                         &proof,
                         log_size,
                         &operations,
-                        &config.target.hash,
+                        &config.target.root,
                     )
                 };
                 let _ = success_tx.send(proof_valid);
@@ -592,18 +592,18 @@ where
                     .await
                     .map_err(Error::Adb)?;
 
-                    // Verify the final hash matches the target
+                    // Verify the final root digest matches the target
                     let mut hasher = mmr::hasher::Standard::<H>::new();
-                    let got_hash = db.root(&mut hasher);
-                    if got_hash != config.target.hash {
-                        return Err(Error::HashMismatch {
-                            expected: Box::new(config.target.hash),
-                            actual: Box::new(got_hash),
+                    let got_root = db.root(&mut hasher);
+                    if got_root != config.target.root {
+                        return Err(Error::RootMismatch {
+                            expected: Box::new(config.target.root),
+                            actual: Box::new(got_root),
                         });
                     }
 
                     info!(
-                        target_hash = ?config.target.hash,
+                        target_root = ?config.target.root,
                         lower_bound_ops = config.target.lower_bound_ops,
                         upper_bound_ops = config.target.upper_bound_ops,
                         log_size = log_size,
@@ -658,14 +658,14 @@ pub(crate) mod tests {
     use std::collections::{HashMap, HashSet};
     use test_case::test_case;
 
-    type TestHash = Sha256;
+    type TestDigest = Sha256;
     type TestTranslator = translator::TwoCap;
 
     const PAGE_SIZE: usize = 111;
     const PAGE_CACHE_SIZE: usize = 5;
 
-    fn create_test_hasher() -> crate::mmr::hasher::Standard<TestHash> {
-        crate::mmr::hasher::Standard::<TestHash>::new()
+    fn create_test_hasher() -> crate::mmr::hasher::Standard<TestDigest> {
+        crate::mmr::hasher::Standard::<TestDigest>::new()
     }
 
     fn create_test_config(seed: u64) -> adb::any::Config<TestTranslator> {
@@ -703,7 +703,7 @@ pub(crate) mod tests {
             let target_inactivity_floor = target_db.inactivity_floor_loc;
             let target_log_size = target_db.log.size().await.unwrap();
             let mut hasher = create_test_hasher();
-            let target_hash = target_db.root(&mut hasher);
+            let target_root = target_db.root(&mut hasher);
 
             // After commit, the database may have pruned early operations
             // Start syncing from the inactivity floor, not 0
@@ -732,7 +732,7 @@ pub(crate) mod tests {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size,
                 target: SyncTarget {
-                    hash: target_hash,
+                    root: target_root,
                     lower_bound_ops,
                     upper_bound_ops: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
                 },
@@ -754,8 +754,8 @@ pub(crate) mod tests {
                 leaf_num_to_pos(target_inactivity_floor)
             );
 
-            // Verify the root hash matches the target
-            assert_eq!(got_db.root(&mut hasher), target_hash);
+            // Verify the root digest matches the target
+            assert_eq!(got_db.root(&mut hasher), target_root);
 
             // Verify that the synced database matches the target state
             for (key, &(value, loc)) in &expected_kvs {
@@ -804,7 +804,7 @@ pub(crate) mod tests {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(10),
                 target: SyncTarget {
-                    hash: Digest::from([1u8; 32]),
+                    root: Digest::from([1u8; 32]),
                     lower_bound_ops: 31, // Invalid: lower > upper
                     upper_bound_ops: 30,
                 },
@@ -843,7 +843,7 @@ pub(crate) mod tests {
 
             let mut hasher = create_test_hasher();
             let upper_bound_ops = target_db.op_count() - 1;
-            let target_hash = target_db.root(&mut hasher);
+            let root = target_db.root(&mut hasher);
             let lower_bound_ops = target_db.inactivity_floor_loc;
 
             // Add another operation after the sync range
@@ -856,7 +856,7 @@ pub(crate) mod tests {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(10),
                 target: SyncTarget {
-                    hash: target_hash,
+                    root,
                     lower_bound_ops,
                     upper_bound_ops,
                 },
@@ -878,8 +878,8 @@ pub(crate) mod tests {
             );
             assert_eq!(synced_db.op_count(), upper_bound_ops + 1);
 
-            // Verify the final hash matches our target
-            assert_eq!(synced_db.root(&mut hasher), target_hash);
+            // Verify the final root digest matches our target
+            assert_eq!(synced_db.root(&mut hasher), root);
 
             // Verify the synced database doesn't have any operations beyond the sync range.
             assert_eq!(
@@ -922,7 +922,7 @@ pub(crate) mod tests {
             apply_ops(&mut target_db, last_op.clone()).await;
             target_db.commit().await.unwrap();
             let mut hasher = create_test_hasher();
-            let target_hash = target_db.root(&mut hasher);
+            let root = target_db.root(&mut hasher);
             let lower_bound_ops = target_db.inactivity_floor_loc;
             let upper_bound_ops = target_db.op_count() - 1; // Up to the last operation
 
@@ -931,7 +931,7 @@ pub(crate) mod tests {
                 db_config: sync_db_config, // Use same config as before
                 fetch_batch_size: NZU64!(10),
                 target: SyncTarget {
-                    hash: target_hash,
+                    root,
                     lower_bound_ops,
                     upper_bound_ops,
                 },
@@ -955,8 +955,8 @@ pub(crate) mod tests {
                 sync_db.ops.pruned_to_pos(),
                 leaf_num_to_pos(lower_bound_ops)
             );
-            // Verify the root hash matches the target
-            assert_eq!(sync_db.root(&mut hasher), target_hash);
+            // Verify the root digest matches the target
+            assert_eq!(sync_db.root(&mut hasher), root);
 
             // Verify that the operations in the overlapping range are present and correct
             for i in lower_bound_ops..original_db_op_count {
@@ -1015,7 +1015,7 @@ pub(crate) mod tests {
 
             // Reopen sync_db
             let mut hasher = create_test_hasher();
-            let target_hash = target_db.root(&mut hasher);
+            let root = target_db.root(&mut hasher);
             let lower_bound_ops = target_db.inactivity_floor_loc;
             let upper_bound_ops = target_db.op_count() - 1;
             // sync_db should never ask the resolver for operations
@@ -1026,7 +1026,7 @@ pub(crate) mod tests {
                 db_config: sync_config, // Use same config to access same partitions
                 fetch_batch_size: NZU64!(10),
                 target: SyncTarget {
-                    hash: target_hash,
+                    root,
                     lower_bound_ops,
                     upper_bound_ops,
                 },
@@ -1051,8 +1051,8 @@ pub(crate) mod tests {
                 leaf_num_to_pos(lower_bound_ops)
             );
 
-            // Verify the root hash matches the target
-            assert_eq!(sync_db.root(&mut hasher), target_hash);
+            // Verify the root digest matches the target
+            assert_eq!(sync_db.root(&mut hasher), root);
 
             // Verify state matches for sample operations
             for target_op in &target_ops {
@@ -1083,7 +1083,7 @@ pub(crate) mod tests {
             let mut hasher = create_test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
             let initial_upper_bound = target_db.op_count() - 1;
-            let initial_hash = target_db.root(&mut hasher);
+            let initial_root = target_db.root(&mut hasher);
 
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
@@ -1092,7 +1092,7 @@ pub(crate) mod tests {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(5),
                 target: SyncTarget {
-                    hash: initial_hash,
+                    root: initial_root,
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
@@ -1106,7 +1106,7 @@ pub(crate) mod tests {
             // Send target update with decreased lower bound
             update_sender
                 .send(SyncTarget {
-                    hash: initial_hash,
+                    root: initial_root,
                     lower_bound_ops: initial_lower_bound.saturating_sub(1),
                     upper_bound_ops: initial_upper_bound.saturating_add(1),
                 })
@@ -1135,7 +1135,7 @@ pub(crate) mod tests {
             let mut hasher = create_test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
             let initial_upper_bound = target_db.op_count() - 1;
-            let initial_hash = target_db.root(&mut hasher);
+            let initial_root = target_db.root(&mut hasher);
 
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
@@ -1144,7 +1144,7 @@ pub(crate) mod tests {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(5),
                 target: SyncTarget {
-                    hash: initial_hash,
+                    root: initial_root,
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
@@ -1158,7 +1158,7 @@ pub(crate) mod tests {
             // Send target update with decreased upper bound
             update_sender
                 .send(SyncTarget {
-                    hash: initial_hash,
+                    root: initial_root,
                     lower_bound_ops: initial_lower_bound.saturating_add(1),
                     upper_bound_ops: initial_upper_bound.saturating_sub(1),
                 })
@@ -1187,7 +1187,7 @@ pub(crate) mod tests {
             let mut hasher = create_test_hasher();
             let final_lower_bound = target_db.inactivity_floor_loc;
             let final_upper_bound = target_db.op_count() - 1;
-            let final_hash = target_db.root(&mut hasher);
+            let final_root = target_db.root(&mut hasher);
 
             // Create client with placeholder initial target (stale compared to final target)
             let (mut update_sender, update_receiver) = mpsc::channel(1);
@@ -1197,7 +1197,7 @@ pub(crate) mod tests {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(10),
                 target: SyncTarget {
-                    hash: Digest::from([1u8; 32]),
+                    root: Digest::from([1u8; 32]),
                     lower_bound_ops: 1,
                     upper_bound_ops: 10,
                 },
@@ -1211,7 +1211,7 @@ pub(crate) mod tests {
             // Send target update with increased bounds
             let _ = update_sender
                 .send(SyncTarget {
-                    hash: final_hash,
+                    root: final_root,
                     lower_bound_ops: final_lower_bound,
                     upper_bound_ops: final_upper_bound,
                 })
@@ -1222,7 +1222,7 @@ pub(crate) mod tests {
 
             // Verify the synced database has the expected state
             let mut hasher = create_test_hasher();
-            assert_eq!(synced_db.root(&mut hasher), final_hash);
+            assert_eq!(synced_db.root(&mut hasher), final_root);
             assert_eq!(synced_db.op_count(), final_upper_bound + 1);
             assert_eq!(synced_db.inactivity_floor_loc, final_lower_bound);
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), final_lower_bound);
@@ -1247,7 +1247,7 @@ pub(crate) mod tests {
             let mut hasher = create_test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
             let initial_upper_bound = target_db.op_count() - 1;
-            let initial_hash = target_db.root(&mut hasher);
+            let initial_root = target_db.root(&mut hasher);
 
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
@@ -1256,7 +1256,7 @@ pub(crate) mod tests {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(5),
                 target: SyncTarget {
-                    hash: initial_hash,
+                    root: initial_root,
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
@@ -1270,7 +1270,7 @@ pub(crate) mod tests {
             // Send target update with invalid bounds (lower > upper)
             let _ = update_sender
                 .send(SyncTarget {
-                    hash: initial_hash,
+                    root: initial_root,
                     lower_bound_ops: initial_upper_bound, // Greater than upper bound
                     upper_bound_ops: initial_lower_bound, // Less than
                 })
@@ -1296,9 +1296,9 @@ pub(crate) mod tests {
 
             // Capture target state
             let mut hasher = create_test_hasher();
-            let target_lower_bound = target_db.inactivity_floor_loc;
-            let target_upper_bound = target_db.op_count() - 1;
-            let target_hash = target_db.root(&mut hasher);
+            let lower_bound = target_db.inactivity_floor_loc;
+            let upper_bound = target_db.op_count() - 1;
+            let root = target_db.root(&mut hasher);
 
             // Create client with target that will complete immediately
             let (mut update_sender, update_receiver) = mpsc::channel(1);
@@ -1307,9 +1307,9 @@ pub(crate) mod tests {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(20),
                 target: SyncTarget {
-                    hash: target_hash,
-                    lower_bound_ops: target_lower_bound,
-                    upper_bound_ops: target_upper_bound,
+                    root,
+                    lower_bound_ops: lower_bound,
+                    upper_bound_ops: upper_bound,
                 },
                 resolver: &target_db,
                 hasher: create_test_hasher(),
@@ -1326,18 +1326,18 @@ pub(crate) mod tests {
             let _ = update_sender
                 .send(SyncTarget {
                     // Dummy target update
-                    hash: Digest::from([2u8; 32]),
-                    lower_bound_ops: target_lower_bound + 1,
-                    upper_bound_ops: target_upper_bound + 1,
+                    root: Digest::from([2u8; 32]),
+                    lower_bound_ops: lower_bound + 1,
+                    upper_bound_ops: upper_bound + 1,
                 })
                 .await;
 
             // Verify the synced database has the expected state
             let mut hasher = create_test_hasher();
-            assert_eq!(synced_db.root(&mut hasher), target_hash);
-            assert_eq!(synced_db.op_count(), target_upper_bound + 1);
-            assert_eq!(synced_db.inactivity_floor_loc, target_lower_bound);
-            assert_eq!(synced_db.oldest_retained_loc().unwrap(), target_lower_bound);
+            assert_eq!(synced_db.root(&mut hasher), root);
+            assert_eq!(synced_db.op_count(), upper_bound + 1);
+            assert_eq!(synced_db.inactivity_floor_loc, lower_bound);
+            assert_eq!(synced_db.oldest_retained_loc().unwrap(), lower_bound);
 
             synced_db.destroy().await.unwrap();
             target_db.destroy().await.unwrap();
@@ -1371,7 +1371,7 @@ pub(crate) mod tests {
             let mut hasher = create_test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
             let initial_upper_bound = target_db.op_count() - 1;
-            let initial_hash = target_db.root(&mut hasher);
+            let initial_root = target_db.root(&mut hasher);
 
             // Wrap target database for shared mutable access
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
@@ -1383,7 +1383,7 @@ pub(crate) mod tests {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(1), // Small batch size so we don't finish after one batch
                 target: SyncTarget {
-                    hash: initial_hash,
+                    root: initial_root,
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
@@ -1418,7 +1418,7 @@ pub(crate) mod tests {
 
             // Modify the target database by adding more operations
             let additional_ops = create_test_ops(additional_ops);
-            let new_hash = {
+            let new_root = {
                 let mut db = target_db.write().await;
                 apply_ops(&mut db, additional_ops).await;
                 db.commit().await.unwrap();
@@ -1427,19 +1427,19 @@ pub(crate) mod tests {
                 let mut hasher = create_test_hasher();
                 let new_lower_bound = db.inactivity_floor_loc;
                 let new_upper_bound = db.op_count() - 1;
-                let new_hash = db.root(&mut hasher);
+                let new_root = db.root(&mut hasher);
 
                 // Send target update with new target
                 update_sender
                     .send(SyncTarget {
-                        hash: new_hash,
+                        root: new_root,
                         lower_bound_ops: new_lower_bound,
                         upper_bound_ops: new_upper_bound,
                     })
                     .await
                     .unwrap();
 
-                new_hash
+                new_root
             };
 
             // Complete the sync
@@ -1447,7 +1447,7 @@ pub(crate) mod tests {
 
             // Verify the synced database has the expected final state
             let mut hasher = create_test_hasher();
-            assert_eq!(synced_db.root(&mut hasher), new_hash);
+            assert_eq!(synced_db.root(&mut hasher), new_root);
 
             // Verify the target database matches the synced database
             let target_db = match Arc::try_unwrap(target_db) {
@@ -1499,14 +1499,14 @@ pub(crate) mod tests {
             let mut hasher = create_test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
             let initial_upper_bound = target_db.op_count() - 1;
-            let initial_hash = target_db.root(&mut hasher);
+            let initial_root = target_db.root(&mut hasher);
 
             // Add more operations to create the extended target
             let additional_ops = create_test_ops(50);
             apply_ops(&mut target_db, additional_ops).await;
             target_db.commit().await.unwrap();
             let final_upper_bound = target_db.op_count() - 1;
-            let final_hash = target_db.root(&mut hasher);
+            let final_root = target_db.root(&mut hasher);
 
             // Wrap target database for shared mutable access
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
@@ -1518,7 +1518,7 @@ pub(crate) mod tests {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(2), // Very small batch size to ensure multiple batches needed
                 target: SyncTarget {
-                    hash: initial_hash,
+                    root: initial_root,
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
@@ -1556,7 +1556,7 @@ pub(crate) mod tests {
             // Send target update with SAME lower bound but higher upper bound
             update_sender
                 .send(SyncTarget {
-                    hash: final_hash,
+                    root: final_root,
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: final_upper_bound,
                 })
@@ -1568,7 +1568,7 @@ pub(crate) mod tests {
 
             // Verify the synced database has the expected final state
             let mut hasher = create_test_hasher();
-            assert_eq!(synced_db.root(&mut hasher), final_hash);
+            assert_eq!(synced_db.root(&mut hasher), final_root);
 
             // Verify the target database matches the synced database
             let target_db = match Arc::try_unwrap(target_db) {

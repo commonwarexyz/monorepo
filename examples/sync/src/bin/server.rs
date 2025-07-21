@@ -109,7 +109,7 @@ where
     let oldest_retained_loc = database.oldest_retained_loc().unwrap_or(0);
     let latest_op_loc = database.op_count().saturating_sub(1);
 
-    let target_hash = {
+    let root = {
         let mut hasher = Standard::new();
         database.root(&mut hasher)
     };
@@ -117,7 +117,7 @@ where
     drop(database);
 
     let response = GetServerMetadataResponse {
-        target_hash,
+        root,
         oldest_retained_loc,
         latest_op_loc,
     };
@@ -399,8 +399,8 @@ fn main() {
 
         // Display database state
         let mut hasher = Standard::new();
-        let root_hash = database.root(&mut hasher);
-        let root_hash_hex = root_hash
+        let root = database.root(&mut hasher);
+        let root_hex = root
             .as_ref()
             .iter()
             .map(|b| format!("{b:02x}"))
@@ -408,7 +408,7 @@ fn main() {
 
         info!(
             op_count = database.op_count(),
-            root_hash = %root_hash_hex,
+            root = %root_hex,
             "Database ready"
         );
 

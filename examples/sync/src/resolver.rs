@@ -99,7 +99,7 @@ where
             .map_err(|e| ResolverError::DeserializationError(e.to_string()))
     }
 
-    /// Get server metadata (target hash and bounds)
+    /// Get server metadata (target root digest and bounds)
     pub async fn get_server_metadata(&self) -> Result<GetServerMetadataResponse, ResolverError> {
         match self.send_request(Message::GetServerMetadataRequest).await? {
             Message::GetServerMetadataResponse(response) => {

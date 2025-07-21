@@ -687,7 +687,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         proof: &Proof<H::Digest>,
         start_loc: u64,
         ops: &[Operation<K, V>],
-        root_digest: &H::Digest,
+        root: &H::Digest,
     ) -> bool {
         let start_pos = leaf_num_to_pos(start_loc);
 
@@ -696,7 +696,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             .map(|op| Any::<E, _, _, _, T>::op_digest(hasher, op))
             .collect::<Vec<_>>();
 
-        proof.verify_range_inclusion(hasher, &digests, start_pos, root_digest)
+        proof.verify_range_inclusion(hasher, &digests, start_pos, root)
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
@@ -1216,10 +1216,10 @@ pub(super) mod test {
             assert_eq!(db.snapshot.items(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
-            let root_digest = db.root(&mut hasher);
+            let root = db.root(&mut hasher);
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(root_digest, db.root(&mut hasher));
+            assert_eq!(root, db.root(&mut hasher));
             assert_eq!(db.op_count(), 2336);
             assert_eq!(db.inactivity_floor_loc, 1478);
             assert_eq!(db.snapshot.items(), 857);
@@ -1400,10 +1400,10 @@ pub(super) mod test {
             assert!(db.get(&k).await.unwrap().is_none());
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
-            let root_digest = db.root(&mut hasher);
+            let root = db.root(&mut hasher);
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
-            assert_eq!(root_digest, db.root(&mut hasher));
+            assert_eq!(root, db.root(&mut hasher));
             assert!(db.get(&k).await.unwrap().is_none());
 
             db.destroy().await.unwrap();
@@ -1655,7 +1655,7 @@ pub(super) mod test {
                 source_db.log.size().await.unwrap()
             );
 
-            // Verify the root hash matches the target
+            // Verify the root digest matches the target
             assert_eq!(db.root(&mut hasher), target_hash);
 
             // Verify state matches the source operations
@@ -1854,7 +1854,7 @@ pub(super) mod test {
                 leaf_num_to_pos(sync_lower_bound)
             );
 
-            // Verify the root hash matches the target
+            // Verify the root digest matches the target
             assert_eq!(sync_db.root(&mut hasher), target_hash);
 
             // Verify state matches the source operations
@@ -2235,7 +2235,7 @@ pub(super) mod test {
                 ));
             }
 
-            // Changing the root hash should cause verification to fail
+            // Changing the root digest should cause verification to fail
             {
                 assert!(!AnyTest::verify_proof(
                     &mut hasher,
@@ -2292,7 +2292,7 @@ pub(super) mod test {
             // Final commit to establish the inactivity floor
             db.commit().await.unwrap();
 
-            // Get the root hash
+            // Get the root digest
             let original_root = db.root(&mut hasher);
 
             // Verify the pruning boundary is correct

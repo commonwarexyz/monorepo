@@ -5,7 +5,7 @@
 //! logic for safe network communication.
 //!
 //! The protocol supports:
-//! - Getting server metadata (database size, target hash, operation bounds)
+//! - Getting server metadata (database size, root digest, operation bounds)
 //! - Fetching operations with cryptographic proofs
 //! - Error handling
 
@@ -32,7 +32,7 @@ pub enum Message {
     GetOperationsRequest(GetOperationsRequest),
     /// Response with operations and proof.
     GetOperationsResponse(GetOperationsResponse),
-    /// Request server metadata (target hash, bounds, etc.).
+    /// Request server metadata (target root digest, bounds, etc.).
     GetServerMetadataRequest,
     /// Response with server metadata.
     GetServerMetadataResponse(GetServerMetadataResponse),
@@ -67,8 +67,8 @@ pub struct GetOperationsResponse {
 /// Response with server metadata.
 #[derive(Debug, Clone)]
 pub struct GetServerMetadataResponse {
-    /// Target hash of the database.
-    pub target_hash: Digest,
+    /// Target root digest of the database.
+    pub root: Digest,
     /// Oldest retained operation location.
     pub oldest_retained_loc: u64,
     /// Latest operation location.
@@ -233,7 +233,7 @@ impl Read for GetOperationsResponse {
 
 impl Write for GetServerMetadataResponse {
     fn write(&self, buf: &mut impl BufMut) {
-        self.target_hash.write(buf);
+        self.root.write(buf);
         self.oldest_retained_loc.write(buf);
         self.latest_op_loc.write(buf);
     }
@@ -241,7 +241,7 @@ impl Write for GetServerMetadataResponse {
 
 impl EncodeSize for GetServerMetadataResponse {
     fn encode_size(&self) -> usize {
-        self.target_hash.encode_size()
+        self.root.encode_size()
             + self.oldest_retained_loc.encode_size()
             + self.latest_op_loc.encode_size()
     }
@@ -251,11 +251,11 @@ impl Read for GetServerMetadataResponse {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let target_hash = Digest::read(buf)?;
+        let root = Digest::read(buf)?;
         let oldest_retained_loc = u64::read(buf)?;
         let latest_op_loc = u64::read(buf)?;
         Ok(Self {
-            target_hash,
+            root,
             oldest_retained_loc,
             latest_op_loc,
         })
