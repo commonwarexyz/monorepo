@@ -56,8 +56,8 @@ where
     loop {
         context.sleep(interval_duration).await;
 
-        // Request target update from server
-        match resolver.get_target_update().await {
+        // Request sync target from server
+        match resolver.get_sync_target().await {
             Ok(new_target) => {
                 // Check if target has changed
                 if new_target.root != current_target.root {
@@ -78,7 +78,7 @@ where
                 }
             }
             Err(e) => {
-                warn!(error = %e, "failed to get target update from server");
+                warn!(error = %e, "failed to get sync target from server");
                 // Continue trying on next interval
             }
         }

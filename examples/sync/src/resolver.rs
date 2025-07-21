@@ -114,25 +114,6 @@ where
             }
         }
     }
-
-    /// Get target update from server
-    pub async fn get_target_update(
-        &self,
-    ) -> Result<SyncTarget<commonware_cryptography::sha256::Digest>, ResolverError> {
-        debug!("requesting target update from server");
-
-        match self.send_request(Message::GetSyncTargetRequest).await? {
-            Message::GetSyncTargetResponse(response) => Ok(response),
-            Message::Error(err) => {
-                error!(error = %err.message, "❌ server error");
-                Err(ResolverError::ServerError(err.message))
-            }
-            _ => {
-                error!("❌ unexpected response type");
-                Err(ResolverError::UnexpectedResponse)
-            }
-        }
-    }
 }
 
 impl<E> ResolverTrait for Resolver<E>
