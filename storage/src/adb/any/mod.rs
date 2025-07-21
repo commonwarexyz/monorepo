@@ -538,7 +538,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     }
 
     /// Return the inactivity floor location.
-    /// This is the location before which all operations are "inactive".
+    /// This is the location before which all operations are inactive.
     pub fn inactivity_floor_loc(&self) -> u64 {
         self.inactivity_floor_loc
     }

@@ -57,7 +57,7 @@ where
     /// Error counter for metrics.
     error_counter: Counter,
     /// Counter for continuous operations added (currently unused).
-    continuous_ops_counter: Counter,
+    ops_counter: Counter,
     /// Last known target root digest for tracking changes.
     last_target_root: Arc<RwLock<Option<commonware_cryptography::sha256::Digest>>>,
     /// Last time we added continuous operations.
@@ -75,26 +75,26 @@ where
             database: Arc::new(RwLock::new(database)),
             request_counter: Counter::default(),
             error_counter: Counter::default(),
-            continuous_ops_counter: Counter::default(),
+            ops_counter: Counter::default(),
             last_target_root: Arc::new(RwLock::new(None)),
             last_operation_time: Arc::new(RwLock::new(SystemTime::now())),
             operation_seed: Arc::new(RwLock::new(initial_seed)),
         };
         context.register(
-            "request",
-            "Number of requests",
+            "requests",
+            "Number of requests received",
             state.request_counter.clone(),
         );
         context.register("error", "Number of errors", state.error_counter.clone());
         context.register(
-            "continuous_ops",
-            "Number of continuous operations added",
-            state.continuous_ops_counter.clone(),
+            "ops_added",
+            "Number of operations added since server start, not including the initial operations",
+            state.ops_counter.clone(),
         );
         state
     }
 
-    /// Add an operation to the database if the interval has passed.
+    /// Add operations to the database if the configured interval has passed.
     async fn maybe_add_operation(
         &self,
         config: &Config,
@@ -109,12 +109,12 @@ where
             // Generate new operations
             let mut seed_guard = self.operation_seed.write().await;
             let current_seed = *seed_guard;
-            *seed_guard += 1;
+            *seed_guard = current_seed.wrapping_add(1);
             drop(seed_guard);
 
             let new_operations = create_test_operations(config.ops_per_interval, current_seed);
 
-            // Add operations to database (no async boundaries crossed)
+            // Add operations to database and get the new root
             let root = {
                 let mut database = self.database.write().await;
                 for operation in new_operations.iter() {
@@ -127,14 +127,13 @@ where
                     };
 
                     if let Err(e) = result {
-                        error!(error = %e, "Failed to add continuous operation");
+                        error!(error = %e, "failed to add operations to database");
                     }
                 }
                 database.root(&mut Standard::new())
             };
 
-            self.continuous_ops_counter
-                .inc_by(new_operations.len() as u64);
+            self.ops_counter.inc_by(new_operations.len() as u64);
             info!(
                 operations_added = new_operations.len(),
                 root = %root,
@@ -146,7 +145,7 @@ where
     }
 }
 
-/// Add operations to the database.
+/// Add the given `operations` to the `database`.
 async fn add_operations<E>(
     database: &mut Database<E>,
     operations: Vec<Operation>,
@@ -547,24 +546,19 @@ fn main() {
             "server listening and continuously adding operations"
         );
 
-        // Handle each client connection in a separate task.
-         // Create server state
         let state = Arc::new(State::new(context.with_label("server"), database, config.seed));
         let operation_interval = config.operation_interval;
-        let operation_context = context.with_label("operations");
 
-        // Create a sleep future for operation timing
-        let mut operation_sleep = Box::pin(operation_context.sleep(operation_interval));
-
+        let mut sleep_fut = Box::pin(context.sleep(operation_interval));
         loop {
             select! {
-                _ = &mut operation_sleep => {
+                _ = &mut sleep_fut => {
                     // Add operations to the database
-                    if let Err(e) = state.maybe_add_operation(&config, &operation_context).await {
-                        warn!(error = %e, "failed to add continuous operations");
+                    if let Err(e) = state.maybe_add_operation(&config, &context).await {
+                        warn!(error = %e, "failed to add additional operations");
                     }
                     // Reset the sleep future for next iteration
-                    operation_sleep = Box::pin(operation_context.sleep(operation_interval));
+                    sleep_fut = Box::pin(context.sleep(operation_interval));
                 },
                 client_result = listener.accept() => {
                     match client_result {
