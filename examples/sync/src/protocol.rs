@@ -32,7 +32,7 @@ pub enum Message {
     GetOperationsRequest(GetOperationsRequest),
     /// Response with operations and proof.
     GetOperationsResponse(GetOperationsResponse),
-    /// Request server metadata (target digest, bounds, etc.).
+    /// Request server metadata (target root digest, bounds, etc.).
     GetServerMetadataRequest,
     /// Response with server metadata.
     GetServerMetadataResponse(GetServerMetadataResponse),

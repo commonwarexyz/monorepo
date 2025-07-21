@@ -436,7 +436,7 @@ where
                 let batch_size = NonZeroU64::new(batch_size).ok_or(Error::InvalidState)?;
 
                 debug!(
-                    target_digest = ?config.target.root,
+                    target_root = ?config.target.root,
                     lower_bound_pos = config.target.lower_bound_ops,
                     upper_bound_pos = config.target.upper_bound_ops,
                     current_pos = log_size,
@@ -592,7 +592,7 @@ where
                     .await
                     .map_err(Error::Adb)?;
 
-                    // Verify the final digest matches the target
+                    // Verify the final root digest matches the target
                     let mut hasher = mmr::hasher::Standard::<H>::new();
                     let got_root = db.root(&mut hasher);
                     if got_root != config.target.root {
@@ -603,7 +603,7 @@ where
                     }
 
                     info!(
-                        target_digest = ?config.target.root,
+                        target_root = ?config.target.root,
                         lower_bound_ops = config.target.lower_bound_ops,
                         upper_bound_ops = config.target.upper_bound_ops,
                         log_size = log_size,
@@ -703,7 +703,7 @@ pub(crate) mod tests {
             let target_inactivity_floor = target_db.inactivity_floor_loc;
             let target_log_size = target_db.log.size().await.unwrap();
             let mut hasher = create_test_hasher();
-            let target_digest = target_db.root(&mut hasher);
+            let target_root = target_db.root(&mut hasher);
 
             // After commit, the database may have pruned early operations
             // Start syncing from the inactivity floor, not 0
@@ -732,7 +732,7 @@ pub(crate) mod tests {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size,
                 target: SyncTarget {
-                    root: target_digest,
+                    root: target_root,
                     lower_bound_ops,
                     upper_bound_ops: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
                 },
@@ -755,7 +755,7 @@ pub(crate) mod tests {
             );
 
             // Verify the root digest matches the target
-            assert_eq!(got_db.root(&mut hasher), target_digest);
+            assert_eq!(got_db.root(&mut hasher), target_root);
 
             // Verify that the synced database matches the target state
             for (key, &(value, loc)) in &expected_kvs {
@@ -878,7 +878,7 @@ pub(crate) mod tests {
             );
             assert_eq!(synced_db.op_count(), upper_bound_ops + 1);
 
-            // Verify the final digest matches our target
+            // Verify the final root digest matches our target
             assert_eq!(synced_db.root(&mut hasher), root);
 
             // Verify the synced database doesn't have any operations beyond the sync range.
