@@ -57,7 +57,7 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
 fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
     let runner = Runner::new(cfg.clone());
     runner.start(|ctx| async move {
-        info!("Starting DB generation...");
+        info!("starting DB generation...");
         let pool = create_pool(ctx.clone(), THREADS).unwrap();
         let any_cfg = any_cfg(pool);
         let mut db = Any::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
@@ -104,7 +104,7 @@ fn bench_any_init(c: &mut Criterion) {
     let runner = tokio::Runner::new(cfg.clone());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
-            info!(elements, operations, "Benchmarking any init.",);
+            info!(elements, operations, "benchmarking any init",);
             gen_random_any(cfg.clone(), elements, operations);
 
             c.bench_function(
@@ -133,7 +133,7 @@ fn bench_any_init(c: &mut Criterion) {
 
             let runner = Runner::new(cfg.clone());
             runner.start(|ctx| async move {
-                info!("Cleaning up db...");
+                info!("cleaning up db...");
                 let pool = commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
                 let any_cfg = any_cfg(pool);
                 // Clean up the database after the benchmark.

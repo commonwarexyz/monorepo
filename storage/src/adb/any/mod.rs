@@ -2115,7 +2115,7 @@ pub(super) mod test {
                     assert_eq!(requested, leaf_num_to_pos(op_count + 1));
                     assert_eq!(actual, leaf_num_to_pos(op_count));
                 }
-                _ => panic!("Expected HistoricalSizeTooLarge error"),
+                _ => panic!("expected HistoricalSizeTooLarge error"),
             }
 
             db.destroy().await.unwrap();
@@ -2142,7 +2142,7 @@ pub(super) mod test {
                     assert_eq!(size, leaf_num_to_pos(op_count));
                     assert_eq!(start_loc, leaf_num_to_pos(op_count));
                 }
-                _ => panic!("Expected HistoricalSizeTooSmall error"),
+                _ => panic!("expected HistoricalSizeTooSmall error"),
             }
 
             // Historical size < start location is invalid
@@ -2155,7 +2155,7 @@ pub(super) mod test {
                     assert_eq!(size, leaf_num_to_pos(op_count));
                     assert_eq!(start_loc, leaf_num_to_pos(op_count + 1));
                 }
-                _ => panic!("Expected HistoricalSizeTooSmall error"),
+                _ => panic!("expected HistoricalSizeTooSmall error"),
             }
 
             db.destroy().await.unwrap();
