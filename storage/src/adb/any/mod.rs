@@ -514,6 +514,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             .map(|pos| leaf_pos_to_num(pos).unwrap())
     }
 
+    /// Return the inactivity floor location.
+    /// This is the location before which all operations are inactive.
+    pub fn inactivity_floor_loc(&self) -> u64 {
+        self.inactivity_floor_loc
+    }
+
     /// Updates `key` to have value `value`. If the key already has this same value, then this is a
     /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
     /// next successful `commit`.

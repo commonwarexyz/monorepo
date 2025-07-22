@@ -1,7 +1,6 @@
 //! This client demonstrates how to use the [commonware_storage::adb::any::sync] functionality
-//! to synchronize to the server's state. It fetches server metadata to determine sync parameters
-//! and then performs the actual sync operation. It uses the [Resolver] trait to fetch operations
-//! from the server.
+//! to synchronize to the server's state. It uses the [Resolver] to fetch operations and sync
+//! target updates from the server.
 
 use clap::{Arg, Command};
 use commonware_cryptography::sha256::Digest;
@@ -11,14 +10,20 @@ use commonware_storage::{
     mmr::hasher::Standard,
 };
 use commonware_sync::{crate_version, create_adb_config, Database, Resolver};
+use commonware_utils::parse_duration;
+use futures::channel::mpsc;
+use rand::Rng;
 use std::{
     net::{Ipv4Addr, SocketAddr},
     num::NonZeroU64,
+    time::Duration,
 };
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 /// Default server address.
 const DEFAULT_SERVER: &str = "127.0.0.1:8080";
+const DEFAULT_CLIENT_DIR_PREFIX: &str = "/tmp/commonware-sync/client";
+const UPDATE_CHANNEL_SIZE: usize = 16;
 
 #[derive(Debug)]
 struct Config {
@@ -30,64 +35,95 @@ struct Config {
     storage_dir: String,
     /// Port on which metrics are exposed.
     metrics_port: u16,
+    /// Interval for requesting target updates.
+    target_update_interval: Duration,
 }
 
-#[derive(Debug)]
-struct ServerMetadata {
-    root: Digest,
-    oldest_retained_loc: u64,
-    latest_op_loc: u64,
-}
-
-/// Get server metadata to determine sync parameters.
-async fn get_server_metadata<E>(
-    resolver: &Resolver<E>,
-) -> Result<ServerMetadata, Box<dyn std::error::Error>>
+/// Periodically request target updates from server and send them to sync client
+/// on `update_sender`.
+async fn target_update_task<E>(
+    context: E,
+    resolver: Resolver<E>,
+    update_sender: mpsc::Sender<SyncTarget<Digest>>,
+    interval_duration: Duration,
+    initial_target: SyncTarget<Digest>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
-    E: commonware_runtime::Network + Clone,
+    E: commonware_runtime::Network + commonware_runtime::Clock + Clone,
 {
-    info!("Requesting server metadata...");
+    let mut current_target = initial_target;
 
-    let metadata = resolver.get_server_metadata().await?;
-    let metadata = ServerMetadata {
-        root: metadata.root,
-        oldest_retained_loc: metadata.oldest_retained_loc,
-        latest_op_loc: metadata.latest_op_loc,
-    };
-    info!(?metadata, "Received server metadata");
-    Ok(metadata)
+    loop {
+        context.sleep(interval_duration).await;
+
+        // Request sync target from server
+        match resolver.get_sync_target().await {
+            Ok(new_target) => {
+                // Check if target has changed
+                if new_target.root != current_target.root {
+                    // Send new target to sync client
+                    if let Err(e) = update_sender.clone().try_send(new_target.clone()) {
+                        warn!(error = %e, "failed to send target update to sync client");
+                    } else {
+                        info!(
+                            old_target = ?current_target,
+                            new_target = ?new_target,
+                            "target updated"
+                        );
+                        current_target = new_target;
+                    }
+                } else {
+                    debug!(current_target = ?current_target, "target unchanged");
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to get sync target from server");
+                // Continue trying on next interval
+            }
+        }
+    }
 }
 
 /// Create a new database synced to the server's state.
 async fn sync<E>(
     context: E,
     resolver: Resolver<E>,
-    config: &Config,
+    config: Config,
 ) -> Result<Database<E>, Box<dyn std::error::Error>>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
         + commonware_runtime::Metrics
-        + commonware_runtime::Network,
+        + commonware_runtime::Network
+        + commonware_runtime::Spawner
+        + Clone,
 {
-    info!(server = %config.server, "Starting sync to server's database state");
+    info!(server = %config.server, "starting sync to server");
 
-    // Get server metadata to determine sync parameters
-    let ServerMetadata {
-        root,
-        oldest_retained_loc,
-        latest_op_loc,
-    } = get_server_metadata(&resolver).await?;
-
-    info!(
-        lower_bound = oldest_retained_loc,
-        upper_bound = latest_op_loc,
-        "Sync parameters"
-    );
+    // Get initial sync target
+    let initial_target = resolver.get_sync_target().await?;
+    info!(target = ?initial_target, "initial sync target");
 
     // Create database configuration
     let db_config = create_adb_config();
-    info!("Created local database");
+    debug!("created local database");
+
+    // Create channel for target updates
+    let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
+
+    // Start target update task
+    let target_resolver = Resolver::new(context.clone(), config.server);
+    let target_update_interval = config.target_update_interval;
+    let initial_target_clone = initial_target.clone();
+    let _target_update_handle = context.with_label("target-update").spawn(move |context| {
+        target_update_task(
+            context,
+            target_resolver,
+            update_sender,
+            target_update_interval,
+            initial_target_clone,
+        )
+    });
 
     // Create sync configuration
     let sync_config = SyncConfig::<
@@ -101,52 +137,23 @@ where
         context: context.clone(),
         db_config,
         fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
-        target: SyncTarget {
-            root,
-            lower_bound_ops: oldest_retained_loc,
-            upper_bound_ops: latest_op_loc,
-        },
+        target: initial_target,
         resolver,
         hasher: Standard::new(),
         apply_batch_size: 1024,
-        update_receiver: None,
+        update_receiver: Some(update_receiver),
     };
 
     info!(
         batch_size = config.batch_size,
         lower_bound = sync_config.target.lower_bound_ops,
         upper_bound = sync_config.target.upper_bound_ops,
-        "Sync configuration"
+        target_update_interval = ?config.target_update_interval,
+        "sync configuration",
     );
 
-    // Do the sync.
-    info!("Beginning sync operation...");
-    let database = sync::sync(sync_config).await?;
-
-    // Get the root digest of the synced database
-    let mut hasher = Standard::new();
-    let got_root = database.root(&mut hasher);
-
-    // Verify the digest matches the  target digest.
-    if got_root != root {
-        return Err(format!(
-            "Synced database root digest does not match target root digest: {got_root:?} != {root:?}"
-        )
-        .into());
-    }
-
-    let root_hex = got_root
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
-    info!(
-        database_ops = database.op_count(),
-        root = %root_hex,
-        "✅ Sync completed successfully"
-    );
-
-    Ok(database)
+    // Sync to the server's state
+    sync::sync(sync_config).await.map_err(|e| e.into())
 }
 
 fn main() {
@@ -176,7 +183,7 @@ fn main() {
                 .long("storage-dir")
                 .value_name("PATH")
                 .help("Storage directory for local database")
-                .default_value("/tmp/commonware-sync/client"),
+                .default_value(DEFAULT_CLIENT_DIR_PREFIX),
         )
         .arg(
             Arg::new("metrics-port")
@@ -185,6 +192,14 @@ fn main() {
                 .value_name("PORT")
                 .help("Port on which metrics are exposed")
                 .default_value("9091"),
+        )
+        .arg(
+            Arg::new("target-update-interval")
+                .short('t')
+                .long("target-update-interval")
+                .value_name("DURATION")
+                .help("Interval for requesting target updates ('ms', 's', 'm', 'h')")
+                .default_value("1s"),
         )
         .get_matches();
 
@@ -205,10 +220,19 @@ fn main() {
                 eprintln!("❌ Invalid batch size: {e}");
                 std::process::exit(1);
             }),
-        storage_dir: matches
-            .get_one::<String>("storage-dir")
-            .unwrap()
-            .to_string(),
+        storage_dir: {
+            let storage_dir = matches
+                .get_one::<String>("storage-dir")
+                .unwrap()
+                .to_string();
+            // Only add suffix if using the default value
+            if storage_dir == DEFAULT_CLIENT_DIR_PREFIX {
+                let suffix: u64 = rand::thread_rng().gen();
+                format!("{storage_dir}-{suffix}")
+            } else {
+                storage_dir
+            }
+        },
         metrics_port: matches
             .get_one::<String>("metrics-port")
             .unwrap()
@@ -217,15 +241,22 @@ fn main() {
                 eprintln!("❌ Invalid metrics port: {e}");
                 std::process::exit(1);
             }),
+        target_update_interval: parse_duration(
+            matches.get_one::<String>("target-update-interval").unwrap(),
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("❌ Invalid target update interval: {e}");
+            std::process::exit(1);
+        }),
     };
 
-    info!("Sync Client starting");
     info!(
         server = %config.server,
         batch_size = config.batch_size,
         storage_dir = %config.storage_dir,
         metrics_port = config.metrics_port,
-        "Configuration"
+        target_update_interval = ?config.target_update_interval,
+        "client starting with configuration"
     );
 
     let executor_config =
@@ -246,13 +277,13 @@ fn main() {
         let resolver = Resolver::new(context.with_label("resolver"), config.server);
 
         // Perform the sync operation
-        match sync(context.with_label("sync"), resolver, &config).await {
+        match sync(context.with_label("sync"), resolver, config).await {
             Ok(_database) => {
                 // _database is now synced to the server's state.
                 // We don't use it in this example, but at this point it's ready to be used.
             }
             Err(e) => {
-                error!(error = %e, "❌ Sync failed");
+                error!(error = %e, "❌ sync failed");
                 std::process::exit(1);
             }
         }
