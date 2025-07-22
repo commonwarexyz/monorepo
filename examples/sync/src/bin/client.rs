@@ -180,7 +180,6 @@ where
     // Get the root digest of the synced database
     let got_root = database.root(&mut Standard::new());
 
-    // Debug: Log database state before closing
     info!(
         sync_iteration,
         database_ops = database.op_count(),
@@ -188,7 +187,6 @@ where
         "✅ Sync completed successfully - about to close database"
     );
 
-    // Additional debug info
     debug!(
         sync_iteration,
         "Database state before close: ops={}, root={:?}",
