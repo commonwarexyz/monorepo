@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 /// - `m`: Minutes (e.g., "2m", "30m")
 /// - `h`: Hours (e.g., "1h", "24h")
 ///
-/// If no suffix is provided, the value is interpreted as seconds.
+/// A suffix is required - strings without suffixes will return an error.
 ///
 /// # Overflow Protection
 ///
@@ -22,7 +22,7 @@ use std::time::{Duration, SystemTime};
 ///
 /// # Arguments
 ///
-/// * `s` - A string slice containing the duration with optional suffix
+/// * `s` - A string slice containing the duration with required suffix
 ///
 /// # Returns
 ///
@@ -41,13 +41,11 @@ use std::time::{Duration, SystemTime};
 /// assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
 /// assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
 ///
-/// // No suffix defaults to seconds
-/// assert_eq!(parse_duration("60").unwrap(), Duration::from_secs(60));
-///
 /// // Error cases
 /// assert!(parse_duration("invalid").is_err());
 /// assert!(parse_duration("10x").is_err());
 /// assert!(parse_duration("5minutes").is_err()); // Long forms not supported
+/// assert!(parse_duration("60").is_err()); // No suffix required
 ///
 /// // Overflow protection
 /// let max_hours = u64::MAX / 3600;
@@ -99,14 +97,11 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
         return Ok(Duration::from_secs(secs));
     }
 
-    // No suffix - parse as seconds
-    let secs: u64 = s.parse().map_err(|_| {
-        format!(
-            "Invalid duration format: '{s}'. Supported formats: \
-             '123ms', '30s', '5m', '2h'"
-        )
-    })?;
-    Ok(Duration::from_secs(secs))
+    // No suffix - return error
+    Err(format!(
+        "Invalid duration format: '{s}'. A suffix is required. \
+         Supported formats: '123ms', '30s', '5m', '2h'"
+    ))
 }
 
 /// Extension trait to add methods to `std::time::SystemTime`
@@ -256,15 +251,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_duration_no_suffix() {
-        // Should default to seconds
-        assert_eq!(parse_duration("60").unwrap(), Duration::from_secs(60));
-        assert_eq!(parse_duration("0").unwrap(), Duration::from_secs(0));
-        assert_eq!(parse_duration("3600").unwrap(), Duration::from_secs(3600));
-        assert_eq!(parse_duration("1").unwrap(), Duration::from_secs(1));
-    }
-
-    #[test]
     fn test_parse_duration_whitespace() {
         // Should handle whitespace around the input
         assert_eq!(parse_duration("  30s  ").unwrap(), Duration::from_secs(30));
@@ -304,6 +290,12 @@ mod tests {
         assert!(parse_duration("30sec").is_err());
         assert!(parse_duration("5min").is_err());
         assert!(parse_duration("2hr").is_err());
+
+        // No suffix
+        assert!(parse_duration("60").is_err());
+        assert!(parse_duration("0").is_err());
+        assert!(parse_duration("3600").is_err());
+        assert!(parse_duration("1").is_err());
 
         // Empty or whitespace only
         assert!(parse_duration("").is_err());
