@@ -1,12 +1,15 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::criterion_main;
 
-mod lthash_operations;
+mod add;
+mod combine;
+mod finalize;
+mod incremental_vs_full;
+mod subtract;
 
-use lthash_operations::*;
-
-criterion_group! {
-    name = benches;
-    config = Criterion::default();
-    targets = bench_lthash_add, bench_lthash_subtract, bench_lthash_combine, bench_lthash_finalize, bench_lthash_operations_comparison
-}
-criterion_main!(benches);
+criterion_main!(
+    add::benches,
+    subtract::benches,
+    combine::benches,
+    finalize::benches,
+    incremental_vs_full::benches
+);
