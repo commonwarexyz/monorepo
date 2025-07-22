@@ -73,6 +73,15 @@ const BLOCK_SIZE: usize = Digest::SIZE;
 /// Block type for IBE.
 pub type Block = FixedBytes<BLOCK_SIZE>;
 
+/// Implement conversion from Digest to Block to avoid copying.
+impl From<Digest> for Block {
+    fn from(digest: Digest) -> Self {
+        // SAFETY: Both Digest and Block (FixedBytes<32>) are wrappers around [u8; 32]
+        // with the same memory layout, so this transmute is safe.
+        unsafe { std::mem::transmute(digest) }
+    }
+}
+
 /// Ciphertext type for IBE.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ciphertext<V: Variant> {
@@ -121,8 +130,7 @@ mod hash {
         let mut hasher = Sha256::new();
         hasher.update(b"h2");
         hasher.update(&gt.to_bytes());
-        let digest = hasher.finalize();
-        Block::new(*digest.as_ref())
+        hasher.finalize().into()
     }
 
     /// H3: (sigma, M) -> Scalar
@@ -145,8 +153,7 @@ mod hash {
         let mut hasher = Sha256::new();
         hasher.update(b"h4");
         hasher.update(sigma.as_ref());
-        let digest = hasher.finalize();
-        Block::new(*digest.as_ref())
+        hasher.finalize().into()
     }
 }
 
