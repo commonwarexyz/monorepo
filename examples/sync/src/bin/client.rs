@@ -281,7 +281,7 @@ fn main() {
                 .short('i')
                 .long("sync-interval")
                 .value_name("DURATION")
-                .help("Interval between sync operations in 's' or 'ms'")
+                .help("Interval between sync operations ('ms', 's', 'm', 'h')")
                 .default_value("10s"),
         )
         .get_matches();
