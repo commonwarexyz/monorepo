@@ -100,12 +100,27 @@ mod hash {
 }
 
 /// XOR two blocks together.
+/// 
+/// This function takes advantage of the fixed-size nature of blocks
+/// to enable better compiler optimizations. Since we know blocks are
+/// exactly 32 bytes, we can unroll the operation completely.
+#[inline]
 fn xor_blocks(a: &Block, b: &Block) -> Block {
-    let mut result = [0u8; BLOCK_SIZE];
-    for (i, (a, b)) in a.as_ref().iter().zip(b.as_ref().iter()).enumerate() {
-        result[i] = a ^ b;
-    }
-    Block::new(result)
+    let a_bytes = a.as_ref();
+    let b_bytes = b.as_ref();
+    
+    // Since Block is exactly 32 bytes, we can use array initialization
+    // with const generics to let the compiler fully optimize this
+    Block::new([
+        a_bytes[0] ^ b_bytes[0],   a_bytes[1] ^ b_bytes[1],   a_bytes[2] ^ b_bytes[2],   a_bytes[3] ^ b_bytes[3],
+        a_bytes[4] ^ b_bytes[4],   a_bytes[5] ^ b_bytes[5],   a_bytes[6] ^ b_bytes[6],   a_bytes[7] ^ b_bytes[7],
+        a_bytes[8] ^ b_bytes[8],   a_bytes[9] ^ b_bytes[9],   a_bytes[10] ^ b_bytes[10], a_bytes[11] ^ b_bytes[11],
+        a_bytes[12] ^ b_bytes[12], a_bytes[13] ^ b_bytes[13], a_bytes[14] ^ b_bytes[14], a_bytes[15] ^ b_bytes[15],
+        a_bytes[16] ^ b_bytes[16], a_bytes[17] ^ b_bytes[17], a_bytes[18] ^ b_bytes[18], a_bytes[19] ^ b_bytes[19],
+        a_bytes[20] ^ b_bytes[20], a_bytes[21] ^ b_bytes[21], a_bytes[22] ^ b_bytes[22], a_bytes[23] ^ b_bytes[23],
+        a_bytes[24] ^ b_bytes[24], a_bytes[25] ^ b_bytes[25], a_bytes[26] ^ b_bytes[26], a_bytes[27] ^ b_bytes[27],
+        a_bytes[28] ^ b_bytes[28], a_bytes[29] ^ b_bytes[29], a_bytes[30] ^ b_bytes[30], a_bytes[31] ^ b_bytes[31],
+    ])
 }
 
 /// Encrypt a message using identity-based encryption with CCA-security.
@@ -120,7 +135,7 @@ fn xor_blocks(a: &Block, b: &Block) -> Block {
 /// # Arguments
 /// * `rng` - Random number generator
 /// * `public` - Master public key
-/// * `message` - Message to encrypt (must be exactly 32 bytes)
+/// * `message` - Message to encrypt
 /// * `target` - Identity/target to encrypt for
 ///
 /// # Returns
@@ -434,8 +449,13 @@ mod tests {
 
         // Encrypt with namespace
         let message_block = block_from_bytes(message);
-        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (Some(namespace), identity))
-            .expect("Encryption should succeed");
+        let ciphertext = encrypt::<_, MinPk>(
+            &mut rng,
+            master_public,
+            &message_block,
+            (Some(namespace), identity),
+        )
+        .expect("Encryption should succeed");
 
         // Decrypt
         let decrypted =
@@ -464,8 +484,13 @@ mod tests {
 
         // Encrypt with namespace2
         let message_block = block_from_bytes(message);
-        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (Some(namespace2), identity))
-            .expect("Encryption should succeed");
+        let ciphertext = encrypt::<_, MinPk>(
+            &mut rng,
+            master_public,
+            &message_block,
+            (Some(namespace2), identity),
+        )
+        .expect("Encryption should succeed");
 
         // Try to decrypt with private key from namespace1 - should fail
         let result = decrypt::<MinPk>(private_key, &ciphertext);
@@ -495,12 +520,18 @@ mod tests {
 
         // Encrypt with namespace
         let message_block = block_from_bytes(message);
-        let ciphertext_ns = encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (Some(namespace), identity))
-            .expect("Encryption should succeed");
+        let ciphertext_ns = encrypt::<_, MinPk>(
+            &mut rng,
+            master_public,
+            &message_block,
+            (Some(namespace), identity),
+        )
+        .expect("Encryption should succeed");
 
         // Encrypt without namespace
-        let ciphertext_no_ns = encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
-            .expect("Encryption should succeed");
+        let ciphertext_no_ns =
+            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
+                .expect("Encryption should succeed");
 
         // Try to decrypt namespaced ciphertext with non-namespaced key - should fail
         let result1 = decrypt::<MinPk>(private_key_no_ns, &ciphertext_ns);
