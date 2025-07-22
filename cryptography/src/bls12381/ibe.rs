@@ -1,13 +1,14 @@
-//! Identity-Based Encryption (IBE) implementation for BLS12-381.
+//! Identity-Based Encryption (IBE) over BLS12-381.
 //!
-//! This module provides timelock encryption functionality using identity-based
-//! encryption on the BLS12-381 elliptic curve. The implementation uses the
-//! Fujisaki-Okamoto transform to achieve CCA-security.
+//! This create implements Timelock Encryption (TLE) over BLS12-381 using
+//! Identity-Based Encryption (IBE). To achieve CCA-security, this crate
+//! employs the Fujisaki-Okamoto transform.
 //!
 //! # Acknowledgements
 //!
 //! The following resources were used as references when implementing this crate:
 //!
+//! * <https://crypto.stanford.edu/~dabo/papers/bfibe.pdf>: Identity-Based Encryption from the Weil Pairing
 //! * <https://eprint.iacr.org/2023/189>: tlock: Practical Timelock Encryption from Threshold BLS
 //! * <https://github.com/thibmeu/tlock-rs>: tlock-rs: Practical Timelock Encryption/Decryption in Rust
 //! * <https://github.com/drand/tlock> tlock: Timelock Encryption/Decryption Made Practical
@@ -26,10 +27,10 @@ use rand::{CryptoRng, Rng};
 /// Block size for encryption operations.
 const BLOCK_SIZE: usize = Digest::SIZE;
 
-/// Type alias for 32-byte blocks using FixedBytes.
+/// Block type for IBE.
 pub type Block = FixedBytes<BLOCK_SIZE>;
 
-/// Ciphertext structure for IBE.
+/// Ciphertext type for IBE.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ciphertext<V: Variant> {
     /// First group element U = r * Public::one().
@@ -67,11 +68,11 @@ impl<V: Variant> EncodeSize for Ciphertext<V> {
 
 /// Hash functions for IBE.
 mod hash {
+    use super::*;
     use crate::{Hasher, Sha256};
 
-    use super::*;
-
     /// H2: GT -> Block
+    ///
     /// Used to mask the random sigma value.
     pub fn h2(gt: &GT) -> Block {
         let mut hasher = Sha256::new();
@@ -82,6 +83,7 @@ mod hash {
     }
 
     /// H3: (sigma, M) -> Scalar
+    ///
     /// Used to derive the random scalar r.
     pub fn h3(sigma: &Block, message: &[u8]) -> Scalar {
         let mut hasher = Sha256::new();
@@ -94,6 +96,7 @@ mod hash {
     }
 
     /// H4: sigma -> Block
+    ///
     /// Used to mask the message.
     pub fn h4(sigma: &Block) -> Block {
         let mut hasher = Sha256::new();
@@ -152,14 +155,14 @@ fn xor(a: &Block, b: &Block) -> Block {
     ])
 }
 
-/// Encrypt a message using identity-based encryption with CCA-security.
+/// Encrypt a message for a given target.
 ///
-/// This implements the Fujisaki-Okamoto transform for CCA-security by:
-/// 1. Generating random sigma
-/// 2. Deriving encryption randomness r = H3(sigma || message)
-/// 3. Creating commitment U = r * G
-/// 4. Masking sigma with the pairing result
-/// 5. Masking the message with H4(sigma)
+/// # Steps
+/// 1. Generate random sigma
+/// 2. Derive encryption randomness r = H3(sigma || message)
+/// 3. Create commitment U = r * G
+/// 4. Mask sigma with the pairing result
+/// 5. Mask the message with H4(sigma)
 ///
 /// # Arguments
 /// * `rng` - Random number generator
@@ -209,13 +212,14 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
     Ciphertext { u, v, w }
 }
 
-/// Decrypt a ciphertext using identity-based encryption with CCA-security.
+/// Decrypt a ciphertext with a signature over the target specified
+/// during [encrypt].
 ///
-/// The decryption verifies the ciphertext integrity by:
-/// 1. Recovering sigma from the pairing
-/// 2. Recovering the message
-/// 3. Recomputing r = H3(sigma || message)
-/// 4. Verifying that U = r * G matches the ciphertext
+/// # Steps
+/// 1. Recover sigma from the pairing
+/// 2. Recover the message
+/// 3. Recompute r = H3(sigma || message)
+/// 4. Verify that U = r * G matches the ciphertext
 ///
 /// # Arguments
 /// * `signature` - Signature over the target payload
