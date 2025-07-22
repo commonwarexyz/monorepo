@@ -81,10 +81,8 @@
 
 use crate::{
     bls12381::primitives::{
-        group::DST,
-        group::{Element, Scalar, GT},
-        ops::hash_message,
-        ops::hash_message_namespace,
+        group::{Element, Scalar, DST, GT},
+        ops::{hash_message, hash_message_namespace},
         variant::Variant,
     },
     sha256::Digest,
