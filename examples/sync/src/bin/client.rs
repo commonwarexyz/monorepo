@@ -217,23 +217,12 @@ where
 
     let mut sync_iteration = 1;
     loop {
-        match perform_sync(&context, &config, sync_iteration).await {
-            Ok(()) => {
-                info!(
-                    sync_iteration,
-                    sync_interval = ?config.sync_interval,
-                    "sync completed successfully, waiting before next sync"
-                );
-            }
-            Err(e) => {
-                error!(
-                    sync_iteration,
-                    error = %e,
-                    sync_interval = ?config.sync_interval,
-                    "❌ sync failed, waiting before retry"
-                );
-            }
-        }
+        perform_sync(&context, &config, sync_iteration).await?;
+        info!(
+            sync_iteration,
+            sync_interval = ?config.sync_interval,
+            "sync completed successfully, waiting before next sync"
+        );
 
         // Wait before next sync
         context.sleep(config.sync_interval).await;
