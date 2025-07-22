@@ -12,7 +12,9 @@ documentation = "https://docs.rs/commonware-consensus"
 
 [dependencies]
 commonware-codec = { workspace = true }
+commonware-broadcast = { workspace = true }
 commonware-cryptography = { workspace = true }
+commonware-resolver = { workspace = true }
 commonware-utils = { workspace = true }
 bytes = { workspace = true }
 cfg-if = { workspace = true }

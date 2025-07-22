@@ -6,6 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 pub mod aggregation;
+pub mod marshal;
 pub mod ordered_broadcast;
 pub mod simplex;
 pub mod threshold_simplex;
