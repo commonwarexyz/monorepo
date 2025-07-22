@@ -15,7 +15,7 @@ fn benchmark_ibe_encrypt(c: &mut Criterion) {
     c.bench_function(module_path!(), |b| {
         b.iter(|| {
             black_box(
-                encrypt::<_, MinSig>(&mut rng, master_public, &message, (None, &target)).unwrap(),
+                encrypt::<_, MinSig>(&mut rng, master_public, (None, &target), &message).unwrap(),
             );
         });
     });
