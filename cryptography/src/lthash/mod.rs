@@ -49,14 +49,14 @@
 //! lthash2.add(b"alice");
 //! lthash2.add(b"charlie");
 //!
-//! assert_eq!(lthash.finalize(), lthash2.finalize());
+//! assert_eq!(lthash.checksum(), lthash2.checksum());
 //!
 //! // Order doesn't matter (commutative property)
 //! let mut lthash3 = LtHash::new();
 //! lthash3.add(b"charlie");
 //! lthash3.add(b"alice");
 //!
-//! assert_eq!(lthash2.finalize(), lthash3.finalize());
+//! assert_eq!(lthash2.checksum(), lthash3.checksum());
 //! ```
 //!
 //! # Acknowledgements
