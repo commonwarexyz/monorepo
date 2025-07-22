@@ -82,7 +82,7 @@ impl From<Digest> for Block {
     }
 }
 
-/// Ciphertext type for IBE.
+/// Encrypted message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ciphertext<V: Variant> {
     /// First group element U = r * Public::one().
@@ -157,7 +157,7 @@ mod hash {
     }
 }
 
-/// XOR two blocks together.
+/// XOR two [Block]s together.
 ///
 /// This function takes advantage of the fixed-size nature of blocks
 /// to enable better compiler optimizations. Since we know blocks are
