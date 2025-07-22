@@ -106,7 +106,7 @@ mod hash {
 /// to enable better compiler optimizations. Since we know blocks are
 /// exactly 32 bytes, we can unroll the operation completely.
 #[inline]
-fn xor_blocks(a: &Block, b: &Block) -> Block {
+fn xor(a: &Block, b: &Block) -> Block {
     let a_bytes = a.as_ref();
     let b_bytes = b.as_ref();
 
@@ -196,11 +196,11 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
 
     // Compute V = sigma XOR H2(e(Q_id, r * P_pub))
     let h2_value = hash::h2(&gt);
-    let v = xor_blocks(&sigma, &h2_value);
+    let v = xor(&sigma, &h2_value);
 
     // Compute W = M XOR H4(sigma)
     let h4_value = hash::h4(&sigma);
-    let w = xor_blocks(message, &h4_value);
+    let w = xor(message, &h4_value);
 
     Ok(Ciphertext { u, v, w })
 }
@@ -228,11 +228,11 @@ pub fn decrypt<V: Variant>(
 
     // Recover sigma = V XOR H2(e(U, signature))
     let h2_value = hash::h2(&gt);
-    let sigma = xor_blocks(&ciphertext.v, &h2_value);
+    let sigma = xor(&ciphertext.v, &h2_value);
 
     // Recover M = W XOR H4(sigma)
     let h4_value = hash::h4(&sigma);
-    let message = xor_blocks(&ciphertext.w, &h4_value);
+    let message = xor(&ciphertext.w, &h4_value);
 
     // Verify integrity: recompute r and check U = r * Public::one()
     let r = hash::h3(&sigma, &message);
