@@ -166,6 +166,8 @@ pub const G2_MESSAGE: DST = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 pub struct GT(blst_fp12);
 
 /// The size in bytes of an encoded GT element.
+///
+/// GT is a 12-tuple of Fp elements, each 48 bytes.
 pub const GT_ELEMENT_BYTE_LENGTH: usize = 576;
 
 impl GT {
