@@ -74,7 +74,7 @@ where
                             );
                             current_target = new_target;
                         }
-                        Err(e) if format!("{e}").contains("receiver is gone") => {
+                        Err(e) if e.is_disconnected() => {
                             debug!("sync client disconnected, terminating target update task");
                             return Ok(());
                         }
