@@ -68,24 +68,28 @@ impl<V: Variant> EncodeSize for Ciphertext<V> {
 
 /// Hash functions for IBE.
 mod hash {
+    use crate::{Hasher, Sha256};
+
     use super::*;
 
     /// H2: GT -> Block
     /// Used to mask the random sigma value.
     pub fn h2(gt: &GT) -> Block {
-        let mut input = b"h2".to_vec();
-        input.extend_from_slice(&gt.to_bytes());
-        let digest = crate::sha256::hash(&input);
+        let mut hasher = Sha256::new();
+        hasher.update(b"h2");
+        hasher.update(&gt.to_bytes());
+        let digest = hasher.finalize();
         Block::new(*digest.as_ref())
     }
 
     /// H3: (sigma, M) -> Scalar
     /// Used to derive the random scalar r.
     pub fn h3(sigma: &Block, message: &[u8]) -> Scalar {
-        let mut input = b"h3".to_vec();
-        input.extend_from_slice(sigma.as_ref());
-        input.extend_from_slice(message);
-        let digest = crate::sha256::hash(&input);
+        let mut hasher = Sha256::new();
+        hasher.update(b"h3");
+        hasher.update(sigma.as_ref());
+        hasher.update(message);
+        let digest = hasher.finalize();
         Scalar::from_be_bytes(digest.as_ref())
             .expect("SHA256 output should never produce zero scalar after reduction")
     }
@@ -93,9 +97,10 @@ mod hash {
     /// H4: sigma -> Block
     /// Used to mask the message.
     pub fn h4(sigma: &Block) -> Block {
-        let mut input = b"h4".to_vec();
-        input.extend_from_slice(sigma.as_ref());
-        let digest = crate::sha256::hash(&input);
+        let mut hasher = Sha256::new();
+        hasher.update(b"h4");
+        hasher.update(sigma.as_ref());
+        let digest = hasher.finalize();
         Block::new(*digest.as_ref())
     }
 }
