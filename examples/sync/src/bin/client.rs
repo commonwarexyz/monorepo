@@ -1,6 +1,7 @@
 //! This client demonstrates how to use the [commonware_storage::adb::any::sync] functionality
 //! to synchronize to the server's state. It uses the [Resolver] to fetch operations and sync
-//! target updates from the server.
+//! target updates from the server, and continuously syncs to demonstrate that sync works
+//! with both empty and already-initialized databases.
 
 use clap::{Arg, Command};
 use commonware_cryptography::sha256::Digest;
@@ -9,7 +10,7 @@ use commonware_storage::{
     adb::any::sync::{self, client::Config as SyncConfig, SyncTarget},
     mmr::hasher::Standard,
 };
-use commonware_sync::{crate_version, create_adb_config, parse_duration, Database, Resolver};
+use commonware_sync::{crate_version, create_adb_config, parse_duration, Resolver};
 use futures::channel::mpsc;
 use rand::Rng;
 use std::{
@@ -36,6 +37,8 @@ struct Config {
     metrics_port: u16,
     /// Interval for requesting target updates.
     target_update_interval: Duration,
+    /// Interval between sync operations.
+    sync_interval: Duration,
 }
 
 /// Periodically request target updates from server and send them to sync client
@@ -61,15 +64,23 @@ where
                 // Check if target has changed
                 if new_target.root != current_target.root {
                     // Send new target to sync client
-                    if let Err(e) = update_sender.clone().try_send(new_target.clone()) {
-                        warn!(error = %e, "failed to send target update to sync client");
-                    } else {
-                        info!(
-                            old_target = ?current_target,
-                            new_target = ?new_target,
-                            "target updated"
-                        );
-                        current_target = new_target;
+                    match update_sender.clone().try_send(new_target.clone()) {
+                        Ok(()) => {
+                            info!(
+                                old_target = ?current_target,
+                                new_target = ?new_target,
+                                "target updated"
+                            );
+                            current_target = new_target;
+                        }
+                        Err(e) if format!("{e}").contains("receiver is gone") => {
+                            debug!("sync client disconnected, terminating target update task");
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "failed to send target update to sync client");
+                            return Err(e.into());
+                        }
                     }
                 } else {
                     debug!("sync target unchanged");
@@ -83,12 +94,12 @@ where
     }
 }
 
-/// Create a new database synced to the server's state.
-async fn sync<E>(
-    context: E,
-    resolver: Resolver<E>,
-    config: Config,
-) -> Result<Database<E>, Box<dyn std::error::Error>>
+/// Perform a single sync by opening the database, syncing, and closing it.
+async fn perform_sync<E>(
+    context: &E,
+    config: &Config,
+    sync_iteration: u32,
+) -> Result<(), Box<dyn std::error::Error>>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
@@ -97,27 +108,34 @@ where
         + commonware_runtime::Spawner
         + Clone,
 {
-    info!(server = %config.server, "starting sync to server");
+    info!(
+        sync_iteration,
+        server = %config.server,
+        "starting sync to server"
+    );
 
     // Get initial sync target
+    let resolver = Resolver::new(context.clone(), config.server);
     let initial_target = resolver.get_sync_target().await?;
-    info!(target = ?initial_target, "initial sync target");
+    info!(
+        sync_iteration,
+        target = ?initial_target,
+        "initial sync target"
+    );
 
     // Create database configuration
     let db_config = create_adb_config();
-    debug!("created local database");
 
     // Create channel for target updates
     let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
     // Start target update task
-    let target_resolver = Resolver::new(context.clone(), config.server);
     let target_update_interval = config.target_update_interval;
     let initial_target_clone = initial_target.clone();
-    let _target_update_handle = context.with_label("target-update").spawn(move |context| {
+    let target_update_handle = context.with_label("target-update").spawn(move |context| {
         target_update_task(
             context,
-            target_resolver,
+            resolver,
             update_sender,
             target_update_interval,
             initial_target_clone,
@@ -137,13 +155,14 @@ where
         db_config,
         fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
         target: initial_target,
-        resolver,
+        resolver: Resolver::new(context.clone(), config.server),
         hasher: Standard::new(),
         apply_batch_size: 1024,
         update_receiver: Some(update_receiver),
     };
 
     info!(
+        sync_iteration,
         batch_size = config.batch_size,
         lower_bound = sync_config.target.lower_bound_ops,
         upper_bound = sync_config.target.upper_bound_ops,
@@ -152,14 +171,81 @@ where
     );
 
     // Sync to the server's state
-    sync::sync(sync_config).await.map_err(|e| e.into())
+    let database = sync::sync(sync_config).await?;
+
+    // Cancel the target update task since sync is complete
+    target_update_handle.abort();
+
+    // Get the root digest of the synced database
+    let got_root = database.root(&mut Standard::new());
+
+    // Debug: Log database state before closing
+    info!(
+        sync_iteration,
+        database_ops = database.op_count(),
+        root = %got_root,
+        "✅ Sync completed successfully - about to close database"
+    );
+
+    // Additional debug info
+    debug!(
+        sync_iteration,
+        "Database state before close: ops={}, root={:?}",
+        database.op_count(),
+        got_root
+    );
+
+    // Close the database so it can be reopened on next iteration
+    database.close().await?;
+
+    info!(sync_iteration, "database closed; ready for next iteration");
+
+    Ok(())
+}
+
+/// Continuously sync the database to the server's state.
+async fn continuous_sync<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: commonware_runtime::Storage
+        + commonware_runtime::Clock
+        + commonware_runtime::Metrics
+        + commonware_runtime::Network
+        + commonware_runtime::Spawner
+        + Clone,
+{
+    info!("starting continuous sync process");
+
+    let mut sync_iteration = 1;
+    loop {
+        match perform_sync(&context, &config, sync_iteration).await {
+            Ok(()) => {
+                info!(
+                    sync_iteration,
+                    sync_interval = ?config.sync_interval,
+                    "sync completed successfully, waiting before next sync"
+                );
+            }
+            Err(e) => {
+                error!(
+                    sync_iteration,
+                    error = %e,
+                    sync_interval = ?config.sync_interval,
+                    "❌ sync failed, waiting before retry"
+                );
+            }
+        }
+
+        // Wait before next sync
+        context.sleep(config.sync_interval).await;
+        sync_iteration += 1;
+    }
 }
 
 fn main() {
     // Parse command line arguments
     let matches = Command::new("Sync Client")
         .version(crate_version())
-        .about("Syncs a database to a server's database state")
+        .about("Continuously syncs a database to a server's database state")
         .arg(
             Arg::new("server")
                 .short('s')
@@ -199,6 +285,14 @@ fn main() {
                 .value_name("DURATION")
                 .help("Interval for requesting target updates in 's' or 'ms'")
                 .default_value("1s"),
+        )
+        .arg(
+            Arg::new("sync-interval")
+                .short('i')
+                .long("sync-interval")
+                .value_name("DURATION")
+                .help("Interval between sync operations in 's' or 'ms'")
+                .default_value("10s"),
         )
         .get_matches();
 
@@ -247,6 +341,11 @@ fn main() {
             eprintln!("❌ Invalid target update interval: {e}");
             std::process::exit(1);
         }),
+        sync_interval: parse_duration(matches.get_one::<String>("sync-interval").unwrap())
+            .unwrap_or_else(|e| {
+                eprintln!("❌ Invalid sync interval: {e}");
+                std::process::exit(1);
+            }),
     };
 
     info!(
@@ -255,6 +354,7 @@ fn main() {
         storage_dir = %config.storage_dir,
         metrics_port = config.metrics_port,
         target_update_interval = ?config.target_update_interval,
+        sync_interval = ?config.sync_interval,
         "client starting with configuration"
     );
 
@@ -272,19 +372,10 @@ fn main() {
             None,
         );
 
-        // Create the network resolver with the runtime context
-        let resolver = Resolver::new(context.with_label("resolver"), config.server);
-
-        // Perform the sync operation
-        match sync(context.with_label("sync"), resolver, config).await {
-            Ok(_database) => {
-                // _database is now synced to the server's state.
-                // We don't use it in this example, but at this point it's ready to be used.
-            }
-            Err(e) => {
-                error!(error = %e, "❌ sync failed");
-                std::process::exit(1);
-            }
+        // Continuously sync to the server's state
+        if let Err(e) = continuous_sync(context.with_label("sync"), config).await {
+            error!(error = %e, "❌ continuous sync failed");
+            std::process::exit(1);
         }
     });
 }
