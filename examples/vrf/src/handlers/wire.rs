@@ -286,13 +286,13 @@ mod tests {
     fn new_share(v: u32) -> group::Share {
         group::Share {
             index: v,
-            private: group::Private::rand(&mut thread_rng()),
+            private: group::Private::from_rand(&mut thread_rng()),
         }
     }
 
     fn new_eval(v: u32) -> Eval<<MinSig as Variant>::Signature> {
         let mut signature = <MinSig as Variant>::Signature::one();
-        let scalar = group::Scalar::rand(&mut thread_rng());
+        let scalar = group::Scalar::from_rand(&mut thread_rng());
         signature.mul(&scalar);
         Eval {
             index: v,
@@ -302,7 +302,7 @@ mod tests {
 
     fn new_poly() -> poly::Public<MinSig> {
         let mut public = <MinSig as Variant>::Public::one();
-        let scalar = group::Scalar::rand(&mut thread_rng());
+        let scalar = group::Scalar::from_rand(&mut thread_rng());
         public.mul(&scalar);
         poly::Public::<MinSig>::from(vec![public; T])
     }

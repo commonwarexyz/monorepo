@@ -107,7 +107,7 @@ impl Hasher for Blake3 {
 /// Digest of a BLAKE3 hashing operation.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
-pub struct Digest([u8; DIGEST_LENGTH]);
+pub struct Digest(pub [u8; DIGEST_LENGTH]);
 
 impl Write for Digest {
     fn write(&self, buf: &mut impl BufMut) {

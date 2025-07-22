@@ -83,7 +83,9 @@ pub fn new(degree: u32) -> Poly<Scalar> {
 /// In the context of secret sharing, the threshold is the degree + 1.
 pub fn new_from<R: RngCore>(degree: u32, rng: &mut R) -> Poly<Scalar> {
     // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L46-L52
-    let coeffs = (0..=degree).map(|_| Scalar::rand(rng)).collect::<Vec<_>>();
+    let coeffs = (0..=degree)
+        .map(|_| Scalar::from_rand(rng))
+        .collect::<Vec<_>>();
     Poly::<Scalar>(coeffs)
 }
 

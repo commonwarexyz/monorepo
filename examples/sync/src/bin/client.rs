@@ -143,7 +143,7 @@ where
         )
     });
 
-    // Create sync configuration with target update receiver
+    // Create sync configuration
     let sync_config = SyncConfig::<
         E,
         commonware_sync::Key,

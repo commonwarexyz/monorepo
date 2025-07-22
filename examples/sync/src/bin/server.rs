@@ -59,8 +59,6 @@ where
     error_counter: Counter,
     /// Counter for operations added.
     ops_counter: Counter,
-    /// Last known target root digest for tracking changes.
-    last_target_root: Arc<RwLock<Option<Digest>>>,
     /// Last time we added operations.
     last_operation_time: Arc<RwLock<SystemTime>>,
     /// Seed for generating operations.
@@ -77,7 +75,6 @@ where
             request_counter: Counter::default(),
             error_counter: Counter::default(),
             ops_counter: Counter::default(),
-            last_target_root: Arc::new(RwLock::new(None)),
             last_operation_time: Arc::new(RwLock::new(SystemTime::now())),
             operation_seed: Arc::new(RwLock::new(initial_seed)),
         };
@@ -188,11 +185,6 @@ where
     };
 
     drop(database);
-
-    // Update the stored target root digest
-    let mut last_root_guard = state.last_target_root.write().await;
-    *last_root_guard = Some(root);
-    drop(last_root_guard);
 
     let response = SyncTarget {
         root,
