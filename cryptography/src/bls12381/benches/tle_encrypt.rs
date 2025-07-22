@@ -1,12 +1,12 @@
 use commonware_cryptography::bls12381::{
-    tle::{encrypt, Block},
     primitives::{ops::keypair, variant::MinSig},
+    tle::{encrypt, Block},
 };
 use criterion::{criterion_group, Criterion};
 use rand::thread_rng;
 use std::hint::black_box;
 
-fn benchmark_ibe_encrypt(c: &mut Criterion) {
+fn benchmark_tle_encrypt(c: &mut Criterion) {
     let mut rng = thread_rng();
     let (_, master_public) = keypair::<_, MinSig>(&mut rng);
     let target = 10u64.to_be_bytes();
@@ -27,5 +27,5 @@ fn benchmark_ibe_encrypt(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_ibe_encrypt
+    targets = benchmark_tle_encrypt
 }
