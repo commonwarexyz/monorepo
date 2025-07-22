@@ -29,7 +29,7 @@ pub fn compute_public<V: Variant>(private: &Scalar) -> V::Public {
 
 /// Returns a new keypair derived from the provided randomness.
 pub fn keypair<R: RngCore, V: Variant>(rng: &mut R) -> (group::Private, V::Public) {
-    let private = group::Private::rand(rng);
+    let private = group::Private::from_rand(rng);
     let public = compute_public::<V>(&private);
     (private, public)
 }
@@ -1615,7 +1615,7 @@ mod tests {
 
         // Corrupt a share
         let share = shares.get_mut(3).unwrap();
-        share.private = Private::rand(&mut rand::thread_rng());
+        share.private = Private::from_rand(&mut rand::thread_rng());
 
         // Generate the partial signatures
         let namespace = Some(&b"test"[..]);
@@ -1680,7 +1680,7 @@ mod tests {
 
         // Corrupt the second share's private key
         let corrupted_index = 1;
-        shares[corrupted_index].private = Private::rand(&mut rng);
+        shares[corrupted_index].private = Private::from_rand(&mut rng);
 
         // Generate partial signatures
         let partials: Vec<_> = shares
@@ -1727,7 +1727,7 @@ mod tests {
         // Corrupt shares at indices 1 and 3
         let corrupted_indices = vec![1, 3];
         for &idx in &corrupted_indices {
-            shares[idx].private = Private::rand(&mut rng);
+            shares[idx].private = Private::from_rand(&mut rng);
         }
 
         // Generate partial signatures
@@ -1840,7 +1840,7 @@ mod tests {
         let namespace = Some(&b"test"[..]);
         let msg = b"hello";
 
-        shares[0].private = Private::rand(&mut rng);
+        shares[0].private = Private::from_rand(&mut rng);
 
         let partials: Vec<_> = shares
             .iter()
@@ -1876,7 +1876,7 @@ mod tests {
         let msg = b"hello";
 
         let corrupted_index = n - 1;
-        shares[corrupted_index as usize].private = Private::rand(&mut rng);
+        shares[corrupted_index as usize].private = Private::from_rand(&mut rng);
 
         let partials: Vec<_> = shares
             .iter()
