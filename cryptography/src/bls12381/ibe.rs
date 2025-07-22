@@ -255,11 +255,6 @@ mod tests {
     };
     use rand::thread_rng;
 
-    // Helper function to create a Block from a byte literal
-    fn block_from_bytes(bytes: &[u8; BLOCK_SIZE]) -> Block {
-        Block::new(*bytes)
-    }
-
     #[test]
     fn test_encrypt_decrypt_minpk() {
         let mut rng = thread_rng();
@@ -275,10 +270,13 @@ mod tests {
         let signature = sign_message::<MinPk>(&master_secret, None, &target);
 
         // Encrypt
-        let message_block = block_from_bytes(message);
-        let ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public, (None, &target), &message_block)
-                .expect("Encryption should succeed");
+        let ciphertext = encrypt::<_, MinPk>(
+            &mut rng,
+            master_public,
+            (None, &target),
+            &Block::new(*message),
+        )
+        .expect("Encryption should succeed");
 
         // Decrypt
         let decrypted =
@@ -302,10 +300,13 @@ mod tests {
         let signature = sign_message::<MinSig>(&master_secret, None, &target);
 
         // Encrypt
-        let message_block = block_from_bytes(message);
-        let ciphertext =
-            encrypt::<_, MinSig>(&mut rng, master_public, (None, &target), &message_block)
-                .expect("Encryption should succeed");
+        let ciphertext = encrypt::<_, MinSig>(
+            &mut rng,
+            master_public,
+            (None, &target),
+            &Block::new(*message),
+        )
+        .expect("Encryption should succeed");
 
         // Decrypt
         let decrypted =
@@ -326,10 +327,13 @@ mod tests {
         let message = b"Secret message padded to 32bytes";
 
         // Encrypt with first master public key
-        let message_block = block_from_bytes(message);
-        let ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public1, (None, &target), &message_block)
-                .expect("Encryption should succeed");
+        let ciphertext = encrypt::<_, MinPk>(
+            &mut rng,
+            master_public1,
+            (None, &target),
+            &Block::new(*message),
+        )
+        .expect("Encryption should succeed");
 
         // Try to decrypt with signature from second master
         let wrong_signature = sign_message::<MinPk>(&master_secret2, None, &target);
@@ -350,10 +354,13 @@ mod tests {
         let signature = sign_message::<MinPk>(&master_secret, None, &target);
 
         // Encrypt
-        let message_block = block_from_bytes(message);
-        let ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public, (None, &target), &message_block)
-                .expect("Encryption should succeed");
+        let ciphertext = encrypt::<_, MinPk>(
+            &mut rng,
+            master_public,
+            (None, &target),
+            &Block::new(*message),
+        )
+        .expect("Encryption should succeed");
 
         // Tamper with ciphertext by creating a modified w
         let mut w_bytes = [0u8; BLOCK_SIZE];
@@ -377,13 +384,15 @@ mod tests {
         let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
         let target = 50u64.to_be_bytes();
         let message = [0u8; 32]; // 32 zero bytes
-
         let signature = sign_message::<MinPk>(&master_secret, None, &target);
 
-        let message_block = block_from_bytes(&message);
-        let ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public, (None, &target), &message_block)
-                .expect("Encryption should succeed");
+        let ciphertext = encrypt::<_, MinPk>(
+            &mut rng,
+            master_public,
+            (None, &target),
+            &Block::new(message),
+        )
+        .expect("Encryption should succeed");
 
         let decrypted =
             decrypt::<MinPk>(&signature, &ciphertext).expect("Decryption should succeed");
@@ -401,10 +410,13 @@ mod tests {
 
         let signature = sign_message::<MinPk>(&master_secret, None, &target);
 
-        let message_block = block_from_bytes(&message);
-        let ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public, (None, &target), &message_block)
-                .expect("Encryption should succeed");
+        let ciphertext = encrypt::<_, MinPk>(
+            &mut rng,
+            master_public,
+            (None, &target),
+            &Block::new(message),
+        )
+        .expect("Encryption should succeed");
 
         let decrypted =
             decrypt::<MinPk>(&signature, &ciphertext).expect("Decryption should succeed");
@@ -424,10 +436,13 @@ mod tests {
         let signature = sign_message::<MinPk>(&master_secret, None, &target);
 
         // Encrypt
-        let message_block = block_from_bytes(message);
-        let mut ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public, (None, &target), &message_block)
-                .expect("Encryption should succeed");
+        let mut ciphertext = encrypt::<_, MinPk>(
+            &mut rng,
+            master_public,
+            (None, &target),
+            &Block::new(*message),
+        )
+        .expect("Encryption should succeed");
 
         // Modify U component (this should make decryption fail due to FO transform)
         let mut modified_u = ciphertext.u;
@@ -455,12 +470,11 @@ mod tests {
         let signature = sign_message::<MinPk>(&master_secret, Some(namespace), &target);
 
         // Encrypt with namespace
-        let message_block = block_from_bytes(message);
         let ciphertext = encrypt::<_, MinPk>(
             &mut rng,
             master_public,
             (Some(namespace), &target),
-            &message_block,
+            &Block::new(*message),
         )
         .expect("Encryption should succeed");
 
@@ -488,12 +502,11 @@ mod tests {
         let signature = sign_message::<MinPk>(&master_secret, Some(namespace1), &target);
 
         // Encrypt with namespace2
-        let message_block = block_from_bytes(message);
         let ciphertext = encrypt::<_, MinPk>(
             &mut rng,
             master_public,
             (Some(namespace2), &target),
-            &message_block,
+            &Block::new(*message),
         )
         .expect("Encryption should succeed");
 
@@ -520,19 +533,22 @@ mod tests {
         let signature_ns = sign_message::<MinPk>(&master_secret, Some(namespace), &target);
 
         // Encrypt with namespace
-        let message_block = block_from_bytes(message);
         let ciphertext_ns = encrypt::<_, MinPk>(
             &mut rng,
             master_public,
             (Some(namespace), &target),
-            &message_block,
+            &Block::new(*message),
         )
         .expect("Encryption should succeed");
 
         // Encrypt without namespace
-        let ciphertext_no_ns =
-            encrypt::<_, MinPk>(&mut rng, master_public, (None, &target), &message_block)
-                .expect("Encryption should succeed");
+        let ciphertext_no_ns = encrypt::<_, MinPk>(
+            &mut rng,
+            master_public,
+            (None, &target),
+            &Block::new(*message),
+        )
+        .expect("Encryption should succeed");
 
         // Try to decrypt namespaced ciphertext with non-namespaced signature - should fail
         let result1 = decrypt::<MinPk>(&signature_no_ns, &ciphertext_ns);
@@ -564,10 +580,13 @@ mod tests {
         let signature = sign_message::<MinPk>(&master_secret, None, &target);
 
         // Encrypt
-        let message_block = block_from_bytes(message);
-        let ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public, (None, &target), &message_block)
-                .expect("Encryption should succeed");
+        let ciphertext = encrypt::<_, MinPk>(
+            &mut rng,
+            master_public,
+            (None, &target),
+            &Block::new(*message),
+        )
+        .expect("Encryption should succeed");
 
         // Modify V component (encrypted sigma)
         let mut v_bytes = [0u8; BLOCK_SIZE];
