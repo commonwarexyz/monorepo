@@ -70,7 +70,7 @@ use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_utils::array::FixedBytes;
 use rand::{CryptoRng, Rng};
 
-/// Domain separation tag for hashing a message to a scalar.
+/// Domain separation tag for hashing the `h3` message to a scalar.
 const DST: DST = b"TLE_BLS12381_XMD:SHA-256_SSWU_RO_H3_";
 
 /// Block size for encryption operations.
