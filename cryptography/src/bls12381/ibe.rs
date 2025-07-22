@@ -238,8 +238,9 @@ mod tests {
 
         // Encrypt
         let message_block = block_from_bytes(message);
-        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
-            .expect("Encryption should succeed");
+        let ciphertext =
+            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
+                .expect("Encryption should succeed");
 
         // Decrypt
         let decrypted =
@@ -275,21 +276,6 @@ mod tests {
             decrypt::<MinSig>(private_key, &ciphertext).expect("Decryption should succeed");
 
         assert_eq!(message.as_ref(), decrypted.as_ref());
-    }
-
-    #[test]
-    fn test_message_size_enforcement() {
-        // This test verifies that Block enforces 32-byte size at the type level
-        // Since encrypt now takes Block, we can't pass wrong-sized data
-        let message_33 = vec![0u8; 33];
-        let message_32 = [0u8; 32];
-        
-        // We can create a Block from a 32-byte array
-        let _block = block_from_bytes(&message_32);
-        
-        // But we can't create a Block from a 33-byte vec at compile time
-        // The type system enforces this
-        assert_eq!(message_33.len(), 33);
     }
 
     #[test]
@@ -334,8 +320,9 @@ mod tests {
 
         // Encrypt
         let message_block = block_from_bytes(message);
-        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
-            .expect("Encryption should succeed");
+        let ciphertext =
+            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
+                .expect("Encryption should succeed");
 
         // Tamper with ciphertext by creating a modified w
         let mut w_bytes = [0u8; BLOCK_SIZE];
@@ -443,8 +430,9 @@ mod tests {
 
         // Encrypt
         let message_block = block_from_bytes(message);
-        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
-            .expect("Encryption should succeed");
+        let ciphertext =
+            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
+                .expect("Encryption should succeed");
 
         // Modify V component (encrypted sigma)
         let mut v_bytes = [0u8; BLOCK_SIZE];
