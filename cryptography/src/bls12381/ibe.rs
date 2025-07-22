@@ -1,6 +1,6 @@
 //! Identity-Based Encryption (IBE) over BLS12-381.
 //!
-//! This create implements Timelock Encryption (TLE) over BLS12-381 using
+//! This crate implements Timelock Encryption (TLE) over BLS12-381 using
 //! Identity-Based Encryption (IBE). To achieve CCA-security, this crate
 //! employs the Fujisaki-Okamoto transform.
 //!
@@ -251,7 +251,7 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
     r_pub.mul(&r);
     let gt = V::pairing(&r_pub, &q_id);
 
-    // Compute V = sigma XOR H2(e(Q_id, r * P_pub))
+    // Compute V = sigma XOR H2(e(r * P_pub, Q_id))
     let h2_value = hash::h2(&gt);
     let v = xor(&sigma, &h2_value);
 
@@ -563,7 +563,7 @@ mod tests {
 
         // Modify U component (this should make decryption fail due to FO transform)
         let mut modified_u = ciphertext.u;
-        modified_u.mul(&Scalar::from_ikm(&[1u8; 64]));
+        modified_u.mul(&Scalar::rand(&mut rng));
         ciphertext.u = modified_u;
 
         // Try to decrypt - should fail
