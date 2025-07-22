@@ -72,7 +72,7 @@ where
                         current_target = new_target;
                     }
                 } else {
-                    debug!("sync target unchanged");
+                    debug!(current_target = ?current_target, "target unchanged");
                 }
             }
             Err(e) => {

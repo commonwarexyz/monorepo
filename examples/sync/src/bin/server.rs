@@ -549,16 +549,13 @@ fn main() {
         let state = Arc::new(State::new(context.with_label("server"), database, config.seed));
         let operation_interval = config.operation_interval;
 
-        let mut sleep_fut = Box::pin(context.sleep(operation_interval));
         loop {
             select! {
-                _ = &mut sleep_fut => {
+                _ = context.sleep(operation_interval) => {
                     // Add operations to the database
                     if let Err(e) = state.maybe_add_operation(&config, &context).await {
                         warn!(error = %e, "failed to add additional operations");
                     }
-                    // Reset the sleep future for next iteration
-                    sleep_fut = Box::pin(context.sleep(operation_interval));
                 },
                 client_result = listener.accept() => {
                     match client_result {
