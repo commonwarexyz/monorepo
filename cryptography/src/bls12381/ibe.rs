@@ -168,7 +168,7 @@ fn xor(a: &Block, b: &Block) -> Block {
 /// * `message` - Message to encrypt
 ///
 /// # Returns
-/// * `Result<Ciphertext>` - The encrypted ciphertext
+/// * `Ciphertext<V>` - The encrypted ciphertext
 pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
     rng: &mut R,
     public: V::Public,
@@ -222,7 +222,7 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
 /// * `ciphertext` - Ciphertext to decrypt
 ///
 /// # Returns
-/// * `Result<Block>` - The decrypted message
+/// * `Option<Block>` - The decrypted message
 pub fn decrypt<V: Variant>(signature: &V::Signature, ciphertext: &Ciphertext<V>) -> Option<Block> {
     // Compute e(U, signature)
     let gt = V::pairing(&ciphertext.u, signature);
