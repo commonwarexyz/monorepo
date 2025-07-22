@@ -13,7 +13,7 @@ use crate::{
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
         bitmap::Bitmap,
-        hasher::{Hasher, Standard},
+        hasher::Standard,
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::{Config as MmrConfig, Mmr},
         verification::Proof,
@@ -167,7 +167,7 @@ pub enum UpdateResult {
 impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator>
     Any<E, K, V, H, T>
 {
-    /// Returns any `Any` adb initialized from `cfg`. Any uncommitted log operations will be
+    /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
         let mut snapshot: Index<T, u64> =
@@ -248,8 +248,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let log_size = cfg.log.size().await?;
         for i in mmr_ops..log_size {
             let op = cfg.log.read(i).await?;
-            let digest = Self::op_digest(&mut hasher, &op);
-            mmr.add_batched(&mut hasher, &digest).await?;
+            mmr.add_batched(&mut hasher, &op.encode()).await?;
             if i % cfg.apply_batch_size as u64 == 0 {
                 // Periodically sync the MMR to avoid memory bloat.
                 // Since the first value i takes may not be a multiple of `cfg.apply_batch_size`,
@@ -346,8 +345,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             warn!(op_count, "MMR lags behind log, replaying log to catch up");
             while next_mmr_leaf_num < log_size {
                 let op = log.read(next_mmr_leaf_num).await?;
-                let digest = Self::op_digest(hasher, &op);
-                mmr.add_batched(hasher, &digest).await?;
+                mmr.add_batched(hasher, &op.encode()).await?;
                 next_mmr_leaf_num += 1;
             }
             mmr.sync(hasher).await.map_err(Error::MmrError)?;
@@ -485,11 +483,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok((k, v))
     }
 
-    /// Return a digest of the operation.
-    pub fn op_digest(hasher: &mut Standard<H>, op: &Operation<K, V>) -> H::Digest {
-        hasher.digest(&op.encode())
-    }
-
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         Ok(self.get_with_loc(key).await?.map(|(v, _)| v))
@@ -605,8 +598,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// `commit` method must be called to make any applied operation persistent & recoverable.
     pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<u64, Error> {
         // Update the ops MMR.
-        let digest = Self::op_digest(&mut self.hasher, &op);
-        self.ops.add_batched(&mut self.hasher, &digest).await?;
+        self.ops.add_batched(&mut self.hasher, &op.encode()).await?;
         self.uncommitted_ops += 1;
 
         // Append the operation to the log.
@@ -674,12 +666,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     ) -> bool {
         let start_pos = leaf_num_to_pos(start_loc);
 
-        let digests = ops
-            .iter()
-            .map(|op| Any::<E, _, _, _, T>::op_digest(hasher, op))
-            .collect::<Vec<_>>();
+        let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
 
-        proof.verify_range_inclusion(hasher, &digests, start_pos, root)
+        proof.verify_range_inclusion(hasher, &elements, start_pos, root)
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable

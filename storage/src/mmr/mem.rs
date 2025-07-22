@@ -191,7 +191,8 @@ impl<H: CHasher> Mmr<H> {
         (pos - self.pruned_to_pos) as usize
     }
 
-    /// Add an element to the MMR and return its position in the MMR.
+    /// Add `element` to the MMR and return its position in the MMR. The element can be an arbitrary
+    /// byte slice, and need not be converted to a digest first.
     ///
     /// # Warning
     ///
@@ -204,8 +205,9 @@ impl<H: CHasher> Mmr<H> {
         leaf_pos
     }
 
-    /// Add an element to the MMR and return its position in the MMR, but without updating ancestors
-    /// until `sync` is called. Returns the position of the leaf in the MMR.
+    /// Add `element` to the MMR and return its position in the MMR, but without updating ancestors
+    /// until `sync` is called. The element can be an arbitrary byte slice, and need not be
+    /// converted to a digest first.
     pub fn add_batched(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> u64 {
         let leaf_pos = self.size();
         let digest = hasher.leaf_digest(leaf_pos, element);
