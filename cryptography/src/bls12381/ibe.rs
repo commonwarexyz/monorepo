@@ -416,6 +416,111 @@ mod tests {
     }
 
     #[test]
+    fn test_encrypt_decrypt_with_namespace() {
+        let mut rng = thread_rng();
+
+        // Generate master keypair
+        let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
+
+        // Identity and namespace
+        let namespace = b"example.org";
+        let identity = b"alice";
+        let message = b"Message with namespace - 32 byte"; // 32 bytes
+
+        // Generate private key for namespaced identity
+        let id_point = hash_message_namespace::<MinPk>(MinPk::MESSAGE, namespace, identity);
+        let mut private_key = id_point;
+        private_key.mul(&master_secret);
+
+        // Encrypt with namespace
+        let message_block = block_from_bytes(message);
+        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (Some(namespace), identity))
+            .expect("Encryption should succeed");
+
+        // Decrypt
+        let decrypted =
+            decrypt::<MinPk>(private_key, &ciphertext).expect("Decryption should succeed");
+
+        assert_eq!(message.as_ref(), decrypted.as_ref());
+    }
+
+    #[test]
+    fn test_namespace_mismatch() {
+        let mut rng = thread_rng();
+
+        // Generate master keypair
+        let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
+
+        // Different namespaces
+        let namespace1 = b"example.org";
+        let namespace2 = b"example.com";
+        let identity = b"alice";
+        let message = b"Namespace mismatch test - 32byte"; // 32 bytes
+
+        // Generate private key for namespace1
+        let id_point = hash_message_namespace::<MinPk>(MinPk::MESSAGE, namespace1, identity);
+        let mut private_key = id_point;
+        private_key.mul(&master_secret);
+
+        // Encrypt with namespace2
+        let message_block = block_from_bytes(message);
+        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (Some(namespace2), identity))
+            .expect("Encryption should succeed");
+
+        // Try to decrypt with private key from namespace1 - should fail
+        let result = decrypt::<MinPk>(private_key, &ciphertext);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_namespace_vs_no_namespace() {
+        let mut rng = thread_rng();
+
+        // Generate master keypair
+        let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
+
+        let namespace = b"example.org";
+        let identity = b"alice";
+        let message = b"Namespace vs no namespace - 32by"; // 32 bytes
+
+        // Generate private key without namespace
+        let id_point_no_ns = hash_message::<MinPk>(MinPk::MESSAGE, identity);
+        let mut private_key_no_ns = id_point_no_ns;
+        private_key_no_ns.mul(&master_secret);
+
+        // Generate private key with namespace
+        let id_point_ns = hash_message_namespace::<MinPk>(MinPk::MESSAGE, namespace, identity);
+        let mut private_key_ns = id_point_ns;
+        private_key_ns.mul(&master_secret);
+
+        // Encrypt with namespace
+        let message_block = block_from_bytes(message);
+        let ciphertext_ns = encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (Some(namespace), identity))
+            .expect("Encryption should succeed");
+
+        // Encrypt without namespace
+        let ciphertext_no_ns = encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
+            .expect("Encryption should succeed");
+
+        // Try to decrypt namespaced ciphertext with non-namespaced key - should fail
+        let result1 = decrypt::<MinPk>(private_key_no_ns, &ciphertext_ns);
+        assert!(result1.is_err());
+
+        // Try to decrypt non-namespaced ciphertext with namespaced key - should fail
+        let result2 = decrypt::<MinPk>(private_key_ns, &ciphertext_no_ns);
+        assert!(result2.is_err());
+
+        // Correct decryptions should succeed
+        let decrypted_ns = decrypt::<MinPk>(private_key_ns, &ciphertext_ns)
+            .expect("Decryption with matching namespace should succeed");
+        let decrypted_no_ns = decrypt::<MinPk>(private_key_no_ns, &ciphertext_no_ns)
+            .expect("Decryption without namespace should succeed");
+
+        assert_eq!(message.as_ref(), decrypted_ns.as_ref());
+        assert_eq!(message.as_ref(), decrypted_no_ns.as_ref());
+    }
+
+    #[test]
     fn test_cca_security_modified_v() {
         let mut rng = thread_rng();
 
