@@ -41,7 +41,7 @@ struct Config {
     /// Port on which metrics are exposed.
     metrics_port: u16,
     /// Interval for adding new operations.
-    operation_interval: Duration,
+    op_interval: Duration,
     /// Number of operations to add each interval.
     ops_per_interval: usize,
 }
@@ -95,13 +95,13 @@ where
     /// Add operations to the database if the configured interval has passed.
     async fn maybe_add_operation(
         &self,
-        config: &Config,
         context: &impl commonware_runtime::Clock,
+        config: &Config,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut last_time = self.last_operation_time.write().await;
         let now = context.current();
 
-        if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.operation_interval {
+        if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.op_interval {
             *last_time = now;
 
             // Generate new operations
@@ -438,7 +438,7 @@ fn main() {
                 eprintln!("❌ Invalid metrics port: {e}");
                 std::process::exit(1);
             }),
-        operation_interval: parse_duration(matches.get_one::<String>("op-interval").unwrap())
+        op_interval: parse_duration(matches.get_one::<String>("op-interval").unwrap())
             .unwrap_or_else(|e| {
                 eprintln!("❌ Invalid operation interval: {e}");
                 std::process::exit(1);
@@ -459,7 +459,7 @@ fn main() {
         storage_dir = %config.storage_dir,
         seed = %config.seed,
         metrics_port = config.metrics_port,
-        operation_interval = ?config.operation_interval,
+        op_interval = ?config.op_interval,
         ops_per_interval = config.ops_per_interval,
         "configuration"
     );
@@ -532,21 +532,22 @@ fn main() {
 
         info!(
             addr = %addr,
-            operation_interval = ?config.operation_interval,
+            op_interval = ?config.op_interval,
             ops_per_interval = config.ops_per_interval,
             "server listening and continuously adding operations"
         );
 
         let state = Arc::new(State::new(context.with_label("server"), database, config.seed));
-        let operation_interval = config.operation_interval;
+        let mut next_op_time = context.current() + config.op_interval;
 
         loop {
             select! {
-                _ = context.sleep(operation_interval) => {
+                _ = context.sleep_until(next_op_time) => {
                     // Add operations to the database
-                    if let Err(e) = state.maybe_add_operation(&config, &context).await {
+                    if let Err(e) = state.maybe_add_operation(&context, &config).await {
                         warn!(error = %e, "failed to add additional operations");
                     }
+                    next_op_time = context.current() + config.op_interval;
                 },
                 client_result = listener.accept() => {
                     match client_result {
