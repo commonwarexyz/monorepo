@@ -28,7 +28,7 @@ use rand::{CryptoRng, Rng};
 const BLOCK_SIZE: usize = Digest::SIZE;
 
 /// Type alias for 32-byte blocks using FixedBytes.
-type Block = FixedBytes<BLOCK_SIZE>;
+pub type Block = FixedBytes<BLOCK_SIZE>;
 
 /// Ciphertext structure for IBE.
 #[derive(Debug, Clone, PartialEq, Eq)]

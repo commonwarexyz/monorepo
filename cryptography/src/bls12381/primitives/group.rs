@@ -215,18 +215,18 @@ impl Scalar {
     }
 
     /// Creates a scalar from big-endian bytes with modular reduction.
-    /// 
+    ///
     /// This function converts arbitrary-length big-endian bytes to a valid scalar
     /// by performing modular reduction modulo the BLS12-381 scalar field order.
     /// Unlike direct conversion methods, this ensures the result is always valid
     /// even if the input represents a number larger than the field order.
-    /// 
+    ///
     /// # Arguments
     /// * `bytes` - Big-endian bytes to convert
-    /// 
+    ///
     /// # Returns
     /// * `Option<Self>` - The scalar if successful, None if the result is zero
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let hash = sha256::hash(b"some data");
@@ -1221,36 +1221,43 @@ mod tests {
         // Test 1: Valid 32-byte input
         let bytes32 = [0x42u8; 32];
         let scalar = Scalar::from_be_bytes(&bytes32);
-        assert!(scalar.is_some(), "32-byte input should produce valid scalar");
-        
+        assert!(
+            scalar.is_some(),
+            "32-byte input should produce valid scalar"
+        );
+
         // Test 2: Large value that requires modular reduction
         let mut large_bytes = [0xFFu8; 32];
         large_bytes[0] = 0xFF; // Definitely larger than field order
         let scalar_large = Scalar::from_be_bytes(&large_bytes);
-        assert!(scalar_large.is_some(), "Large value should be reduced modulo field order");
-        
+        assert!(
+            scalar_large.is_some(),
+            "Large value should be reduced modulo field order"
+        );
+
         // Test 3: Zero bytes should return None
         let zero_bytes = [0u8; 32];
         let scalar_zero = Scalar::from_be_bytes(&zero_bytes);
         assert!(scalar_zero.is_none(), "Zero bytes should return None");
-        
+
         // Test 4: Different length inputs
         let bytes16 = [0x42u8; 16];
         let scalar16 = Scalar::from_be_bytes(&bytes16);
         assert!(scalar16.is_some(), "16-byte input should work");
-        
+
         let bytes64 = [0x42u8; 64];
         let scalar64 = Scalar::from_be_bytes(&bytes64);
         assert!(scalar64.is_some(), "64-byte input should work");
-        
+
         // Test 5: Verify that modular reduction produces consistent results
-        let bytes_a = [0x73, 0xed, 0xa7, 0x53, 0x29, 0x9d, 0x7d, 0x48, 
-                       0x33, 0x39, 0xd8, 0x08, 0x09, 0xa1, 0xd8, 0x05,
-                       0x53, 0xbd, 0xa4, 0x02, 0xff, 0xfe, 0x5b, 0xfe,
-                       0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x02]; // field order + 1
+        let bytes_a = [
+            0x73, 0xed, 0xa7, 0x53, 0x29, 0x9d, 0x7d, 0x48, 0x33, 0x39, 0xd8, 0x08, 0x09, 0xa1,
+            0xd8, 0x05, 0x53, 0xbd, 0xa4, 0x02, 0xff, 0xfe, 0x5b, 0xfe, 0xff, 0xff, 0xff, 0xff,
+            0x00, 0x00, 0x00, 0x02,
+        ]; // field order + 1
         let scalar_a = Scalar::from_be_bytes(&bytes_a);
         assert!(scalar_a.is_some(), "Field order + 1 should be reduced to 1");
-        
+
         // The result should be 1 after reduction
         let one = Scalar::one();
         assert_eq!(scalar_a.unwrap(), one, "Field order + 1 should reduce to 1");
