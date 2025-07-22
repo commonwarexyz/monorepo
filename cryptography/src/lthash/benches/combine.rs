@@ -2,7 +2,7 @@ use commonware_cryptography::lthash::LtHash;
 use criterion::{criterion_group, BatchSize, Criterion};
 
 fn benchmark_combine(c: &mut Criterion) {
-    c.bench_function(&format!("{}", module_path!()), |b| {
+    c.bench_function(module_path!(), |b| {
         b.iter_batched(
             || {
                 let mut lthash1 = LtHash::new();
