@@ -289,7 +289,7 @@ pub fn decrypt<V: Variant>(signature: &V::Signature, ciphertext: &Ciphertext<V>)
     let h4_value = hash::h4(&sigma);
     let message = xor(&ciphertext.w, &h4_value);
 
-    // Verify integrity: recompute r and check U = r * Public::one()
+    // Recompute r and verify U = r * Public::one()
     let r = hash::h3(&sigma, &message);
     let mut expected_u = V::Public::one();
     expected_u.mul(&r);
