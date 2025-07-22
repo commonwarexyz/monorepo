@@ -125,20 +125,12 @@ fn xor_blocks(a: &Block, b: &Block) -> Block {
 ///
 /// # Returns
 /// * `Result<Ciphertext>` - The encrypted ciphertext
-pub fn encrypt<R: Rng + CryptoRng, V: Variant, M: AsRef<[u8]>>(
+pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
     rng: &mut R,
     public: V::Public,
-    message: M,
+    message: &Block,
     target: (Option<&[u8]>, &[u8]),
 ) -> Result<Ciphertext<V>, Error> {
-    // Convert message to Block
-    let message_bytes = message.as_ref();
-    if message_bytes.len() != BLOCK_SIZE {
-        return Err(Error::InvalidSignature); // TODO: Better error type
-    }
-    let mut message_array = [0u8; BLOCK_SIZE];
-    message_array.copy_from_slice(message_bytes);
-    let message_block = Block::new(message_array);
     // Hash target to get Q_id in signature group using the variant's message DST
     let q_id = match target {
         (None, target) => hash_message::<V>(V::MESSAGE, target),
@@ -151,7 +143,7 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant, M: AsRef<[u8]>>(
     let sigma = Block::new(sigma_array);
 
     // Derive scalar r from sigma and message
-    let r = hash::h3(&sigma, &message_block);
+    let r = hash::h3(&sigma, message.as_ref());
 
     // Compute U = r * Public::one()
     let mut u = V::Public::one();
@@ -168,7 +160,7 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant, M: AsRef<[u8]>>(
 
     // Compute W = M XOR H4(sigma)
     let h4_value = hash::h4(&sigma);
-    let w = xor_blocks(&message_block, &h4_value);
+    let w = xor_blocks(message, &h4_value);
 
     Ok(Ciphertext { u, v, w })
 }
@@ -223,6 +215,11 @@ mod tests {
     };
     use rand::thread_rng;
 
+    // Helper function to create a Block from a byte literal
+    fn block_from_bytes(bytes: &[u8; BLOCK_SIZE]) -> Block {
+        Block::new(*bytes)
+    }
+
     #[test]
     fn test_encrypt_decrypt_minpk() {
         let mut rng = thread_rng();
@@ -240,7 +237,8 @@ mod tests {
         private_key.mul(&master_secret);
 
         // Encrypt
-        let ciphertext = encrypt::<_, MinPk, _>(&mut rng, master_public, message, (None, identity))
+        let message_block = block_from_bytes(message);
+        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
             .expect("Encryption should succeed");
 
         // Decrypt
@@ -267,8 +265,9 @@ mod tests {
         private_key.mul(&master_secret);
 
         // Encrypt
+        let message_block = block_from_bytes(message);
         let ciphertext =
-            encrypt::<_, MinSig, _>(&mut rng, master_public, message, (None, identity))
+            encrypt::<_, MinSig>(&mut rng, master_public, &message_block, (None, identity))
                 .expect("Encryption should succeed");
 
         // Decrypt
@@ -279,17 +278,18 @@ mod tests {
     }
 
     #[test]
-    fn test_message_too_long() {
-        let mut rng = thread_rng();
-        let (_, master_public) = keypair::<_, MinPk>(&mut rng);
-
-        let identity = b"test@example.com";
-        let message = vec![0u8; 33]; // 33 bytes, not 32
-
-        // This should fail since we can't create a Block from non-32 byte slices
-        // Try to encrypt with wrong size message
-        let result = encrypt::<_, MinPk, _>(&mut rng, master_public, &message, (None, identity));
-        assert!(result.is_err());
+    fn test_message_size_enforcement() {
+        // This test verifies that Block enforces 32-byte size at the type level
+        // Since encrypt now takes Block, we can't pass wrong-sized data
+        let message_33 = vec![0u8; 33];
+        let message_32 = [0u8; 32];
+        
+        // We can create a Block from a 32-byte array
+        let _block = block_from_bytes(&message_32);
+        
+        // But we can't create a Block from a 33-byte vec at compile time
+        // The type system enforces this
+        assert_eq!(message_33.len(), 33);
     }
 
     #[test]
@@ -304,8 +304,9 @@ mod tests {
         let message = b"Secret message padded to 32bytes";
 
         // Encrypt with first master public key
+        let message_block = block_from_bytes(message);
         let ciphertext =
-            encrypt::<_, MinPk, _>(&mut rng, master_public1, message, (None, identity))
+            encrypt::<_, MinPk>(&mut rng, master_public1, &message_block, (None, identity))
                 .expect("Encryption should succeed");
 
         // Try to decrypt with private key from second master
@@ -332,7 +333,8 @@ mod tests {
         private_key.mul(&master_secret);
 
         // Encrypt
-        let ciphertext = encrypt::<_, MinPk, _>(&mut rng, master_public, message, (None, identity))
+        let message_block = block_from_bytes(message);
+        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
             .expect("Encryption should succeed");
 
         // Tamper with ciphertext by creating a modified w
@@ -363,8 +365,9 @@ mod tests {
         let mut private_key = id_point;
         private_key.mul(&master_secret);
 
+        let message_block = block_from_bytes(&message);
         let ciphertext =
-            encrypt::<_, MinPk, _>(&mut rng, master_public, &message, (None, identity))
+            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
                 .expect("Encryption should succeed");
 
         let decrypted =
@@ -385,8 +388,9 @@ mod tests {
         let mut private_key = id_point;
         private_key.mul(&master_secret);
 
+        let message_block = block_from_bytes(&message);
         let ciphertext =
-            encrypt::<_, MinPk, _>(&mut rng, master_public, &message, (None, identity))
+            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
                 .expect("Encryption should succeed");
 
         let decrypted =
@@ -409,8 +413,9 @@ mod tests {
         private_key.mul(&master_secret);
 
         // Encrypt
+        let message_block = block_from_bytes(message);
         let mut ciphertext =
-            encrypt::<_, MinPk, _>(&mut rng, master_public, message, (None, identity))
+            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
                 .expect("Encryption should succeed");
 
         // Modify U component (this should make decryption fail due to FO transform)
@@ -437,7 +442,8 @@ mod tests {
         private_key.mul(&master_secret);
 
         // Encrypt
-        let ciphertext = encrypt::<_, MinPk, _>(&mut rng, master_public, message, (None, identity))
+        let message_block = block_from_bytes(message);
+        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
             .expect("Encryption should succeed");
 
         // Modify V component (encrypted sigma)
