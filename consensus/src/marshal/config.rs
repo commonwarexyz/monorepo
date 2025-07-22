@@ -17,27 +17,25 @@ pub struct Config<V: Variant, P: PublicKey, D: Coordinator<PublicKey = P>> {
     /// The prefix to use for all partitions.
     pub partition_prefix: String,
 
-    /// Number of messages from consensus to hold in our backlog
-    /// before blocking.
+    /// Size of backfill request/response mailbox.
     pub mailbox_size: usize,
-
-    /// The rate limit for backfilling.
+    /// Backfill rate limit.
     pub backfill_quota: Quota,
-
-    /// The timeout for pruning consensus activity, in views.
+    /// Timeout for block activity (in views).
     pub activity_timeout: u64,
-
-    /// The number of items to store per section in prunable archives.
+    /// Namespace for proofs.
+    pub namespace: Vec<u8>,
+    /// Prunable archive partition prefix.
     pub prunable_items_per_section: u64,
 
     /// The number of items to store per section in immutable archives.
     pub immutable_items_per_section: u64,
 
     /// The initial size of the freezer table for finalizations.
-    pub finalized_freezer_table_initial_size: u64,
+    pub finalized_freezer_table_initial_size: u32,
 
     /// The initial size of the freezer table for blocks.
-    pub blocks_freezer_table_initial_size: u64,
+    pub blocks_freezer_table_initial_size: u32,
 
     /// The frequency (in number of resizes) at which to check if the freezer table
     /// should be resized.
@@ -63,7 +61,4 @@ pub struct Config<V: Variant, P: PublicKey, D: Coordinator<PublicKey = P>> {
 
     /// Enable fast-path streaming for contiguous blocks
     pub enable_fast_path: bool,
-
-    /// The namespace to use for all notarizations and finalizations.
-    pub namespace: Vec<u8>,
 }

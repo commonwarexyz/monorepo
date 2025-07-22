@@ -1,5 +1,6 @@
 use super::{
     config::Config,
+    finalizer::Finalizer,
     handler::{self, Handler},
     ingress::{Mailbox, Message, Orchestration, Orchestrator},
     types::{Block, Finalized, Notarized},
@@ -32,7 +33,7 @@ use std::{
     marker::PhantomData,
     time::{Duration, Instant},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Application actor.
 pub struct Actor<
@@ -49,7 +50,6 @@ pub struct Actor<
     mailbox: mpsc::Receiver<Message<V, D>>,
     mailbox_size: usize,
     backfill_quota: Quota,
-    activity_timeout: u64,
     namespace: Vec<u8>,
 
     // Blocks verified stored by view<>digest
@@ -71,6 +71,9 @@ pub struct Actor<
     finalized_height: Gauge,
     // Indexed height metric
     contiguous_height: Gauge,
+
+    // Timeout for block activity (in views)
+    activity_timeout: u64,
 
     _variant: PhantomData<V>,
 }
@@ -131,7 +134,7 @@ impl<
                     "{}-finalized-freezer-table",
                     config.partition_prefix
                 ),
-                freezer_table_initial_size: config.finalized_freezer_table_initial_size as u32,
+                freezer_table_initial_size: config.finalized_freezer_table_initial_size,
                 freezer_table_resize_frequency: config.freezer_table_resize_frequency,
                 freezer_table_resize_chunk_size: config.freezer_table_resize_chunk_size,
                 freezer_journal_partition: format!(
@@ -161,7 +164,7 @@ impl<
                     "{}-blocks-freezer-table",
                     config.partition_prefix
                 ),
-                freezer_table_initial_size: config.blocks_freezer_table_initial_size as u32,
+                freezer_table_initial_size: config.blocks_freezer_table_initial_size,
                 freezer_table_resize_frequency: config.freezer_table_resize_frequency,
                 freezer_table_resize_chunk_size: config.freezer_table_resize_chunk_size,
                 freezer_journal_partition: format!(
@@ -178,7 +181,7 @@ impl<
             },
         )
         .await
-        .expect("Failed to initialize finalized archive");
+        .expect("Failed to initialize blocks archive");
         info!(elapsed = ?start.elapsed(), "restored block archive");
 
         // Initialize finalizer metadata
@@ -217,7 +220,6 @@ impl<
                 mailbox,
                 mailbox_size: config.mailbox_size,
                 backfill_quota: config.backfill_quota,
-                activity_timeout: config.activity_timeout,
                 namespace: config.namespace.clone(),
                 verified,
                 notarized,
@@ -227,6 +229,7 @@ impl<
 
                 finalized_height,
                 contiguous_height,
+                activity_timeout: config.activity_timeout,
                 _variant: PhantomData,
             },
             Mailbox::new(sender),
@@ -326,73 +329,18 @@ impl<
         resolver_by_view_engine.start(backfill_by_view);
 
         // Process all finalized blocks in order (fetching any that are missing)
-        let (mut finalizer_sender, mut finalizer_receiver) = mpsc::channel::<()>(1);
+        let (mut finalizer_sender, finalizer_receiver) = mpsc::channel::<()>(1);
         let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(2); // buffer to send processed while moving forward
-        let mut orchestor = Orchestrator::new(orchestrator_sender);
+        let orchestrator = Orchestrator::new(orchestrator_sender);
+        let finalizer = Finalizer::new(
+            self.metadata,
+            self.contiguous_height.clone(),
+            orchestrator,
+            finalizer_receiver,
+        );
         self.context
             .with_label("finalizer")
-            .spawn(move |_| async move {
-                // Initialize last indexed from metadata store
-                let latest_key = FixedBytes::new([0u8]);
-                let mut last_indexed = if let Some(bytes) = self.metadata.get(&latest_key) {
-                    bytes
-                        .to_vec()
-                        .try_into()
-                        .map(u64::from_be_bytes)
-                        .unwrap_or(0)
-                } else {
-                    0
-                };
-
-                // Index all finalized blocks.
-                //
-                // If using state sync, this is not necessary.
-                loop {
-                    // Check if the next block is available
-                    let next = last_indexed + 1;
-                    if let Some(block) = orchestor.get(next).await {
-                        // In an application that maintains state, you would compute the state transition function here.
-                        //
-                        // After an unclean shutdown (where the finalizer metadata is not synced after some height is processed by the application),
-                        // it is possible that the application may be asked to process a block it has already seen (which it can simply ignore).
-
-                        // Update finalizer metadata.
-                        //
-                        // If we updated the finalizer metadata before the application applied its state transition function, an unclean
-                        // shutdown could put the application in an unrecoverable state where the last indexed height (the height we
-                        // start processing at after restart) is ahead of the application's last processed height (requiring the application
-                        // to process a non-contiguous log). For the same reason, the application should sync any cached disk changes after processing
-                        // its state transition function to ensure that the application can continue processing from the the last synced indexed height
-                        // (on restart).
-                        if let Err(e) = self
-                            .metadata
-                            .put_sync(latest_key.clone(), next.into())
-                            .await
-                        {
-                            error!("Failed to update metadata: {e}");
-                            return;
-                        }
-
-                        // Update the latest indexed
-                        self.contiguous_height.set(next as i64);
-                        last_indexed = next;
-                        info!(height = next, "indexed finalized block");
-
-                        // Update last view processed (if we have a finalization for this block)
-                        orchestor.processed(next, block.digest()).await;
-                        continue;
-                    }
-
-                    // Try to connect to our latest handled block (may not exist finalizations for some heights)
-                    if orchestor.repair(next).await {
-                        continue;
-                    }
-
-                    // If nothing to do, wait for some message from someone that the finalized store was updated
-                    debug!(height = next, "waiting to index finalized block");
-                    let _ = finalizer_receiver.next().await;
-                }
-            });
+            .spawn(|_| finalizer.run());
 
         // Handle messages
         let mut latest_view = 0;
@@ -401,15 +349,10 @@ impl<
         let mut outstanding_notarize: BTreeSet<u64> = BTreeSet::new();
         loop {
             // Cancel useless requests
-            let mut to_cancel = Vec::<u64>::new();
-            outstanding_notarize.retain(|view| {
-                if *view < latest_view {
-                    to_cancel.push(*view);
-                    false
-                } else {
-                    true
-                }
-            });
+            let (to_cancel, still_outstanding): (BTreeSet<_>, BTreeSet<_>) = outstanding_notarize
+                .into_iter()
+                .partition(|&view| view < latest_view);
+            outstanding_notarize = still_outstanding;
             for view in to_cancel {
                 resolver_by_view.cancel(U64::new(view)).await;
             }

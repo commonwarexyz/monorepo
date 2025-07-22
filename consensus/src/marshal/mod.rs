@@ -7,14 +7,9 @@
 //!
 //! The main component is the [`actor::Actor`], which drives the process.
 
+pub mod actor;
+pub mod config;
+pub mod finalizer;
+pub mod handler;
+pub mod ingress;
 pub mod types;
-
-cfg_if::cfg_if! {
-    if #[cfg(not(target_arch = "wasm32"))] {
-        mod actor;
-        pub use actor::Actor;
-        mod config;
-        mod handler;
-        mod ingress;
-    }
-}
