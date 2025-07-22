@@ -16,7 +16,6 @@ use super::primitives::{
     group::{Element, Scalar, GT},
     ops::hash_message,
     variant::Variant,
-    Error,
 };
 use crate::{bls12381::primitives::ops::hash_message_namespace, sha256::Digest};
 use bytes::{Buf, BufMut};
@@ -175,7 +174,7 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
     public: V::Public,
     target: (Option<&[u8]>, &[u8]),
     message: &Block,
-) -> Result<Ciphertext<V>, Error> {
+) -> Ciphertext<V> {
     // Hash target to get Q_id in signature group using the variant's message DST
     let q_id = match target {
         (None, target) => hash_message::<V>(V::MESSAGE, target),
@@ -207,7 +206,7 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
     let h4_value = hash::h4(&sigma);
     let w = xor(message, &h4_value);
 
-    Ok(Ciphertext { u, v, w })
+    Ciphertext { u, v, w }
 }
 
 /// Decrypt a ciphertext using identity-based encryption with CCA-security.
@@ -224,10 +223,7 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
 ///
 /// # Returns
 /// * `Result<Block>` - The decrypted message
-pub fn decrypt<V: Variant>(
-    signature: &V::Signature,
-    ciphertext: &Ciphertext<V>,
-) -> Result<Block, Error> {
+pub fn decrypt<V: Variant>(signature: &V::Signature, ciphertext: &Ciphertext<V>) -> Option<Block> {
     // Compute e(U, signature)
     let gt = V::pairing(&ciphertext.u, signature);
 
@@ -243,12 +239,11 @@ pub fn decrypt<V: Variant>(
     let r = hash::h3(&sigma, &message);
     let mut expected_u = V::Public::one();
     expected_u.mul(&r);
-
     if ciphertext.u != expected_u {
-        return Err(Error::InvalidSignature); // TODO: Add better error variant
+        return None;
     }
 
-    Ok(message)
+    Some(message)
 }
 
 #[cfg(test)]
@@ -280,8 +275,7 @@ mod tests {
             master_public,
             (None, &target),
             &Block::new(*message),
-        )
-        .expect("Encryption should succeed");
+        );
 
         // Decrypt
         let decrypted =
@@ -310,8 +304,7 @@ mod tests {
             master_public,
             (None, &target),
             &Block::new(*message),
-        )
-        .expect("Encryption should succeed");
+        );
 
         // Decrypt
         let decrypted =
@@ -337,14 +330,13 @@ mod tests {
             master_public1,
             (None, &target),
             &Block::new(*message),
-        )
-        .expect("Encryption should succeed");
+        );
 
         // Try to decrypt with signature from second master
         let wrong_signature = sign_message::<MinPk>(&master_secret2, None, &target);
         let result = decrypt::<MinPk>(&wrong_signature, &ciphertext);
 
-        assert!(result.is_err());
+        assert!(result.is_none());
     }
 
     #[test]
@@ -364,8 +356,7 @@ mod tests {
             master_public,
             (None, &target),
             &Block::new(*message),
-        )
-        .expect("Encryption should succeed");
+        );
 
         // Tamper with ciphertext by creating a modified w
         let mut w_bytes = [0u8; BLOCK_SIZE];
@@ -379,7 +370,7 @@ mod tests {
 
         // Try to decrypt
         let result = decrypt::<MinPk>(&signature, &tampered_ciphertext);
-        assert!(result.is_err());
+        assert!(result.is_none());
     }
 
     #[test]
@@ -396,8 +387,7 @@ mod tests {
             master_public,
             (None, &target),
             &Block::new(message),
-        )
-        .expect("Encryption should succeed");
+        );
 
         let decrypted =
             decrypt::<MinPk>(&signature, &ciphertext).expect("Decryption should succeed");
@@ -420,8 +410,7 @@ mod tests {
             master_public,
             (None, &target),
             &Block::new(message),
-        )
-        .expect("Encryption should succeed");
+        );
 
         let decrypted =
             decrypt::<MinPk>(&signature, &ciphertext).expect("Decryption should succeed");
@@ -446,8 +435,7 @@ mod tests {
             master_public,
             (None, &target),
             &Block::new(*message),
-        )
-        .expect("Encryption should succeed");
+        );
 
         // Modify U component (this should make decryption fail due to FO transform)
         let mut modified_u = ciphertext.u;
@@ -456,7 +444,7 @@ mod tests {
 
         // Try to decrypt - should fail
         let result = decrypt::<MinPk>(&signature, &ciphertext);
-        assert!(result.is_err());
+        assert!(result.is_none());
     }
 
     #[test]
@@ -480,8 +468,7 @@ mod tests {
             master_public,
             (Some(namespace), &target),
             &Block::new(*message),
-        )
-        .expect("Encryption should succeed");
+        );
 
         // Decrypt
         let decrypted =
@@ -512,12 +499,11 @@ mod tests {
             master_public,
             (Some(namespace2), &target),
             &Block::new(*message),
-        )
-        .expect("Encryption should succeed");
+        );
 
         // Try to decrypt with signature from namespace1 - should fail
         let result = decrypt::<MinPk>(&signature, &ciphertext);
-        assert!(result.is_err());
+        assert!(result.is_none());
     }
 
     #[test]
@@ -543,8 +529,7 @@ mod tests {
             master_public,
             (Some(namespace), &target),
             &Block::new(*message),
-        )
-        .expect("Encryption should succeed");
+        );
 
         // Encrypt without namespace
         let ciphertext_no_ns = encrypt::<_, MinPk>(
@@ -552,16 +537,15 @@ mod tests {
             master_public,
             (None, &target),
             &Block::new(*message),
-        )
-        .expect("Encryption should succeed");
+        );
 
         // Try to decrypt namespaced ciphertext with non-namespaced signature - should fail
         let result1 = decrypt::<MinPk>(&signature_no_ns, &ciphertext_ns);
-        assert!(result1.is_err());
+        assert!(result1.is_none());
 
         // Try to decrypt non-namespaced ciphertext with namespaced signature - should fail
         let result2 = decrypt::<MinPk>(&signature_ns, &ciphertext_no_ns);
-        assert!(result2.is_err());
+        assert!(result2.is_none());
 
         // Correct decryptions should succeed
         let decrypted_ns = decrypt::<MinPk>(&signature_ns, &ciphertext_ns)
@@ -590,8 +574,7 @@ mod tests {
             master_public,
             (None, &target),
             &Block::new(*message),
-        )
-        .expect("Encryption should succeed");
+        );
 
         // Modify V component (encrypted sigma)
         let mut v_bytes = [0u8; BLOCK_SIZE];
@@ -605,6 +588,6 @@ mod tests {
 
         // Try to decrypt - should fail due to verification
         let result = decrypt::<MinPk>(&signature, &tampered_ciphertext);
-        assert!(result.is_err());
+        assert!(result.is_none());
     }
 }

@@ -18,10 +18,7 @@ fn benchmark_ibe_decrypt(c: &mut Criterion) {
 
     c.bench_function(module_path!(), |b| {
         b.iter_batched(
-            || {
-                encrypt::<_, MinSig>(&mut rng, master_public, (None, &target), &message)
-                    .expect("Encryption should succeed")
-            },
+            || encrypt::<_, MinSig>(&mut rng, master_public, (None, &target), &message),
             |ciphertext| {
                 black_box(decrypt::<MinSig>(&signature, &ciphertext).unwrap());
             },
