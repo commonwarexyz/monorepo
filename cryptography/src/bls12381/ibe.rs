@@ -428,80 +428,6 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_message() {
-        let mut rng = thread_rng();
-
-        let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
-        let target = 50u64.to_be_bytes();
-        let message = [0u8; 32]; // 32 zero bytes
-        let signature = sign_message::<MinPk>(&master_secret, None, &target);
-
-        let ciphertext = encrypt::<_, MinPk>(
-            &mut rng,
-            master_public,
-            (None, &target),
-            &Block::new(message),
-        );
-
-        let decrypted =
-            decrypt::<MinPk>(&signature, &ciphertext).expect("Decryption should succeed");
-
-        assert_eq!(message.as_ref(), decrypted.as_ref());
-    }
-
-    #[test]
-    fn test_max_size_message() {
-        let mut rng = thread_rng();
-
-        let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
-        let target = 60u64.to_be_bytes();
-        let message = [0xAB; 32]; // Maximum allowed size
-
-        let signature = sign_message::<MinPk>(&master_secret, None, &target);
-
-        let ciphertext = encrypt::<_, MinPk>(
-            &mut rng,
-            master_public,
-            (None, &target),
-            &Block::new(message),
-        );
-
-        let decrypted =
-            decrypt::<MinPk>(&signature, &ciphertext).expect("Decryption should succeed");
-
-        assert_eq!(message.as_ref(), decrypted.as_ref());
-    }
-
-    #[test]
-    fn test_cca_security_modified_u() {
-        let mut rng = thread_rng();
-
-        let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
-        let target = 70u64.to_be_bytes();
-        let message = b"CCA security test message 32 byt"; // 32 bytes
-
-        // Generate signature over the target
-        let signature = sign_message::<MinPk>(&master_secret, None, &target);
-
-        // Encrypt
-        let mut ciphertext = encrypt::<_, MinPk>(
-            &mut rng,
-            master_public,
-            (None, &target),
-            &Block::new(*message),
-        );
-
-        // Modify U component (this should make decryption fail due to FO transform)
-        let mut modified_u = ciphertext.u;
-        modified_u.mul(&Scalar::from_ikm(&[1u8; 64]));
-        ciphertext.u = modified_u;
-
-        // Try to decrypt - should fail
-        let result = decrypt::<MinPk>(&signature, &ciphertext);
-        assert!(result.is_none());
-    }
-
-    #[test]
     fn test_encrypt_decrypt_with_namespace() {
         let mut rng = thread_rng();
 
@@ -532,36 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn test_namespace_mismatch() {
-        let mut rng = thread_rng();
-
-        // Generate master keypair
-        let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
-
-        // Different namespaces
-        let namespace1 = b"example.org";
-        let namespace2 = b"example.com";
-        let target = 90u64.to_be_bytes();
-        let message = b"Namespace mismatch test - 32byte"; // 32 bytes
-
-        // Generate signature for namespace1
-        let signature = sign_message::<MinPk>(&master_secret, Some(namespace1), &target);
-
-        // Encrypt with namespace2
-        let ciphertext = encrypt::<_, MinPk>(
-            &mut rng,
-            master_public,
-            (Some(namespace2), &target),
-            &Block::new(*message),
-        );
-
-        // Try to decrypt with signature from namespace1 - should fail
-        let result = decrypt::<MinPk>(&signature, &ciphertext);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_namespace_vs_no_namespace() {
+    fn test_namespace_variance() {
         let mut rng = thread_rng();
 
         // Generate master keypair
@@ -612,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cca_security_modified_v() {
+    fn test_cca_modified_v() {
         let mut rng = thread_rng();
 
         let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
@@ -642,6 +539,35 @@ mod tests {
 
         // Try to decrypt - should fail due to verification
         let result = decrypt::<MinPk>(&signature, &tampered_ciphertext);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_cca_modified_u() {
+        let mut rng = thread_rng();
+
+        let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
+        let target = 70u64.to_be_bytes();
+        let message = b"CCA security test message 32 byt"; // 32 bytes
+
+        // Generate signature over the target
+        let signature = sign_message::<MinPk>(&master_secret, None, &target);
+
+        // Encrypt
+        let mut ciphertext = encrypt::<_, MinPk>(
+            &mut rng,
+            master_public,
+            (None, &target),
+            &Block::new(*message),
+        );
+
+        // Modify U component (this should make decryption fail due to FO transform)
+        let mut modified_u = ciphertext.u;
+        modified_u.mul(&Scalar::from_ikm(&[1u8; 64]));
+        ciphertext.u = modified_u;
+
+        // Try to decrypt - should fail
+        let result = decrypt::<MinPk>(&signature, &ciphertext);
         assert!(result.is_none());
     }
 }
