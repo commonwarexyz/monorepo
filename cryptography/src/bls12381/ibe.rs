@@ -3,8 +3,14 @@
 //! This module provides timelock encryption functionality using identity-based
 //! encryption on the BLS12-381 elliptic curve. The implementation uses the
 //! Fujisaki-Okamoto transform to achieve CCA-security.
-
-use crate::{bls12381::primitives::ops::hash_message_namespace, sha256::Digest};
+//!
+//! # Acknowledgements
+//!
+//! The following resources were used as references when implementing this crate:
+//!
+//! * <https://eprint.iacr.org/2023/189>: tlock: Practical Timelock Encryption from Threshold BLS
+//! * <https://github.com/thibmeu/tlock-rs>: tlock-rs: Practical Timelock Encryption/Decryption in Rust
+//! * <https://github.com/drand/tlock> tlock: Timelock Encryption/Decryption Made Practical
 
 use super::primitives::{
     group::{Element, Scalar, GT},
@@ -12,6 +18,7 @@ use super::primitives::{
     variant::Variant,
     Error,
 };
+use crate::{bls12381::primitives::ops::hash_message_namespace, sha256::Digest};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_utils::array::FixedBytes;
@@ -69,7 +76,6 @@ mod hash {
         let mut input = b"h2".to_vec();
         input.extend_from_slice(&gt.to_bytes());
         let digest = crate::sha256::hash(&input);
-        // Convert Digest to Block
         Block::new(*digest.as_ref())
     }
 
@@ -80,9 +86,6 @@ mod hash {
         input.extend_from_slice(sigma.as_ref());
         input.extend_from_slice(message);
         let digest = crate::sha256::hash(&input);
-
-        // Convert hash to scalar using from_be_bytes with modular reduction
-        // This is more efficient than from_ikm while still ensuring a valid scalar
         Scalar::from_be_bytes(digest.as_ref())
             .expect("SHA256 output should never produce zero scalar after reduction")
     }
@@ -93,7 +96,6 @@ mod hash {
         let mut input = b"h4".to_vec();
         input.extend_from_slice(sigma.as_ref());
         let digest = crate::sha256::hash(&input);
-        // Convert Digest to Block
         Block::new(*digest.as_ref())
     }
 }
