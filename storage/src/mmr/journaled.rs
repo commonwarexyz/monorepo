@@ -67,8 +67,7 @@ pub struct SyncConfig<D: Digest> {
 
     /// The pinned nodes the MMR needs at the pruning boundary given by
     /// `lower_bound`, in the order specified by [Proof::nodes_to_pin].
-    /// If `None`, the pinned nodes will be computed from the journal and metadata,
-    /// which are expected to have the necessary pinned nodes.
+    /// If `None`, the pinned nodes are expected to already be in the MMR's metadata/journal.
     pub pinned_nodes: Option<Vec<D>>,
 }
 
@@ -266,50 +265,52 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             cfg.upper_bound,
         )
         .await?;
+        let journal_size = journal.size().await?;
+        assert!(journal_size <= cfg.upper_bound + 1);
 
-        // Update the metadata with the new pruning boundary.
+        // Open the metadata.
         let metadata_cfg = MConfig {
             partition: cfg.config.metadata_partition,
             codec_config: ((0..).into(), ()),
         };
         let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
-        let pruning_boundary_key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
+
+        // Write the pruning boundary.
+        let pruning_boundary_key = U64::new(PRUNE_TO_POS_PREFIX, 0);
         metadata.put(pruning_boundary_key, cfg.lower_bound.to_be_bytes().into());
-        metadata.sync().await.map_err(Error::MetadataError)?;
 
-        let journal_size = journal.size().await?;
-        assert!(journal_size <= cfg.upper_bound + 1);
-
-        // Set up pinned nodes if not provided
-        let pinned_nodes = if let Some(pinned_nodes) = cfg.pinned_nodes {
-            pinned_nodes
-        } else {
-            // Get pinned nodes for the lower bound (what we're pruned to)
-            let mut pinned_nodes = Vec::new();
-            for pos in Proof::<H::Digest>::nodes_to_pin(journal_size) {
-                let digest =
-                    Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
-                pinned_nodes.push(digest);
+        // Write the required pinned nodes to metadata.
+        if let Some(pinned_nodes) = cfg.pinned_nodes {
+            let nodes_to_pin_persisted = Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound);
+            for (pos, digest) in nodes_to_pin_persisted.zip(pinned_nodes.iter()) {
+                metadata.put(U64::new(NODE_PREFIX, pos), digest.to_vec());
             }
-            pinned_nodes
-        };
+        }
 
+        // Create the in-memory MMR with the pinned nodes required for its size.
+        let nodes_to_pin_mem = Proof::<H::Digest>::nodes_to_pin(journal_size);
+        let mut mem_pinned_nodes = Vec::new();
+        for pos in nodes_to_pin_mem {
+            let digest =
+                Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+            mem_pinned_nodes.push(digest);
+        }
         let mut mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
             pruned_to_pos: journal_size,
-            pinned_nodes,
+            pinned_nodes: mem_pinned_nodes,
             pool: cfg.config.thread_pool,
         });
 
+        // Add the additional pinned nodes required for the pruning boundary, if applicable.
         if cfg.lower_bound < journal_size {
-            // We need to add the pinned nodes required for proving at the given pruning boundary.
-            let mut additional_pinned_nodes = HashMap::new();
+            let mut pinned_nodes_pruning_boundary = HashMap::new();
             for pos in Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound) {
                 let digest =
                     Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
-                additional_pinned_nodes.insert(pos, digest);
+                pinned_nodes_pruning_boundary.insert(pos, digest);
             }
-            mem_mmr.add_pinned_nodes(additional_pinned_nodes);
+            mem_mmr.add_pinned_nodes(pinned_nodes_pruning_boundary);
         }
 
         Ok(Self {

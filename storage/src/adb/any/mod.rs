@@ -1783,6 +1783,14 @@ pub(super) mod test {
             target_db.commit().await.unwrap();
             apply_ops(&mut sync_db, original_ops.clone()).await;
             sync_db.commit().await.unwrap();
+            let sync_db_original_size = sync_db.op_count();
+
+            // Get pinned nodes before closing the database
+            let pinned_nodes_map = sync_db.ops.get_pinned_nodes();
+            let pinned_nodes =
+                Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(sync_db_original_size))
+                    .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
+                    .collect::<Vec<_>>();
 
             // Close the sync db
             sync_db.close().await.unwrap();
@@ -1800,11 +1808,6 @@ pub(super) mod test {
 
             let sync_lower_bound = target_db.inactivity_floor_loc;
             let sync_upper_bound = target_db.op_count() - 1;
-
-            let pinned_nodes_map = target_db.ops.get_pinned_nodes();
-            let pinned_nodes = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(target_db_log_size))
-                .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
-                .collect::<Vec<_>>();
 
             let mut hasher = Standard::<Sha256>::new();
             let target_hash = target_db.root(&mut hasher);
