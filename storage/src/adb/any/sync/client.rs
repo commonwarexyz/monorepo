@@ -1681,8 +1681,8 @@ pub(crate) mod tests {
             let lower_bound = target_db.inactivity_floor_loc;
             let upper_bound = target_db.op_count() - 1;
 
-            // Create sync configuration with stable partition names
-            let db_config = create_test_config(42); // Fixed seed for stable partitions
+            // Perform sync
+            let db_config = create_test_config(42);
             let context_clone = context.clone();
             let config = Config {
                 db_config: db_config.clone(),
@@ -1698,27 +1698,46 @@ pub(crate) mod tests {
                 apply_batch_size: 1024,
                 update_receiver: None,
             };
-
-            // Perform sync
             let synced_db = sync(config).await.unwrap();
 
             // Verify initial sync worked
             let mut hasher = create_test_hasher();
             assert_eq!(synced_db.root(&mut hasher), target_root);
 
+            // Save state before closing
+            let expected_root = synced_db.root(&mut hasher);
+            let expected_op_count = synced_db.op_count();
+            let expected_inactivity_floor_loc = synced_db.inactivity_floor_loc;
+            let expected_oldest_retained_loc = synced_db.oldest_retained_loc();
+            let expected_pruned_to_pos = synced_db.ops.pruned_to_pos();
+
             // Close the database
             synced_db.close().await.unwrap();
 
-            // This will panic due to journal corruption on reopen - this is the known issue
-            let _reopened_db =
-                adb::any::Any::<_, Digest, Digest, TestDigest, TestTranslator>::init(
-                    context_clone,
-                    db_config,
-                )
-                .await
-                .unwrap();
+            // Re-open the database
+            let reopened_db = adb::any::Any::<_, Digest, Digest, TestDigest, TestTranslator>::init(
+                context_clone,
+                db_config,
+            )
+            .await
+            .unwrap();
 
+            // Verify the state is unchanged
+            assert_eq!(reopened_db.root(&mut hasher), expected_root);
+            assert_eq!(reopened_db.op_count(), expected_op_count);
+            assert_eq!(
+                reopened_db.inactivity_floor_loc,
+                expected_inactivity_floor_loc
+            );
+            assert_eq!(
+                reopened_db.oldest_retained_loc(),
+                expected_oldest_retained_loc
+            );
+            assert_eq!(reopened_db.ops.pruned_to_pos(), expected_pruned_to_pos);
+
+            // Cleanup
             target_db.destroy().await.unwrap();
+            reopened_db.destroy().await.unwrap();
         });
     }
 }
