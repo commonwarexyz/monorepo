@@ -1608,4 +1608,62 @@ pub(crate) mod tests {
             target_db.destroy().await.unwrap();
         });
     }
+
+    /// Test demonstrating that a synced database can be reopened and retain its state.
+    #[test_traced("WARN")]
+    fn test_sync_database_persistence() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create and populate a simple target database
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(10);
+            apply_ops(&mut target_db, target_ops.clone()).await;
+            target_db.commit().await.unwrap();
+
+            // Capture target state
+            let mut hasher = create_test_hasher();
+            let target_root = target_db.root(&mut hasher);
+            let lower_bound = target_db.inactivity_floor_loc;
+            let upper_bound = target_db.op_count() - 1;
+
+            // Create sync configuration with stable partition names
+            let db_config = create_test_config(42); // Fixed seed for stable partitions
+            let context_clone = context.clone();
+            let config = Config {
+                db_config: db_config.clone(),
+                fetch_batch_size: NZU64!(5),
+                target: SyncTarget {
+                    root: target_root,
+                    lower_bound_ops: lower_bound,
+                    upper_bound_ops: upper_bound,
+                },
+                context,
+                resolver: &target_db,
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+                update_receiver: None,
+            };
+
+            // Perform sync
+            let synced_db = sync(config).await.unwrap();
+
+            // Verify initial sync worked
+            let mut hasher = create_test_hasher();
+            assert_eq!(synced_db.root(&mut hasher), target_root);
+
+            // Close the database
+            synced_db.close().await.unwrap();
+
+            // This will panic due to journal corruption on reopen - this is the known issue
+            let _reopened_db =
+                adb::any::Any::<_, Digest, Digest, TestDigest, TestTranslator>::init(
+                    context_clone,
+                    db_config,
+                )
+                .await
+                .unwrap();
+
+            target_db.destroy().await.unwrap();
+        });
+    }
 }

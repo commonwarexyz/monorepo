@@ -281,15 +281,20 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         assert!(journal_size <= cfg.upper_bound + 1);
 
         // Set up pinned nodes if not provided
+        let nodes_to_pin = Proof::<H::Digest>::nodes_to_pin(journal_size);
         let pinned_nodes = if let Some(pinned_nodes) = cfg.pinned_nodes {
+            for (pos, digest) in nodes_to_pin.zip(pinned_nodes.iter()) {
+                metadata.put(U64::new(NODE_PREFIX, pos), digest.to_vec());
+            }
             pinned_nodes
         } else {
-            // Get pinned nodes for the lower bound (what we're pruned to)
+            // Calculate pinned nodes from existing data
             let mut pinned_nodes = Vec::new();
-            for pos in Proof::<H::Digest>::nodes_to_pin(journal_size) {
+            for pos in nodes_to_pin {
                 let digest =
                     Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
                 pinned_nodes.push(digest);
+                metadata.put(U64::new(NODE_PREFIX, pos), digest.to_vec());
             }
             pinned_nodes
         };
@@ -307,6 +312,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             for pos in Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound) {
                 let digest =
                     Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+                metadata.put(U64::new(NODE_PREFIX, pos), digest.to_vec());
                 additional_pinned_nodes.insert(pos, digest);
             }
             mem_mmr.add_pinned_nodes(additional_pinned_nodes);
