@@ -138,7 +138,7 @@ impl Variant for MinPk {
         // Generate random non-zero scalars.
         let scalars: Vec<Scalar> = (0..publics.len())
             .map(|_| loop {
-                let scalar = Scalar::rand(rng);
+                let scalar = Scalar::from_rand(rng);
                 if scalar != Scalar::zero() {
                     return scalar;
                 }
@@ -284,7 +284,7 @@ impl Variant for MinSig {
         // Generate random non-zero scalars.
         let scalars: Vec<Scalar> = (0..publics.len())
             .map(|_| loop {
-                let scalar = Scalar::rand(rng);
+                let scalar = Scalar::from_rand(rng);
                 if scalar != Scalar::zero() {
                     return scalar;
                 }

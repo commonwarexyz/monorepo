@@ -1,5 +1,5 @@
 use commonware_cryptography::bls12381::{
-    ibe::{decrypt, encrypt, Block},
+    tle::{decrypt, encrypt, Block},
     primitives::{
         ops::{keypair, sign_message},
         variant::MinSig,

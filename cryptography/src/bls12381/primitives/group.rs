@@ -12,13 +12,14 @@
 
 use super::variant::Variant;
 use blst::{
-    blst_bendian_from_scalar, blst_fp12, blst_fr, blst_fr_add, blst_fr_from_scalar,
-    blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul, blst_fr_sub, blst_hash_to_g1,
-    blst_hash_to_g2, blst_keygen, blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_compress,
-    blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
-    blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof, blst_p2,
-    blst_p2_add_or_double, blst_p2_affine, blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2,
-    blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
+    blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr, blst_fr_add,
+    blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul, blst_fr_sub,
+    blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1, blst_p1_add_or_double, blst_p1_affine,
+    blst_p1_compress, blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult,
+    blst_p1_to_affine, blst_p1_uncompress, blst_p1s_mult_pippenger,
+    blst_p1s_mult_pippenger_scratch_sizeof, blst_p2, blst_p2_add_or_double, blst_p2_affine,
+    blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult,
+    blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar, blst_scalar_from_be_bytes,
     blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check, BLS12_381_G1, BLS12_381_G2,
     BLST_ERROR,
@@ -197,7 +198,7 @@ pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
     /// Generates a random scalar using the provided RNG.
-    pub fn rand<R: RngCore>(rng: &mut R) -> Self {
+    pub fn from_rand<R: RngCore>(rng: &mut R) -> Self {
         // Generate a random 64 byte buffer
         let mut ikm = [0u8; 64];
         rng.fill_bytes(&mut ikm);
@@ -216,27 +217,34 @@ impl Scalar {
         Self(ret)
     }
 
-    /// Creates a scalar from big-endian bytes with modular reduction.
-    ///
-    /// This function converts arbitrary-length big-endian bytes to a valid scalar
-    /// by performing modular reduction modulo the BLS12-381 scalar field order.
-    /// Unlike direct conversion methods, this ensures the result is always valid
-    /// even if the input represents a number larger than the field order.
-    pub fn from_be_bytes(bytes: &[u8]) -> Option<Self> {
-        let mut ret = blst_fr::default();
+    /// Maps arbitrary bytes to a scalar using RFC9380 hash-to-field.
+    pub fn map(dst: DST, msg: &[u8]) -> Self {
+        const L: usize = 48;
+        let mut uniform_bytes = [0u8; L];
         unsafe {
-            let mut sc = blst_scalar::default();
-            let valid = blst_scalar_from_be_bytes(&mut sc, bytes.as_ptr(), bytes.len());
-            if !valid {
-                return None;
-            }
-            blst_fr_from_scalar(&mut ret, &sc);
+            blst_expand_message_xmd(
+                uniform_bytes.as_mut_ptr(),
+                L,
+                msg.as_ptr(),
+                msg.len(),
+                dst.as_ptr(),
+                dst.len(),
+            );
         }
-        Some(Self(ret))
+
+        // Transform expanded bytes with modular reduction
+        let mut fr = blst_fr::default();
+        unsafe {
+            let mut scalar = blst_scalar::default();
+            blst_scalar_from_be_bytes(&mut scalar, uniform_bytes.as_ptr(), L);
+            blst_fr_from_scalar(&mut fr, &scalar);
+        }
+
+        Self(fr)
     }
 
     /// Creates a new scalar from the provided integer.
-    fn from(i: u64) -> Self {
+    fn from_u64(i: u64) -> Self {
         // Create a new scalar
         let mut ret = blst_fr::default();
 
@@ -296,7 +304,7 @@ impl From<u32> for Scalar {
 
 impl From<u64> for Scalar {
     fn from(i: u64) -> Self {
-        Self::from(i)
+        Self::from_u64(i)
     }
 }
 
@@ -885,7 +893,7 @@ mod tests {
     #[test]
     fn basic_group() {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/curve/bls12381.rs#L200-L220
-        let s = Scalar::rand(&mut thread_rng());
+        let s = Scalar::from_rand(&mut thread_rng());
         let mut e1 = s.clone();
         let e2 = s.clone();
         let mut s2 = s.clone();
@@ -907,7 +915,7 @@ mod tests {
 
     #[test]
     fn test_scalar_codec() {
-        let original = Scalar::rand(&mut thread_rng());
+        let original = Scalar::from_rand(&mut thread_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), Scalar::SIZE);
         let decoded = Scalar::decode(&mut encoded).unwrap();
@@ -917,7 +925,7 @@ mod tests {
     #[test]
     fn test_g1_codec() {
         let mut original = G1::one();
-        original.mul(&Scalar::rand(&mut thread_rng()));
+        original.mul(&Scalar::from_rand(&mut thread_rng()));
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G1::SIZE);
         let decoded = G1::decode(&mut encoded).unwrap();
@@ -927,7 +935,7 @@ mod tests {
     #[test]
     fn test_g2_codec() {
         let mut original = G2::one();
-        original.mul(&Scalar::rand(&mut thread_rng()));
+        original.mul(&Scalar::from_rand(&mut thread_rng()));
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G2::SIZE);
         let decoded = G2::decode(&mut encoded).unwrap();
@@ -959,11 +967,11 @@ mod tests {
         let points_g1: Vec<G1> = (0..n)
             .map(|_| {
                 let mut point = G1::one();
-                point.mul(&Scalar::rand(&mut rng));
+                point.mul(&Scalar::from_rand(&mut rng));
                 point
             })
             .collect();
-        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
+        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::from_rand(&mut rng)).collect();
         let expected_g1 = naive_msm(&points_g1, &scalars);
         let result_g1 = G1::msm(&points_g1, &scalars);
         assert_eq!(expected_g1, result_g1, "G1 MSM basic case failed");
@@ -1040,11 +1048,11 @@ mod tests {
         let points_g1: Vec<G1> = (0..50_000)
             .map(|_| {
                 let mut point = G1::one();
-                point.mul(&Scalar::rand(&mut rng));
+                point.mul(&Scalar::from_rand(&mut rng));
                 point
             })
             .collect();
-        let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::rand(&mut rng)).collect();
+        let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::from_rand(&mut rng)).collect();
         let expected_g1 = naive_msm(&points_g1, &scalars);
         let result_g1 = G1::msm(&points_g1, &scalars);
         assert_eq!(expected_g1, result_g1, "G1 MSM basic case failed");
@@ -1059,11 +1067,11 @@ mod tests {
         let points_g2: Vec<G2> = (0..n)
             .map(|_| {
                 let mut point = G2::one();
-                point.mul(&Scalar::rand(&mut rng));
+                point.mul(&Scalar::from_rand(&mut rng));
                 point
             })
             .collect();
-        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
+        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::from_rand(&mut rng)).collect();
         let expected_g2 = naive_msm(&points_g2, &scalars);
         let result_g2 = G2::msm(&points_g2, &scalars);
         assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
@@ -1140,11 +1148,11 @@ mod tests {
         let points_g2: Vec<G2> = (0..50_000)
             .map(|_| {
                 let mut point = G2::one();
-                point.mul(&Scalar::rand(&mut rng));
+                point.mul(&Scalar::from_rand(&mut rng));
                 point
             })
             .collect();
-        let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::rand(&mut rng)).collect();
+        let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::from_rand(&mut rng)).collect();
         let expected_g2 = naive_msm(&points_g2, &scalars);
         let result_g2 = G2::msm(&points_g2, &scalars);
         assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
@@ -1160,7 +1168,7 @@ mod tests {
         let mut g2_set = BTreeSet::new();
         let mut share_set = BTreeSet::new();
         while scalar_set.len() < NUM_ITEMS {
-            let scalar = Scalar::rand(&mut rng);
+            let scalar = Scalar::from_rand(&mut rng);
             let mut g1 = G1::one();
             g1.mul(&scalar);
             let mut g2 = G2::one();
@@ -1206,49 +1214,53 @@ mod tests {
     }
 
     #[test]
-    fn test_scalar_from_be_bytes() {
-        // Test 1: Valid 32-byte input
-        let bytes32 = [0x42u8; 32];
-        let scalar = Scalar::from_be_bytes(&bytes32);
-        assert!(
-            scalar.is_some(),
-            "32-byte input should produce valid scalar"
+    fn test_scalar_map() {
+        // Test 1: Basic functionality
+        let msg = b"test message";
+        let dst = b"TEST_DST";
+        let scalar1 = Scalar::map(dst, msg);
+        let scalar2 = Scalar::map(dst, msg);
+        assert_eq!(scalar1, scalar2, "Same input should produce same output");
+
+        // Test 2: Different messages produce different scalars
+        let msg2 = b"different message";
+        let scalar3 = Scalar::map(dst, msg2);
+        assert_ne!(
+            scalar1, scalar3,
+            "Different messages should produce different scalars"
         );
 
-        // Test 2: Large value that requires modular reduction
-        let mut large_bytes = [0xFFu8; 32];
-        large_bytes[0] = 0xFF; // Definitely larger than field order
-        let scalar_large = Scalar::from_be_bytes(&large_bytes);
-        assert!(
-            scalar_large.is_some(),
-            "Large value should be reduced modulo field order"
+        // Test 3: Different DSTs produce different scalars
+        let dst2 = b"DIFFERENT_DST";
+        let scalar4 = Scalar::map(dst2, msg);
+        assert_ne!(
+            scalar1, scalar4,
+            "Different DSTs should produce different scalars"
         );
 
-        // Test 3: Zero bytes should return None
-        let zero_bytes = [0u8; 32];
-        let scalar_zero = Scalar::from_be_bytes(&zero_bytes);
-        assert!(scalar_zero.is_none(), "Zero bytes should return None");
+        // Test 4: Empty message
+        let empty_msg = b"";
+        let scalar_empty = Scalar::map(dst, empty_msg);
+        assert_ne!(
+            scalar_empty,
+            Scalar::zero(),
+            "Empty message should not produce zero"
+        );
 
-        // Test 4: Different length inputs
-        let bytes16 = [0x42u8; 16];
-        let scalar16 = Scalar::from_be_bytes(&bytes16);
-        assert!(scalar16.is_some(), "16-byte input should work");
+        // Test 5: Large message
+        let large_msg = vec![0x42u8; 1000];
+        let scalar_large = Scalar::map(dst, &large_msg);
+        assert_ne!(
+            scalar_large,
+            Scalar::zero(),
+            "Large message should not produce zero"
+        );
 
-        let bytes64 = [0x42u8; 64];
-        let scalar64 = Scalar::from_be_bytes(&bytes64);
-        assert!(scalar64.is_some(), "64-byte input should work");
-
-        // Test 5: Verify that modular reduction produces consistent results
-        let bytes_a = [
-            0x73, 0xed, 0xa7, 0x53, 0x29, 0x9d, 0x7d, 0x48, 0x33, 0x39, 0xd8, 0x08, 0x09, 0xa1,
-            0xd8, 0x05, 0x53, 0xbd, 0xa4, 0x02, 0xff, 0xfe, 0x5b, 0xfe, 0xff, 0xff, 0xff, 0xff,
-            0x00, 0x00, 0x00, 0x02,
-        ]; // field order + 1
-        let scalar_a = Scalar::from_be_bytes(&bytes_a);
-        assert!(scalar_a.is_some(), "Field order + 1 should be reduced to 1");
-
-        // The result should be 1 after reduction
-        let one = Scalar::one();
-        assert_eq!(scalar_a.unwrap(), one, "Field order + 1 should reduce to 1");
+        // Test 6: Verify the scalar is valid (not zero)
+        assert_ne!(
+            scalar1,
+            Scalar::zero(),
+            "Hash should not produce zero scalar"
+        );
     }
 }

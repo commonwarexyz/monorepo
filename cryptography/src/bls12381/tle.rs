@@ -1,4 +1,4 @@
-//! Identity-Based Encryption (IBE) over BLS12-381.
+//! Timelock Encryption (TLE) over BLS12-381.
 //!
 //! This crate implements Timelock Encryption (TLE) over BLS12-381 using
 //! Identity-Based Encryption (IBE). To achieve CCA-security, this crate
@@ -61,11 +61,17 @@ use super::primitives::{
     ops::hash_message,
     variant::Variant,
 };
-use crate::{bls12381::primitives::ops::hash_message_namespace, sha256::Digest};
+use crate::{
+    bls12381::primitives::{group::DST, ops::hash_message_namespace},
+    sha256::Digest,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_utils::array::FixedBytes;
 use rand::{CryptoRng, Rng};
+
+/// Domain separation tag for hashing a message to a scalar.
+const DST: DST = b"TLE_BLS12381_XMD:SHA-256_SSWU_RO_H3_";
 
 /// Block size for encryption operations.
 const BLOCK_SIZE: usize = Digest::SIZE;
@@ -135,15 +141,15 @@ mod hash {
 
     /// H3: (sigma, M) -> Scalar
     ///
-    /// Used to derive the random scalar r.
+    /// Used to derive the random scalar r using RFC9380 hash-to-field.
     pub fn h3(sigma: &Block, message: &[u8]) -> Scalar {
-        let mut hasher = Sha256::new();
-        hasher.update(b"h3");
-        hasher.update(sigma.as_ref());
-        hasher.update(message);
-        let digest = hasher.finalize();
-        Scalar::from_be_bytes(digest.as_ref())
-            .expect("SHA256 output should never produce zero scalar after reduction")
+        // Combine sigma and message
+        let mut combined = Vec::with_capacity(sigma.len() + message.len());
+        combined.extend_from_slice(sigma.as_ref());
+        combined.extend_from_slice(message);
+
+        // Map the combined bytes to a scalar via RFC9380 hash-to-field
+        Scalar::map(DST, &combined)
     }
 
     /// H4: sigma -> Block
@@ -563,7 +569,7 @@ mod tests {
 
         // Modify U component (this should make decryption fail due to FO transform)
         let mut modified_u = ciphertext.u;
-        modified_u.mul(&Scalar::rand(&mut rng));
+        modified_u.mul(&Scalar::from_rand(&mut rng));
         ciphertext.u = modified_u;
 
         // Try to decrypt - should fail
