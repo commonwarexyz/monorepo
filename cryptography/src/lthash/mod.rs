@@ -110,8 +110,8 @@ impl LtHash {
         let expanded = Self::expand_to_state(data);
 
         // Add the expanded hash to our state with 16-bit wrapping arithmetic
-        for (i, val) in expanded.into_iter().enumerate() {
-            self.state[i] = self.state[i].wrapping_add(val);
+        for (i, val) in expanded.iter().enumerate() {
+            self.state[i] = self.state[i].wrapping_add(*val);
         }
     }
 
@@ -124,15 +124,15 @@ impl LtHash {
         let expanded = Self::expand_to_state(data);
 
         // Subtract the expanded hash from our state with 16-bit wrapping arithmetic
-        for (i, val) in expanded.into_iter().enumerate() {
-            self.state[i] = self.state[i].wrapping_sub(val);
+        for (i, val) in expanded.iter().enumerate() {
+            self.state[i] = self.state[i].wrapping_sub(*val);
         }
     }
 
     /// Combine two [LtHash] states by addition.
     pub fn combine(&mut self, other: &Self) {
-        for (i, val) in other.state.into_iter().enumerate() {
-            self.state[i] = self.state[i].wrapping_add(val);
+        for (i, val) in other.state.iter().enumerate() {
+            self.state[i] = self.state[i].wrapping_add(*val);
         }
     }
 
