@@ -57,6 +57,7 @@
 //! * <https://cseweb.ucsd.edu/~daniele/papers/Cyclic.pdf>: Generalized compact knapsacks, cyclic lattices, and efficient one-way functions
 //! * <https://dl.acm.org/doi/10.1145/237814.237838>: Generating hard instances of lattice problems
 //! * <https://eprint.iacr.org/2019/227>: Securing Update Propagation with Homomorphic Hashing
+//! * <https://engineering.fb.com/2019/03/01/security/homomorphic-hashing/>: Open-sourcing homomorphic hashing to secure update propagation
 //! * <https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0215-accounts-lattice-hash.md>: Homomorphic Hashing of Account State
 
 use crate::Hasher;
