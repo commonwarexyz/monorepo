@@ -80,12 +80,11 @@ mod hash {
         input.extend_from_slice(sigma.as_ref());
         input.extend_from_slice(message);
         let digest = crate::sha256::hash(&input);
-        // Convert hash to scalar
-        // Use the hash as IKM (input keying material) for scalar generation
-        let mut ikm = [0u8; 64];
-        ikm[..32].copy_from_slice(&digest);
-        ikm[32..].copy_from_slice(&digest);
-        Scalar::from_ikm(&ikm)
+
+        // Convert hash to scalar using from_be_bytes with modular reduction
+        // This is more efficient than from_ikm while still ensuring a valid scalar
+        Scalar::from_be_bytes(digest.as_ref())
+            .expect("SHA256 output should never produce zero scalar after reduction")
     }
 
     /// H4: sigma -> Block
@@ -100,7 +99,7 @@ mod hash {
 }
 
 /// XOR two blocks together.
-/// 
+///
 /// This function takes advantage of the fixed-size nature of blocks
 /// to enable better compiler optimizations. Since we know blocks are
 /// exactly 32 bytes, we can unroll the operation completely.
@@ -108,18 +107,42 @@ mod hash {
 fn xor_blocks(a: &Block, b: &Block) -> Block {
     let a_bytes = a.as_ref();
     let b_bytes = b.as_ref();
-    
+
     // Since Block is exactly 32 bytes, we can use array initialization
     // with const generics to let the compiler fully optimize this
     Block::new([
-        a_bytes[0] ^ b_bytes[0],   a_bytes[1] ^ b_bytes[1],   a_bytes[2] ^ b_bytes[2],   a_bytes[3] ^ b_bytes[3],
-        a_bytes[4] ^ b_bytes[4],   a_bytes[5] ^ b_bytes[5],   a_bytes[6] ^ b_bytes[6],   a_bytes[7] ^ b_bytes[7],
-        a_bytes[8] ^ b_bytes[8],   a_bytes[9] ^ b_bytes[9],   a_bytes[10] ^ b_bytes[10], a_bytes[11] ^ b_bytes[11],
-        a_bytes[12] ^ b_bytes[12], a_bytes[13] ^ b_bytes[13], a_bytes[14] ^ b_bytes[14], a_bytes[15] ^ b_bytes[15],
-        a_bytes[16] ^ b_bytes[16], a_bytes[17] ^ b_bytes[17], a_bytes[18] ^ b_bytes[18], a_bytes[19] ^ b_bytes[19],
-        a_bytes[20] ^ b_bytes[20], a_bytes[21] ^ b_bytes[21], a_bytes[22] ^ b_bytes[22], a_bytes[23] ^ b_bytes[23],
-        a_bytes[24] ^ b_bytes[24], a_bytes[25] ^ b_bytes[25], a_bytes[26] ^ b_bytes[26], a_bytes[27] ^ b_bytes[27],
-        a_bytes[28] ^ b_bytes[28], a_bytes[29] ^ b_bytes[29], a_bytes[30] ^ b_bytes[30], a_bytes[31] ^ b_bytes[31],
+        a_bytes[0] ^ b_bytes[0],
+        a_bytes[1] ^ b_bytes[1],
+        a_bytes[2] ^ b_bytes[2],
+        a_bytes[3] ^ b_bytes[3],
+        a_bytes[4] ^ b_bytes[4],
+        a_bytes[5] ^ b_bytes[5],
+        a_bytes[6] ^ b_bytes[6],
+        a_bytes[7] ^ b_bytes[7],
+        a_bytes[8] ^ b_bytes[8],
+        a_bytes[9] ^ b_bytes[9],
+        a_bytes[10] ^ b_bytes[10],
+        a_bytes[11] ^ b_bytes[11],
+        a_bytes[12] ^ b_bytes[12],
+        a_bytes[13] ^ b_bytes[13],
+        a_bytes[14] ^ b_bytes[14],
+        a_bytes[15] ^ b_bytes[15],
+        a_bytes[16] ^ b_bytes[16],
+        a_bytes[17] ^ b_bytes[17],
+        a_bytes[18] ^ b_bytes[18],
+        a_bytes[19] ^ b_bytes[19],
+        a_bytes[20] ^ b_bytes[20],
+        a_bytes[21] ^ b_bytes[21],
+        a_bytes[22] ^ b_bytes[22],
+        a_bytes[23] ^ b_bytes[23],
+        a_bytes[24] ^ b_bytes[24],
+        a_bytes[25] ^ b_bytes[25],
+        a_bytes[26] ^ b_bytes[26],
+        a_bytes[27] ^ b_bytes[27],
+        a_bytes[28] ^ b_bytes[28],
+        a_bytes[29] ^ b_bytes[29],
+        a_bytes[30] ^ b_bytes[30],
+        a_bytes[31] ^ b_bytes[31],
     ])
 }
 
