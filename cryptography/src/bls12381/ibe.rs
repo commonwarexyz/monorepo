@@ -4,7 +4,7 @@
 //! encryption on the BLS12-381 elliptic curve. The implementation uses the
 //! Fujisaki-Okamoto transform to achieve CCA-security.
 
-use crate::bls12381::primitives::ops::hash_message_namespace;
+use crate::{bls12381::primitives::ops::hash_message_namespace, sha256::Digest};
 
 use super::primitives::{
     group::{Element, Scalar, GT},
@@ -13,14 +13,15 @@ use super::primitives::{
     Error,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_utils::array::FixedBytes;
 use rand::{CryptoRng, Rng};
 
 /// Block size for encryption operations.
-const BLOCK_SIZE: usize = 32;
+const BLOCK_SIZE: usize = Digest::SIZE;
 
-/// Type alias for 32-byte blocks.
-type Block = [u8; 32];
+/// Type alias for 32-byte blocks using FixedBytes.
+type Block = FixedBytes<BLOCK_SIZE>;
 
 /// Ciphertext structure for IBE.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,15 +31,14 @@ pub struct Ciphertext<V: Variant> {
     /// Encrypted random value V = sigma XOR H2(e(Q_id, r * P_pub)).
     pub v: Block,
     /// Encrypted message W = M XOR H4(sigma).
-    pub w: Vec<u8>,
+    pub w: Block,
 }
 
 impl<V: Variant> Write for Ciphertext<V> {
     fn write(&self, buf: &mut impl BufMut) {
         self.u.write(buf);
-        buf.put_slice(&self.v);
-        UInt(self.w.len() as u64).write(buf);
-        buf.put_slice(&self.w);
+        buf.put_slice(self.v.as_ref());
+        buf.put_slice(self.w.as_ref());
     }
 }
 
@@ -47,24 +47,15 @@ impl<V: Variant> Read for Ciphertext<V> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         let u = V::Public::read(buf)?;
-        let mut v = Block::default();
-        if buf.remaining() < 32 {
-            return Err(commonware_codec::Error::EndOfBuffer);
-        }
-        buf.copy_to_slice(&mut v);
-        let w_len: u64 = UInt::read(buf)?.0;
-        if buf.remaining() < w_len as usize {
-            return Err(commonware_codec::Error::EndOfBuffer);
-        }
-        let mut w = vec![0u8; w_len as usize];
-        buf.copy_to_slice(&mut w);
+        let v = Block::read(buf)?;
+        let w = Block::read(buf)?;
         Ok(Self { u, v, w })
     }
 }
 
 impl<V: Variant> EncodeSize for Ciphertext<V> {
     fn encode_size(&self) -> usize {
-        self.u.encode_size() + 32 + UInt(self.w.len() as u64).encode_size() + self.w.len()
+        self.u.encode_size() + self.v.encode_size() + self.w.encode_size()
     }
 }
 
@@ -78,15 +69,15 @@ mod hash {
         let mut input = b"h2".to_vec();
         input.extend_from_slice(&gt.to_bytes());
         let digest = crate::sha256::hash(&input);
-        // Convert Digest to Block without copying
-        *digest.as_ref()
+        // Convert Digest to Block
+        Block::new(*digest.as_ref())
     }
 
     /// H3: (sigma, M) -> Scalar
     /// Used to derive the random scalar r.
     pub fn h3(sigma: &Block, message: &[u8]) -> Scalar {
         let mut input = b"h3".to_vec();
-        input.extend_from_slice(sigma);
+        input.extend_from_slice(sigma.as_ref());
         input.extend_from_slice(message);
         let digest = crate::sha256::hash(&input);
         // Convert hash to scalar
@@ -101,17 +92,20 @@ mod hash {
     /// Used to mask the message.
     pub fn h4(sigma: &Block) -> Block {
         let mut input = b"h4".to_vec();
-        input.extend_from_slice(sigma);
+        input.extend_from_slice(sigma.as_ref());
         let digest = crate::sha256::hash(&input);
-        // Convert Digest to Block without copying
-        *digest.as_ref()
+        // Convert Digest to Block
+        Block::new(*digest.as_ref())
     }
 }
 
-/// XOR two byte arrays of the same length.
-fn xor(a: &[u8], b: &[u8]) -> Vec<u8> {
-    assert_eq!(a.len(), b.len(), "XOR operands must have the same length");
-    a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect()
+/// XOR two blocks together.
+fn xor_blocks(a: &Block, b: &Block) -> Block {
+    let mut result = [0u8; BLOCK_SIZE];
+    for (i, (a, b)) in a.as_ref().iter().zip(b.as_ref().iter()).enumerate() {
+        result[i] = a ^ b;
+    }
+    Block::new(result)
 }
 
 /// Encrypt a message using identity-based encryption with CCA-security.
@@ -131,17 +125,20 @@ fn xor(a: &[u8], b: &[u8]) -> Vec<u8> {
 ///
 /// # Returns
 /// * `Result<Ciphertext>` - The encrypted ciphertext
-pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
+pub fn encrypt<R: Rng + CryptoRng, V: Variant, M: AsRef<[u8]>>(
     rng: &mut R,
     public: V::Public,
-    message: &[u8],
+    message: M,
     target: (Option<&[u8]>, &[u8]),
 ) -> Result<Ciphertext<V>, Error> {
-    // Security check: message must be exactly 32 bytes
-    if message.len() != BLOCK_SIZE {
-        return Err(Error::InvalidSignature); // TODO: Add better error variant
+    // Convert message to Block
+    let message_bytes = message.as_ref();
+    if message_bytes.len() != BLOCK_SIZE {
+        return Err(Error::InvalidSignature); // TODO: Better error type
     }
-
+    let mut message_array = [0u8; BLOCK_SIZE];
+    message_array.copy_from_slice(message_bytes);
+    let message_block = Block::new(message_array);
     // Hash target to get Q_id in signature group using the variant's message DST
     let q_id = match target {
         (None, target) => hash_message::<V>(V::MESSAGE, target),
@@ -149,11 +146,12 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
     };
 
     // Generate random sigma
-    let mut sigma = Block::default();
-    rng.fill_bytes(&mut sigma);
+    let mut sigma_array = [0u8; BLOCK_SIZE];
+    rng.fill_bytes(&mut sigma_array);
+    let sigma = Block::new(sigma_array);
 
     // Derive scalar r from sigma and message
-    let r = hash::h3(&sigma, message);
+    let r = hash::h3(&sigma, &message_block);
 
     // Compute U = r * Public::one()
     let mut u = V::Public::one();
@@ -166,13 +164,11 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
 
     // Compute V = sigma XOR H2(e(Q_id, r * P_pub))
     let h2_value = hash::h2(&gt);
-    let v: Block = xor(&sigma, &h2_value)
-        .try_into()
-        .expect("XOR result should be Block");
+    let v = xor_blocks(&sigma, &h2_value);
 
     // Compute W = M XOR H4(sigma)
     let h4_value = hash::h4(&sigma);
-    let w = xor(message, &h4_value);
+    let w = xor_blocks(&message_block, &h4_value);
 
     Ok(Ciphertext { u, v, w })
 }
@@ -190,23 +186,21 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
 /// * `ciphertext` - Ciphertext to decrypt
 ///
 /// # Returns
-/// * `Result<Vec<u8>>` - The decrypted message
+/// * `Result<Block>` - The decrypted message
 pub fn decrypt<V: Variant>(
     private: V::Signature,
     ciphertext: &Ciphertext<V>,
-) -> Result<Vec<u8>, Error> {
+) -> Result<Block, Error> {
     // Compute e(U, private)
     let gt = V::pairing(&ciphertext.u, &private);
 
     // Recover sigma = V XOR H2(e(U, private))
     let h2_value = hash::h2(&gt);
-    let sigma: Block = xor(&ciphertext.v, &h2_value)
-        .try_into()
-        .expect("XOR result should be Block");
+    let sigma = xor_blocks(&ciphertext.v, &h2_value);
 
     // Recover M = W XOR H4(sigma)
     let h4_value = hash::h4(&sigma);
-    let message = xor(&ciphertext.w, &h4_value);
+    let message = xor_blocks(&ciphertext.w, &h4_value);
 
     // Verify integrity: recompute r and check U = r * Public::one()
     let r = hash::h3(&sigma, &message);
@@ -246,14 +240,14 @@ mod tests {
         private_key.mul(&master_secret);
 
         // Encrypt
-        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, message, (None, identity))
+        let ciphertext = encrypt::<_, MinPk, _>(&mut rng, master_public, message, (None, identity))
             .expect("Encryption should succeed");
 
         // Decrypt
         let decrypted =
             decrypt::<MinPk>(private_key, &ciphertext).expect("Decryption should succeed");
 
-        assert_eq!(message, &decrypted[..]);
+        assert_eq!(message.as_ref(), decrypted.as_ref());
     }
 
     #[test]
@@ -273,14 +267,15 @@ mod tests {
         private_key.mul(&master_secret);
 
         // Encrypt
-        let ciphertext = encrypt::<_, MinSig>(&mut rng, master_public, message, (None, identity))
-            .expect("Encryption should succeed");
+        let ciphertext =
+            encrypt::<_, MinSig, _>(&mut rng, master_public, message, (None, identity))
+                .expect("Encryption should succeed");
 
         // Decrypt
         let decrypted =
             decrypt::<MinSig>(private_key, &ciphertext).expect("Decryption should succeed");
 
-        assert_eq!(message, &decrypted[..]);
+        assert_eq!(message.as_ref(), decrypted.as_ref());
     }
 
     #[test]
@@ -289,11 +284,12 @@ mod tests {
         let (_, master_public) = keypair::<_, MinPk>(&mut rng);
 
         let identity = b"test@example.com";
-        let message = vec![0u8; 33]; // Not exactly 32
+        let message = vec![0u8; 33]; // 33 bytes, not 32
 
-        let result = encrypt::<_, MinPk>(&mut rng, master_public, &message, (None, identity));
+        // This should fail since we can't create a Block from non-32 byte slices
+        // Try to encrypt with wrong size message
+        let result = encrypt::<_, MinPk, _>(&mut rng, master_public, &message, (None, identity));
         assert!(result.is_err());
-        // Just check it's an error
     }
 
     #[test]
@@ -308,8 +304,9 @@ mod tests {
         let message = b"Secret message padded to 32bytes";
 
         // Encrypt with first master public key
-        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public1, message, (None, identity))
-            .expect("Encryption should succeed");
+        let ciphertext =
+            encrypt::<_, MinPk, _>(&mut rng, master_public1, message, (None, identity))
+                .expect("Encryption should succeed");
 
         // Try to decrypt with private key from second master
         let id_point = hash_message::<MinPk>(MinPk::MESSAGE, identity);
@@ -335,15 +332,21 @@ mod tests {
         private_key.mul(&master_secret);
 
         // Encrypt
-        let mut ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public, message, (None, identity))
-                .expect("Encryption should succeed");
+        let ciphertext = encrypt::<_, MinPk, _>(&mut rng, master_public, message, (None, identity))
+            .expect("Encryption should succeed");
 
-        // Tamper with ciphertext
-        ciphertext.w[0] ^= 0xFF;
+        // Tamper with ciphertext by creating a modified w
+        let mut w_bytes = [0u8; BLOCK_SIZE];
+        w_bytes.copy_from_slice(ciphertext.w.as_ref());
+        w_bytes[0] ^= 0xFF;
+        let tampered_ciphertext = Ciphertext {
+            u: ciphertext.u,
+            v: ciphertext.v,
+            w: Block::new(w_bytes),
+        };
 
         // Try to decrypt
-        let result = decrypt::<MinPk>(private_key, &ciphertext);
+        let result = decrypt::<MinPk>(private_key, &tampered_ciphertext);
         assert!(result.is_err());
         // Error type doesn't have Display implementation, just check it's an error
     }
@@ -360,13 +363,14 @@ mod tests {
         let mut private_key = id_point;
         private_key.mul(&master_secret);
 
-        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, &message, (None, identity))
-            .expect("Encryption should succeed");
+        let ciphertext =
+            encrypt::<_, MinPk, _>(&mut rng, master_public, &message, (None, identity))
+                .expect("Encryption should succeed");
 
         let decrypted =
             decrypt::<MinPk>(private_key, &ciphertext).expect("Decryption should succeed");
 
-        assert_eq!(message, &decrypted[..]);
+        assert_eq!(message.as_ref(), decrypted.as_ref());
     }
 
     #[test]
@@ -375,19 +379,20 @@ mod tests {
 
         let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
         let identity = b"maxsize@example.com";
-        let message = vec![0xAB; 32]; // Maximum allowed size
+        let message = [0xAB; 32]; // Maximum allowed size
 
         let id_point = hash_message::<MinPk>(MinPk::MESSAGE, identity);
         let mut private_key = id_point;
         private_key.mul(&master_secret);
 
-        let ciphertext = encrypt::<_, MinPk>(&mut rng, master_public, &message, (None, identity))
-            .expect("Encryption should succeed");
+        let ciphertext =
+            encrypt::<_, MinPk, _>(&mut rng, master_public, &message, (None, identity))
+                .expect("Encryption should succeed");
 
         let decrypted =
             decrypt::<MinPk>(private_key, &ciphertext).expect("Decryption should succeed");
 
-        assert_eq!(message, decrypted);
+        assert_eq!(message.as_ref(), decrypted.as_ref());
     }
 
     #[test]
@@ -405,7 +410,7 @@ mod tests {
 
         // Encrypt
         let mut ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public, message, (None, identity))
+            encrypt::<_, MinPk, _>(&mut rng, master_public, message, (None, identity))
                 .expect("Encryption should succeed");
 
         // Modify U component (this should make decryption fail due to FO transform)
@@ -432,15 +437,21 @@ mod tests {
         private_key.mul(&master_secret);
 
         // Encrypt
-        let mut ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public, message, (None, identity))
-                .expect("Encryption should succeed");
+        let ciphertext = encrypt::<_, MinPk, _>(&mut rng, master_public, message, (None, identity))
+            .expect("Encryption should succeed");
 
         // Modify V component (encrypted sigma)
-        ciphertext.v[0] ^= 0x01;
+        let mut v_bytes = [0u8; BLOCK_SIZE];
+        v_bytes.copy_from_slice(ciphertext.v.as_ref());
+        v_bytes[0] ^= 0x01;
+        let tampered_ciphertext = Ciphertext {
+            u: ciphertext.u,
+            v: Block::new(v_bytes),
+            w: ciphertext.w,
+        };
 
         // Try to decrypt - should fail due to verification
-        let result = decrypt::<MinPk>(private_key, &ciphertext);
+        let result = decrypt::<MinPk>(private_key, &tampered_ciphertext);
         assert!(result.is_err());
     }
 }
