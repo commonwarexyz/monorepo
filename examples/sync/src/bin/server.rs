@@ -375,9 +375,9 @@ fn main() {
                 .default_value("9090"),
         )
         .arg(
-            Arg::new("operation-interval")
+            Arg::new("op-interval")
                 .short('t')
-                .long("operation-interval")
+                .long("op-interval")
                 .value_name("DURATION")
                 .help("Interval for adding new operations ('ms', 's', 'm', 'h')")
                 .default_value("100ms"),
@@ -438,13 +438,11 @@ fn main() {
                 eprintln!("❌ Invalid metrics port: {e}");
                 std::process::exit(1);
             }),
-        operation_interval: parse_duration(
-            matches.get_one::<String>("operation-interval").unwrap(),
-        )
-        .unwrap_or_else(|e| {
-            eprintln!("❌ Invalid operation interval: {e}");
-            std::process::exit(1);
-        }),
+        operation_interval: parse_duration(matches.get_one::<String>("op-interval").unwrap())
+            .unwrap_or_else(|e| {
+                eprintln!("❌ Invalid operation interval: {e}");
+                std::process::exit(1);
+            }),
         ops_per_interval: matches
             .get_one::<String>("ops-per-interval")
             .unwrap()
