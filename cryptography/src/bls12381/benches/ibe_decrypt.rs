@@ -1,9 +1,8 @@
 use commonware_cryptography::bls12381::{
     ibe::{decrypt, encrypt, Block},
     primitives::{
-        group::Element,
-        ops::{hash_message, keypair},
-        variant::{MinSig, Variant},
+        ops::{keypair, sign_message},
+        variant::MinSig,
     },
 };
 use criterion::{criterion_group, BatchSize, Criterion};
@@ -13,22 +12,18 @@ use std::hint::black_box;
 fn benchmark_ibe_decrypt(c: &mut Criterion) {
     let mut rng = thread_rng();
     let (master_secret, master_public) = keypair::<_, MinSig>(&mut rng);
-    let identity = b"user@example.com";
+    let target = 10u64.to_be_bytes();
     let message = Block::new([0x42u8; 32]);
-
-    // Generate private key for identity
-    let id_point = hash_message::<MinSig>(MinSig::MESSAGE, identity);
-    let mut private_key = id_point;
-    private_key.mul(&master_secret);
+    let signature = sign_message::<MinSig>(&master_secret, None, &target);
 
     c.bench_function(module_path!(), |b| {
         b.iter_batched(
             || {
-                encrypt::<_, MinSig>(&mut rng, master_public, &message, (None, identity))
+                encrypt::<_, MinSig>(&mut rng, master_public, &message, (None, &target))
                     .expect("Encryption should succeed")
             },
             |ciphertext| {
-                black_box(decrypt::<MinSig>(private_key, &ciphertext).unwrap());
+                black_box(decrypt::<MinSig>(&signature, &ciphertext).unwrap());
             },
             BatchSize::SmallInput,
         );

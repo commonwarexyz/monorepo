@@ -161,7 +161,7 @@ fn xor_blocks(a: &Block, b: &Block) -> Block {
 /// * `rng` - Random number generator
 /// * `public` - Master public key
 /// * `message` - Message to encrypt
-/// * `target` - Identity/target to encrypt for
+/// * `target` - Payload over which a signature will decrypt the message
 ///
 /// # Returns
 /// * `Result<Ciphertext>` - The encrypted ciphertext
@@ -214,19 +214,19 @@ pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
 /// 4. Verifying that U = r * G matches the ciphertext
 ///
 /// # Arguments
-/// * `private` - Private key for the identity
+/// * `signature` - Signature over the target payload
 /// * `ciphertext` - Ciphertext to decrypt
 ///
 /// # Returns
 /// * `Result<Block>` - The decrypted message
 pub fn decrypt<V: Variant>(
-    private: V::Signature,
+    signature: &V::Signature,
     ciphertext: &Ciphertext<V>,
 ) -> Result<Block, Error> {
-    // Compute e(U, private)
-    let gt = V::pairing(&ciphertext.u, &private);
+    // Compute e(U, signature)
+    let gt = V::pairing(&ciphertext.u, signature);
 
-    // Recover sigma = V XOR H2(e(U, private))
+    // Recover sigma = V XOR H2(e(U, signature))
     let h2_value = hash::h2(&gt);
     let sigma = xor_blocks(&ciphertext.v, &h2_value);
 
@@ -250,7 +250,7 @@ pub fn decrypt<V: Variant>(
 mod tests {
     use super::*;
     use crate::bls12381::primitives::{
-        ops::keypair,
+        ops::{keypair, sign_message},
         variant::{MinPk, MinSig},
     };
     use rand::thread_rng;
@@ -267,24 +267,22 @@ mod tests {
         // Generate master keypair
         let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
 
-        // Identity and message
-        let identity = b"alice@example.com";
+        // Target and message
+        let target = 10u64.to_be_bytes();
         let message = b"Hello, IBE! This is exactly 32b!"; // 32 bytes
 
-        // Generate private key for identity
-        let id_point = hash_message::<MinPk>(MinPk::MESSAGE, identity);
-        let mut private_key = id_point;
-        private_key.mul(&master_secret);
+        // Generate signature over the target
+        let signature = sign_message::<MinPk>(&master_secret, None, &target);
 
         // Encrypt
         let message_block = block_from_bytes(message);
         let ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
+            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, &target))
                 .expect("Encryption should succeed");
 
         // Decrypt
         let decrypted =
-            decrypt::<MinPk>(private_key, &ciphertext).expect("Decryption should succeed");
+            decrypt::<MinPk>(&signature, &ciphertext).expect("Decryption should succeed");
 
         assert_eq!(message.as_ref(), decrypted.as_ref());
     }
@@ -296,24 +294,22 @@ mod tests {
         // Generate master keypair
         let (master_secret, master_public) = keypair::<_, MinSig>(&mut rng);
 
-        // Identity and message
-        let identity = b"bob@example.com";
+        // Target and message
+        let target = 20u64.to_be_bytes();
         let message = b"Testing MinSig variant - 32 byte";
 
-        // Generate private key for identity
-        let id_point = hash_message::<MinSig>(MinSig::MESSAGE, identity);
-        let mut private_key = id_point;
-        private_key.mul(&master_secret);
+        // Generate signature over the target
+        let signature = sign_message::<MinSig>(&master_secret, None, &target);
 
         // Encrypt
         let message_block = block_from_bytes(message);
         let ciphertext =
-            encrypt::<_, MinSig>(&mut rng, master_public, &message_block, (None, identity))
+            encrypt::<_, MinSig>(&mut rng, master_public, &message_block, (None, &target))
                 .expect("Encryption should succeed");
 
         // Decrypt
         let decrypted =
-            decrypt::<MinSig>(private_key, &ciphertext).expect("Decryption should succeed");
+            decrypt::<MinSig>(&signature, &ciphertext).expect("Decryption should succeed");
 
         assert_eq!(message.as_ref(), decrypted.as_ref());
     }
@@ -326,23 +322,20 @@ mod tests {
         let (_, master_public1) = keypair::<_, MinPk>(&mut rng);
         let (master_secret2, _) = keypair::<_, MinPk>(&mut rng);
 
-        let identity = b"charlie@example.com";
+        let target = 30u64.to_be_bytes();
         let message = b"Secret message padded to 32bytes";
 
         // Encrypt with first master public key
         let message_block = block_from_bytes(message);
         let ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public1, &message_block, (None, identity))
+            encrypt::<_, MinPk>(&mut rng, master_public1, &message_block, (None, &target))
                 .expect("Encryption should succeed");
 
-        // Try to decrypt with private key from second master
-        let id_point = hash_message::<MinPk>(MinPk::MESSAGE, identity);
-        let mut wrong_private = id_point;
-        wrong_private.mul(&master_secret2);
-        let result = decrypt::<MinPk>(wrong_private, &ciphertext);
+        // Try to decrypt with signature from second master
+        let wrong_signature = sign_message::<MinPk>(&master_secret2, None, &target);
+        let result = decrypt::<MinPk>(&wrong_signature, &ciphertext);
 
         assert!(result.is_err());
-        // Error type doesn't have Display implementation, just check it's an error
     }
 
     #[test]
@@ -350,18 +343,16 @@ mod tests {
         let mut rng = thread_rng();
 
         let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
-        let identity = b"dave@example.com";
+        let target = 40u64.to_be_bytes();
         let message = b"Tamper test padded to 32 bytes.."; // 32 bytes
 
-        // Generate private key
-        let id_point = hash_message::<MinPk>(MinPk::MESSAGE, identity);
-        let mut private_key = id_point;
-        private_key.mul(&master_secret);
+        // Generate signature over the target
+        let signature = sign_message::<MinPk>(&master_secret, None, &target);
 
         // Encrypt
         let message_block = block_from_bytes(message);
         let ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
+            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, &target))
                 .expect("Encryption should succeed");
 
         // Tamper with ciphertext by creating a modified w
@@ -375,9 +366,8 @@ mod tests {
         };
 
         // Try to decrypt
-        let result = decrypt::<MinPk>(private_key, &tampered_ciphertext);
+        let result = decrypt::<MinPk>(&signature, &tampered_ciphertext);
         assert!(result.is_err());
-        // Error type doesn't have Display implementation, just check it's an error
     }
 
     #[test]
@@ -385,20 +375,18 @@ mod tests {
         let mut rng = thread_rng();
 
         let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
-        let identity = b"empty@example.com";
+        let target = 50u64.to_be_bytes();
         let message = [0u8; 32]; // 32 zero bytes
 
-        let id_point = hash_message::<MinPk>(MinPk::MESSAGE, identity);
-        let mut private_key = id_point;
-        private_key.mul(&master_secret);
+        let signature = sign_message::<MinPk>(&master_secret, None, &target);
 
         let message_block = block_from_bytes(&message);
         let ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
+            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, &target))
                 .expect("Encryption should succeed");
 
         let decrypted =
-            decrypt::<MinPk>(private_key, &ciphertext).expect("Decryption should succeed");
+            decrypt::<MinPk>(&signature, &ciphertext).expect("Decryption should succeed");
 
         assert_eq!(message.as_ref(), decrypted.as_ref());
     }
@@ -408,20 +396,18 @@ mod tests {
         let mut rng = thread_rng();
 
         let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
-        let identity = b"maxsize@example.com";
+        let target = 60u64.to_be_bytes();
         let message = [0xAB; 32]; // Maximum allowed size
 
-        let id_point = hash_message::<MinPk>(MinPk::MESSAGE, identity);
-        let mut private_key = id_point;
-        private_key.mul(&master_secret);
+        let signature = sign_message::<MinPk>(&master_secret, None, &target);
 
         let message_block = block_from_bytes(&message);
         let ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
+            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, &target))
                 .expect("Encryption should succeed");
 
         let decrypted =
-            decrypt::<MinPk>(private_key, &ciphertext).expect("Decryption should succeed");
+            decrypt::<MinPk>(&signature, &ciphertext).expect("Decryption should succeed");
 
         assert_eq!(message.as_ref(), decrypted.as_ref());
     }
@@ -431,18 +417,16 @@ mod tests {
         let mut rng = thread_rng();
 
         let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
-        let identity = b"cca@example.com";
+        let target = 70u64.to_be_bytes();
         let message = b"CCA security test message 32 byt"; // 32 bytes
 
-        // Generate private key
-        let id_point = hash_message::<MinPk>(MinPk::MESSAGE, identity);
-        let mut private_key = id_point;
-        private_key.mul(&master_secret);
+        // Generate signature over the target
+        let signature = sign_message::<MinPk>(&master_secret, None, &target);
 
         // Encrypt
         let message_block = block_from_bytes(message);
         let mut ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
+            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, &target))
                 .expect("Encryption should succeed");
 
         // Modify U component (this should make decryption fail due to FO transform)
@@ -451,7 +435,7 @@ mod tests {
         ciphertext.u = modified_u;
 
         // Try to decrypt - should fail
-        let result = decrypt::<MinPk>(private_key, &ciphertext);
+        let result = decrypt::<MinPk>(&signature, &ciphertext);
         assert!(result.is_err());
     }
 
@@ -462,15 +446,13 @@ mod tests {
         // Generate master keypair
         let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
 
-        // Identity and namespace
+        // Target and namespace
         let namespace = b"example.org";
-        let identity = b"alice";
+        let target = 80u64.to_be_bytes();
         let message = b"Message with namespace - 32 byte"; // 32 bytes
 
-        // Generate private key for namespaced identity
-        let id_point = hash_message_namespace::<MinPk>(MinPk::MESSAGE, namespace, identity);
-        let mut private_key = id_point;
-        private_key.mul(&master_secret);
+        // Generate signature over the namespaced target
+        let signature = sign_message::<MinPk>(&master_secret, Some(namespace), &target);
 
         // Encrypt with namespace
         let message_block = block_from_bytes(message);
@@ -478,13 +460,13 @@ mod tests {
             &mut rng,
             master_public,
             &message_block,
-            (Some(namespace), identity),
+            (Some(namespace), &target),
         )
         .expect("Encryption should succeed");
 
         // Decrypt
         let decrypted =
-            decrypt::<MinPk>(private_key, &ciphertext).expect("Decryption should succeed");
+            decrypt::<MinPk>(&signature, &ciphertext).expect("Decryption should succeed");
 
         assert_eq!(message.as_ref(), decrypted.as_ref());
     }
@@ -499,13 +481,11 @@ mod tests {
         // Different namespaces
         let namespace1 = b"example.org";
         let namespace2 = b"example.com";
-        let identity = b"alice";
+        let target = 90u64.to_be_bytes();
         let message = b"Namespace mismatch test - 32byte"; // 32 bytes
 
-        // Generate private key for namespace1
-        let id_point = hash_message_namespace::<MinPk>(MinPk::MESSAGE, namespace1, identity);
-        let mut private_key = id_point;
-        private_key.mul(&master_secret);
+        // Generate signature for namespace1
+        let signature = sign_message::<MinPk>(&master_secret, Some(namespace1), &target);
 
         // Encrypt with namespace2
         let message_block = block_from_bytes(message);
@@ -513,12 +493,12 @@ mod tests {
             &mut rng,
             master_public,
             &message_block,
-            (Some(namespace2), identity),
+            (Some(namespace2), &target),
         )
         .expect("Encryption should succeed");
 
-        // Try to decrypt with private key from namespace1 - should fail
-        let result = decrypt::<MinPk>(private_key, &ciphertext);
+        // Try to decrypt with signature from namespace1 - should fail
+        let result = decrypt::<MinPk>(&signature, &ciphertext);
         assert!(result.is_err());
     }
 
@@ -530,18 +510,14 @@ mod tests {
         let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
 
         let namespace = b"example.org";
-        let identity = b"alice";
+        let target = 100u64.to_be_bytes();
         let message = b"Namespace vs no namespace - 32by"; // 32 bytes
 
-        // Generate private key without namespace
-        let id_point_no_ns = hash_message::<MinPk>(MinPk::MESSAGE, identity);
-        let mut private_key_no_ns = id_point_no_ns;
-        private_key_no_ns.mul(&master_secret);
+        // Generate signature without namespace
+        let signature_no_ns = sign_message::<MinPk>(&master_secret, None, &target);
 
-        // Generate private key with namespace
-        let id_point_ns = hash_message_namespace::<MinPk>(MinPk::MESSAGE, namespace, identity);
-        let mut private_key_ns = id_point_ns;
-        private_key_ns.mul(&master_secret);
+        // Generate signature with namespace
+        let signature_ns = sign_message::<MinPk>(&master_secret, Some(namespace), &target);
 
         // Encrypt with namespace
         let message_block = block_from_bytes(message);
@@ -549,27 +525,27 @@ mod tests {
             &mut rng,
             master_public,
             &message_block,
-            (Some(namespace), identity),
+            (Some(namespace), &target),
         )
         .expect("Encryption should succeed");
 
         // Encrypt without namespace
         let ciphertext_no_ns =
-            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
+            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, &target))
                 .expect("Encryption should succeed");
 
-        // Try to decrypt namespaced ciphertext with non-namespaced key - should fail
-        let result1 = decrypt::<MinPk>(private_key_no_ns, &ciphertext_ns);
+        // Try to decrypt namespaced ciphertext with non-namespaced signature - should fail
+        let result1 = decrypt::<MinPk>(&signature_no_ns, &ciphertext_ns);
         assert!(result1.is_err());
 
-        // Try to decrypt non-namespaced ciphertext with namespaced key - should fail
-        let result2 = decrypt::<MinPk>(private_key_ns, &ciphertext_no_ns);
+        // Try to decrypt non-namespaced ciphertext with namespaced signature - should fail
+        let result2 = decrypt::<MinPk>(&signature_ns, &ciphertext_no_ns);
         assert!(result2.is_err());
 
         // Correct decryptions should succeed
-        let decrypted_ns = decrypt::<MinPk>(private_key_ns, &ciphertext_ns)
+        let decrypted_ns = decrypt::<MinPk>(&signature_ns, &ciphertext_ns)
             .expect("Decryption with matching namespace should succeed");
-        let decrypted_no_ns = decrypt::<MinPk>(private_key_no_ns, &ciphertext_no_ns)
+        let decrypted_no_ns = decrypt::<MinPk>(&signature_no_ns, &ciphertext_no_ns)
             .expect("Decryption without namespace should succeed");
 
         assert_eq!(message.as_ref(), decrypted_ns.as_ref());
@@ -581,18 +557,16 @@ mod tests {
         let mut rng = thread_rng();
 
         let (master_secret, master_public) = keypair::<_, MinPk>(&mut rng);
-        let identity = b"cca2@example.com";
+        let target = 110u64.to_be_bytes();
         let message = b"Another CCA test message 32bytes"; // 32 bytes
 
-        // Generate private key
-        let id_point = hash_message::<MinPk>(MinPk::MESSAGE, identity);
-        let mut private_key = id_point;
-        private_key.mul(&master_secret);
+        // Generate signature over the target
+        let signature = sign_message::<MinPk>(&master_secret, None, &target);
 
         // Encrypt
         let message_block = block_from_bytes(message);
         let ciphertext =
-            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, identity))
+            encrypt::<_, MinPk>(&mut rng, master_public, &message_block, (None, &target))
                 .expect("Encryption should succeed");
 
         // Modify V component (encrypted sigma)
@@ -606,7 +580,7 @@ mod tests {
         };
 
         // Try to decrypt - should fail due to verification
-        let result = decrypt::<MinPk>(private_key, &tampered_ciphertext);
+        let result = decrypt::<MinPk>(&signature, &tampered_ciphertext);
         assert!(result.is_err());
     }
 }

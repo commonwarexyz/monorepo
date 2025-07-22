@@ -9,13 +9,13 @@ use std::hint::black_box;
 fn benchmark_ibe_encrypt(c: &mut Criterion) {
     let mut rng = thread_rng();
     let (_, master_public) = keypair::<_, MinSig>(&mut rng);
-    let identity = b"user@example.com";
+    let target = 10u64.to_be_bytes();
     let message = Block::new([0x42u8; 32]);
 
     c.bench_function(module_path!(), |b| {
         b.iter(|| {
             black_box(
-                encrypt::<_, MinSig>(&mut rng, master_public, &message, (None, identity)).unwrap(),
+                encrypt::<_, MinSig>(&mut rng, master_public, &message, (None, &target)).unwrap(),
             );
         });
     });
