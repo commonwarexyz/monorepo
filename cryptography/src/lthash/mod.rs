@@ -299,13 +299,11 @@ mod tests {
     }
 
     #[test]
-    fn test_lthash_blake3_xof() {
-        // Test that Blake3 XOF expansion works correctly
+    fn test_lthash_deterministic() {
         let mut lthash = LtHash::new();
         lthash.add(b"test");
         let _ = lthash.finalize();
 
-        // Verify deterministic output
         let mut lthash2 = LtHash::new();
         lthash2.add(b"test");
         assert_eq!(lthash.finalize(), lthash2.finalize());
@@ -320,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lthash_many_additions() {
+    fn test_lthash_snake() {
         let mut lthash1 = LtHash::new();
         for i in 0..100u32 {
             lthash1.add(&i.to_le_bytes());
