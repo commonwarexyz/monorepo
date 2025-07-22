@@ -40,7 +40,7 @@ Server options:
 - `-i, --initial-ops <COUNT>`: Number of initial operations to create (default: 100)
 - `-d, --storage-dir <PATH>`: Storage directory for database (default: /tmp/commonware-sync/server-{RANDOM_SUFFIX})
 - `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9090)
-- `-t, --op-interval <DURATION>`: Interval for adding new operations in 's' or 'ms' (default: 100ms)
+- `-t, --op-interval <DURATION>`: Interval for adding new operations ('ms', 's', 'm', 'h') (default: 100ms)
 - `-o, --ops-per-interval <COUNT>`: Number of operations to add each interval (default: 5)
 
 ### Running the Client
@@ -58,8 +58,8 @@ Client options:
 - `-b, --batch-size <SIZE>`: Batch size for fetching operations (default: 50)
 - `-d, --storage-dir <PATH>`: Storage directory for local database (default: /tmp/commonware-sync/client-{RANDOM_SUFFIX})
 - `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9091)
-- `-t, --target-update-interval <DURATION>`: Interval for requesting target updates in 's' or 'ms' (default: 1s)
-- `-i, --sync-interval <DURATION>`: Interval between sync operations in 's' or 'ms' (default: 10s)
+- `-t, --target-update-interval <DURATION>`: Interval for requesting target updates ('ms', 's', 'm', 'h') (default: 1s)
+- `-i, --sync-interval <DURATION>`: Interval between sync operations ('ms', 's', 'm', 'h') (default: 10s)
 
 ## Example Session
 
