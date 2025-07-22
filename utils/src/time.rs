@@ -296,7 +296,7 @@ mod tests {
         assert!(parse_duration("30days").is_err());
         assert!(parse_duration("5y").is_err());
 
-        // Long forms no longer supported
+        // Long forms not supported
         assert!(parse_duration("5minutes").is_err());
         assert!(parse_duration("10seconds").is_err());
         assert!(parse_duration("2hours").is_err());
