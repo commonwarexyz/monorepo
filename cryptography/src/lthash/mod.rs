@@ -55,7 +55,7 @@ use std::marker::PhantomData;
 ///
 /// # Security Rationale
 ///
-/// The 2048-byte (16384-bit) state size provides strong security guarantees:
+/// The 2048-byte (16384-bit) state size is sufficiently large for the 128-bit security level:
 ///
 /// 1. **Collision Resistance**: With a 16384-bit state space, finding two different
 ///    inputs that produce the same LtHash state requires approximately 2^8192
@@ -77,10 +77,6 @@ use std::marker::PhantomData;
 ///    hash functions, Wagner's k-tree algorithm could find collisions in O(2^(n/(1+lg k)))
 ///    time. With n=16384, even for large k, this remains infeasible.
 ///    * <https://www.iacr.org/archive/crypto2002/24420288/24420288.pdf>: A Generalized Birthday Problem
-///
-/// This implementation targets 128-bit security level, which is considered sufficient
-/// for long-term security according to current cryptographic standards. The 2048-byte
-/// state provides a substantial security margin beyond this target.
 const LTHASH_SIZE: usize = 2048;
 
 /// LtHash implementation generic over a hasher.
