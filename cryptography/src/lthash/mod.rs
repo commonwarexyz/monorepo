@@ -1,15 +1,20 @@
-//! A LtHash (Lattice Hash) over a configurable [Hasher].
+//! A homomorphic hash function that enables efficient incremental updates.
 //!
-//! LtHash is a homomorphic hash function that supports incremental updates.
-//! Given the hash of an input, along with a small update to the input, you can
-//! compute the hash of the new input with its update applied, without having to
-//! recompute the entire hash from scratch.
+//! [LtHash] is an additive homomorphic hash function, meaning that the hash of a sum equals
+//! the sum of the hashes: `H(a + b) = H(a) + H(b)`. This enables the efficient addition or
+//! removal of elements from a hashed set without recomputing the entire hash from scratch. And
+//! unlocks the ability to compare set equality without revealing the entire set or requiring items
+//! be added in a specific order.
 //!
-//! # Properties
+//! # Key Properties
 //!
-//! - Incremental: Can update hash without full recomputation
-//! - Commutative: Order of operations doesn't matter (a + b = b + a)
-//! - Homomorphic: Supports add/subtract operations on hashes
+//! - **Homomorphic**: Supports addition and subtraction of hashes (H(a ± b) = H(a) ± H(b))
+//! - **Incremental**: Update existing hashes in O(1) time instead of rehashing everything
+//! - **Commutative**: Operation order doesn't matter (H(a) + H(b) = H(b) + H(a))
+//! - **Generic**: Works with any cryptographic hash function implementing the [Hasher] trait
+//!
+//! _If your application requires a (probabilistic) membership check, consider using
+//! [crate::bloomfilter] instead._
 //!
 //! # Example
 //!
@@ -17,24 +22,30 @@
 //! use commonware_cryptography::{Hasher, Blake3};
 //! use commonware_cryptography::lthash::LtHash;
 //!
-//! // Create a new LtHash instance with Blake3
+//! // Demonstrate the homomorphic property
 //! let mut lthash = LtHash::<Blake3>::new();
 //!
-//! // Add some data
-//! lthash.add(b"hello");
-//! lthash.add(b"world");
+//! // Add elements to our set
+//! lthash.add(b"alice");
+//! lthash.add(b"bob");
+//! lthash.add(b"charlie");
 //!
-//! // Get the final hash
-//! let hash1 = lthash.finalize();
+//! // Remove an element (homomorphic subtraction)
+//! lthash.subtract(b"bob");
 //!
-//! // Create another instance with different order
+//! // This is equivalent to just adding alice and charlie
 //! let mut lthash2 = LtHash::<Blake3>::new();
-//! lthash2.add(b"world");
-//! lthash2.add(b"hello");
+//! lthash2.add(b"alice");
+//! lthash2.add(b"charlie");
 //!
-//! // Should produce the same hash (commutativity)
-//! let hash2 = lthash2.finalize();
-//! assert_eq!(hash1, hash2);
+//! assert_eq!(lthash.finalize(), lthash2.finalize());
+//!
+//! // Order doesn't matter (commutative property)
+//! let mut lthash3 = LtHash::<Blake3>::new();
+//! lthash3.add(b"charlie");
+//! lthash3.add(b"alice");
+//!
+//! assert_eq!(lthash2.finalize(), lthash3.finalize());
 //! ```
 //!
 //! # Acknowledgements
@@ -51,11 +62,10 @@
 use crate::Hasher;
 use std::marker::PhantomData;
 
-/// Size of the internal LtHash state in bytes (2048 bytes = 16384 bits).
+/// Size of the internal [LtHash] state.
 ///
-/// # Security Rationale
-///
-/// The 2048-byte (16384-bit) state size is sufficiently large for the 128-bit security level:
+/// The 2048-byte (16384-bit) state size is sufficient for a 128-bit security level according
+/// to "Securing Update Propagation with Homomorphic Hashing". The rationale is as follows:
 ///
 /// 1. **Collision Resistance**: With a 16384-bit state space, finding two different
 ///    inputs that produce the same LtHash state requires approximately 2^8192
