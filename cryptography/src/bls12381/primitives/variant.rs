@@ -45,8 +45,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         signatures: &[Self::Signature],
     ) -> Result<(), Error>;
 
-    /// Compute the pairing e(public, signature) -> GT.
-    /// This is useful for custom pairing-based protocols like IBE.
+    /// Compute the pairing `e(G1, G2) -> GT`.
     fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT;
 }
 
@@ -175,9 +174,8 @@ impl Variant for MinPk {
         Ok(())
     }
 
+    /// Compute the pairing `e(public, signature) -> GT`.
     fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT {
-        // For MinPk: public is G1, signature is G2
-        // Compute e(public, signature) = e(G1, G2)
         let p1_affine = public.as_blst_p1_affine();
         let p2_affine = signature.as_blst_p2_affine();
 
@@ -322,9 +320,8 @@ impl Variant for MinSig {
         Ok(())
     }
 
+    /// Compute the pairing `e(signature, public) -> GT`.
     fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT {
-        // For MinSig: public is G2, signature is G1
-        // Compute e(signature, public) = e(G1, G2)
         let p1_affine = signature.as_blst_p1_affine();
         let p2_affine = public.as_blst_p2_affine();
 
