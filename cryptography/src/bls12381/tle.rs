@@ -1,8 +1,31 @@
 //! Timelock Encryption (TLE) over BLS12-381.
 //!
 //! This crate implements Timelock Encryption (TLE) over BLS12-381 using
-//! Identity-Based Encryption (IBE). To achieve CCA-security, this crate
-//! employs the Fujisaki-Okamoto transform.
+//! Identity-Based Encryption (IBE) with the Boneh-Franklin scheme. TLE enables
+//! encrypting messages that can only be decrypted when a valid signature over
+//! a specific target (e.g., timestamp or round number) becomes available.
+//!
+//! # Security
+//!
+//! To achieve CCA-security (resistance against chosen-ciphertext attacks), this
+//! implementation employs the Fujisaki-Okamoto transform, which converts the
+//! underlying CPA-secure IBE scheme into a CCA-secure scheme through:
+//!
+//! * Deriving encryption randomness deterministically from the message and a
+//!   random value (sigma)
+//! * Including integrity checks to detect ciphertext tampering
+//!
+//! # Architecture
+//!
+//! The encryption process involves (for [crate::bls12381::primitives::variant::MinPk]):
+//! 1. Generating a random sigma value
+//! 2. Deriving encryption randomness r = H3(sigma || message)
+//! 3. Computing the ciphertext components:
+//!    - U = r * G (commitment in G1)
+//!    - V = sigma ⊕ H2(e(r * P_pub, Q_id)) (masked random value)
+//!    - W = M ⊕ H4(sigma) (masked message)
+//!
+//! Where Q_id = H1(target) maps the target to a point in G2.
 //!
 //! # Example
 //!
@@ -11,7 +34,7 @@
 //!
 //! ```rust
 //! use commonware_cryptography::bls12381::{
-//!     ibe::{encrypt, decrypt, Block},
+//!     tle::{encrypt, decrypt, Block},
 //!     primitives::{
 //!         ops::{keypair, sign_message},
 //!         variant::MinPk,
@@ -56,13 +79,14 @@
 //! * <https://github.com/thibmeu/tlock-rs>: tlock-rs: Practical Timelock Encryption/Decryption in Rust
 //! * <https://github.com/drand/tlock> tlock: Timelock Encryption/Decryption Made Practical
 
-use super::primitives::{
-    group::{Element, Scalar, GT},
-    ops::hash_message,
-    variant::Variant,
-};
 use crate::{
-    bls12381::primitives::{group::DST, ops::hash_message_namespace},
+    bls12381::primitives::{
+        group::DST,
+        group::{Element, Scalar, GT},
+        ops::hash_message,
+        ops::hash_message_namespace,
+        variant::Variant,
+    },
     sha256::Digest,
 };
 use bytes::{Buf, BufMut};
@@ -93,7 +117,7 @@ impl From<Digest> for Block {
 pub struct Ciphertext<V: Variant> {
     /// First group element U = r * Public::one().
     pub u: V::Public,
-    /// Encrypted random value V = sigma XOR H2(e(Q_id, r * P_pub)).
+    /// Encrypted random value V = sigma XOR H2(e(r * P_pub, Q_id)).
     pub v: Block,
     /// Encrypted message W = M XOR H4(sigma).
     pub w: Block,

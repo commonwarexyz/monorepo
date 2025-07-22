@@ -219,6 +219,19 @@ impl Scalar {
 
     /// Maps arbitrary bytes to a scalar using RFC9380 hash-to-field.
     pub fn map(dst: DST, msg: &[u8]) -> Self {
+        // The BLS12-381 scalar field has a modulus of approximately 255 bits.
+        // According to RFC9380, when mapping to a field element, we need to
+        // generate uniform bytes with length L = ceil((ceil(log2(p)) + k) / 8),
+        // where p is the field modulus and k is the security parameter.
+        //
+        // For BLS12-381's scalar field:
+        // - log2(p) ≈ 255 bits
+        // - k = 128 bits (for 128-bit security)
+        // - L = ceil((255 + 128) / 8) = ceil(383 / 8) = 48 bytes
+        //
+        // These 48 bytes provide sufficient entropy to ensure uniform distribution
+        // in the scalar field after modular reduction, maintaining the security
+        // properties required by the hash-to-field construction.
         const L: usize = 48;
         let mut uniform_bytes = [0u8; L];
         unsafe {
