@@ -76,7 +76,7 @@ mod tests {
     }
 
     fn new_finalization() -> Finalization<MinSig, Sha256Digest> {
-        let scalar = group::Scalar::rand(&mut thread_rng());
+        let scalar = group::Scalar::from_rand(&mut thread_rng());
         let mut proposal_signature = <MinSig as Variant>::Signature::one();
         proposal_signature.mul(&scalar);
         let mut seed_signature = <MinSig as Variant>::Signature::one();

@@ -14,6 +14,8 @@ mod partial_verify_multiple_public_keys_precomputed;
 mod signature_generation;
 mod signature_verification;
 mod threshold_signature_recover;
+mod tle_decrypt;
+mod tle_encrypt;
 
 criterion_main!(
     dkg_recovery::benches,
@@ -30,4 +32,6 @@ criterion_main!(
     evaluate_point::benches,
     partial_verify_multiple_public_keys::benches,
     partial_verify_multiple_public_keys_precomputed::benches,
+    tle_encrypt::benches,
+    tle_decrypt::benches,
 );
