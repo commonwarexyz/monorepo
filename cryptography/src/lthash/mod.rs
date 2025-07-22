@@ -314,7 +314,7 @@ mod tests {
         let mut lthash = LtHash::new();
         let large_data = vec![0xAB; 10000];
         lthash.add(&large_data);
-        let _ = lthash.finalize();
+        lthash.finalize();
     }
 
     #[test]
