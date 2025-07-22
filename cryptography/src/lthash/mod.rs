@@ -19,11 +19,10 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_cryptography::{Hasher, Blake3};
 //! use commonware_cryptography::lthash::LtHash;
 //!
 //! // Demonstrate the homomorphic property
-//! let mut lthash = LtHash::<Blake3>::new();
+//! let mut lthash = LtHash::new();
 //!
 //! // Add elements to our set
 //! lthash.add(b"alice");
@@ -34,14 +33,14 @@
 //! lthash.subtract(b"bob");
 //!
 //! // This is equivalent to just adding alice and charlie
-//! let mut lthash2 = LtHash::<Blake3>::new();
+//! let mut lthash2 = LtHash::new();
 //! lthash2.add(b"alice");
 //! lthash2.add(b"charlie");
 //!
 //! assert_eq!(lthash.finalize(), lthash2.finalize());
 //!
 //! // Order doesn't matter (commutative property)
-//! let mut lthash3 = LtHash::<Blake3>::new();
+//! let mut lthash3 = LtHash::new();
 //! lthash3.add(b"charlie");
 //! lthash3.add(b"alice");
 //!
@@ -61,8 +60,9 @@
 //! * <https://github.com/facebook/folly/blob/main/folly/crypto/LtHash.cpp>: An open-source C++ library developed and used at Facebook.
 //! * <https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0215-accounts-lattice-hash.md>: Homomorphic Hashing of Account State
 
+use crate::blake3::{Blake3, Digest as Blake3Digest};
 use crate::Hasher;
-use std::marker::PhantomData;
+use blake3::Hasher as Blake3Hasher;
 
 /// Number of 16-bit integers in the LtHash state.
 ///
@@ -97,7 +97,7 @@ const LTHASH_ELEMENTS: usize = 1024;
 ///    * <https://www.iacr.org/archive/crypto2002/24420288/24420288.pdf>: A Generalized Birthday Problem
 const LTHASH_SIZE: usize = 2048;
 
-/// LtHash implementation generic over a hasher.
+/// LtHash implementation using Blake3 XOF.
 ///
 /// This implementation maintains a state of 1024 16-bit unsigned integers that supports
 /// homomorphic operations (add/subtract) using modular arithmetic. The construction
@@ -110,19 +110,16 @@ const LTHASH_SIZE: usize = 2048;
 /// applications where this is a concern, consider adding unique metadata (like indices
 /// or timestamps) to each element.
 #[derive(Clone)]
-pub struct LtHash<H: Hasher> {
+pub struct LtHash {
     /// Internal state as 1024 16-bit unsigned integers
     state: [u16; LTHASH_ELEMENTS],
-    /// Phantom data to track the hasher type
-    _hasher: PhantomData<H>,
 }
 
-impl<H: Hasher> LtHash<H> {
+impl LtHash {
     /// Create a new LtHash instance with zero state.
     pub fn new() -> Self {
         Self {
             state: [0u16; LTHASH_ELEMENTS],
-            _hasher: PhantomData,
         }
     }
 
@@ -164,10 +161,10 @@ impl<H: Hasher> LtHash<H> {
 
     /// Finalize the hash and return the compressed result.
     ///
-    /// This compresses the internal state to the output size of the hasher.
+    /// This compresses the internal state to the output size of Blake3.
     /// The u16 array is converted to little-endian bytes before hashing.
-    pub fn finalize(&self) -> H::Digest {
-        let mut hasher = H::new();
+    pub fn finalize(&self) -> Blake3Digest {
+        let mut hasher = Blake3::new();
 
         // Convert u16 array to bytes in little-endian order
         for &val in &self.state {
@@ -187,36 +184,23 @@ impl<H: Hasher> LtHash<H> {
         self.state.iter().all(|&val| val == 0)
     }
 
-    /// Expand input data to an array of u16s using the hasher as an XOF.
+    /// Expand input data to an array of u16s using Blake3 as an XOF.
     ///
     /// This follows the construction from the paper: hash the input to produce
     /// 2048 bytes, then interpret as 1024 little-endian u16 values.
     ///
-    /// Note: The reference implementations (Facebook folly, lukechampine/lthash) use
-    /// BLAKE2b in XOF mode for expansion. Our implementation uses the provided hasher
-    /// in counter mode, which maintains the security properties but produces different
-    /// internal states. This means our implementation won't match their test vectors
-    /// byte-for-byte, but the homomorphic properties are preserved.
+    /// Uses Blake3's native XOF support via finalize_xof() to generate
+    /// exactly 2048 bytes of output, similar to how the reference implementations
+    /// use BLAKE2b in XOF mode.
     fn expand_to_u16_array(data: &[u8]) -> [u16; LTHASH_ELEMENTS] {
         let mut result = [0u16; LTHASH_ELEMENTS];
         let mut bytes = [0u8; LTHASH_SIZE];
-        let mut offset = 0;
-        let mut counter = 0u64;
 
-        // Use the hasher in counter mode to expand the data to LTHASH_SIZE bytes
-        while offset < LTHASH_SIZE {
-            let mut hasher = H::new();
-            hasher.update(data);
-            hasher.update(&counter.to_le_bytes());
-            let digest = hasher.finalize();
-
-            let digest_bytes = digest.as_ref();
-            let copy_len = (LTHASH_SIZE - offset).min(digest_bytes.len());
-            bytes[offset..offset + copy_len].copy_from_slice(&digest_bytes[..copy_len]);
-
-            offset += copy_len;
-            counter += 1;
-        }
+        // Use Blake3 in XOF mode to expand the data to LTHASH_SIZE bytes
+        let mut hasher = Blake3Hasher::new();
+        hasher.update(data);
+        let mut output_reader = hasher.finalize_xof();
+        output_reader.fill(&mut bytes);
 
         // Convert bytes to u16 array using little-endian interpretation
         for i in 0..LTHASH_ELEMENTS {
@@ -228,13 +212,13 @@ impl<H: Hasher> LtHash<H> {
     }
 }
 
-impl<H: Hasher> Default for LtHash<H> {
+impl Default for LtHash {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<H: Hasher> std::fmt::Debug for LtHash<H> {
+impl std::fmt::Debug for LtHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Show first and last 8 u16 values for debugging
         write!(
@@ -249,17 +233,17 @@ impl<H: Hasher> std::fmt::Debug for LtHash<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Blake3, Sha256};
+    use crate::Hasher;
 
     #[test]
     fn test_lthash_new() {
-        let lthash = LtHash::<Blake3>::new();
+        let lthash = LtHash::new();
         assert!(lthash.is_zero());
     }
 
     #[test]
     fn test_lthash_add() {
-        let mut lthash = LtHash::<Blake3>::new();
+        let mut lthash = LtHash::new();
         lthash.add(b"hello");
         assert!(!lthash.is_zero());
     }
@@ -267,12 +251,12 @@ mod tests {
     #[test]
     fn test_lthash_commutativity() {
         // Test that a + b = b + a
-        let mut lthash1 = LtHash::<Blake3>::new();
+        let mut lthash1 = LtHash::new();
         lthash1.add(b"hello");
         lthash1.add(b"world");
         let hash1 = lthash1.finalize();
 
-        let mut lthash2 = LtHash::<Blake3>::new();
+        let mut lthash2 = LtHash::new();
         lthash2.add(b"world");
         lthash2.add(b"hello");
         let hash2 = lthash2.finalize();
@@ -283,14 +267,14 @@ mod tests {
     #[test]
     fn test_lthash_associativity() {
         // Test that (a + b) + c = a + (b + c)
-        let mut lthash1 = LtHash::<Blake3>::new();
+        let mut lthash1 = LtHash::new();
         lthash1.add(b"a");
         lthash1.add(b"b");
         lthash1.add(b"c");
         let hash1 = lthash1.finalize();
 
-        let mut lthash2 = LtHash::<Blake3>::new();
-        let mut temp = LtHash::<Blake3>::new();
+        let mut lthash2 = LtHash::new();
+        let mut temp = LtHash::new();
         temp.add(b"b");
         temp.add(b"c");
         lthash2.add(b"a");
@@ -303,11 +287,11 @@ mod tests {
     #[test]
     fn test_lthash_subtraction() {
         // Test that (a + b) - b = a
-        let mut lthash1 = LtHash::<Blake3>::new();
+        let mut lthash1 = LtHash::new();
         lthash1.add(b"hello");
         let hash1 = lthash1.finalize();
 
-        let mut lthash2 = LtHash::<Blake3>::new();
+        let mut lthash2 = LtHash::new();
         lthash2.add(b"hello");
         lthash2.add(b"world");
         lthash2.subtract(b"world");
@@ -318,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_lthash_empty() {
-        let lthash = LtHash::<Blake3>::new();
+        let lthash = LtHash::new();
         let empty_hash = lthash.finalize();
 
         // Empty state should produce the hash of all zero u16s in little-endian
@@ -333,7 +317,7 @@ mod tests {
 
     #[test]
     fn test_lthash_reset() {
-        let mut lthash = LtHash::<Blake3>::new();
+        let mut lthash = LtHash::new();
         lthash.add(b"hello");
         assert!(!lthash.is_zero());
 
@@ -342,21 +326,21 @@ mod tests {
     }
 
     #[test]
-    fn test_lthash_different_hashers() {
-        // Test with SHA256
-        let mut lthash_sha = LtHash::<Sha256>::new();
-        lthash_sha.add(b"test");
-        let _ = lthash_sha.finalize();
-
-        // Test with Blake3
-        let mut lthash_blake = LtHash::<Blake3>::new();
-        lthash_blake.add(b"test");
-        let _ = lthash_blake.finalize();
+    fn test_lthash_blake3_xof() {
+        // Test that Blake3 XOF expansion works correctly
+        let mut lthash = LtHash::new();
+        lthash.add(b"test");
+        let _ = lthash.finalize();
+        
+        // Verify deterministic output
+        let mut lthash2 = LtHash::new();
+        lthash2.add(b"test");
+        assert_eq!(lthash.finalize(), lthash2.finalize());
     }
 
     #[test]
     fn test_lthash_large_data() {
-        let mut lthash = LtHash::<Blake3>::new();
+        let mut lthash = LtHash::new();
         let large_data = vec![0xAB; 10000];
         lthash.add(&large_data);
         let _ = lthash.finalize();
@@ -364,14 +348,14 @@ mod tests {
 
     #[test]
     fn test_lthash_many_additions() {
-        let mut lthash1 = LtHash::<Blake3>::new();
+        let mut lthash1 = LtHash::new();
         for i in 0..100u32 {
             lthash1.add(&i.to_le_bytes());
         }
         let hash1 = lthash1.finalize();
 
         // Add in reverse order
-        let mut lthash2 = LtHash::<Blake3>::new();
+        let mut lthash2 = LtHash::new();
         for i in (0..100u32).rev() {
             lthash2.add(&i.to_le_bytes());
         }

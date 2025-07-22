@@ -1,5 +1,4 @@
 use commonware_cryptography::lthash::LtHash;
-use commonware_cryptography::Blake3;
 use criterion::{criterion_group, BatchSize, Criterion};
 
 fn benchmark_incremental_vs_full(c: &mut Criterion) {
@@ -12,7 +11,7 @@ fn benchmark_incremental_vs_full(c: &mut Criterion) {
     c.bench_function(&format!("{}/incremental_update", module_path!()), |b| {
         b.iter_batched(
             || {
-                let mut lthash = LtHash::<Blake3>::new();
+                let mut lthash = LtHash::new();
                 for data in &initial_data {
                     lthash.add(data);
                 }
@@ -29,7 +28,7 @@ fn benchmark_incremental_vs_full(c: &mut Criterion) {
     // Benchmark full recomputation
     c.bench_function(&format!("{}/full_recomputation", module_path!()), |b| {
         b.iter(|| {
-            let mut lthash = LtHash::<Blake3>::new();
+            let mut lthash = LtHash::new();
             for data in &initial_data {
                 lthash.add(data);
             }
@@ -42,7 +41,7 @@ fn benchmark_incremental_vs_full(c: &mut Criterion) {
     c.bench_function(&format!("{}/many_small_updates", module_path!()), |b| {
         let small_data = vec![0u8; 32];
         b.iter_batched(
-            LtHash::<Blake3>::new,
+            LtHash::new,
             |mut lthash| {
                 for _ in 0..100 {
                     lthash.add(&small_data);
@@ -56,7 +55,7 @@ fn benchmark_incremental_vs_full(c: &mut Criterion) {
     c.bench_function(&format!("{}/few_large_updates", module_path!()), |b| {
         let large_data = vec![0u8; 3200];
         b.iter_batched(
-            LtHash::<Blake3>::new,
+            LtHash::new,
             |mut lthash| {
                 lthash.add(&large_data);
                 lthash.finalize()
