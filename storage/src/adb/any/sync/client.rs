@@ -790,31 +790,41 @@ pub(crate) mod tests {
                 assert_eq!(got_value, target_value);
                 assert_eq!(got_value, *value);
             }
-            let target_root = target_db.root(&mut hasher);
-            assert_eq!(got_db.root(&mut hasher), target_root);
+
+            let final_target_root = target_db.root(&mut hasher);
+            assert_eq!(got_db.root(&mut hasher), final_target_root);
+
+            // Capture the database state before closing
+            let final_synced_op_count = got_db.op_count();
+            let final_synced_inactivity_floor = got_db.inactivity_floor_loc;
+            let final_synced_log_size = got_db.log.size().await.unwrap();
+            let final_synced_oldest_retained_loc = got_db.oldest_retained_loc();
+            let final_synced_pruned_to_pos = got_db.ops.pruned_to_pos();
+            let final_synced_root = got_db.root(&mut hasher);
 
             // Close the database
             got_db.close().await.unwrap();
 
-            // Reopen the database using the same configuration and verify the state is still right
+            // Reopen the database using the same configuration and verify the state is unchanged
             let reopened_db = adb::any::Any::<_, Digest, Digest, TestDigest, TestTranslator>::init(
                 context, db_config,
             )
             .await
             .unwrap();
 
-            assert_eq!(reopened_db.op_count(), target_op_count);
-            assert_eq!(reopened_db.inactivity_floor_loc, target_inactivity_floor);
-            assert_eq!(reopened_db.log.size().await.unwrap(), target_log_size);
+            // Compare state against the database state before closing
+            assert_eq!(reopened_db.op_count(), final_synced_op_count);
+            assert_eq!(
+                reopened_db.inactivity_floor_loc,
+                final_synced_inactivity_floor
+            );
+            assert_eq!(reopened_db.log.size().await.unwrap(), final_synced_log_size);
             assert_eq!(
                 reopened_db.oldest_retained_loc(),
-                target_db.oldest_retained_loc(),
+                final_synced_oldest_retained_loc,
             );
-            assert_eq!(
-                reopened_db.ops.pruned_to_pos(),
-                target_db.ops.pruned_to_pos(),
-            );
-            assert_eq!(reopened_db.root(&mut hasher), target_root);
+            assert_eq!(reopened_db.ops.pruned_to_pos(), final_synced_pruned_to_pos);
+            assert_eq!(reopened_db.root(&mut hasher), final_synced_root);
 
             // Verify that the original key-value pairs are still correct
             for (key, &(value, _loc)) in &expected_kvs {
