@@ -13,7 +13,7 @@
 //! - **Incremental**: Update existing hashes in O(1) time instead of rehashing everything
 //!
 //! _If your application requires a (probabilistic) membership check, consider using
-//! [crate::bloomfilter] instead._
+//! [crate::BloomFilter] instead._
 //!
 //! # Security
 //!
