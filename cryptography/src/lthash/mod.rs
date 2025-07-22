@@ -209,20 +209,20 @@ mod tests {
     use crate::Hasher;
 
     #[test]
-    fn test_lthash_new() {
+    fn test_new() {
         let lthash = LtHash::new();
         assert!(lthash.is_zero());
     }
 
     #[test]
-    fn test_lthash_add() {
+    fn test_add() {
         let mut lthash = LtHash::new();
         lthash.add(b"hello");
         assert!(!lthash.is_zero());
     }
 
     #[test]
-    fn test_lthash_commutativity() {
+    fn test_commutativity() {
         // Test that a + b = b + a
         let mut lthash1 = LtHash::new();
         lthash1.add(b"hello");
@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lthash_associativity() {
+    fn test_associativity() {
         // Test that (a + b) + c = a + (b + c)
         let mut lthash1 = LtHash::new();
         lthash1.add(b"a");
@@ -258,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lthash_subtraction() {
+    fn test_subtraction() {
         // Test that (a + b) - b = a
         let mut lthash1 = LtHash::new();
         lthash1.add(b"hello");
@@ -274,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lthash_empty() {
+    fn test_empty() {
         let lthash = LtHash::new();
         let empty_hash = lthash.finalize();
 
@@ -289,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lthash_reset() {
+    fn test_reset() {
         let mut lthash = LtHash::new();
         lthash.add(b"hello");
         assert!(!lthash.is_zero());
@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lthash_deterministic() {
+    fn test_deterministic() {
         let mut lthash = LtHash::new();
         lthash.add(b"test");
         let _ = lthash.finalize();
@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lthash_large_data() {
+    fn test_large_data() {
         let mut lthash = LtHash::new();
         let large_data = vec![0xAB; 10000];
         lthash.add(&large_data);
@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lthash_snake() {
+    fn test_snake() {
         let mut lthash1 = LtHash::new();
         for i in 0..100u32 {
             lthash1.add(&i.to_le_bytes());
