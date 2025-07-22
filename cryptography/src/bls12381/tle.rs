@@ -101,12 +101,9 @@ const BLOCK_SIZE: usize = Digest::SIZE;
 /// Block type for IBE.
 pub type Block = FixedBytes<BLOCK_SIZE>;
 
-/// Implement conversion from Digest to Block to avoid copying.
 impl From<Digest> for Block {
     fn from(digest: Digest) -> Self {
-        // SAFETY: Both Digest and Block (FixedBytes<32>) are wrappers around [u8; 32]
-        // with the same memory layout, so this transmute is safe.
-        unsafe { std::mem::transmute(digest) }
+        Block::new(digest.0)
     }
 }
 
