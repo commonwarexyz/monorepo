@@ -17,8 +17,8 @@ pub mod blake3;
 pub use blake3::{Blake3, CoreBlake3};
 mod bloomfilter;
 pub use bloomfilter::BloomFilter;
-pub mod secp256r1;
 pub mod lthash;
+pub mod secp256r1;
 
 /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
 pub trait Signer: Send + Sync + Clone + 'static {
