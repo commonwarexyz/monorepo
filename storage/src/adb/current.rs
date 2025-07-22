@@ -20,7 +20,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::FixedSize;
+use commonware_codec::{Encode as _, FixedSize};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
@@ -506,10 +506,7 @@ impl<
 
         let start_pos = leaf_num_to_pos(start_loc);
 
-        let digests = ops
-            .iter()
-            .map(|op| Any::<E, _, _, _, T>::op_digest(hasher, op))
-            .collect::<Vec<_>>();
+        let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
         let mut verifier = GraftingVerifier::<H>::new(
@@ -519,7 +516,7 @@ impl<
         );
 
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
-            return proof.verify_range_inclusion(&mut verifier, &digests, start_pos, root);
+            return proof.verify_range_inclusion(&mut verifier, &elements, start_pos, root);
         }
 
         // The proof must contain the partial chunk digest as its last hash.
@@ -531,7 +528,7 @@ impl<
         let last_chunk_digest = proof.digests.pop().unwrap();
 
         // Reconstruct the MMR root.
-        let mmr_root = match proof.reconstruct_root(&mut verifier, &digests, start_pos) {
+        let mmr_root = match proof.reconstruct_root(&mut verifier, &elements, start_pos) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");
@@ -619,14 +616,12 @@ impl<
 
         let pos = leaf_num_to_pos(info.loc);
         let num = info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
-        let mut verifier = GraftingVerifier::new(Self::grafting_height(), num, vec![&info.chunk]);
-        let digest = Any::<E, _, _, H, T>::op_digest(
-            verifier.standard(),
-            &Operation::Update(info.key.clone(), info.value.clone()),
-        );
+        let mut verifier =
+            GraftingVerifier::<H>::new(Self::grafting_height(), num, vec![&info.chunk]);
+        let element = Operation::Update(info.key.clone(), info.value.clone()).encode();
 
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
-            return proof.verify_element_inclusion(&mut verifier, &digest, pos, root);
+            return proof.verify_element_inclusion(&mut verifier, &element, pos, root);
         }
 
         // The proof must contain the partial chunk digest as its last hash.
@@ -651,7 +646,7 @@ impl<
         }
 
         // Reconstruct the MMR root.
-        let mmr_root = match proof.reconstruct_root(&mut verifier, &[digest], pos) {
+        let mmr_root = match proof.reconstruct_root(&mut verifier, &[element], pos) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");
