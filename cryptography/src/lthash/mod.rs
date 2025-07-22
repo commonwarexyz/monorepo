@@ -130,11 +130,11 @@ impl LtHash {
     /// with modular arithmetic (mod 2^16).
     pub fn add(&mut self, data: &[u8]) {
         // Hash the input data to expand it to LTHASH_ELEMENTS u16s
-        let expanded = Self::expand_to_u16_array(data);
+        let expanded = Self::expand_to_state(data);
 
         // Add the expanded hash to our state with 16-bit wrapping arithmetic
-        for i in 0..LTHASH_ELEMENTS {
-            self.state[i] = self.state[i].wrapping_add(expanded[i]);
+        for (i, val) in expanded.into_iter().enumerate() {
+            self.state[i] = self.state[i].wrapping_add(val);
         }
     }
 
@@ -144,18 +144,18 @@ impl LtHash {
     /// Uses 16-bit modular subtraction.
     pub fn subtract(&mut self, data: &[u8]) {
         // Hash the input data to expand it to LTHASH_ELEMENTS u16s
-        let expanded = Self::expand_to_u16_array(data);
+        let expanded = Self::expand_to_state(data);
 
         // Subtract the expanded hash from our state with 16-bit wrapping arithmetic
-        for i in 0..LTHASH_ELEMENTS {
-            self.state[i] = self.state[i].wrapping_sub(expanded[i]);
+        for (i, val) in expanded.into_iter().enumerate() {
+            self.state[i] = self.state[i].wrapping_sub(val);
         }
     }
 
     /// Combine two LtHash states by addition.
     pub fn combine(&mut self, other: &Self) {
-        for i in 0..LTHASH_ELEMENTS {
-            self.state[i] = self.state[i].wrapping_add(other.state[i]);
+        for (i, val) in other.state.into_iter().enumerate() {
+            self.state[i] = self.state[i].wrapping_add(val);
         }
     }
 
@@ -192,7 +192,7 @@ impl LtHash {
     /// Uses Blake3's native XOF support via finalize_xof() to generate
     /// exactly 2048 bytes of output, similar to how the reference implementations
     /// use BLAKE2b in XOF mode.
-    fn expand_to_u16_array(data: &[u8]) -> [u16; LTHASH_ELEMENTS] {
+    fn expand_to_state(data: &[u8]) -> [u16; LTHASH_ELEMENTS] {
         let mut result = [0u16; LTHASH_ELEMENTS];
         let mut bytes = [0u8; LTHASH_SIZE];
 
@@ -203,9 +203,8 @@ impl LtHash {
         output_reader.fill(&mut bytes);
 
         // Convert bytes to u16 array using little-endian interpretation
-        for i in 0..LTHASH_ELEMENTS {
-            let byte_idx = i * 2;
-            result[i] = u16::from_le_bytes([bytes[byte_idx], bytes[byte_idx + 1]]);
+        for (i, chunk) in bytes.chunks(2).enumerate() {
+            result[i] = u16::from_le_bytes([chunk[0], chunk[1]]);
         }
 
         result
@@ -215,18 +214,6 @@ impl LtHash {
 impl Default for LtHash {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl std::fmt::Debug for LtHash {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Show first and last 8 u16 values for debugging
-        write!(
-            f,
-            "LtHash {{ state: [{:04x?}...{:04x?}] }}",
-            &self.state[..8],
-            &self.state[LTHASH_ELEMENTS - 8..]
-        )
     }
 }
 
@@ -331,7 +318,7 @@ mod tests {
         let mut lthash = LtHash::new();
         lthash.add(b"test");
         let _ = lthash.finalize();
-        
+
         // Verify deterministic output
         let mut lthash2 = LtHash::new();
         lthash2.add(b"test");
