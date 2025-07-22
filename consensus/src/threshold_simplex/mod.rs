@@ -209,11 +209,15 @@ pub(crate) fn interesting(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Monitor;
+    use crate::{threshold_simplex::types::seed_namespace, Monitor};
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
-            primitives::variant::{MinPk, MinSig, Variant},
+            primitives::{
+                poly::public,
+                variant::{MinPk, MinSig, Variant},
+            },
+            tle::{decrypt, encrypt, Block},
         },
         ed25519::PrivateKey,
         PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
@@ -3129,5 +3133,170 @@ mod tests {
     fn test_1k() {
         run_1k::<MinPk>();
         run_1k::<MinSig>();
+    }
+
+    fn tle<V: Variant>() {
+        // Create context
+        let n = 4;
+        let threshold = quorum(n);
+        let namespace = b"consensus".to_vec();
+        let activity_timeout = 100;
+        let skip_timeout = 50;
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let scheme = PrivateKey::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: 10.0,
+                jitter: 5.0,
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+
+            // Derive threshold
+            let (polynomial, shares) =
+                ops::generate_shares::<_, V>(&mut context, None, n, threshold);
+            let public_key = *public::<V>(&polynomial);
+
+            // Create engines and supervisors
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut supervisors = Vec::new();
+            let mut engine_handlers = Vec::new();
+            let monitor_supervisor = Arc::new(Mutex::new(None));
+            for (idx, scheme) in schemes.into_iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", scheme.public_key()));
+
+                // Configure engine
+                let validator = scheme.public_key();
+                let mut participants = BTreeMap::new();
+                participants.insert(
+                    0,
+                    (polynomial.clone(), validators.clone(), shares[idx].clone()),
+                );
+
+                // Store first supervisor for monitoring
+                let supervisor_config = mocks::supervisor::Config::<_, V> {
+                    namespace: namespace.clone(),
+                    participants,
+                };
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
+                supervisors.push(supervisor.clone());
+                if idx == 0 {
+                    *monitor_supervisor.lock().unwrap() = Some(supervisor.clone());
+                }
+
+                // Configure application
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    participant: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(scheme.public_key());
+                let cfg = config::Config {
+                    crypto: scheme,
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: supervisor.clone(),
+                    supervisor,
+                    partition: validator.to_string(),
+                    compression: Some(3),
+                    mailbox_size: 1024,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_millis(100),
+                    notarization_timeout: Duration::from_millis(200),
+                    nullify_retry: Duration::from_millis(500),
+                    fetch_timeout: Duration::from_millis(100),
+                    activity_timeout,
+                    skip_timeout,
+                    max_fetch_count: 1,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(10)),
+                    fetch_concurrent: 1,
+                    replay_buffer: 1024 * 1024,
+                    write_buffer: 1024 * 1024,
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(pending, recovered, resolver));
+            }
+
+            // Prepare TLE test data
+            let target = 10u64; // Encrypt for view 10
+            let target_bytes = target.to_be_bytes();
+            let message_content = b"Secret message for future view10"; // 32 bytes
+            let message = Block::new(*message_content);
+
+            // Encrypt message for future view using threshold public key
+            let seed_namespace = seed_namespace(&namespace);
+            let ciphertext = encrypt::<_, V>(
+                &mut context,
+                public_key,
+                (Some(&seed_namespace), &target_bytes),
+                &message,
+            );
+
+            // Wait for consensus to reach the target view and then decrypt
+            let supervisor = monitor_supervisor.lock().unwrap().clone().unwrap();
+            loop {
+                // Wait for notarization
+                context.sleep(Duration::from_millis(100)).await;
+                let notarizations = supervisor.notarizations.lock().unwrap();
+                let Some(notarization) = notarizations.get(&target) else {
+                    continue;
+                };
+
+                // Decrypt the message using the seed signature
+                let seed_signature = notarization.seed_signature;
+                let decrypted = decrypt::<V>(&seed_signature, &ciphertext)
+                    .expect("Decryption should succeed with valid seed signature");
+                assert_eq!(
+                    message.as_ref(),
+                    decrypted.as_ref(),
+                    "Decrypted message should match original message"
+                );
+                break;
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_tle() {
+        tle::<MinPk>();
+        tle::<MinSig>();
     }
 }
