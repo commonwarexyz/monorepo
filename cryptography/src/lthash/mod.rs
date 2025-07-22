@@ -1,20 +1,53 @@
 //! A homomorphic hash function that enables efficient incremental updates.
 //!
-//! [LtHash] is an additive homomorphic hash function, meaning that the hash of a sum equals
-//! the sum of the hashes: `H(a + b) = H(a) + H(b)`. This enables the efficient addition or
-//! removal of elements from a hashed set without recomputing the entire hash from scratch. And
-//! unlocks the ability to compare set equality without revealing the entire set or requiring items
-//! be added in a specific order.
+//! [LtHash] is an additive homomorphic hash function over [crate::Blake3], meaning that the
+//! hash of a sum equals the sum of the hashes: `H(a + b) = H(a) + H(b)`. This useful property
+//! enables the efficient addition or removal of elements from some hashed set without recomputing
+//! the entire hash from scratch. This unlocks the ability to compare set equality without revealing
+//! the entire set or requiring items be added in a specific order.
 //!
-//! # Key Properties
+//! # Properties
 //!
 //! - **Homomorphic**: Supports addition and subtraction of hashes (H(a ± b) = H(a) ± H(b))
-//! - **Incremental**: Update existing hashes in O(1) time instead of rehashing everything
 //! - **Commutative**: Operation order doesn't matter (H(a) + H(b) = H(b) + H(a))
-//! - **Generic**: Works with any cryptographic hash function implementing the [Hasher] trait
+//! - **Incremental**: Update existing hashes in O(1) time instead of rehashing everything
 //!
 //! _If your application requires a (probabilistic) membership check, consider using
 //! [crate::bloomfilter] instead._
+//!
+//! # Security
+//!
+//! [LtHash]'s state consists of 1024 16-bit unsigned integers (2048 bytes), as recommended in
+//! "Securing Update Propagation with Homomorphic Hashing". This provides at least 200 bits of
+//! security, following the rationale:
+//!
+//! 1. **Collision Resistance**: With a 16384-bit state space, finding two different
+//!    inputs that produce the same LtHash state requires approximately 2^8192
+//!    operations (birthday paradox), which is computationally infeasible.
+//!     * <https://cseweb.ucsd.edu/~daniele/papers/IncHash.html>: A new paradigm for collision-free hashing: Incrementality at reduced cost
+//!
+//! 2. **Preimage Resistance**: The large state space makes it infeasible to find
+//!    an input that produces a specific target hash state.
+//!    * <https://cseweb.ucsd.edu/~mihir/papers/inc1.pdf>: Incremental Cryptography: The Case of Hashing and Signing
+//!
+//! 3. **Homomorphic Security**: The additive homomorphic property relies on the
+//!    difficulty of solving the subset sum problem in a large finite group. With
+//!    16384 bits, even if an attacker knows the final hash and some inputs, finding
+//!    the remaining inputs is computationally intractable.
+//!    * <https://dl.acm.org/doi/10.1145/237814.237838>: Generating hard instances of lattice problems
+//!    * <https://cseweb.ucsd.edu/~daniele/papers/Cyclic.pdf>: Generalized compact knapsacks, cyclic lattices, and efficient one-way functions
+//!
+//! 4. **Protection Against Wagner's Generalized Birthday Attack**: For homomorphic
+//!    hash functions, Wagner's k-tree algorithm could find collisions in O(2^(n/(1+lg k)))
+//!    time. With n=16384, even for large k, this remains infeasible.
+//!    * <https://www.iacr.org/archive/crypto2002/24420288/24420288.pdf>: A Generalized Birthday Problem
+//!
+//! # Warning
+//!
+//! This construction has a known vulnerability: adding the same element 2^16 times
+//! will cause overflow and result in the same hash as not adding it at all. For
+//! applications where this is a concern, consider adding unique metadata (like indices
+//! or timestamps) to each element.
 //!
 //! # Example
 //!
@@ -60,55 +93,18 @@
 //! * <https://github.com/facebook/folly/blob/main/folly/crypto/LtHash.cpp>: An open-source C++ library developed and used at Facebook.
 //! * <https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0215-accounts-lattice-hash.md>: Homomorphic Hashing of Account State
 
-use crate::blake3::{Blake3, Digest as Blake3Digest};
-use crate::Hasher;
-use blake3::Hasher as Blake3Hasher;
-
-/// Number of 16-bit integers in the LtHash state.
-///
-/// Following the construction from "Securing Update Propagation with Homomorphic Hashing",
-/// we use 1024 16-bit integers (2048 bytes total) which provides at least 200 bits of security.
-const LTHASH_ELEMENTS: usize = 1024;
+use crate::{
+    blake3::{Blake3, CoreBlake3, Digest},
+    Hasher as _,
+};
 
 /// Size of the internal [LtHash] state in bytes.
-///
-/// The 2048-byte state consists of 1024 16-bit unsigned integers, as specified in
-/// "Securing Update Propagation with Homomorphic Hashing". The rationale is as follows:
-///
-/// 1. **Collision Resistance**: With a 16384-bit state space, finding two different
-///    inputs that produce the same LtHash state requires approximately 2^8192
-///    operations (birthday paradox), which is computationally infeasible.
-///     * <https://cseweb.ucsd.edu/~daniele/papers/IncHash.html>: A new paradigm for collision-free hashing: Incrementality at reduced cost
-///
-/// 2. **Preimage Resistance**: The large state space makes it infeasible to find
-///    an input that produces a specific target hash state.
-///    * <https://cseweb.ucsd.edu/~mihir/papers/inc1.pdf>: Incremental Cryptography: The Case of Hashing and Signing
-///
-/// 3. **Homomorphic Security**: The additive homomorphic property relies on the
-///    difficulty of solving the subset sum problem in a large finite group. With
-///    16384 bits, even if an attacker knows the final hash and some inputs, finding
-///    the remaining inputs is computationally intractable.
-///    * <https://dl.acm.org/doi/10.1145/237814.237838>: Generating hard instances of lattice problems
-///    * <https://cseweb.ucsd.edu/~daniele/papers/Cyclic.pdf>: Generalized compact knapsacks, cyclic lattices, and efficient one-way functions
-///
-/// 4. **Protection Against Wagner's Generalized Birthday Attack**: For homomorphic
-///    hash functions, Wagner's k-tree algorithm could find collisions in O(2^(n/(1+lg k)))
-///    time. With n=16384, even for large k, this remains infeasible.
-///    * <https://www.iacr.org/archive/crypto2002/24420288/24420288.pdf>: A Generalized Birthday Problem
 const LTHASH_SIZE: usize = 2048;
 
-/// LtHash implementation using Blake3 XOF.
-///
-/// This implementation maintains a state of 1024 16-bit unsigned integers that supports
-/// homomorphic operations (add/subtract) using modular arithmetic. The construction
-/// follows "Securing Update Propagation with Homomorphic Hashing" (IACR 2019/227).
-///
-/// # Security Warning
-///
-/// This construction has a known vulnerability: adding the same element 2^16 times
-/// will cause overflow and result in the same hash as not adding it at all. For
-/// applications where this is a concern, consider adding unique metadata (like indices
-/// or timestamps) to each element.
+/// Number of 16-bit integers in the [LtHash] state.
+const LTHASH_ELEMENTS: usize = LTHASH_SIZE / 2; // each u16 is 2 bytes
+
+/// An additive homomorphic hash function over [crate::Blake3].
 #[derive(Clone)]
 pub struct LtHash {
     /// Internal state as 1024 16-bit unsigned integers
@@ -116,7 +112,7 @@ pub struct LtHash {
 }
 
 impl LtHash {
-    /// Create a new LtHash instance with zero state.
+    /// Create a new [LtHash] instance with zero state.
     pub fn new() -> Self {
         Self {
             state: [0u16; LTHASH_ELEMENTS],
@@ -160,10 +156,7 @@ impl LtHash {
     }
 
     /// Finalize the hash and return the compressed result.
-    ///
-    /// This compresses the internal state to the output size of Blake3.
-    /// The u16 array is converted to little-endian bytes before hashing.
-    pub fn finalize(&self) -> Blake3Digest {
+    pub fn finalize(&self) -> Digest {
         let mut hasher = Blake3::new();
 
         // Convert u16 array to bytes in little-endian order
@@ -185,19 +178,12 @@ impl LtHash {
     }
 
     /// Expand input data to an array of u16s using Blake3 as an XOF.
-    ///
-    /// This follows the construction from the paper: hash the input to produce
-    /// 2048 bytes, then interpret as 1024 little-endian u16 values.
-    ///
-    /// Uses Blake3's native XOF support via finalize_xof() to generate
-    /// exactly 2048 bytes of output, similar to how the reference implementations
-    /// use BLAKE2b in XOF mode.
     fn expand_to_state(data: &[u8]) -> [u16; LTHASH_ELEMENTS] {
         let mut result = [0u16; LTHASH_ELEMENTS];
         let mut bytes = [0u8; LTHASH_SIZE];
 
         // Use Blake3 in XOF mode to expand the data to LTHASH_SIZE bytes
-        let mut hasher = Blake3Hasher::new();
+        let mut hasher = CoreBlake3::new();
         hasher.update(data);
         let mut output_reader = hasher.finalize_xof();
         output_reader.fill(&mut bytes);
