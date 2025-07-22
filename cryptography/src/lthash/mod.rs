@@ -121,9 +121,8 @@ impl LtHash {
 
     /// Add data to the hash.
     ///
-    /// This operation is commutative - the order of additions doesn't matter.
-    /// Each element is expanded to 1024 16-bit integers and added component-wise
-    /// with modular arithmetic (mod 2^16).
+    /// The order of additions doesn't matter. Each element is expanded to 1024 16-bit
+    /// integers and added component-wise with modular arithmetic (mod 2^16).
     pub fn add(&mut self, data: &[u8]) {
         // Hash the input data to expand it to LTHASH_ELEMENTS u16s
         let expanded = Self::expand_to_state(data);
@@ -136,8 +135,8 @@ impl LtHash {
 
     /// Subtract data from the hash.
     ///
-    /// This allows removing previously added data from the hash state.
-    /// Uses 16-bit modular subtraction.
+    /// This allows removing previously added data from the hash state. Uses 16-bit
+    /// modular subtraction.
     pub fn subtract(&mut self, data: &[u8]) {
         // Hash the input data to expand it to LTHASH_ELEMENTS u16s
         let expanded = Self::expand_to_state(data);
