@@ -32,14 +32,13 @@ cargo test
 cargo run --bin server
 
 # Start server with custom settings
-cargo run --bin server -- --port 8080 --initial-ops 50 --storage-dir /tmp/my_server --seed 1337 --metrics-port 9090 --op-interval 2s --ops-per-interval 10
+cargo run --bin server -- --port 8080 --initial-ops 50 --storage-dir /tmp/my_server --metrics-port 9090 --op-interval 2s --ops-per-interval 10
 ```
 
 Server options:
 - `-p, --port <PORT>`: Port to listen on (default: 8080)
 - `-i, --initial-ops <COUNT>`: Number of initial operations to create (default: 100)
 - `-d, --storage-dir <PATH>`: Storage directory for database (default: /tmp/commonware-sync/server-{RANDOM_SUFFIX})
-- `-s, --seed <SEED>`: Seed for generating test operations (default: 1337)
 - `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9090)
 - `-t, --op-interval <DURATION>`: Interval for adding new operations in 's' or 'ms' (default: 100ms)
 - `-o, --ops-per-interval <COUNT>`: Number of operations to add each interval (default: 5)

@@ -17,7 +17,7 @@ use commonware_sync::{
 };
 use commonware_utils::parse_duration;
 use prometheus_client::metrics::counter::Counter;
-use rand::Rng;
+use rand::{Rng, RngCore};
 use std::{
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
@@ -36,8 +36,6 @@ struct Config {
     initial_ops: usize,
     /// Storage directory.
     storage_dir: String,
-    /// Seed for generating test operations.
-    seed: u64,
     /// Port on which metrics are exposed.
     metrics_port: u16,
     /// Interval for adding new operations.
@@ -61,22 +59,19 @@ where
     ops_counter: Counter,
     /// Last time we added operations.
     last_operation_time: Arc<RwLock<SystemTime>>,
-    /// Seed for generating operations.
-    operation_seed: Arc<RwLock<u64>>,
 }
 
 impl<E> State<E>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
-    fn new(context: E, database: Database<E>, initial_seed: u64) -> Self {
+    fn new(context: E, database: Database<E>) -> Self {
         let state = Self {
             database: Arc::new(RwLock::new(database)),
             request_counter: Counter::default(),
             error_counter: Counter::default(),
             ops_counter: Counter::default(),
             last_operation_time: Arc::new(RwLock::new(SystemTime::now())),
-            operation_seed: Arc::new(RwLock::new(initial_seed)),
         };
         context.register(
             "requests",
@@ -95,9 +90,12 @@ where
     /// Add operations to the database if the configured interval has passed.
     async fn maybe_add_operation(
         &self,
-        context: &impl commonware_runtime::Clock,
+        context: &mut E,
         config: &Config,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        E: commonware_runtime::Clock + RngCore,
+    {
         let mut last_time = self.last_operation_time.write().await;
         let now = context.current();
 
@@ -105,12 +103,8 @@ where
             *last_time = now;
 
             // Generate new operations
-            let mut seed_guard = self.operation_seed.write().await;
-            let current_seed = *seed_guard;
-            *seed_guard = current_seed.wrapping_add(1);
-            drop(seed_guard);
-
-            let new_operations = create_test_operations(config.ops_per_interval, current_seed);
+            let new_operations =
+                create_test_operations(config.ops_per_interval, context.next_u64());
 
             // Add operations to database and get the new root
             let root = {
@@ -359,14 +353,6 @@ fn main() {
                 .default_value("/tmp/commonware-sync/server"),
         )
         .arg(
-            Arg::new("seed")
-                .short('s')
-                .long("seed")
-                .value_name("SEED")
-                .help("Seed for generating test operations")
-                .default_value("1337"),
-        )
-        .arg(
             Arg::new("metrics-port")
                 .short('m')
                 .long("metrics-port")
@@ -422,14 +408,6 @@ fn main() {
                 storage_dir
             }
         },
-        seed: matches
-            .get_one::<String>("seed")
-            .unwrap()
-            .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid seed: {e}");
-                std::process::exit(1);
-            }),
         metrics_port: matches
             .get_one::<String>("metrics-port")
             .unwrap()
@@ -457,7 +435,6 @@ fn main() {
         port = config.port,
         initial_ops = config.initial_ops,
         storage_dir = %config.storage_dir,
-        seed = %config.seed,
         metrics_port = config.metrics_port,
         op_interval = ?config.op_interval,
         ops_per_interval = config.ops_per_interval,
@@ -467,7 +444,7 @@ fn main() {
     let executor_config =
         tokio_runtime::Config::default().with_storage_directory(config.storage_dir.clone());
     let executor = tokio_runtime::Runner::new(executor_config);
-    executor.start(|context| async move {
+    executor.start(|mut context| async move {
         tokio_runtime::telemetry::init(
             context.with_label("telemetry"),
             tokio_runtime::telemetry::Logging {
@@ -491,7 +468,7 @@ fn main() {
         };
 
         // Create and add initial operations
-        let initial_ops = create_test_operations(config.initial_ops, config.seed);
+        let initial_ops = create_test_operations(config.initial_ops, context.next_u64());
         info!(operations_len = initial_ops.len(), "creating initial operations");
 
         if let Err(e) = add_operations(&mut database, initial_ops).await {
@@ -537,14 +514,14 @@ fn main() {
             "server listening and continuously adding operations"
         );
 
-        let state = Arc::new(State::new(context.with_label("server"), database, config.seed));
+        let state = Arc::new(State::new(context.with_label("server"), database));
         let mut next_op_time = context.current() + config.op_interval;
 
         loop {
             select! {
                 _ = context.sleep_until(next_op_time) => {
                     // Add operations to the database
-                    if let Err(e) = state.maybe_add_operation(&context, &config).await {
+                    if let Err(e) = state.maybe_add_operation(&mut context, &config).await {
                         warn!(error = %e, "failed to add additional operations");
                     }
                     next_op_time = context.current() + config.op_interval;
