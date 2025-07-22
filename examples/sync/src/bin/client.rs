@@ -10,7 +10,8 @@ use commonware_storage::{
     adb::any::sync::{self, client::Config as SyncConfig, SyncTarget},
     mmr::hasher::Standard,
 };
-use commonware_sync::{crate_version, create_adb_config, parse_duration, Resolver};
+use commonware_sync::{crate_version, create_adb_config, Resolver};
+use commonware_utils::parse_duration;
 use futures::channel::mpsc;
 use rand::Rng;
 use std::{
@@ -83,7 +84,7 @@ where
                         }
                     }
                 } else {
-                    debug!("sync target unchanged");
+                    debug!(current_target = ?current_target, "target unchanged");
                 }
             }
             Err(e) => {
@@ -272,7 +273,7 @@ fn main() {
                 .short('t')
                 .long("target-update-interval")
                 .value_name("DURATION")
-                .help("Interval for requesting target updates in 's' or 'ms'")
+                .help("Interval for requesting target updates ('ms', 's', 'm', 'h')")
                 .default_value("1s"),
         )
         .arg(

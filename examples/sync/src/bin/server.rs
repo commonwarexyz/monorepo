@@ -11,10 +11,11 @@ use commonware_runtime::{
 use commonware_storage::{adb::any::sync::SyncTarget, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    crate_version, create_adb_config, create_test_operations, parse_duration, Database,
-    ErrorResponse, GetOperationsRequest, GetOperationsResponse, Message, Operation, ProtocolError,
+    crate_version, create_adb_config, create_test_operations, Database, ErrorResponse,
+    GetOperationsRequest, GetOperationsResponse, Message, Operation, ProtocolError,
     MAX_MESSAGE_SIZE,
 };
+use commonware_utils::parse_duration;
 use prometheus_client::metrics::counter::Counter;
 use rand::Rng;
 use std::{
@@ -386,7 +387,7 @@ fn main() {
                 .short('t')
                 .long("operation-interval")
                 .value_name("DURATION")
-                .help("Interval for adding new operations in 's' or 'ms'")
+                .help("Interval for adding new operations ('ms', 's', 'm', 'h')")
                 .default_value("100ms"),
         )
         .arg(
@@ -549,16 +550,13 @@ fn main() {
         let state = Arc::new(State::new(context.with_label("server"), database, config.seed));
         let operation_interval = config.operation_interval;
 
-        let mut sleep_fut = Box::pin(context.sleep(operation_interval));
         loop {
             select! {
-                _ = &mut sleep_fut => {
+                _ = context.sleep(operation_interval) => {
                     // Add operations to the database
                     if let Err(e) = state.maybe_add_operation(&config, &context).await {
                         warn!(error = %e, "failed to add additional operations");
                     }
-                    // Reset the sleep future for next iteration
-                    sleep_fut = Box::pin(context.sleep(operation_interval));
                 },
                 client_result = listener.accept() => {
                     match client_result {

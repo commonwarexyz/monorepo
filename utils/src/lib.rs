@@ -9,7 +9,7 @@ pub use array::Array;
 mod bitvec;
 pub use bitvec::{BitIterator, BitVec};
 mod time;
-pub use time::SystemTimeExt;
+pub use time::{parse_duration, SystemTimeExt};
 mod priority_set;
 pub use priority_set::PrioritySet;
 pub mod futures;
