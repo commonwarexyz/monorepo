@@ -62,10 +62,16 @@
 use crate::Hasher;
 use std::marker::PhantomData;
 
-/// Size of the internal [LtHash] state.
+/// Number of 16-bit integers in the LtHash state.
 ///
-/// The 2048-byte (16384-bit) state size is sufficient for a 128-bit security level according
-/// to "Securing Update Propagation with Homomorphic Hashing". The rationale is as follows:
+/// Following the construction from "Securing Update Propagation with Homomorphic Hashing",
+/// we use 1024 16-bit integers (2048 bytes total) which provides at least 200 bits of security.
+const LTHASH_ELEMENTS: usize = 1024;
+
+/// Size of the internal [LtHash] state in bytes.
+///
+/// The 2048-byte state consists of 1024 16-bit unsigned integers, as specified in
+/// "Securing Update Propagation with Homomorphic Hashing". The rationale is as follows:
 ///
 /// 1. **Collision Resistance**: With a 16384-bit state space, finding two different
 ///    inputs that produce the same LtHash state requires approximately 2^8192
@@ -91,13 +97,20 @@ const LTHASH_SIZE: usize = 2048;
 
 /// LtHash implementation generic over a hasher.
 ///
-/// This implementation maintains a large internal state that supports
-/// homomorphic operations (add/subtract) and produces a final hash
-/// by compressing the state with the provided hasher.
+/// This implementation maintains a state of 1024 16-bit unsigned integers that supports
+/// homomorphic operations (add/subtract) using modular arithmetic. The construction
+/// follows "Securing Update Propagation with Homomorphic Hashing" (IACR 2019/227).
+///
+/// # Security Warning
+///
+/// This construction has a known vulnerability: adding the same element 2^16 times
+/// will cause overflow and result in the same hash as not adding it at all. For
+/// applications where this is a concern, consider adding unique metadata (like indices
+/// or timestamps) to each element.
 #[derive(Clone)]
 pub struct LtHash<H: Hasher> {
-    /// Internal state representing the lattice hash
-    state: [u8; LTHASH_SIZE],
+    /// Internal state as 1024 16-bit unsigned integers
+    state: [u16; LTHASH_ELEMENTS],
     /// Phantom data to track the hasher type
     _hasher: PhantomData<H>,
 }
@@ -106,7 +119,7 @@ impl<H: Hasher> LtHash<H> {
     /// Create a new LtHash instance with zero state.
     pub fn new() -> Self {
         Self {
-            state: [0u8; LTHASH_SIZE],
+            state: [0u16; LTHASH_ELEMENTS],
             _hasher: PhantomData,
         }
     }
@@ -114,65 +127,81 @@ impl<H: Hasher> LtHash<H> {
     /// Add data to the hash.
     ///
     /// This operation is commutative - the order of additions doesn't matter.
+    /// Each element is expanded to 1024 16-bit integers and added component-wise
+    /// with modular arithmetic (mod 2^16).
     pub fn add(&mut self, data: &[u8]) {
-        // Hash the input data to expand it to LTHASH_SIZE
-        let expanded = Self::expand_to_lthash_size(data);
+        // Hash the input data to expand it to LTHASH_ELEMENTS u16s
+        let expanded = Self::expand_to_u16_array(data);
 
-        // Add the expanded hash to our state (wrapping arithmetic)
-        for (i, &byte) in expanded.iter().enumerate() {
-            self.state[i] = self.state[i].wrapping_add(byte);
+        // Add the expanded hash to our state with 16-bit wrapping arithmetic
+        for i in 0..LTHASH_ELEMENTS {
+            self.state[i] = self.state[i].wrapping_add(expanded[i]);
         }
     }
 
     /// Subtract data from the hash.
     ///
     /// This allows removing previously added data from the hash state.
+    /// Uses 16-bit modular subtraction.
     pub fn subtract(&mut self, data: &[u8]) {
-        // Hash the input data to expand it to LTHASH_SIZE
-        let expanded = Self::expand_to_lthash_size(data);
+        // Hash the input data to expand it to LTHASH_ELEMENTS u16s
+        let expanded = Self::expand_to_u16_array(data);
 
-        // Subtract the expanded hash from our state (wrapping arithmetic)
-        for (i, &byte) in expanded.iter().enumerate() {
-            self.state[i] = self.state[i].wrapping_sub(byte);
+        // Subtract the expanded hash from our state with 16-bit wrapping arithmetic
+        for i in 0..LTHASH_ELEMENTS {
+            self.state[i] = self.state[i].wrapping_sub(expanded[i]);
         }
     }
 
     /// Combine two LtHash states by addition.
     pub fn combine(&mut self, other: &Self) {
-        for (i, &byte) in other.state.iter().enumerate() {
-            self.state[i] = self.state[i].wrapping_add(byte);
+        for i in 0..LTHASH_ELEMENTS {
+            self.state[i] = self.state[i].wrapping_add(other.state[i]);
         }
     }
 
     /// Finalize the hash and return the compressed result.
     ///
-    /// This compresses the internal LTHASH_SIZE state to the output size
-    /// of the hasher using the hasher's compression function.
+    /// This compresses the internal state to the output size of the hasher.
+    /// The u16 array is converted to little-endian bytes before hashing.
     pub fn finalize(&self) -> H::Digest {
         let mut hasher = H::new();
-        hasher.update(&self.state);
+
+        // Convert u16 array to bytes in little-endian order
+        for &val in &self.state {
+            hasher.update(&val.to_le_bytes());
+        }
+
         hasher.finalize()
     }
 
     /// Reset the hash to the initial zero state.
     pub fn reset(&mut self) {
-        self.state = [0u8; LTHASH_SIZE];
+        self.state = [0u16; LTHASH_ELEMENTS];
     }
 
     /// Check if the hash is in the zero state.
     pub fn is_zero(&self) -> bool {
-        self.state.iter().all(|&b| b == 0)
+        self.state.iter().all(|&val| val == 0)
     }
 
-    /// Expand input data to LTHASH_SIZE bytes using the hasher as an XOF.
+    /// Expand input data to an array of u16s using the hasher as an XOF.
     ///
-    /// This uses the hasher in counter mode to generate enough bytes.
-    fn expand_to_lthash_size(data: &[u8]) -> [u8; LTHASH_SIZE] {
-        let mut result = [0u8; LTHASH_SIZE];
+    /// This follows the construction from the paper: hash the input to produce
+    /// 2048 bytes, then interpret as 1024 little-endian u16 values.
+    ///
+    /// Note: The reference implementations (Facebook folly, lukechampine/lthash) use
+    /// BLAKE2b in XOF mode for expansion. Our implementation uses the provided hasher
+    /// in counter mode, which maintains the security properties but produces different
+    /// internal states. This means our implementation won't match their test vectors
+    /// byte-for-byte, but the homomorphic properties are preserved.
+    fn expand_to_u16_array(data: &[u8]) -> [u16; LTHASH_ELEMENTS] {
+        let mut result = [0u16; LTHASH_ELEMENTS];
+        let mut bytes = [0u8; LTHASH_SIZE];
         let mut offset = 0;
         let mut counter = 0u64;
 
-        // Use the hasher in counter mode to expand the data
+        // Use the hasher in counter mode to expand the data to LTHASH_SIZE bytes
         while offset < LTHASH_SIZE {
             let mut hasher = H::new();
             hasher.update(data);
@@ -181,10 +210,16 @@ impl<H: Hasher> LtHash<H> {
 
             let digest_bytes = digest.as_ref();
             let copy_len = (LTHASH_SIZE - offset).min(digest_bytes.len());
-            result[offset..offset + copy_len].copy_from_slice(&digest_bytes[..copy_len]);
+            bytes[offset..offset + copy_len].copy_from_slice(&digest_bytes[..copy_len]);
 
             offset += copy_len;
             counter += 1;
+        }
+
+        // Convert bytes to u16 array using little-endian interpretation
+        for i in 0..LTHASH_ELEMENTS {
+            let byte_idx = i * 2;
+            result[i] = u16::from_le_bytes([bytes[byte_idx], bytes[byte_idx + 1]]);
         }
 
         result
@@ -199,12 +234,12 @@ impl<H: Hasher> Default for LtHash<H> {
 
 impl<H: Hasher> std::fmt::Debug for LtHash<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Show first and last 16 bytes of state for debugging
+        // Show first and last 8 u16 values for debugging
         write!(
             f,
-            "LtHash {{ state: [{:02x?}...{:02x?}] }}",
-            &self.state[..16],
-            &self.state[LTHASH_SIZE - 16..]
+            "LtHash {{ state: [{:04x?}...{:04x?}] }}",
+            &self.state[..8],
+            &self.state[LTHASH_ELEMENTS - 8..]
         )
     }
 }
@@ -284,9 +319,11 @@ mod tests {
         let lthash = LtHash::<Blake3>::new();
         let empty_hash = lthash.finalize();
 
-        // Empty state should produce the hash of all zeros
+        // Empty state should produce the hash of all zero u16s in little-endian
         let mut hasher = Blake3::new();
-        hasher.update(&[0u8; LTHASH_SIZE]);
+        for _ in 0..LTHASH_ELEMENTS {
+            hasher.update(&0u16.to_le_bytes());
+        }
         let expected = hasher.finalize();
 
         assert_eq!(empty_hash, expected);
