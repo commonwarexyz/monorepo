@@ -287,7 +287,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             }
         }
 
-        // Create the [MemMmr] with the pinned nodes required for its size.
+        // Create the in-memory MMR with the pinned nodes required for its size.
         let nodes_to_pin_mem = Proof::<H::Digest>::nodes_to_pin(journal_size);
         let mut mem_pinned_nodes = Vec::new();
         for pos in nodes_to_pin_mem {
