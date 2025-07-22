@@ -15,8 +15,10 @@ pub mod sha256;
 pub use sha256::{hash, CoreSha256, Sha256};
 pub mod blake3;
 pub use blake3::{Blake3, CoreBlake3};
-mod bloomfilter;
+pub mod bloomfilter;
 pub use bloomfilter::BloomFilter;
+pub mod lthash;
+pub use lthash::LtHash;
 pub mod secp256r1;
 
 /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].

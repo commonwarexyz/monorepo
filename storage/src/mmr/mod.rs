@@ -84,7 +84,8 @@ pub mod verification;
 
 /// A trait for building an MMR and computing the root.
 pub trait Builder<H: CHasher>: Send + Sync {
-    /// Add an element to the MMR.
+    /// Add `element` to the MMR and return its position within it. The element can be an arbitrary
+    /// byte slice, and need not be converted to a digest first.
     fn add(
         &mut self,
         hasher: &mut impl Hasher<H>,
