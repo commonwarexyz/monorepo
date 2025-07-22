@@ -85,16 +85,10 @@ Client options:
    You should see output like:
    ```
    INFO starting continuous sync process
-   INFO starting sync to server sync_iteration=1 server=127.0.0.1:8080
-   INFO establishing connection server_addr=127.0.0.1:8080
-   INFO connected server_addr=127.0.0.1:8080
-   INFO initial sync target sync_iteration=1 target=SyncTarget { root: 234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3, lower_bound_ops: 74, upper_bound_ops: 144 }
-   INFO sync configuration sync_iteration=1 batch_size=25 lower_bound=74 upper_bound=144 target_update_interval=3s
-   INFO sync completed successfully - about to close database sync_iteration=1 database_ops=145 root=234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3
-   INFO database closed; ready for next iteration sync_iteration=1
-   INFO sync completed successfully, waiting before next sync sync_iteration=1 sync_interval=5s
-   INFO starting sync to server sync_iteration=2 server=127.0.0.1:8080
-   INFO initial sync target sync_iteration=2 target=SyncTarget { root: a47d3c2e8b1f9c045e6d2b8a7c9f1e4d3a6b5c8e2f4a7d1e9c2b5a8f3e6d9c2b, lower_bound_ops: 74, upper_bound_ops: 162 }
+   INFO starting sync sync_iteration=1 target=SyncTarget { root: 234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3, lower_bound_ops: 74, upper_bound_ops: 144 } server=127.0.0.1:8080 batch_size=25 target_update_interval=3s
+   INFO ✅ sync completed successfully sync_iteration=1 database_ops=145 root=234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3 sync_interval=5s
+   INFO starting sync sync_iteration=2 target=SyncTarget { root: a47d3c2e8b1f9c045e6d2b8a7c9f1e4d3a6b5c8e2f4a7d1e9c2b5a8f3e6d9c2b, lower_bound_ops: 74, upper_bound_ops: 162 } server=127.0.0.1:8080 batch_size=25 target_update_interval=3s
+   INFO ✅ sync completed successfully sync_iteration=2 database_ops=163 root=a47d3c2e8b1f9c045e6d2b8a7c9f1e4d3a6b5c8e2f4a7d1e9c2b5a8f3e6d9c2b sync_interval=5s
    ...
    ```
 

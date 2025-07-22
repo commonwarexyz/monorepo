@@ -96,7 +96,7 @@ where
 }
 
 /// Perform a single sync by opening the database, syncing, and closing it.
-async fn perform_sync<E>(
+async fn sync<E>(
     context: &E,
     config: &Config,
     sync_iteration: u32,
@@ -109,19 +109,17 @@ where
         + commonware_runtime::Spawner
         + Clone,
 {
-    info!(
-        sync_iteration,
-        server = %config.server,
-        "starting sync to server"
-    );
-
     // Get initial sync target
     let resolver = Resolver::new(context.clone(), config.server);
     let initial_target = resolver.get_sync_target().await?;
     info!(
         sync_iteration,
         target = ?initial_target,
-        "initial sync target"
+        server = %config.server,
+        batch_size = config.batch_size,
+        target = ?initial_target,
+        target_update_interval = ?config.target_update_interval,
+        "starting sync"
     );
 
     // Create database configuration
@@ -162,15 +160,6 @@ where
         update_receiver: Some(update_receiver),
     };
 
-    info!(
-        sync_iteration,
-        batch_size = config.batch_size,
-        lower_bound = sync_config.target.lower_bound_ops,
-        upper_bound = sync_config.target.upper_bound_ops,
-        target_update_interval = ?config.target_update_interval,
-        "sync configuration",
-    );
-
     // Sync to the server's state
     let database = sync::sync(sync_config).await?;
 
@@ -184,7 +173,8 @@ where
         sync_iteration,
         database_ops = database.op_count(),
         root = %got_root,
-        "✅ Sync completed successfully - about to close database"
+        sync_interval = ?config.sync_interval,
+        "✅ sync completed successfully"
     );
 
     debug!(
@@ -197,13 +187,11 @@ where
     // Close the database so it can be reopened on next iteration
     database.close().await?;
 
-    info!(sync_iteration, "database closed; ready for next iteration");
-
     Ok(())
 }
 
 /// Continuously sync the database to the server's state.
-async fn continuous_sync<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+async fn run<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
@@ -216,12 +204,7 @@ where
 
     let mut sync_iteration = 1;
     loop {
-        perform_sync(&context, &config, sync_iteration).await?;
-        info!(
-            sync_iteration,
-            sync_interval = ?config.sync_interval,
-            "sync completed successfully, waiting before next sync"
-        );
+        sync(&context, &config, sync_iteration).await?;
 
         // Wait before next sync
         context.sleep(config.sync_interval).await;
@@ -361,7 +344,7 @@ fn main() {
         );
 
         // Continuously sync to the server's state
-        if let Err(e) = continuous_sync(context.with_label("sync"), config).await {
+        if let Err(e) = run(context.with_label("sync"), config).await {
             error!(error = %e, "❌ continuous sync failed");
             std::process::exit(1);
         }
