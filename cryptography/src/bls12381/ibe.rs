@@ -4,6 +4,49 @@
 //! Identity-Based Encryption (IBE). To achieve CCA-security, this crate
 //! employs the Fujisaki-Okamoto transform.
 //!
+//! # Example
+//!
+//! _It is recommended to use a threshold signature scheme to generate decrypting
+//! signatures in production (where no single party owns the private key)._
+//!
+//! ```rust
+//! use commonware_cryptography::bls12381::{
+//!     ibe::{encrypt, decrypt, Block},
+//!     primitives::{
+//!         ops::{keypair, sign_message},
+//!         variant::MinPk,
+//!     },
+//! };
+//! use rand::rngs::OsRng;
+//!
+//! // Generate keypair
+//! let (master_secret, master_public) = keypair::<_, MinPk>(&mut OsRng);
+//!
+//! // Define a target (e.g., a timestamp or round number)
+//! let target = 12345u64.to_be_bytes();
+//!
+//! // Create a 32-byte message
+//! let message_bytes = b"This is a secret message 32bytes";
+//! let message = Block::new(*message_bytes);
+//!
+//! // Encrypt the message for the target
+//! let ciphertext = encrypt::<_, MinPk>(
+//!     &mut OsRng,
+//!     master_public,
+//!     (None, &target),
+//!     &message,
+//! );
+//!
+//! // Later, when someone has a signature over the target...
+//! let signature = sign_message::<MinPk>(&master_secret, None, &target);
+//!
+//! // They can decrypt the message
+//! let decrypted = decrypt::<MinPk>(&signature, &ciphertext)
+//!     .expect("Decryption should succeed with valid signature");
+//!
+//! assert_eq!(message.as_ref(), decrypted.as_ref());
+//! ```
+//!
 //! # Acknowledgements
 //!
 //! The following resources were used as references when implementing this crate:
