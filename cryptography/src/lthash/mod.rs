@@ -18,29 +18,8 @@
 //! # Security
 //!
 //! [LtHash]'s state consists of 1024 16-bit unsigned integers (2048 bytes), as recommended in
-//! "Securing Update Propagation with Homomorphic Hashing". This provides at least 200 bits of
-//! security, following the rationale:
-//!
-//! 1. **Collision Resistance**: With a 16384-bit state space, finding two different
-//!    inputs that produce the same LtHash state requires approximately 2^8192
-//!    operations (birthday paradox), which is computationally infeasible.
-//!     * <https://cseweb.ucsd.edu/~daniele/papers/IncHash.html>: A new paradigm for collision-free hashing: Incrementality at reduced cost
-//!
-//! 2. **Preimage Resistance**: The large state space makes it infeasible to find
-//!    an input that produces a specific target hash state.
-//!    * <https://cseweb.ucsd.edu/~mihir/papers/inc1.pdf>: Incremental Cryptography: The Case of Hashing and Signing
-//!
-//! 3. **Homomorphic Security**: The additive homomorphic property relies on the
-//!    difficulty of solving the subset sum problem in a large finite group. With
-//!    16384 bits, even if an attacker knows the final hash and some inputs, finding
-//!    the remaining inputs is computationally intractable.
-//!    * <https://dl.acm.org/doi/10.1145/237814.237838>: Generating hard instances of lattice problems
-//!    * <https://cseweb.ucsd.edu/~daniele/papers/Cyclic.pdf>: Generalized compact knapsacks, cyclic lattices, and efficient one-way functions
-//!
-//! 4. **Protection Against Wagner's Generalized Birthday Attack**: For homomorphic
-//!    hash functions, Wagner's k-tree algorithm could find collisions in O(2^(n/(1+lg k)))
-//!    time. With n=16384, even for large k, this remains infeasible.
-//!    * <https://www.iacr.org/archive/crypto2002/24420288/24420288.pdf>: A Generalized Birthday Problem
+//! "Securing Update Propagation with Homomorphic Hashing". This provides (by their estimates) at
+//! least 200 bits of security.
 //!
 //! # Warning
 //!
@@ -92,6 +71,9 @@
 //! * <https://engineering.fb.com/2019/03/01/security/homomorphic-hashing/>: Open-sourcing homomorphic hashing to secure update propagation
 //! * <https://github.com/facebook/folly/blob/main/folly/crypto/LtHash.cpp>: An open-source C++ library developed and used at Facebook.
 //! * <https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0215-accounts-lattice-hash.md>: Homomorphic Hashing of Account State
+
+use bytes::{Buf, BufMut};
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 
 use crate::{
     blake3::{Blake3, CoreBlake3, Digest},
@@ -154,8 +136,8 @@ impl LtHash {
         }
     }
 
-    /// Finalize the hash and return the compressed result.
-    pub fn finalize(&self) -> Digest {
+    /// Return the [Digest] of the current state.
+    pub fn checksum(&self) -> Digest {
         let mut hasher = Blake3::new();
 
         // Convert u16 array to bytes in little-endian order
@@ -202,6 +184,30 @@ impl Default for LtHash {
     }
 }
 
+impl Write for LtHash {
+    fn write(&self, buf: &mut impl BufMut) {
+        for &val in &self.state {
+            val.write(buf);
+        }
+    }
+}
+
+impl Read for LtHash {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let mut state = [0u16; LTHASH_ELEMENTS];
+        for val in state.iter_mut() {
+            *val = u16::read(buf)?;
+        }
+        Ok(Self { state })
+    }
+}
+
+impl FixedSize for LtHash {
+    const SIZE: usize = LTHASH_SIZE;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,12 +232,12 @@ mod tests {
         let mut lthash1 = LtHash::new();
         lthash1.add(b"hello");
         lthash1.add(b"world");
-        let hash1 = lthash1.finalize();
+        let hash1 = lthash1.checksum();
 
         let mut lthash2 = LtHash::new();
         lthash2.add(b"world");
         lthash2.add(b"hello");
-        let hash2 = lthash2.finalize();
+        let hash2 = lthash2.checksum();
 
         assert_eq!(hash1, hash2);
     }
@@ -243,7 +249,7 @@ mod tests {
         lthash1.add(b"a");
         lthash1.add(b"b");
         lthash1.add(b"c");
-        let hash1 = lthash1.finalize();
+        let hash1 = lthash1.checksum();
 
         let mut lthash2 = LtHash::new();
         let mut temp = LtHash::new();
@@ -251,7 +257,7 @@ mod tests {
         temp.add(b"c");
         lthash2.add(b"a");
         lthash2.combine(&temp);
-        let hash2 = lthash2.finalize();
+        let hash2 = lthash2.checksum();
 
         assert_eq!(hash1, hash2);
     }
@@ -261,13 +267,13 @@ mod tests {
         // Test that (a + b) - b = a
         let mut lthash1 = LtHash::new();
         lthash1.add(b"hello");
-        let hash1 = lthash1.finalize();
+        let hash1 = lthash1.checksum();
 
         let mut lthash2 = LtHash::new();
         lthash2.add(b"hello");
         lthash2.add(b"world");
         lthash2.subtract(b"world");
-        let hash2 = lthash2.finalize();
+        let hash2 = lthash2.checksum();
 
         assert_eq!(hash1, hash2);
     }
@@ -275,7 +281,7 @@ mod tests {
     #[test]
     fn test_empty() {
         let lthash = LtHash::new();
-        let empty_hash = lthash.finalize();
+        let empty_hash = lthash.checksum();
 
         // Empty state should produce the hash of all zero u16s in little-endian
         let mut hasher = Blake3::new();
@@ -301,11 +307,10 @@ mod tests {
     fn test_deterministic() {
         let mut lthash = LtHash::new();
         lthash.add(b"test");
-        let _ = lthash.finalize();
 
         let mut lthash2 = LtHash::new();
         lthash2.add(b"test");
-        assert_eq!(lthash.finalize(), lthash2.finalize());
+        assert_eq!(lthash.checksum(), lthash2.checksum());
     }
 
     #[test]
@@ -313,7 +318,7 @@ mod tests {
         let mut lthash = LtHash::new();
         let large_data = vec![0xAB; 10000];
         lthash.add(&large_data);
-        lthash.finalize();
+        lthash.checksum();
     }
 
     #[test]
@@ -322,16 +327,29 @@ mod tests {
         for i in 0..100u32 {
             lthash1.add(&i.to_le_bytes());
         }
-        let hash1 = lthash1.finalize();
+        let hash1 = lthash1.checksum();
 
         // Add in reverse order
         let mut lthash2 = LtHash::new();
         for i in (0..100u32).rev() {
             lthash2.add(&i.to_le_bytes());
         }
-        let hash2 = lthash2.finalize();
+        let hash2 = lthash2.checksum();
 
         // Should be equal due to commutativity
         assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_codec() {
+        let mut lthash = LtHash::new();
+        lthash.add(b"hello");
+        let hash = lthash.checksum();
+
+        let mut buf = Vec::new();
+        lthash.write(&mut buf);
+        let lthash2 = LtHash::read_cfg(&mut &buf[..], &()).unwrap();
+        let hash2 = lthash2.checksum();
+        assert_eq!(hash, hash2);
     }
 }

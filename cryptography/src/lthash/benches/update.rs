@@ -17,7 +17,7 @@ fn benchmark_update(c: &mut Criterion) {
             },
             |mut lthash| {
                 lthash.add(update_data);
-                lthash.finalize()
+                lthash.checksum()
             },
             BatchSize::SmallInput,
         );
@@ -31,7 +31,7 @@ fn benchmark_update(c: &mut Criterion) {
                 lthash.add(data);
             }
             lthash.add(update_data);
-            lthash.finalize()
+            lthash.checksum()
         });
     });
 }

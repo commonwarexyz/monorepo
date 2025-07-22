@@ -1,8 +1,8 @@
 use criterion::criterion_main;
 
 mod add;
+mod checksum;
 mod combine;
-mod finalize;
 mod subtract;
 mod update;
 
@@ -10,6 +10,6 @@ criterion_main!(
     add::benches,
     subtract::benches,
     combine::benches,
-    finalize::benches,
+    checksum::benches,
     update::benches
 );
