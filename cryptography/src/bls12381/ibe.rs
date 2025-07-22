@@ -129,7 +129,7 @@ mod hash {
     pub fn h2(gt: &GT) -> Block {
         let mut hasher = Sha256::new();
         hasher.update(b"h2");
-        hasher.update(&gt.to_bytes());
+        hasher.update(&gt.as_slice());
         hasher.finalize().into()
     }
 

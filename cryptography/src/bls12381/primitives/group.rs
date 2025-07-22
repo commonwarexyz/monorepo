@@ -161,8 +161,12 @@ pub const G2_MESSAGE: DST = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 ///
 /// This is an element in the extension field `F_p^12` and is
 /// produced as the result of a pairing operation.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Copy)]
+#[repr(transparent)]
 pub struct GT(blst_fp12);
+
+/// The size in bytes of an encoded GT element.
+pub const GT_ELEMENT_BYTE_LENGTH: usize = 576;
 
 impl GT {
     /// Create GT from blst_fp12.
@@ -170,17 +174,16 @@ impl GT {
         GT(fp12)
     }
 
-    /// Convert to bytes for serialization.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        // GT elements in BLS12-381 are 576 bytes (48 * 12)
-        let mut bytes = vec![0u8; 576];
+    /// Converts the GT element to its byte representation.
+    pub fn as_slice(&self) -> [u8; GT_ELEMENT_BYTE_LENGTH] {
+        let mut slice = [0u8; GT_ELEMENT_BYTE_LENGTH];
         unsafe {
-            // This is a placeholder - we need the actual blst function to serialize fp12
-            // For now, we'll use a simple representation
-            let ptr = &self.0 as *const _ as *const u8;
-            std::ptr::copy_nonoverlapping(ptr, bytes.as_mut_ptr(), 576);
+            // GT (Fp12) consists of 12 field elements, each 48 bytes
+            // We need to serialize it properly
+            let fp12_ptr = &self.0 as *const blst_fp12 as *const u8;
+            std::ptr::copy_nonoverlapping(fp12_ptr, slice.as_mut_ptr(), GT_ELEMENT_BYTE_LENGTH);
         }
-        bytes
+        slice
     }
 }
 
@@ -196,21 +199,18 @@ impl Scalar {
         // Generate a random 64 byte buffer
         let mut ikm = [0u8; 64];
         rng.fill_bytes(&mut ikm);
-        let result = Self::from_ikm(&ikm);
-        // Zeroize the ikm buffer
-        ikm.zeroize();
-        result
-    }
 
-    /// Generates a scalar from input keying material (IKM).
-    pub fn from_ikm(ikm: &[u8; 64]) -> Self {
-        // Generate a scalar from the IKM buffer
+        // Generate a scalar from the randomly populated buffer
         let mut ret = blst_fr::default();
         unsafe {
             let mut sc = blst_scalar::default();
             blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
             blst_fr_from_scalar(&mut ret, &sc);
         }
+
+        // Zeroize the ikm buffer
+        ikm.zeroize();
+
         Self(ret)
     }
 
@@ -220,23 +220,10 @@ impl Scalar {
     /// by performing modular reduction modulo the BLS12-381 scalar field order.
     /// Unlike direct conversion methods, this ensures the result is always valid
     /// even if the input represents a number larger than the field order.
-    ///
-    /// # Arguments
-    /// * `bytes` - Big-endian bytes to convert
-    ///
-    /// # Returns
-    /// * `Option<Self>` - The scalar if successful, None if the result is zero
-    ///
-    /// # Example
-    /// ```ignore
-    /// let hash = sha256::hash(b"some data");
-    /// let scalar = Scalar::from_be_bytes(&hash).expect("non-zero scalar");
-    /// ```
     pub fn from_be_bytes(bytes: &[u8]) -> Option<Self> {
         let mut ret = blst_fr::default();
         unsafe {
             let mut sc = blst_scalar::default();
-            // blst_scalar_from_be_bytes performs modular reduction
             let valid = blst_scalar_from_be_bytes(&mut sc, bytes.as_ptr(), bytes.len());
             if !valid {
                 return None;
