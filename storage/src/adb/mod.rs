@@ -13,6 +13,7 @@
 use thiserror::Error;
 
 pub mod any;
+pub mod append;
 pub mod current;
 pub mod operation;
 

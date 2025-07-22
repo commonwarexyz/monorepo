@@ -8,7 +8,7 @@ use crate::{
             },
             SyncConfig,
         },
-        operation::Operation,
+        operation::Fixed,
     },
     journal::fixed::{Config as JConfig, Journal},
     mmr::{self, iterator::leaf_num_to_pos},
@@ -146,7 +146,7 @@ where
     /// Next step is to fetch and verify operations.
     FetchData {
         config: Config<E, K, V, H, T, R>,
-        log: Journal<E, Operation<K, V>>,
+        log: Journal<E, Fixed<K, V>>,
         /// Extracted pinned nodes from first batch proof
         pinned_nodes: Option<Vec<H::Digest>>,
         metrics: Metrics<E>,
@@ -154,9 +154,9 @@ where
     /// Next step is to apply fetched operations to the log.
     ApplyData {
         config: Config<E, K, V, H, T, R>,
-        log: Journal<E, Operation<K, V>>,
+        log: Journal<E, Fixed<K, V>>,
         pinned_nodes: Option<Vec<H::Digest>>,
-        batch_ops: Vec<Operation<K, V>>,
+        batch_ops: Vec<Fixed<K, V>>,
         metrics: Metrics<E>,
     },
     /// Sync completed. Database is fully constructed.
@@ -184,7 +184,7 @@ where
 
         // Initialize the operations journal.
         // It may have data in the target range.
-        let log = Journal::<E, Operation<K, V>>::init_sync(
+        let log = Journal::<E, Fixed<K, V>>::init_sync(
             config.context.clone().with_label("log"),
             JConfig {
                 partition: config.db_config.log_journal_partition.clone(),
@@ -327,7 +327,7 @@ where
                 new_bounds = ?new_target,
                 "log is stale, reinitializing"
             );
-            Journal::<E, Operation<K, V>>::init_sync(
+            Journal::<E, Fixed<K, V>>::init_sync(
                 config.context.clone().with_label("log"),
                 JConfig {
                     partition: config.db_config.log_journal_partition.clone(),
@@ -714,13 +714,13 @@ pub(crate) mod tests {
             let mut deleted_keys = HashSet::new();
             for op in &target_db_ops {
                 match op {
-                    Operation::Update(key, _) => {
+                    Fixed::Update(key, _) => {
                         if let Some((value, loc)) = target_db.get_with_loc(key).await.unwrap() {
                             expected_kvs.insert(*key, (value, loc));
                             deleted_keys.remove(key);
                         }
                     }
-                    Operation::Deleted(key) => {
+                    Fixed::Deleted(key) => {
                         expected_kvs.remove(key);
                         deleted_keys.insert(*key);
                     }
@@ -775,7 +775,7 @@ pub(crate) mod tests {
             for _ in 0..expected_kvs.len() {
                 let key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                new_ops.push(Operation::Update(key, value));
+                new_ops.push(Fixed::Update(key, value));
                 new_kvs.insert(key, value);
             }
             apply_ops(&mut got_db, new_ops.clone()).await;

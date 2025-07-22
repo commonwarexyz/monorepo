@@ -7,7 +7,7 @@
 use crate::{
     adb::{
         any::{Any, Config as AConfig, UpdateResult},
-        operation::Operation,
+        operation::Fixed,
         Error,
     },
     index::Index,
@@ -336,7 +336,7 @@ impl<
         }
 
         self.any
-            .apply_op(Operation::Commit(self.any.inactivity_floor_loc))
+            .apply_op(Fixed::Commit(self.any.inactivity_floor_loc))
             .await?;
         self.status.append(false);
 
@@ -430,7 +430,7 @@ impl<
         hasher: &mut H,
         start_loc: u64,
         max_ops: u64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>, Vec<[u8; N]>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Fixed<K, V>>, Vec<[u8; N]>), Error> {
         assert!(
             !self.status.is_dirty(),
             "must process updates before computing proofs"
@@ -486,7 +486,7 @@ impl<
         hasher: &mut Standard<H>,
         proof: &Proof<H::Digest>,
         start_loc: u64,
-        ops: &[Operation<K, V>],
+        ops: &[Fixed<K, V>],
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
@@ -618,7 +618,7 @@ impl<
         let num = info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
         let mut verifier =
             GraftingVerifier::<H>::new(Self::grafting_height(), num, vec![&info.chunk]);
-        let element = Operation::Update(info.key.clone(), info.value.clone()).encode();
+        let element = Fixed::Update(info.key.clone(), info.value.clone()).encode();
 
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
             return proof.verify_element_inclusion(&mut verifier, &element, pos, root);
@@ -677,7 +677,7 @@ impl<
         &self,
         hasher: &mut H,
         loc: u64,
-    ) -> Result<(Proof<H::Digest>, Operation<K, V>, u64, [u8; N]), Error> {
+    ) -> Result<(Proof<H::Digest>, Fixed<K, V>, u64, [u8; N]), Error> {
         let op = self.any.log.read(loc).await?;
 
         let pos = leaf_num_to_pos(loc);
