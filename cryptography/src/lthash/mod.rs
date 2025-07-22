@@ -101,7 +101,7 @@ impl LtHash {
         }
     }
 
-    /// Add data to the hash.
+    /// Add data.
     ///
     /// The order of additions doesn't matter. Each element is expanded to 1024 16-bit
     /// integers and added component-wise with modular arithmetic (mod 2^16).
@@ -115,7 +115,7 @@ impl LtHash {
         }
     }
 
-    /// Subtract data from the hash.
+    /// Subtract data.
     ///
     /// This allows removing previously added data from the hash state. Uses 16-bit
     /// modular subtraction.
@@ -129,7 +129,7 @@ impl LtHash {
         }
     }
 
-    /// Combine two LtHash states by addition.
+    /// Combine two [LtHash] states by addition.
     pub fn combine(&mut self, other: &Self) {
         for (i, val) in other.state.into_iter().enumerate() {
             self.state[i] = self.state[i].wrapping_add(val);
@@ -148,17 +148,17 @@ impl LtHash {
         hasher.finalize()
     }
 
-    /// Reset the hash to the initial zero state.
+    /// Reset the [LtHash] to the initial zero state.
     pub fn reset(&mut self) {
         self.state = [0u16; LTHASH_ELEMENTS];
     }
 
-    /// Check if the hash is in the zero state.
+    /// Check if the [LtHash] is in the zero state.
     pub fn is_zero(&self) -> bool {
         self.state.iter().all(|&val| val == 0)
     }
 
-    /// Expand input data to an array of u16s using Blake3 as an XOF.
+    /// Expand input data to an array of u16s using [Blake3] as an XOF.
     fn expand_to_state(data: &[u8]) -> [u16; LTHASH_ELEMENTS] {
         let mut result = [0u16; LTHASH_ELEMENTS];
         let mut bytes = [0u8; LTHASH_SIZE];
