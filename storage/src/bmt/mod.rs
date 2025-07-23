@@ -193,23 +193,23 @@ impl<H: Hasher> Tree<H> {
         Ok(Proof { siblings })
     }
 
-    /// Generates a range proof for a contiguous set of leaves starting at `start_position`
+    /// Generates a Merkle range proof for a contiguous set of leaves starting at `position`
     /// with `count` elements.
     ///
     /// The proof contains the minimal set of sibling digests needed to reconstruct
     /// the root for all elements in the range.
-    pub fn range_proof(&self, start_position: u32, count: u32) -> Result<RangeProof<H>, Error> {
+    pub fn range_proof(&self, position: u32, count: u32) -> Result<RangeProof<H>, Error> {
         // Ensure the range is within bounds
         if self.empty || count == 0 {
             return Err(Error::NoLeaves);
         }
 
         let leaf_count = self.levels.first().unwrap().len() as u32;
-        if start_position >= leaf_count {
-            return Err(Error::InvalidPosition(start_position));
+        if position >= leaf_count {
+            return Err(Error::InvalidPosition(position));
         }
 
-        let end_position = start_position.saturating_add(count).saturating_sub(1);
+        let end_position = position.saturating_add(count).saturating_sub(1);
         if end_position >= leaf_count {
             return Err(Error::InvalidPosition(end_position));
         }
@@ -226,7 +226,7 @@ impl<H: Hasher> Tree<H> {
             let mut added_indices = std::collections::HashSet::new();
 
             // Calculate the range of indices at this level
-            let level_start = (start_position as usize) >> level_idx;
+            let level_start = (position as usize) >> level_idx;
             let level_end = (end_position as usize) >> level_idx;
 
             // For each position in our range at this level
@@ -257,7 +257,9 @@ impl<H: Hasher> Tree<H> {
             siblings_by_level.push(level_siblings);
         }
 
-        Ok(RangeProof { siblings_by_level })
+        Ok(RangeProof {
+            siblings: siblings_by_level,
+        })
     }
 }
 
@@ -344,9 +346,10 @@ impl<H: Hasher> Proof<H> {
 /// A Merkle range proof for a contiguous set of leaves in a Binary Merkle Tree.
 #[derive(Clone, Debug, Eq)]
 pub struct RangeProof<H: Hasher> {
-    /// The sibling hashes needed to prove all elements in the range.
+    /// The sibling digests needed to prove all elements in the range.
+    ///
     /// Organized by level, from leaves to root.
-    pub siblings_by_level: Vec<Vec<H::Digest>>,
+    pub siblings: Vec<Vec<H::Digest>>,
 }
 
 impl<H: Hasher> PartialEq for RangeProof<H>
@@ -354,7 +357,7 @@ where
     H::Digest: PartialEq,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.siblings_by_level == other.siblings_by_level
+        self.siblings == other.siblings
     }
 }
 
@@ -379,14 +382,14 @@ impl<H: Hasher> RangeProof<H> {
         // Compute position-hashed leaves
         let mut nodes: Vec<(usize, H::Digest)> = Vec::new();
         for (i, leaf) in leaves.iter().enumerate() {
-            let position = position + i as u32;
-            hasher.update(&position.to_be_bytes());
+            let leaf_position = position + i as u32;
+            hasher.update(&leaf_position.to_be_bytes());
             hasher.update(leaf);
-            nodes.push((position as usize, hasher.finalize()));
+            nodes.push((leaf_position as usize, hasher.finalize()));
         }
 
         // Process each level
-        for level_siblings in self.siblings_by_level.iter() {
+        for level_siblings in self.siblings.iter() {
             let mut next_nodes = Vec::new();
             let mut sibling_iter = level_siblings.iter();
 
@@ -402,7 +405,6 @@ impl<H: Hasher> RangeProof<H> {
                 let expected_sibling_pos = if pos % 2 == 0 { pos + 1 } else { usize::MAX };
                 let has_paired_sibling =
                     i + 1 < nodes.len() && nodes[i + 1].0 == expected_sibling_pos;
-
                 if has_paired_sibling {
                     // Both children are in our range
                     hasher.update(node);
@@ -412,7 +414,6 @@ impl<H: Hasher> RangeProof<H> {
                 } else {
                     // Need sibling from proof
                     let is_left = pos % 2 == 0;
-
                     if let Some(sibling) = sibling_iter.next() {
                         if is_left {
                             hasher.update(node);
@@ -423,7 +424,7 @@ impl<H: Hasher> RangeProof<H> {
                         }
                         next_nodes.push((parent_pos, hasher.finalize()));
                     } else {
-                        // No sibling in proof - must be a duplicate case
+                        // No sibling in proof, must be a duplicate case
                         hasher.update(node);
                         hasher.update(node);
                         next_nodes.push((parent_pos, hasher.finalize()));
@@ -444,7 +445,6 @@ impl<H: Hasher> RangeProof<H> {
         if nodes.len() != 1 {
             return Err(Error::UnalignedProof);
         }
-
         if nodes[0].1 == *root {
             Ok(())
         } else {
@@ -458,7 +458,7 @@ impl<H: Hasher> RangeProof<H> {
 
 impl<H: Hasher> Write for RangeProof<H> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.siblings_by_level.write(writer);
+        self.siblings.write(writer);
     }
 }
 
@@ -467,15 +467,15 @@ impl<H: Hasher> Read for RangeProof<H> {
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let levels: RangeCfg = (..=MAX_LEVELS).into();
-        let siblings_by_level = Vec::<Vec<H::Digest>>::read_cfg(reader, &(levels, (levels, ())))?;
+        let siblings = Vec::<Vec<H::Digest>>::read_cfg(reader, &(levels, (levels, ())))?;
 
-        Ok(Self { siblings_by_level })
+        Ok(Self { siblings })
     }
 }
 
 impl<H: Hasher> EncodeSize for RangeProof<H> {
     fn encode_size(&self) -> usize {
-        self.siblings_by_level.encode_size()
+        self.siblings.encode_size()
     }
 }
 
@@ -1067,7 +1067,7 @@ mod tests {
         assert!(range_proof.verify(&mut hasher, 0, &digests, &root).is_ok());
 
         // For full tree, we shouldn't need any siblings
-        for level in &range_proof.siblings_by_level {
+        for level in &range_proof.siblings {
             assert!(level.is_empty());
         }
     }
@@ -1155,10 +1155,8 @@ mod tests {
 
         // Test with tampered proof
         let mut tampered_proof = range_proof.clone();
-        if !tampered_proof.siblings_by_level.is_empty()
-            && !tampered_proof.siblings_by_level[0].is_empty()
-        {
-            tampered_proof.siblings_by_level[0][0] = hash(b"tampered");
+        if !tampered_proof.siblings.is_empty() && !tampered_proof.siblings[0].is_empty() {
+            tampered_proof.siblings[0][0] = hash(b"tampered");
             assert!(tampered_proof
                 .verify(&mut hasher, 2, range_leaves, &root)
                 .is_err());
