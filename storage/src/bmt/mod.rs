@@ -363,14 +363,8 @@ impl<H: Hasher> RangeProof<H> {
     /// Verifies that a given range of `leaves` starting at `position` are included
     /// in a Binary Merkle Tree with `root` using the provided `hasher`.
     ///
-    /// The proof contains the minimal set of sibling digests needed to reconstruct
+    /// The proof contains the set of sibling digests needed to reconstruct
     /// the root for all elements in the range.
-    ///
-    /// # Security
-    /// - Validates that leaves are non-empty and position doesn't overflow
-    /// - Ensures all siblings in the proof are consumed exactly once
-    /// - Rejects proofs with extra siblings or missing siblings
-    /// - Position is included in leaf hash to prevent positional attacks
     pub fn verify(
         &self,
         hasher: &mut H,
