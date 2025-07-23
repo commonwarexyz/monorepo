@@ -95,3 +95,10 @@ path = "fuzz_targets/blake3_hasher.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "lthash_operations"
+path = "fuzz_targets/lthash_operations.rs"
+test = false
+doc = false
+bench = false
