@@ -152,18 +152,6 @@ pub struct Chunk<H: Hasher> {
     pub proof: bmt::Proof<H>,
 }
 
-/// A minimal proof containing only data shards for an entire encoded object.
-/// This is more efficient than individual chunks when transmitting complete blocks.
-/// Includes a BMT range proof to prove the data shards are part of the commitment.
-#[derive(Clone)]
-pub struct MinimalProof<H: Hasher> {
-    /// Only the data shards (first k shards).
-    pub data_shards: Vec<Vec<u8>>,
-
-    /// BMT range proof for indices 0..k (proving all data shards).
-    pub range_proof: bmt::RangeProof<H>,
-}
-
 impl<H: Hasher> Chunk<H> {
     /// Create a new [Chunk] from the given shard, index, and proof.
     pub fn new(shard: Vec<u8>, index: u16, proof: bmt::Proof<H>) -> Self {
@@ -218,13 +206,22 @@ impl<H: Hasher> EncodeSize for Chunk<H> {
     }
 }
 
-impl<H: Hasher> MinimalProof<H> {
+/// A minimal proof containing only data shards for an entire encoded object.
+/// This is more efficient than individual chunks when transmitting complete blocks.
+/// Includes a BMT range proof to prove the data shards are part of the commitment.
+#[derive(Clone)]
+pub struct Data<H: Hasher> {
+    /// Only the data shards (first k shards).
+    pub shards: Vec<Vec<u8>>,
+
+    /// BMT range proof for indices 0..k (proving all data shards).
+    pub proof: bmt::RangeProof<H>,
+}
+
+impl<H: Hasher> Data<H> {
     /// Create a new minimal proof from data shards and range proof.
-    pub fn new(data_shards: Vec<Vec<u8>>, range_proof: bmt::RangeProof<H>) -> Self {
-        Self {
-            data_shards,
-            range_proof,
-        }
+    pub fn new(shards: Vec<Vec<u8>>, proof: bmt::RangeProof<H>) -> Self {
+        Self { shards, proof }
     }
 
     /// Verify the minimal proof against a known root.
@@ -232,20 +229,20 @@ impl<H: Hasher> MinimalProof<H> {
     pub fn verify(&self, min: u16, root: &H::Digest) -> Result<(), Error> {
         let k = min as usize;
 
-        if self.data_shards.len() != k {
-            return Err(Error::InvalidDataLength(self.data_shards.len()));
+        if self.shards.len() != k {
+            return Err(Error::InvalidDataLength(self.shards.len()));
         }
 
         // Hash the data shards
         let mut hasher = H::new();
         let mut shard_hashes = Vec::with_capacity(k);
-        for shard in &self.data_shards {
+        for shard in &self.shards {
             hasher.update(shard);
             shard_hashes.push(hasher.finalize());
         }
 
         // Verify the range proof for indices 0..k
-        self.range_proof
+        self.proof
             .verify(&mut hasher, 0, &shard_hashes, root)
             .map_err(|_| Error::InvalidProof)?;
 
@@ -253,19 +250,20 @@ impl<H: Hasher> MinimalProof<H> {
     }
 
     /// Extract the original data from the minimal proof.
-    pub fn extract_data(&self) -> Vec<u8> {
-        extract_data(self.data_shards.clone(), self.data_shards.len())
+    pub fn extract(self) -> Vec<u8> {
+        let k = self.shards.len();
+        extract_data(self.shards, k)
     }
 }
 
-impl<H: Hasher> Write for MinimalProof<H> {
+impl<H: Hasher> Write for Data<H> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.data_shards.write(writer);
-        self.range_proof.write(writer);
+        self.shards.write(writer);
+        self.proof.write(writer);
     }
 }
 
-impl<H: Hasher> Read for MinimalProof<H> {
+impl<H: Hasher> Read for Data<H> {
     /// Configuration: (min shards, max shard size)
     type Cfg = (u16, usize);
 
@@ -277,20 +275,17 @@ impl<H: Hasher> Read for MinimalProof<H> {
         // Read the vector of data shards with proper configuration
         let outer_range: RangeCfg = (*min as usize..=*min as usize).into();
         let inner_range: RangeCfg = (..=*max_shard_size).into();
-        let data_shards = Vec::<Vec<u8>>::read_cfg(reader, &(outer_range, (inner_range, ())))?;
+        let shards = Vec::<Vec<u8>>::read_cfg(reader, &(outer_range, (inner_range, ())))?;
 
-        let range_proof = bmt::RangeProof::<H>::read(reader)?;
+        let proof = bmt::RangeProof::<H>::read(reader)?;
 
-        Ok(Self {
-            data_shards,
-            range_proof,
-        })
+        Ok(Self { shards, proof })
     }
 }
 
-impl<H: Hasher> EncodeSize for MinimalProof<H> {
+impl<H: Hasher> EncodeSize for Data<H> {
     fn encode_size(&self) -> usize {
-        self.data_shards.encode_size() + self.range_proof.encode_size()
+        self.shards.encode_size() + self.proof.encode_size()
     }
 }
 
@@ -422,11 +417,11 @@ pub fn encode<H: Hasher>(
 /// - `root`: The root of the [bmt].
 /// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
 /// - `minimal_proof`: A minimal proof containing data shards and range proof.
-pub fn encode_with_minimal_proof<H: Hasher>(
+pub fn prove<H: Hasher>(
     total: u16,
     min: u16,
     data: Vec<u8>,
-) -> Result<(H::Digest, Vec<Chunk<H>>, MinimalProof<H>), Error> {
+) -> Result<(H::Digest, Data<H>), Error> {
     // Validate parameters
     assert!(total > min);
     assert!(min > 0);
@@ -474,19 +469,12 @@ pub fn encode_with_minimal_proof<H: Hasher>(
     let root = tree.root();
 
     // Generate range proof for minimal proof
-    let range_proof = tree
+    let proof = tree
         .range_proof(0, min as u32)
         .map_err(|_| Error::InvalidProof)?;
-    let minimal_proof = MinimalProof::new(data_shards, range_proof);
+    let proof = Data::new(data_shards, proof);
 
-    // Generate chunks
-    let mut chunks = Vec::with_capacity(n);
-    for (i, shard) in shards.into_iter().enumerate() {
-        let proof = tree.proof(i as u32).map_err(|_| Error::InvalidProof)?;
-        chunks.push(Chunk::new(shard, i as u16, proof));
-    }
-
-    Ok((root, chunks, minimal_proof))
+    Ok((root, proof))
 }
 
 /// Decode data from a set of [Chunk]s.
@@ -607,6 +595,7 @@ pub fn decode<H: Hasher>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::{Decode, Encode};
     use commonware_cryptography::Sha256;
 
     #[test]
@@ -923,14 +912,13 @@ mod tests {
         let min = 4u16;
 
         // Encode with minimal proof
-        let (root, _chunks, minimal_proof) =
-            encode_with_minimal_proof::<Sha256>(total, min, data.to_vec()).unwrap();
+        let (root, proof) = prove::<Sha256>(total, min, data.to_vec()).unwrap();
 
         // Verify minimal proof
-        minimal_proof.verify(min, &root).unwrap();
+        proof.verify(min, &root).unwrap();
 
         // Extract data from minimal proof
-        let extracted = minimal_proof.extract_data();
+        let extracted = proof.extract();
         assert_eq!(extracted, data);
     }
 
@@ -941,71 +929,35 @@ mod tests {
         let min = 3u16;
 
         // Encode with minimal proof
-        let (_root, _chunks, minimal_proof) =
-            encode_with_minimal_proof::<Sha256>(total, min, data.to_vec()).unwrap();
+        let (_, proof) = prove::<Sha256>(total, min, data.to_vec()).unwrap();
 
         // Try to verify with wrong root
         let mut hasher = Sha256::new();
         hasher.update(b"wrong_root");
         let wrong_root = hasher.finalize();
 
-        let result = minimal_proof.verify(min, &wrong_root);
+        let result = proof.verify(min, &wrong_root);
         assert!(matches!(result, Err(Error::InvalidProof)));
     }
 
     #[test]
     fn test_minimal_proof_serialization() {
-        use commonware_codec::{Decode, Encode};
-
         let data = b"Test serialization of minimal proof";
         let total = 5u16;
         let min = 3u16;
 
         // Encode with minimal proof
-        let (root, _chunks, minimal_proof) =
-            encode_with_minimal_proof::<Sha256>(total, min, data.to_vec()).unwrap();
+        let (root, proof) = prove::<Sha256>(total, min, data.to_vec()).unwrap();
 
         // Serialize
-        let serialized = minimal_proof.encode();
+        let serialized = proof.encode();
 
         // Deserialize
-        let max_shard_size = minimal_proof.data_shards[0].len();
-        let deserialized =
-            MinimalProof::<Sha256>::decode_cfg(serialized, &(min, max_shard_size)).unwrap();
+        let max_shard_size = proof.shards[0].len();
+        let deserialized = Data::<Sha256>::decode_cfg(serialized, &(min, max_shard_size)).unwrap();
 
         // Verify deserialized proof
         deserialized.verify(min, &root).unwrap();
-        assert_eq!(deserialized.extract_data(), data);
-    }
-
-    #[test]
-    fn test_minimal_proof_efficiency() {
-        let data = vec![42u8; 10_000]; // 10KB of data
-        let total = 100u16;
-        let min = 30u16;
-
-        // Encode with minimal proof
-        let (_root, chunks, minimal_proof) =
-            encode_with_minimal_proof::<Sha256>(total, min, data.to_vec()).unwrap();
-
-        // Calculate size of sending all chunks
-        let chunks_size: usize = chunks
-            .iter()
-            .take(min as usize)
-            .map(|c| c.encode_size())
-            .sum();
-
-        // Calculate size of minimal proof
-        let minimal_size = minimal_proof.encode_size();
-
-        // Minimal proof should be much smaller (no individual merkle proofs)
-        println!("Chunks size (first {}): {} bytes", min, chunks_size);
-        println!("Minimal proof size: {} bytes", minimal_size);
-        println!(
-            "Compression ratio: {:.2}x",
-            chunks_size as f64 / minimal_size as f64
-        );
-
-        assert!(minimal_size < chunks_size);
+        assert_eq!(deserialized.extract(), data);
     }
 }
