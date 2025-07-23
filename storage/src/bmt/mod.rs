@@ -1147,6 +1147,8 @@ mod tests {
 
         // Test with tampered proof
         let mut tampered_proof = range_proof.clone();
+        assert!(!tampered_proof.siblings.is_empty());
+        assert!(!tampered_proof.siblings[0].is_empty());
         tampered_proof.siblings[0][0] = hash(b"tampered");
         assert!(tampered_proof
             .verify(&mut hasher, 2, range_leaves, &root)
@@ -1262,6 +1264,7 @@ mod tests {
         let range_leaves = &digests[2..4];
 
         // Add extra sibling to a level
+        assert!(!range_proof.siblings.is_empty());
         range_proof.siblings[0].push(hash(b"extra"));
         assert!(range_proof
             .verify(&mut hasher, 2, range_leaves, &root)
@@ -1281,10 +1284,14 @@ mod tests {
         let tree = builder.build();
         let root = tree.root();
 
-        // Get valid range proof
-        let mut range_proof = tree.range_proof(2, 2).unwrap();
+        // Get valid range proof for a single element (which needs siblings)
+        let mut range_proof = tree.range_proof(2, 1).unwrap();
         let mut hasher = Sha256::default();
-        let range_leaves = &digests[2..4];
+        let range_leaves = &digests[2..3];
+
+        // The proof should have siblings at the first level
+        assert!(!range_proof.siblings.is_empty());
+        assert!(!range_proof.siblings[0].is_empty());
 
         // Remove a sibling from a level
         range_proof.siblings[0].pop();
@@ -1335,8 +1342,9 @@ mod tests {
             .verify(&mut hasher, 2, range_leaves, &root)
             .is_err());
 
-        // Remove a level (if possible)
+        // Remove a level
         let mut range_proof = tree.range_proof(2, 2).unwrap();
+        assert!(!range_proof.siblings.is_empty());
         range_proof.siblings.pop();
         assert!(range_proof
             .verify(&mut hasher, 2, range_leaves, &root)
