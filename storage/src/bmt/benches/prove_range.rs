@@ -38,20 +38,19 @@ fn bench_prove_range(c: &mut Criterion) {
                     b.iter_batched(
                         || {
                             // Generate random starting positions for range proofs
-                            let mut positions = Vec::with_capacity(SAMPLE_SIZE);
+                            let mut range_proofs = Vec::with_capacity(SAMPLE_SIZE);
                             for _ in 0..SAMPLE_SIZE {
                                 let start = sampler.gen_range(0..=(n - range_size));
-                                positions.push(start);
+                                range_proofs.push((
+                                    start,
+                                    tree.range_proof(start as u32, range_size as u32).unwrap(),
+                                ));
                             }
-                            positions
+                            range_proofs
                         },
-                        |positions| {
+                        |range_proofs| {
                             let mut hasher = Sha256::new();
-                            for start in positions {
-                                // Generate range proof
-                                let proof =
-                                    tree.range_proof(start as u32, range_size as u32).unwrap();
-
+                            for (start, proof) in range_proofs {
                                 // Verify range proof
                                 let range_leaves = &elements[start..start + range_size];
                                 assert!(proof
