@@ -65,8 +65,8 @@ fn fuzz(input: FuzzInput) {
 
     assert_eq!(chunks.len(), total as usize);
 
-    for chunk in &chunks {
-        assert!(chunk.verify(&root), "failed to verify chunk");
+    for (i, chunk) in chunks.iter().enumerate() {
+        assert!(chunk.verify(i as u16, &root), "failed to verify chunk");
     }
 
     let decoded = match decode::<Sha256>(total, min, &root, chunks.clone()) {
