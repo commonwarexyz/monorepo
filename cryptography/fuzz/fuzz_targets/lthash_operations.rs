@@ -12,7 +12,12 @@ enum Operation {
     Combine,
     Reset,
     Checksum,
-    HomomorphicProperty(Vec<u8>, Vec<u8>),
+    IsZero,
+}
+
+#[derive(Debug, Arbitrary)]
+enum Property {
+    Homomorphic(Vec<u8>, Vec<u8>),
     SubtractionIdentity(Vec<u8>),
     Commutativity(Vec<u8>, Vec<u8>),
     CodecRoundtrip,
@@ -21,6 +26,7 @@ enum Operation {
 #[derive(Debug, Arbitrary)]
 struct FuzzInput {
     operations: Vec<Operation>,
+    properties: Vec<Property>,
 }
 
 fn verify_homomorphic_property(data1: &[u8], data2: &[u8]) {
@@ -71,10 +77,10 @@ fn verify_codec_roundtrip(hash: &LtHash) {
     assert_eq!(hash.checksum(), decoded.checksum());
 }
 
-fn fuzz(input: FuzzInput) {
+fn fuzz_operation(operations: Vec<Operation>) {
     let mut hashes: Vec<LtHash> = vec![LtHash::new()];
 
-    for op in input.operations {
+    for op in operations {
         match op {
             Operation::Add(data) => {
                 if let Some(hash) = hashes.last_mut() {
@@ -107,16 +113,30 @@ fn fuzz(input: FuzzInput) {
                     let _ = hash.checksum();
                 }
             }
-            Operation::HomomorphicProperty(data1, data2) => {
+            Operation::IsZero => {
+                if let Some(hash) = hashes.last() {
+                    let _ = hash.is_zero();
+                }
+            }
+        }
+    }
+}
+
+fn fuzz_properties(properties: Vec<Property>) {
+    let hashes: Vec<LtHash> = vec![LtHash::new()];
+
+    for property in properties {
+        match property {
+            Property::Homomorphic(data1, data2) => {
                 verify_homomorphic_property(&data1, &data2);
             }
-            Operation::SubtractionIdentity(data) => {
+            Property::SubtractionIdentity(data) => {
                 verify_subtraction_identity(&data);
             }
-            Operation::Commutativity(data1, data2) => {
+            Property::Commutativity(data1, data2) => {
                 verify_commutativity(&data1, &data2);
             }
-            Operation::CodecRoundtrip => {
+            Property::CodecRoundtrip => {
                 if let Some(hash) = hashes.last() {
                     verify_codec_roundtrip(hash);
                 }
@@ -126,5 +146,6 @@ fn fuzz(input: FuzzInput) {
 }
 
 fuzz_target!(|input: FuzzInput| {
-    fuzz(input);
+    fuzz_operation(input.operations);
+    fuzz_properties(input.properties);
 });
