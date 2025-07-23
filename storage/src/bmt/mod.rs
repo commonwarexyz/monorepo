@@ -1147,12 +1147,10 @@ mod tests {
 
         // Test with tampered proof
         let mut tampered_proof = range_proof.clone();
-        if !tampered_proof.siblings.is_empty() && !tampered_proof.siblings[0].is_empty() {
-            tampered_proof.siblings[0][0] = hash(b"tampered");
-            assert!(tampered_proof
-                .verify(&mut hasher, 2, range_leaves, &root)
-                .is_err());
-        }
+        tampered_proof.siblings[0][0] = hash(b"tampered");
+        assert!(tampered_proof
+            .verify(&mut hasher, 2, range_leaves, &root)
+            .is_err());
 
         // Test with wrong root
         let wrong_root = hash(b"wrong_root");
@@ -1264,12 +1262,10 @@ mod tests {
         let range_leaves = &digests[2..4];
 
         // Add extra sibling to a level
-        if !range_proof.siblings.is_empty() {
-            range_proof.siblings[0].push(hash(b"extra"));
-            assert!(range_proof
-                .verify(&mut hasher, 2, range_leaves, &root)
-                .is_err());
-        }
+        range_proof.siblings[0].push(hash(b"extra"));
+        assert!(range_proof
+            .verify(&mut hasher, 2, range_leaves, &root)
+            .is_err());
     }
 
     #[test]
@@ -1291,12 +1287,10 @@ mod tests {
         let range_leaves = &digests[2..4];
 
         // Remove a sibling from a level
-        if !range_proof.siblings.is_empty() && !range_proof.siblings[0].is_empty() {
-            range_proof.siblings[0].pop();
-            assert!(range_proof
-                .verify(&mut hasher, 2, range_leaves, &root)
-                .is_err());
-        }
+        range_proof.siblings[0].pop();
+        assert!(range_proof
+            .verify(&mut hasher, 2, range_leaves, &root)
+            .is_err());
     }
 
     #[test]
@@ -1343,12 +1337,10 @@ mod tests {
 
         // Remove a level (if possible)
         let mut range_proof = tree.range_proof(2, 2).unwrap();
-        if !range_proof.siblings.is_empty() {
-            range_proof.siblings.pop();
-            assert!(range_proof
-                .verify(&mut hasher, 2, range_leaves, &root)
-                .is_err());
-        }
+        range_proof.siblings.pop();
+        assert!(range_proof
+            .verify(&mut hasher, 2, range_leaves, &root)
+            .is_err());
     }
 
     #[test]
