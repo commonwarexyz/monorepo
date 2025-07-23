@@ -41,13 +41,17 @@
 //! ```
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Read, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, RangeCfg, Read, ReadRangeExt, Write};
 use commonware_cryptography::Hasher;
 use thiserror::Error;
 
 /// There should never be more than 255 siblings in a proof (would mean the Binary Merkle Tree
 /// has more than 2^255 leaves).
 const MAX_SIBLINGS: usize = u8::MAX as usize;
+
+/// Maximum number of levels in a range proof. Since we have at most 2^255 leaves,
+/// we need at most 255 levels.
+const MAX_LEVELS: usize = u8::MAX as usize;
 
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
 #[derive(Error, Debug)]
@@ -268,14 +272,6 @@ pub struct Proof<H: Hasher> {
     pub siblings: Vec<H::Digest>,
 }
 
-/// A range proof for a contiguous set of leaves in a Binary Merkle Tree.
-#[derive(Clone, Debug, Eq)]
-pub struct RangeProof<H: Hasher> {
-    /// The sibling hashes needed to prove all elements in the range.
-    /// Organized by level, from leaves to root.
-    pub siblings_by_level: Vec<Vec<H::Digest>>,
-}
-
 impl<H: Hasher> PartialEq for Proof<H>
 where
     H::Digest: PartialEq,
@@ -285,12 +281,24 @@ where
     }
 }
 
-impl<H: Hasher> PartialEq for RangeProof<H>
-where
-    H::Digest: PartialEq,
-{
-    fn eq(&self, other: &Self) -> bool {
-        self.siblings_by_level == other.siblings_by_level
+impl<H: Hasher> Write for Proof<H> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.siblings.write(writer);
+    }
+}
+
+impl<H: Hasher> Read for Proof<H> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let siblings = Vec::<H::Digest>::read_range(reader, ..=MAX_SIBLINGS)?;
+        Ok(Self { siblings })
+    }
+}
+
+impl<H: Hasher> EncodeSize for Proof<H> {
+    fn encode_size(&self) -> usize {
+        self.siblings.encode_size()
     }
 }
 
@@ -334,6 +342,23 @@ impl<H: Hasher> Proof<H> {
         } else {
             Err(Error::InvalidProof(computed.to_string(), root.to_string()))
         }
+    }
+}
+
+/// A range proof for a contiguous set of leaves in a Binary Merkle Tree.
+#[derive(Clone, Debug, Eq)]
+pub struct RangeProof<H: Hasher> {
+    /// The sibling hashes needed to prove all elements in the range.
+    /// Organized by level, from leaves to root.
+    pub siblings_by_level: Vec<Vec<H::Digest>>,
+}
+
+impl<H: Hasher> PartialEq for RangeProof<H>
+where
+    H::Digest: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.siblings_by_level == other.siblings_by_level
     }
 }
 
@@ -432,34 +457,9 @@ impl<H: Hasher> RangeProof<H> {
     }
 }
 
-impl<H: Hasher> Write for Proof<H> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.siblings.write(writer);
-    }
-}
-
-impl<H: Hasher> Read for Proof<H> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let siblings = Vec::<H::Digest>::read_range(reader, ..=MAX_SIBLINGS)?;
-        Ok(Self { siblings })
-    }
-}
-
-impl<H: Hasher> EncodeSize for Proof<H> {
-    fn encode_size(&self) -> usize {
-        self.siblings.encode_size()
-    }
-}
-
 impl<H: Hasher> Write for RangeProof<H> {
     fn write(&self, writer: &mut impl BufMut) {
-        // Write the number of levels as u8 (consistent with Read)
-        writer.put_u8(self.siblings_by_level.len() as u8);
-        for level in &self.siblings_by_level {
-            level.write(writer);
-        }
+        self.siblings_by_level.write(writer);
     }
 }
 
@@ -467,15 +467,13 @@ impl<H: Hasher> Read for RangeProof<H> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        // Read the outer vector length (using u8 since MAX_SIBLINGS = u8::MAX)
-        let levels_count = reader.get_u8() as usize;
+        // Configure range limits for nested vectors
+        let outer_range: RangeCfg = (..=MAX_LEVELS).into();
+        let inner_range: RangeCfg = (..=MAX_SIBLINGS).into();
 
-        let mut siblings_by_level = Vec::with_capacity(levels_count);
-        for _ in 0..levels_count {
-            // Read each inner vector with range limit
-            let level_siblings = Vec::<H::Digest>::read_range(reader, ..=MAX_SIBLINGS)?;
-            siblings_by_level.push(level_siblings);
-        }
+        // Read the nested vector with range limits
+        let siblings_by_level =
+            Vec::<Vec<H::Digest>>::read_cfg(reader, &(outer_range, (inner_range, ())))?;
 
         Ok(Self { siblings_by_level })
     }
@@ -483,11 +481,7 @@ impl<H: Hasher> Read for RangeProof<H> {
 
 impl<H: Hasher> EncodeSize for RangeProof<H> {
     fn encode_size(&self) -> usize {
-        1 + self
-            .siblings_by_level
-            .iter()
-            .map(|level| level.encode_size())
-            .sum::<usize>()
+        self.siblings_by_level.encode_size()
     }
 }
 
