@@ -25,6 +25,7 @@ where
 }
 
 /// Network resolver that fetches operations from a remote server.
+#[derive(Clone)]
 pub struct Resolver<E>
 where
     E: commonware_runtime::Network + Clone,

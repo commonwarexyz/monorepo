@@ -131,10 +131,11 @@ where
     // Start target update task
     let target_update_interval = config.target_update_interval;
     let initial_target_clone = initial_target.clone();
+    let resolver_clone = resolver.clone();
     let target_update_handle = context.with_label("target-update").spawn(move |context| {
         target_update_task(
             context,
-            resolver,
+            resolver_clone,
             update_sender,
             target_update_interval,
             initial_target_clone,
@@ -154,7 +155,7 @@ where
         db_config,
         fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
         target: initial_target,
-        resolver: Resolver::new(context.clone(), config.server),
+        resolver,
         hasher: Standard::new(),
         apply_batch_size: 1024,
         update_receiver: Some(update_receiver),
