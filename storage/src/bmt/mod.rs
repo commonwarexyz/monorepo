@@ -384,7 +384,7 @@ impl<H: Hasher> RangeProof<H> {
         }
 
         // Check for integer overflow - critical for preventing attacks
-        if position.saturating_add(leaves.len() as u32) < position {
+        if position.checked_add(leaves.len() as u32).is_none() {
             return Err(Error::InvalidPosition(position));
         }
 
@@ -450,13 +450,11 @@ impl<H: Hasher> RangeProof<H> {
         if nodes.len() != 1 {
             return Err(Error::UnalignedProof);
         }
-        if nodes[0].1 == *root {
+        let computed = nodes[0].1;
+        if computed == *root {
             Ok(())
         } else {
-            Err(Error::InvalidProof(
-                nodes[0].1.to_string(),
-                root.to_string(),
-            ))
+            Err(Error::InvalidProof(computed.to_string(), root.to_string()))
         }
     }
 }
