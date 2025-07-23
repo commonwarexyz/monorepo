@@ -403,11 +403,9 @@ impl<H: Hasher> RangeProof<H> {
                 let parent_pos = pos / 2;
 
                 // Check if next node is the sibling
-                // For this to be true, the next node must be at position+1 if current is even,
-                // or impossible if current is odd (since we process in order)
-                let expected_sibling_pos = if pos % 2 == 0 { pos + 1 } else { usize::MAX };
+                let expected_sibling_pos = if pos % 2 == 0 { Some(pos + 1) } else { None };
                 let has_paired_sibling =
-                    i + 1 < nodes.len() && nodes[i + 1].0 == expected_sibling_pos;
+                    i + 1 < nodes.len() && expected_sibling_pos == Some(nodes[i + 1].0);
                 if has_paired_sibling {
                     // Both children are in our range - no proof sibling needed
                     hasher.update(node);
