@@ -1,9 +1,8 @@
-use super::types::Block;
 use crate::{
     threshold_simplex::types::{Activity, Finalization, Notarization},
-    Reporter,
+    Block, Reporter,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
+use commonware_cryptography::bls12381::primitives::variant::Variant;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -14,56 +13,56 @@ use tracing::error;
 ///
 /// These messages are sent from the consensus engine and other parts of the
 /// system to drive the state of the marshal.
-pub enum Message<V: Variant, D: Digest> {
+pub enum Message<V: Variant, B: Block> {
     /// A request to retrieve a block by its digest.
     Get {
         /// The view in which the block was notarized. This is an optimization
         /// to help locate the block.
         view: Option<u64>,
         /// The digest of the block to retrieve.
-        payload: D,
+        payload: B::Commitment,
         /// A channel to send the retrieved block.
-        response: oneshot::Sender<Block<D>>,
+        response: oneshot::Sender<B>,
     },
     /// A request to broadcast a block to all peers.
     Broadcast {
         /// The block to broadcast.
-        payload: Block<D>,
+        payload: B,
     },
     /// A notification that a block has been verified by the consensus engine.
     Verified {
         /// The view in which the block was verified.
         view: u64,
         /// The verified block.
-        payload: Block<D>,
+        payload: B,
     },
     /// A notarization from the consensus engine.
     Notarization {
         /// The notarization.
-        notarization: Notarization<V, D>,
+        notarization: Notarization<V, B::Commitment>,
     },
     /// A finalization from the consensus engine.
     Finalization {
         /// The finalization.
-        finalization: Finalization<V, D>,
+        finalization: Finalization<V, B::Commitment>,
     },
 }
 
 /// A mailbox for sending messages to the marshal [`Actor`](super::actor::Actor).
 #[derive(Clone)]
-pub struct Mailbox<V: Variant, D: Digest> {
-    sender: mpsc::Sender<Message<V, D>>,
+pub struct Mailbox<V: Variant, B: Block> {
+    sender: mpsc::Sender<Message<V, B>>,
 }
 
-impl<V: Variant, D: Digest> Mailbox<V, D> {
+impl<V: Variant, B: Block> Mailbox<V, B> {
     /// Creates a new mailbox.
-    pub(super) fn new(sender: mpsc::Sender<Message<V, D>>) -> Self {
+    pub(super) fn new(sender: mpsc::Sender<Message<V, B>>) -> Self {
         Self { sender }
     }
 
     /// Get is a best-effort attempt to retrieve a given payload from local
     /// storage. It is not an indication to go fetch the payload from the network.
-    pub async fn get(&mut self, view: Option<u64>, payload: D) -> oneshot::Receiver<Block<D>> {
+    pub async fn get(&mut self, view: Option<u64>, payload: B::Commitment) -> oneshot::Receiver<B> {
         let (response, receiver) = oneshot::channel();
         if self
             .sender
@@ -81,7 +80,7 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
     }
 
     /// Broadcast indicates that a payload should be sent to all peers.
-    pub async fn broadcast(&mut self, payload: Block<D>) {
+    pub async fn broadcast(&mut self, payload: B) {
         if self
             .sender
             .send(Message::Broadcast { payload })
@@ -93,7 +92,7 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
     }
 
     /// Notifies the actor that a block has been verified.
-    pub async fn verified(&mut self, view: u64, payload: Block<D>) {
+    pub async fn verified(&mut self, view: u64, payload: B) {
         if self
             .sender
             .send(Message::Verified { view, payload })
@@ -105,8 +104,8 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Reporter for Mailbox<V, D> {
-    type Activity = Activity<V, D>;
+impl<V: Variant, B: Block> Reporter for Mailbox<V, B> {
+    type Activity = Activity<V, B::Commitment>;
 
     async fn report(&mut self, activity: Self::Activity) {
         let message = match activity {
@@ -127,20 +126,20 @@ impl<V: Variant, D: Digest> Reporter for Mailbox<V, D> {
 ///
 /// We break this into a separate enum to establish a separate priority for
 /// finalizer messages over consensus messages.
-pub enum Orchestration<D: Digest> {
+pub enum Orchestration<B: Block> {
     /// A request to get the next finalized block.
     Get {
         /// The height of the block to get.
         next: u64,
         /// A channel to send the block, if found.
-        result: oneshot::Sender<Option<Block<D>>>,
+        result: oneshot::Sender<Option<B>>,
     },
     /// A notification that a block has been processed by the application.
     Processed {
         /// The height of the processed block.
         next: u64,
         /// The digest of the processed block.
-        digest: D,
+        digest: B::Commitment,
     },
     /// A request to repair a gap in the finalized block sequence.
     Repair {
@@ -154,18 +153,18 @@ pub enum Orchestration<D: Digest> {
 
 /// A handle for the finalizer to communicate with the main actor loop.
 #[derive(Clone)]
-pub struct Orchestrator<D: Digest> {
-    sender: mpsc::Sender<Orchestration<D>>,
+pub struct Orchestrator<B: Block> {
+    sender: mpsc::Sender<Orchestration<B>>,
 }
 
-impl<D: Digest> Orchestrator<D> {
+impl<B: Block> Orchestrator<B> {
     /// Creates a new orchestrator.
-    pub fn new(sender: mpsc::Sender<Orchestration<D>>) -> Self {
+    pub fn new(sender: mpsc::Sender<Orchestration<B>>) -> Self {
         Self { sender }
     }
 
     /// Gets the finalized block at the given height.
-    pub async fn get(&mut self, next: u64) -> Option<Block<D>> {
+    pub async fn get(&mut self, next: u64) -> Option<B> {
         let (response, receiver) = oneshot::channel();
         if self
             .sender
@@ -183,7 +182,7 @@ impl<D: Digest> Orchestrator<D> {
     }
 
     /// Notifies the actor that a block has been processed.
-    pub async fn processed(&mut self, next: u64, digest: D) {
+    pub async fn processed(&mut self, next: u64, digest: B::Commitment) {
         if self
             .sender
             .send(Orchestration::Processed { next, digest })
