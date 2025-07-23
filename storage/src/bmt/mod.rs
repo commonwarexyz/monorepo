@@ -257,11 +257,7 @@ impl<H: Hasher> Tree<H> {
             siblings_by_level.push(level_siblings);
         }
 
-        Ok(RangeProof {
-            start_position,
-            count,
-            siblings_by_level,
-        })
+        Ok(RangeProof { siblings_by_level })
     }
 }
 
@@ -275,10 +271,6 @@ pub struct Proof<H: Hasher> {
 /// A range proof for a contiguous set of leaves in a Binary Merkle Tree.
 #[derive(Clone, Debug, Eq)]
 pub struct RangeProof<H: Hasher> {
-    /// The starting position of the range.
-    pub start_position: u32,
-    /// The number of elements in the range.
-    pub count: u32,
     /// The sibling hashes needed to prove all elements in the range.
     /// Organized by level, from leaves to root.
     pub siblings_by_level: Vec<Vec<H::Digest>>,
@@ -298,9 +290,7 @@ where
     H::Digest: PartialEq,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.start_position == other.start_position
-            && self.count == other.count
-            && self.siblings_by_level == other.siblings_by_level
+        self.siblings_by_level == other.siblings_by_level
     }
 }
 
@@ -350,27 +340,22 @@ impl<H: Hasher> Proof<H> {
 impl<H: Hasher> RangeProof<H> {
     /// Verifies that a given range of `leaves` starting at `start_position` are included
     /// in a Binary Merkle Tree with `root` using the provided `hasher`.
-    ///
-    /// The leaves slice must have exactly `self.count` elements.
     pub fn verify(
         &self,
         hasher: &mut H,
+        start_position: u32,
         leaves: &[H::Digest],
         root: &H::Digest,
     ) -> Result<(), Error> {
-        // Check that we have the correct number of leaves
-        if leaves.len() != self.count as usize {
-            return Err(Error::UnalignedProof);
-        }
-
-        if self.count == 0 {
+        // Check that we have leaves
+        if leaves.is_empty() {
             return Err(Error::NoLeaves);
         }
 
         // Compute position-hashed leaves
         let mut nodes: Vec<(usize, H::Digest)> = Vec::new();
         for (i, leaf) in leaves.iter().enumerate() {
-            let position = self.start_position + i as u32;
+            let position = start_position + i as u32;
             hasher.update(&position.to_be_bytes());
             hasher.update(leaf);
             nodes.push((position as usize, hasher.finalize()));
@@ -470,8 +455,6 @@ impl<H: Hasher> EncodeSize for Proof<H> {
 
 impl<H: Hasher> Write for RangeProof<H> {
     fn write(&self, writer: &mut impl BufMut) {
-        writer.put_u32(self.start_position);
-        writer.put_u32(self.count);
         // Write the number of levels as u8 (consistent with Read)
         writer.put_u8(self.siblings_by_level.len() as u8);
         for level in &self.siblings_by_level {
@@ -484,9 +467,6 @@ impl<H: Hasher> Read for RangeProof<H> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let start_position = reader.get_u32();
-        let count = reader.get_u32();
-
         // Read the outer vector length (using u8 since MAX_SIBLINGS = u8::MAX)
         let levels_count = reader.get_u8() as usize;
 
@@ -497,23 +477,17 @@ impl<H: Hasher> Read for RangeProof<H> {
             siblings_by_level.push(level_siblings);
         }
 
-        Ok(Self {
-            start_position,
-            count,
-            siblings_by_level,
-        })
+        Ok(Self { siblings_by_level })
     }
 }
 
 impl<H: Hasher> EncodeSize for RangeProof<H> {
     fn encode_size(&self) -> usize {
-        4 + 4
-            + 1
-            + self
-                .siblings_by_level
-                .iter()
-                .map(|level| level.encode_size())
-                .sum::<usize>()
+        1 + self
+            .siblings_by_level
+            .iter()
+            .map(|level| level.encode_size())
+            .sum::<usize>()
     }
 }
 
@@ -1051,13 +1025,15 @@ mod tests {
         let mut hasher = Sha256::default();
         let range_leaves = &digests[2..6];
 
-        assert!(range_proof.verify(&mut hasher, range_leaves, &root).is_ok());
+        assert!(range_proof
+            .verify(&mut hasher, 2, range_leaves, &root)
+            .is_ok());
 
         // Serialize and deserialize
         let mut serialized = range_proof.encode();
         let deserialized = RangeProof::<Sha256>::decode(&mut serialized).unwrap();
         assert!(deserialized
-            .verify(&mut hasher, range_leaves, &root)
+            .verify(&mut hasher, 2, range_leaves, &root)
             .is_ok());
     }
 
@@ -1079,7 +1055,7 @@ mod tests {
             let range_proof = tree.range_proof(i as u32, 1).unwrap();
             let mut hasher = Sha256::default();
 
-            let result = range_proof.verify(&mut hasher, &[*digest], &root);
+            let result = range_proof.verify(&mut hasher, i as u32, &[*digest], &root);
             assert!(result.is_ok());
         }
     }
@@ -1100,7 +1076,7 @@ mod tests {
         // Test full tree range proof
         let range_proof = tree.range_proof(0, digests.len() as u32).unwrap();
         let mut hasher = Sha256::default();
-        assert!(range_proof.verify(&mut hasher, &digests, &root).is_ok());
+        assert!(range_proof.verify(&mut hasher, 0, &digests, &root).is_ok());
 
         // For full tree, we shouldn't need any siblings
         for level in &range_proof.siblings_by_level {
@@ -1125,19 +1101,19 @@ mod tests {
         // Test first half
         let range_proof = tree.range_proof(0, 8).unwrap();
         assert!(range_proof
-            .verify(&mut hasher, &digests[0..8], &root)
+            .verify(&mut hasher, 0, &digests[0..8], &root)
             .is_ok());
 
         // Test second half
         let range_proof = tree.range_proof(8, 7).unwrap();
         assert!(range_proof
-            .verify(&mut hasher, &digests[8..15], &root)
+            .verify(&mut hasher, 8, &digests[8..15], &root)
             .is_ok());
 
         // Test last elements
         let range_proof = tree.range_proof(13, 2).unwrap();
         assert!(range_proof
-            .verify(&mut hasher, &digests[13..15], &root)
+            .verify(&mut hasher, 13, &digests[13..15], &root)
             .is_ok());
     }
 
@@ -1181,12 +1157,12 @@ mod tests {
         // Test with wrong leaves
         let wrong_leaves = vec![hash(b"wrong1"), hash(b"wrong2"), hash(b"wrong3")];
         assert!(range_proof
-            .verify(&mut hasher, &wrong_leaves, &root)
+            .verify(&mut hasher, 2, &wrong_leaves, &root)
             .is_err());
 
         // Test with wrong number of leaves
         assert!(range_proof
-            .verify(&mut hasher, &digests[2..4], &root)
+            .verify(&mut hasher, 2, &digests[2..4], &root)
             .is_err());
 
         // Test with tampered proof
@@ -1196,14 +1172,14 @@ mod tests {
         {
             tampered_proof.siblings_by_level[0][0] = hash(b"tampered");
             assert!(tampered_proof
-                .verify(&mut hasher, range_leaves, &root)
+                .verify(&mut hasher, 2, range_leaves, &root)
                 .is_err());
         }
 
         // Test with wrong root
         let wrong_root = hash(b"wrong_root");
         assert!(range_proof
-            .verify(&mut hasher, range_leaves, &wrong_root)
+            .verify(&mut hasher, 2, range_leaves, &wrong_root)
             .is_err());
     }
 
@@ -1231,7 +1207,7 @@ mod tests {
                     let end = start + range_size;
                     assert!(
                         range_proof
-                            .verify(&mut hasher, &digests[start..end], &root)
+                            .verify(&mut hasher, start as u32, &digests[start..end], &root)
                             .is_ok(),
                         "Failed for tree_size={tree_size}, start={start}, range_size={range_size}"
                     );

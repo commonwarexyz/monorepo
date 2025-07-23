@@ -54,7 +54,9 @@ fn bench_prove_range(c: &mut Criterion) {
 
                                 // Verify range proof
                                 let range_leaves = &elements[start..start + range_size];
-                                assert!(proof.verify(&mut hasher, range_leaves, &root).is_ok());
+                                assert!(proof
+                                    .verify(&mut hasher, start as u32, range_leaves, &root)
+                                    .is_ok());
                             }
                         },
                         criterion::BatchSize::SmallInput,
