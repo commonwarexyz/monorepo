@@ -231,27 +231,24 @@ impl<H: Hasher> Tree<H> {
             let mut level_siblings = Vec::new();
             let mut added_indices = std::collections::HashSet::new();
             for pos in level_start..=level_end {
-                let sibling_pos = if pos % 2 == 0 { pos + 1 } else { pos - 1 };
+                let sibling = if pos % 2 == 0 { pos + 1 } else { pos - 1 };
 
                 // Only add the sibling if:
                 // 1. It's outside our range (not between level_start and level_end)
-                // 2. We haven't already added it (deduplication)
-                // 3. For duplicates (when sibling doesn't exist), only add if needed
-                if (sibling_pos < level_start || sibling_pos > level_end)
-                    && !added_indices.contains(&sibling_pos)
+                // 2. We haven't already added it
+                if (sibling < level_start || sibling > level_end)
+                    && !added_indices.contains(&sibling)
                 {
-                    if sibling_pos < level.len() {
-                        level_siblings.push(level[sibling_pos]);
-                        added_indices.insert(sibling_pos);
+                    if sibling < level.len() {
+                        level_siblings.push(level[sibling]);
                     } else {
-                        // Special case: When a node has no sibling (odd tree size), it uses itself as sibling.
-                        // Only include this duplicate if we're not proving the entire level,
-                        // as the verifier can deduce the duplicate case when seeing the full level.
-                        if level_start > 0 || level_end < level.len() - 1 {
-                            level_siblings.push(level[pos]);
-                            added_indices.insert(sibling_pos);
-                        }
+                        // If no right child exists, use a duplicate of the current node.
+                        //
+                        // This doesn't affect the robustness of the proof (allow a non-existent position
+                        // to be proven or enable multiple proofs to be generated from a single leaf).
+                        level_siblings.push(level[pos]);
                     }
+                    added_indices.insert(sibling);
                 }
             }
 
@@ -426,23 +423,17 @@ impl<H: Hasher> RangeProof<H> {
                 } else {
                     // Need sibling from proof
                     let is_left = pos % 2 == 0;
-                    if let Some(sibling) = sibling_iter.next() {
-                        // Hash in correct order based on position (left/right)
-                        if is_left {
-                            hasher.update(node);
-                            hasher.update(sibling);
-                        } else {
-                            hasher.update(sibling);
-                            hasher.update(node);
-                        }
-                        next_nodes.push((parent_pos, hasher.finalize()));
+                    let sibling = sibling_iter.next().ok_or(Error::UnalignedProof)?;
+
+                    // Hash in correct order based on position (left/right)
+                    if is_left {
+                        hasher.update(node);
+                        hasher.update(sibling);
                     } else {
-                        // No sibling in proof - this is only valid for the duplicate case
-                        // where a node at an odd position has no right sibling (odd tree size)
+                        hasher.update(sibling);
                         hasher.update(node);
-                        hasher.update(node);
-                        next_nodes.push((parent_pos, hasher.finalize()));
                     }
+                    next_nodes.push((parent_pos, hasher.finalize()));
                     i += 1;
                 }
             }
@@ -1079,11 +1070,6 @@ mod tests {
         let range_proof = tree.range_proof(0, digests.len() as u32).unwrap();
         let mut hasher = Sha256::default();
         assert!(range_proof.verify(&mut hasher, 0, &digests, &root).is_ok());
-
-        // For full tree, we shouldn't need any siblings
-        for level in &range_proof.siblings {
-            assert!(level.is_empty());
-        }
     }
 
     #[test]
