@@ -1,5 +1,4 @@
-use crate::marshal::ingress::Orchestrator;
-use commonware_cryptography::{Digest, Digestible};
+use crate::{marshal::ingress::Orchestrator, Block};
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
 use commonware_utils::array::{FixedBytes, U64};
@@ -8,27 +7,27 @@ use prometheus_client::metrics::gauge::Gauge;
 use std::marker::PhantomData;
 use tracing::{debug, error, info};
 
-pub struct Finalizer<D, R>
+pub struct Finalizer<B, R>
 where
-    D: Digest,
+    B: Block,
     R: Spawner + Clock + Metrics + Storage,
 {
     metadata: Metadata<R, FixedBytes<1>, U64>,
     contiguous_height: Gauge,
-    orchestrator: Orchestrator<D>,
+    orchestrator: Orchestrator<B>,
     finalizer_receiver: mpsc::Receiver<()>,
-    _digest: PhantomData<D>,
+    _digest: PhantomData<B::Digest>,
 }
 
-impl<D, R> Finalizer<D, R>
+impl<B, R> Finalizer<B, R>
 where
-    D: Digest,
+    B: Block,
     R: Spawner + Clock + Metrics + Storage,
 {
     pub fn new(
         metadata: Metadata<R, FixedBytes<1>, U64>,
         contiguous_height: Gauge,
-        orchestrator: Orchestrator<D>,
+        orchestrator: Orchestrator<B>,
         finalizer_receiver: mpsc::Receiver<()>,
     ) -> Self {
         Self {
@@ -88,7 +87,7 @@ where
                 info!(height = next, "indexed finalized block");
 
                 // Update last view processed (if we have a finalization for this block)
-                self.orchestrator.processed(next, block.digest()).await;
+                self.orchestrator.processed(next, block.commitment()).await;
                 continue;
             }
 

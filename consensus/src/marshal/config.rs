@@ -1,10 +1,11 @@
+use crate::Block;
 use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
 use commonware_resolver::p2p::Coordinator;
 use governor::Quota;
 
 /// Marshal configuration.
 #[derive(Debug)]
-pub struct Config<V: Variant, P: PublicKey, D: Coordinator<PublicKey = P>> {
+pub struct Config<V: Variant, P: PublicKey, Z: Coordinator<PublicKey = P>, B: Block> {
     /// The public key of the validator.
     pub public_key: P,
 
@@ -12,19 +13,23 @@ pub struct Config<V: Variant, P: PublicKey, D: Coordinator<PublicKey = P>> {
     pub identity: V::Public,
 
     /// The coordinator for the resolvers.
-    pub coordinator: D,
+    pub coordinator: Z,
 
     /// The prefix to use for all partitions.
     pub partition_prefix: String,
 
     /// Size of backfill request/response mailbox.
     pub mailbox_size: usize,
+
     /// Backfill rate limit.
     pub backfill_quota: Quota,
+
     /// Timeout for block activity (in views).
     pub activity_timeout: u64,
+
     /// Namespace for proofs.
     pub namespace: Vec<u8>,
+
     /// Prunable archive partition prefix.
     pub prunable_items_per_section: u64,
 
@@ -61,4 +66,7 @@ pub struct Config<V: Variant, P: PublicKey, D: Coordinator<PublicKey = P>> {
 
     /// Enable fast-path streaming for contiguous blocks
     pub enable_fast_path: bool,
+
+    /// Codec configuration for block type.
+    pub codec_config: B::Cfg,
 }

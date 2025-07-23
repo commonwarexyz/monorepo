@@ -13,7 +13,8 @@ pub mod threshold_simplex;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
-        use commonware_cryptography::{Digest, PublicKey};
+        use commonware_codec::Codec;
+        use commonware_cryptography::{Digest, Digestible, Committable, PublicKey};
         use futures::channel::{oneshot, mpsc};
         use std::future::Future;
 
@@ -171,6 +172,17 @@ cfg_if::cfg_if! {
 
             /// Create a channel that will receive updates when the latest index (also provided) changes.
             fn subscribe(&mut self) -> impl Future<Output = (Self::Index, mpsc::Receiver<Self::Index>)> + Send;
+        }
+
+        /// Block is the interface for a block in the blockchain.
+        ///
+        /// Blocks are used to track the progress of the consensus engine.
+        pub trait Block: Codec + Digestible + Committable + Send + Sync + 'static {
+            /// Get the height of the block.
+            fn height(&self) -> u64;
+
+            /// Get the parent block's digest.
+            fn parent(&self) -> Self::Commitment;
         }
     }
 }

@@ -3,14 +3,12 @@ use super::{
     finalizer::Finalizer,
     handler::{self, Handler},
     ingress::{Mailbox, Message, Orchestration, Orchestrator},
-    types::{Block, Finalized, Notarized},
+    types::{Finalized, Notarized},
 };
-use crate::threshold_simplex::types::Finalization;
+use crate::{threshold_simplex::types::Finalization, Block};
 use commonware_broadcast::{buffered, Broadcaster};
-use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, Digest, Digestible, PublicKey,
-};
+use commonware_codec::{Decode, Encode};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
 use commonware_resolver::{
@@ -37,7 +35,7 @@ use tracing::{debug, info, warn};
 
 /// Application actor.
 pub struct Actor<
-    D: Digest,
+    B: Block,
     R: Rng + Spawner + Metrics + Clock + GClock + Storage,
     V: Variant,
     P: PublicKey,
@@ -47,22 +45,22 @@ pub struct Actor<
     public_key: P,
     identity: V::Public,
     coordinator: Z,
-    mailbox: mpsc::Receiver<Message<V, D>>,
+    mailbox: mpsc::Receiver<Message<V, B>>,
     mailbox_size: usize,
     backfill_quota: Quota,
     namespace: Vec<u8>,
 
     // Blocks verified stored by view<>digest
-    verified: prunable::Archive<TwoCap, R, D, Block<D>>,
+    verified: prunable::Archive<TwoCap, R, B::Commitment, B>,
     // Blocks notarized stored by view<>digest
-    notarized: prunable::Archive<TwoCap, R, D, Notarized<V, D>>,
+    notarized: prunable::Archive<TwoCap, R, B::Commitment, Notarized<V, B>>,
 
     // Finalizations stored by height
-    finalized: immutable::Archive<R, D, Finalization<V, D>>,
+    finalized: immutable::Archive<R, B::Commitment, Finalization<V, B::Commitment>>,
     // Blocks finalized stored by height
     //
     // We store this separately because we may not have the finalization for a block
-    blocks: immutable::Archive<R, D, Block<D>>,
+    blocks: immutable::Archive<R, B::Commitment, B>,
 
     // Finalizer storage
     metadata: Metadata<R, FixedBytes<1>, U64>,
@@ -75,19 +73,22 @@ pub struct Actor<
     // Timeout for block activity (in views)
     activity_timeout: u64,
 
+    // Codec configuration
+    codec_config: B::Cfg,
+
     _variant: PhantomData<V>,
 }
 
 impl<
-        D: Digest,
+        B: Block,
         R: Rng + Spawner + Metrics + Clock + GClock + Storage,
         V: Variant,
         P: PublicKey,
         Z: Coordinator<PublicKey = P>,
-    > Actor<D, R, V, P, Z>
+    > Actor<B, R, V, P, Z>
 {
     /// Create a new application actor.
-    pub async fn init(context: R, config: Config<V, P, Z>) -> (Self, Mailbox<V, D>) {
+    pub async fn init(context: R, config: Config<V, P, Z, B>) -> (Self, Mailbox<V, B>) {
         // Initialize verified blocks
         let start = Instant::now();
         let verified = prunable::Archive::init(
@@ -97,7 +98,7 @@ impl<
                 translator: TwoCap,
                 items_per_section: config.prunable_items_per_section,
                 compression: None,
-                codec_config: (),
+                codec_config: config.codec_config.clone(),
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
             },
@@ -115,7 +116,7 @@ impl<
                 translator: TwoCap,
                 items_per_section: config.prunable_items_per_section,
                 compression: None,
-                codec_config: (),
+                codec_config: config.codec_config.clone(),
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
             },
@@ -175,7 +176,7 @@ impl<
                 freezer_journal_compression: config.freezer_journal_compression,
                 ordinal_partition: format!("{}-blocks-ordinal", config.partition_prefix),
                 items_per_section: config.immutable_items_per_section,
-                codec_config: (),
+                codec_config: config.codec_config.clone(),
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
             },
@@ -230,6 +231,7 @@ impl<
                 finalized_height,
                 contiguous_height,
                 activity_timeout: config.activity_timeout,
+                codec_config: config.codec_config,
                 _variant: PhantomData,
             },
             Mailbox::new(sender),
@@ -238,7 +240,7 @@ impl<
 
     pub fn start(
         mut self,
-        buffer: buffered::Mailbox<P, Block<D>>,
+        buffer: buffered::Mailbox<P, B>,
         backfill_by_digest: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         backfill_by_height: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         backfill_by_view: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
@@ -254,7 +256,7 @@ impl<
     /// Run the application actor.
     async fn run(
         mut self,
-        mut buffer: buffered::Mailbox<P, Block<D>>,
+        mut buffer: buffered::Mailbox<P, B>,
         backfill_by_digest: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         backfill_by_height: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         backfill_by_view: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
@@ -372,7 +374,7 @@ impl<
                         }
                         Message::Verified { view, payload } => {
                             match self.verified
-                                .put_sync(view, payload.digest(), payload)
+                                .put_sync(view, payload.commitment(), payload)
                                 .await {
                                     Ok(_) => {
                                         debug!(view, "verified block stored");
@@ -388,7 +390,7 @@ impl<
                         Message::Notarization { notarization } => {
                             // Check if in buffer
                             let proposal = &notarization.proposal;
-                            let mut block =  buffer.get(None, proposal.payload, Some(proposal.payload)).await.into_iter().next();
+                            let mut block =  buffer.get(None, proposal.payload, None).await.into_iter().next();
 
                             // Check if in verified blocks
                             if block.is_none() {
@@ -401,13 +403,13 @@ impl<
                             // If found, store notarization
                             let view = notarization.proposal.view;
                             if let Some(block) = block {
-                                let height = block.height;
-                                let digest = proposal.payload;
+                                let height = block.height();
+                                let commitment = proposal.payload;
                                 let notarization = Notarized::new(notarization, block);
 
                                 // Persist the notarization
                                 match self.notarized
-                                    .put_sync(view, digest, notarization)
+                                    .put_sync(view, commitment, notarization)
                                     .await {
                                     Ok(_) => {
                                         debug!(view, height, "notarized block stored");
@@ -433,7 +435,7 @@ impl<
                         Message::Finalization { finalization } => {
                             // Check if in buffer
                             let proposal = &finalization.proposal;
-                            let mut block = buffer.get(None, proposal.payload, Some(proposal.payload)).await.into_iter().next();
+                            let mut block = buffer.get(None, proposal.payload, None).await.into_iter().next();
 
                             // Check if in verified
                             if block.is_none() {
@@ -455,7 +457,7 @@ impl<
                             let view = finalization.proposal.view;
                             if let Some(block) = block {
                                 let digest = proposal.payload;
-                                let height = block.height;
+                                let height = block.height();
 
                                 // Persist the finalization and block
                                 let finalized = self.finalized
@@ -494,9 +496,9 @@ impl<
                         }
                         Message::Get { view, payload, response } => {
                             // Check if in buffer
-                            let buffered = buffer.get(None, payload, Some(payload)).await.into_iter().next();
+                            let buffered = buffer.get(None, payload, None).await.into_iter().next();
                             if let Some(buffered) = buffered {
-                                debug!(height = buffered.height, "found block in buffer");
+                                debug!(height = buffered.height(), "found block in buffer");
                                 let _ = response.send(buffered);
                                 continue;
                             }
@@ -507,7 +509,7 @@ impl<
                                 Err(e) => panic!("Failed to get verified block: {e}"),
                             };
                             if let Some(block) = block {
-                                debug!(height = block.height, "found block in verified");
+                                debug!(height = block.height(), "found block in verified");
                                 let _ = response.send(block);
                                 continue;
                             }
@@ -519,7 +521,7 @@ impl<
                             };
                             if let Some(notarization) = notarization {
                                 let block = notarization.block;
-                                debug!(height = block.height, "found block in notarized");
+                                debug!(height = block.height(), "found block in notarized");
                                 let _ = response.send(block);
                                 continue;
                             }
@@ -530,7 +532,7 @@ impl<
                                 Err(e) => panic!("Failed to get finalized block: {e}"),
                             };
                             if let Some(block) = block {
-                                debug!(height = block.height, "found block in finalized");
+                                debug!(height = block.height(), "found block in finalized");
                                 let _ = response.send(block);
                                 continue;
                             }
@@ -543,7 +545,7 @@ impl<
 
                             // Register waiter
                             debug!(view, ?payload, "registering waiter");
-                            buffer.subscribe_prepared(None, payload, Some(payload), response).await;
+                            buffer.subscribe_prepared(None, payload, None, response).await;
                         }
                     }
                 },
@@ -597,13 +599,13 @@ impl<
                                 };
 
                                 // Attempt to repair one block from other sources
-                                let target_block = gapped_block.parent;
+                                let target_block = gapped_block.parent();
                                 let verified = match self.verified.get(Identifier::Key(&target_block)).await {
                                     Ok(block) => block,
                                     Err(e) => panic!("Failed to get verified block: {e}"),
                                 };
                                 if let Some(verified) = verified {
-                                    let height = verified.height;
+                                    let height = verified.height();
                                     if let Err(e) = self.blocks.put_sync(height, target_block, verified).await {
                                         panic!("Failed to insert finalized block: {e}");
                                     }
@@ -616,7 +618,7 @@ impl<
                                     Err(e) => panic!("Failed to get notarized block: {e}"),
                                 };
                                 if let Some(notarization) = notarization {
-                                let height = notarization.block.height;
+                                let height = notarization.block.height();
                                     if let Err(e) = self.blocks.put_sync(height, target_block, notarization.block).await {
                                         panic!("Failed to insert finalized block: {e}");
                                     }
@@ -653,16 +655,16 @@ impl<
                         return;
                     };
                     match message {
-                        handler::Message::Produce { key: digest, response } => {
+                        handler::Message::Produce { key: commitment, response } => {
                             // Check buffer
-                            let block = buffer.get(None, digest, Some(digest)).await.into_iter().next();
+                            let block = buffer.get(None, commitment, None).await.into_iter().next();
                             if let Some(block) = block {
                                 let _ = response.send(block.encode().into());
                                 continue;
                             }
 
                             // Get verified block
-                            let block = match self.verified.get(Identifier::Key(&digest)).await {
+                            let block = match self.verified.get(Identifier::Key(&commitment)).await {
                                 Ok(block) => block,
                                 Err(e) => panic!("Failed to get verified block: {e}"),
                             };
@@ -672,7 +674,7 @@ impl<
                             }
 
                             // Get notarized block
-                            let notarization = match self.notarized.get(Identifier::Key(&digest)).await {
+                            let notarization = match self.notarized.get(Identifier::Key(&commitment)).await {
                                 Ok(notarized) => notarized,
                                 Err(e) => panic!("Failed to get notarized block: {e}"),
                             };
@@ -682,7 +684,7 @@ impl<
                             }
 
                             // Get block
-                            let block = match self.blocks.get(Identifier::Key(&digest)).await {
+                            let block = match self.blocks.get(Identifier::Key(&commitment)).await {
                                 Ok(block) => block,
                                 Err(e) => panic!("Failed to get finalized block: {e}"),
                             };
@@ -692,26 +694,26 @@ impl<
                             };
 
                             // No record of block
-                            debug!(?digest, "block missing on request");
+                            debug!(?commitment, "block missing on request");
                         },
-                        handler::Message::Deliver { key: digest, value, response } => {
+                        handler::Message::Deliver { key: commitment, value, response } => {
                             // Parse block
-                            let Ok(block) = Block::decode(value.as_ref()) else {
+                            let Ok(block) = B::decode_cfg(value.as_ref(), &self.codec_config) else {
                                 let _ = response.send(false);
                                 continue;
                             };
 
                             // Ensure the received payload is for the correct digest
-                            if block.digest() != digest {
+                            if block.commitment() != commitment {
                                 let _ = response.send(false);
                                 continue;
                             }
 
                             // Persist the block
-                            debug!(?digest, height = block.height, "received block");
+                            debug!(?commitment, height = block.height(), "received block");
                             let _ = response.send(true);
                             if let Err(e) = self.blocks
-                                .put_sync(block.height, digest, block)
+                                .put_sync(block.height(), commitment, block)
                                 .await {
                                 panic!("Failed to insert finalized block: {e}");
                             }
@@ -756,7 +758,7 @@ impl<
                         handler::Message::Deliver { key, value, response } => {
                             let height = key.to_u64();
                             // Parse finalization
-                            let Ok(finalization) = Finalized::decode(value.as_ref()) else {
+                            let Ok(finalization) = Finalized::<V, B>::decode_cfg(value, &self.codec_config) else {
                                 let _ = response.send(false);
                                 continue;
                             };
@@ -766,7 +768,7 @@ impl<
                             }
 
                             // Ensure the received payload is for the correct height
-                            if finalization.block.height != height {
+                            if finalization.block.height() != height {
                                 let _ = response.send(false);
                                 continue;
                             }
@@ -777,9 +779,9 @@ impl<
 
                             // Persist the finalization and block
                             let finalized = self.finalized
-                                .put_sync(height, finalization.block.digest(), finalization.proof);
+                                .put_sync(height, finalization.block.commitment(), finalization.proof);
                             let blocks = self.blocks
-                                .put_sync(height, finalization.block.digest(), finalization.block);
+                                .put_sync(height, finalization.block.commitment(), finalization.block);
                             if let Err(e) = try_join!(finalized, blocks) {
                                 panic!("Failed to persist finalization and block: {e}");
                             }
@@ -810,7 +812,7 @@ impl<
                         handler::Message::Deliver { key, value, response } => {
                             let view = key.to_u64();
                             // Parse notarization
-                            let Ok(notarization) = Notarized::decode(value.as_ref()) else {
+                            let Ok(notarization) = Notarized::<V, B>::decode_cfg(value, &self.codec_config) else {
                                 let _ = response.send(false);
                                 continue;
                             };
@@ -828,7 +830,7 @@ impl<
                             // Persist the notarization
                             let _ = response.send(true);
                             match self.notarized
-                                .put_sync(view, notarization.block.digest(), notarization)
+                                .put_sync(view, notarization.block.commitment(), notarization)
                                 .await {
                                 Ok(_) => {
                                     debug!(view, "notarized stored");
