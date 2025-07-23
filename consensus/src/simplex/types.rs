@@ -1,5 +1,6 @@
 //! Types used in [crate::simplex].
 
+use crate::Viewable;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
@@ -24,13 +25,6 @@ pub struct Context<D: Digest> {
     /// payload (any view without a nullification may eventually be finalized and skipping
     /// it would result in a fork).
     pub parent: (View, D),
-}
-
-/// Viewable is a trait that provides access to the view (round) number.
-/// Any consensus message or object that is associated with a specific view should implement this.
-pub trait Viewable {
-    /// Returns the view associated with this object.
-    fn view(&self) -> View;
 }
 
 /// Attributable is a trait that provides access to the signer index.
@@ -166,6 +160,8 @@ impl<S: CSignature, D: Digest> EncodeSize for Voter<S, D> {
 }
 
 impl<S: CSignature, D: Digest> Viewable for Voter<S, D> {
+    type View = View;
+
     fn view(&self) -> View {
         match self {
             Voter::Notarize(notarize) => notarize.view(),
@@ -231,6 +227,8 @@ impl<D: Digest> EncodeSize for Proposal<D> {
 }
 
 impl<D: Digest> Viewable for Proposal<D> {
+    type View = View;
+
     fn view(&self) -> View {
         self.view
     }
@@ -363,6 +361,8 @@ impl<S: CSignature, D: Digest> EncodeSize for Notarize<S, D> {
 }
 
 impl<S: CSignature, D: Digest> Viewable for Notarize<S, D> {
+    type View = View;
+
     fn view(&self) -> View {
         self.proposal.view()
     }
@@ -474,6 +474,8 @@ impl<S: CSignature, D: Digest> EncodeSize for Notarization<S, D> {
 }
 
 impl<S: CSignature, D: Digest> Viewable for Notarization<S, D> {
+    type View = View;
+
     fn view(&self) -> View {
         self.proposal.view()
     }
@@ -547,6 +549,8 @@ impl<S: CSignature> EncodeSize for Nullify<S> {
 }
 
 impl<S: CSignature> Viewable for Nullify<S> {
+    type View = View;
+
     fn view(&self) -> View {
         self.view
     }
@@ -647,6 +651,8 @@ impl<S: CSignature> EncodeSize for Nullification<S> {
 }
 
 impl<S: CSignature> Viewable for Nullification<S> {
+    type View = View;
+
     fn view(&self) -> View {
         self.view
     }
@@ -727,6 +733,8 @@ impl<S: CSignature, D: Digest> EncodeSize for Finalize<S, D> {
 }
 
 impl<S: CSignature, D: Digest> Viewable for Finalize<S, D> {
+    type View = View;
+
     fn view(&self) -> View {
         self.proposal.view()
     }
@@ -833,6 +841,8 @@ impl<S: CSignature, D: Digest> EncodeSize for Finalization<S, D> {
 }
 
 impl<S: CSignature, D: Digest> Viewable for Finalization<S, D> {
+    type View = View;
+
     fn view(&self) -> View {
         self.proposal.view()
     }
@@ -1129,6 +1139,8 @@ impl<S: CSignature, D: Digest> EncodeSize for Activity<S, D> {
 }
 
 impl<S: CSignature, D: Digest> Viewable for Activity<S, D> {
+    type View = View;
+
     fn view(&self) -> View {
         match self {
             Activity::Notarize(notarize) => notarize.view(),
@@ -1255,6 +1267,8 @@ impl<S: CSignature, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
 }
 
 impl<S: CSignature, D: Digest> Viewable for ConflictingNotarize<S, D> {
+    type View = View;
+
     fn view(&self) -> View {
         self.view
     }
@@ -1377,6 +1391,8 @@ impl<S: CSignature, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
 }
 
 impl<S: CSignature, D: Digest> Viewable for ConflictingFinalize<S, D> {
+    type View = View;
+
     fn view(&self) -> View {
         self.view
     }
@@ -1459,6 +1475,8 @@ impl<S: CSignature, D: Digest> EncodeSize for NullifyFinalize<S, D> {
 }
 
 impl<S: CSignature, D: Digest> Viewable for NullifyFinalize<S, D> {
+    type View = View;
+
     fn view(&self) -> View {
         self.proposal.view()
     }

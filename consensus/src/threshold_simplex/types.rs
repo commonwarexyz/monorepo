@@ -1,5 +1,6 @@
 //! Types used in [crate::threshold_simplex].
 
+use crate::Viewable;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
@@ -41,13 +42,6 @@ pub struct Context<D: Digest> {
     /// payload (any view without a nullification may eventually be finalized and skipping
     /// it would result in a fork).
     pub parent: (View, D),
-}
-
-/// Viewable is a trait that provides access to the view (round) number.
-/// Any consensus message or object that is associated with a specific view should implement this.
-pub trait Viewable {
-    /// Returns the view associated with this object.
-    fn view(&self) -> View;
 }
 
 /// Attributable is a trait that provides access to the signer index.
@@ -565,6 +559,8 @@ impl<V: Variant, D: Digest> Read for Voter<V, D> {
 }
 
 impl<V: Variant, D: Digest> Viewable for Voter<V, D> {
+    type View = View;
+
     fn view(&self) -> View {
         match self {
             Voter::Notarize(v) => v.view(),
@@ -630,6 +626,8 @@ impl<D: Digest> EncodeSize for Proposal<D> {
 }
 
 impl<D: Digest> Viewable for Proposal<D> {
+    type View = View;
+
     fn view(&self) -> View {
         self.view
     }
@@ -782,6 +780,8 @@ impl<V: Variant, D: Digest> Attributable for Notarize<V, D> {
 }
 
 impl<V: Variant, D: Digest> Viewable for Notarize<V, D> {
+    type View = View;
+
     fn view(&self) -> View {
         self.proposal.view()
     }
@@ -876,6 +876,8 @@ impl<V: Variant, D: Digest> Notarization<V, D> {
 }
 
 impl<V: Variant, D: Digest> Viewable for Notarization<V, D> {
+    type View = View;
+
     fn view(&self) -> View {
         self.proposal.view()
     }
@@ -1058,6 +1060,8 @@ impl<V: Variant> Attributable for Nullify<V> {
 }
 
 impl<V: Variant> Viewable for Nullify<V> {
+    type View = View;
+
     fn view(&self) -> View {
         self.view
     }
@@ -1146,6 +1150,8 @@ impl<V: Variant> Nullification<V> {
 }
 
 impl<V: Variant> Viewable for Nullification<V> {
+    type View = View;
+
     fn view(&self) -> View {
         self.view
     }
@@ -1293,6 +1299,8 @@ impl<V: Variant, D: Digest> Attributable for Finalize<V, D> {
 }
 
 impl<V: Variant, D: Digest> Viewable for Finalize<V, D> {
+    type View = View;
+
     fn view(&self) -> View {
         self.proposal.view()
     }
@@ -1376,6 +1384,8 @@ impl<V: Variant, D: Digest> Finalization<V, D> {
 }
 
 impl<V: Variant, D: Digest> Viewable for Finalization<V, D> {
+    type View = View;
+
     fn view(&self) -> View {
         self.proposal.view()
     }
@@ -1857,6 +1867,8 @@ impl<V: Variant, D: Digest> Read for Activity<V, D> {
 }
 
 impl<V: Variant, D: Digest> Viewable for Activity<V, D> {
+    type View = View;
+
     fn view(&self) -> View {
         match self {
             Activity::Notarize(v) => v.view(),
@@ -1896,6 +1908,8 @@ impl<V: Variant> Seed<V> {
 }
 
 impl<V: Variant> Viewable for Seed<V> {
+    type View = View;
+
     fn view(&self) -> View {
         self.view
     }
@@ -2004,6 +2018,8 @@ impl<V: Variant, D: Digest> Attributable for ConflictingNotarize<V, D> {
 }
 
 impl<V: Variant, D: Digest> Viewable for ConflictingNotarize<V, D> {
+    type View = View;
+
     fn view(&self) -> View {
         self.view
     }
@@ -2142,6 +2158,8 @@ impl<V: Variant, D: Digest> Attributable for ConflictingFinalize<V, D> {
 }
 
 impl<V: Variant, D: Digest> Viewable for ConflictingFinalize<V, D> {
+    type View = View;
+
     fn view(&self) -> View {
         self.view
     }
@@ -2257,6 +2275,8 @@ impl<V: Variant, D: Digest> Attributable for NullifyFinalize<V, D> {
 }
 
 impl<V: Variant, D: Digest> Viewable for NullifyFinalize<V, D> {
+    type View = View;
+
     fn view(&self) -> View {
         self.proposal.view()
     }

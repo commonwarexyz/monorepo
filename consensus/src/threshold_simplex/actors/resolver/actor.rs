@@ -5,11 +5,9 @@ use super::{
 use crate::{
     threshold_simplex::{
         actors::voter,
-        types::{
-            Backfiller, Notarization, Nullification, Request, Response, View, Viewable, Voter,
-        },
+        types::{Backfiller, Notarization, Nullification, Request, Response, View, Voter},
     },
-    ThresholdSupervisor,
+    ThresholdSupervisor, Viewable,
 };
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
 use commonware_macros::select;

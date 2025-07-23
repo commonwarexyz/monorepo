@@ -5,9 +5,9 @@ use super::{
 use crate::{
     simplex::{
         actors::voter,
-        types::{Backfiller, Notarization, Nullification, Request, Response, View, Viewable},
+        types::{Backfiller, Notarization, Nullification, Request, Response, View},
     },
-    Supervisor,
+    Supervisor, Viewable,
 };
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
