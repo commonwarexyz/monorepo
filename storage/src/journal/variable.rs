@@ -237,24 +237,27 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let size = blob.read_at(vec![0; 4], offset).await?;
         hasher.update(size.as_ref());
-        let size = u32::from_be_bytes(size.as_ref().try_into().unwrap());
+        let size = u32::from_be_bytes(size.as_ref().try_into().unwrap()) as usize;
         let offset = offset.checked_add(4).ok_or(Error::OffsetOverflow)?;
 
-        // Read item
-        let item = blob.read_at(vec![0u8; size as usize], offset).await?;
-        hasher.update(item.as_ref());
+        // Read remaining
+        let buf_size = size.checked_add(4).ok_or(Error::OffsetOverflow)?;
+        let buf = blob.read_at(vec![0u8; buf_size], offset).await?;
+        let buf = buf.as_ref();
         let offset = offset
-            .checked_add(size as u64)
+            .checked_add(buf_size as u64)
             .ok_or(Error::OffsetOverflow)?;
 
-        // Read checksum
+        // Read item
+        let item = &buf[..size];
+        hasher.update(item);
+
+        // Verify integrity
         let checksum = hasher.finalize();
-        let stored_checksum = blob.read_at(vec![0; 4], offset).await?;
-        let stored_checksum = u32::from_be_bytes(stored_checksum.as_ref().try_into().unwrap());
+        let stored_checksum = u32::from_be_bytes(buf[size..].try_into().unwrap());
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
-        let offset = offset.checked_add(4).ok_or(Error::OffsetOverflow)?;
 
         // Compute next offset
         let aligned_offset = compute_next_offset(offset)?;
@@ -265,11 +268,11 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 decode_all(Cursor::new(&item)).map_err(|_| Error::DecompressionFailed)?;
             V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)?
         } else {
-            V::decode_cfg(item.as_ref(), cfg).map_err(Error::Codec)?
+            V::decode_cfg(item, cfg).map_err(Error::Codec)?
         };
 
         // Return item
-        Ok((aligned_offset, size, item))
+        Ok((aligned_offset, size as u32, item))
     }
 
     /// Helper function to read an item from a [Read].
@@ -295,42 +298,40 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             .await
             .map_err(Error::Runtime)?;
         hasher.update(&size_buf);
-        let size = u32::from_be_bytes(size_buf);
 
-        // Read item
-        let mut item = vec![0u8; size as usize];
+        // Read remaining
+        let size = u32::from_be_bytes(size_buf) as usize;
+        let buf_size = size.checked_add(4).ok_or(Error::OffsetOverflow)?;
+        let mut buf = vec![0u8; buf_size];
         reader
-            .read_exact(&mut item, size as usize)
+            .read_exact(&mut buf, buf_size)
             .await
             .map_err(Error::Runtime)?;
-        hasher.update(&item);
+
+        // Read item
+        let item = &buf[..size];
+        hasher.update(item);
 
         // Verify integrity
         let checksum = hasher.finalize();
-        let mut checksum_buf = [0u8; 4];
-        reader
-            .read_exact(&mut checksum_buf, 4)
-            .await
-            .map_err(Error::Runtime)?;
-        let stored_checksum = u32::from_be_bytes(checksum_buf);
+        let stored_checksum = u32::from_be_bytes(buf[size..].try_into().unwrap());
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
 
         // If compression is enabled, decompress the item
         let item = if compressed {
-            decode_all(Cursor::new(&item)).map_err(|_| Error::DecompressionFailed)?
+            let decompressed =
+                decode_all(Cursor::new(&item)).map_err(|_| Error::DecompressionFailed)?;
+            V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)?
         } else {
-            item
+            V::decode_cfg(item, cfg).map_err(Error::Codec)?
         };
-
-        // Decode item
-        let item = V::decode_cfg(item.as_ref(), cfg).map_err(Error::Codec)?;
 
         // Calculate next offset
         let current_pos = reader.position();
         let aligned_offset = compute_next_offset(current_pos)?;
-        Ok((aligned_offset, current_pos, size, item))
+        Ok((aligned_offset, current_pos, size as u32, item))
     }
 
     /// Reads an item from the blob at the given offset and of a given size.
