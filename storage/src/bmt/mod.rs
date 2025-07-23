@@ -45,12 +45,8 @@ use commonware_codec::{EncodeSize, RangeCfg, Read, ReadRangeExt, Write};
 use commonware_cryptography::Hasher;
 use thiserror::Error;
 
-/// There should never be more than 255 siblings in a proof (would mean the Binary Merkle Tree
+/// There should never be more than 255 levels in a proof (would mean the Binary Merkle Tree
 /// has more than 2^255 leaves).
-const MAX_SIBLINGS: usize = u8::MAX as usize;
-
-/// Maximum number of levels in a range proof. Since we have at most 2^255 leaves,
-/// we need at most 255 levels.
 const MAX_LEVELS: usize = u8::MAX as usize;
 
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
@@ -64,8 +60,8 @@ pub enum Error {
     NoLeaves,
     #[error("unaligned proof")]
     UnalignedProof,
-    #[error("too many siblings: {0}")]
-    TooManySiblings(usize),
+    #[error("too many levels: {0}")]
+    TooManyLevels(usize),
     #[error("invalid digest")]
     InvalidDigest,
 }
@@ -291,7 +287,7 @@ impl<H: Hasher> Read for Proof<H> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let siblings = Vec::<H::Digest>::read_range(reader, ..=MAX_SIBLINGS)?;
+        let siblings = Vec::<H::Digest>::read_range(reader, ..=MAX_LEVELS)?;
         Ok(Self { siblings })
     }
 }
@@ -345,7 +341,7 @@ impl<H: Hasher> Proof<H> {
     }
 }
 
-/// A range proof for a contiguous set of leaves in a Binary Merkle Tree.
+/// A Merkle range proof for a contiguous set of leaves in a Binary Merkle Tree.
 #[derive(Clone, Debug, Eq)]
 pub struct RangeProof<H: Hasher> {
     /// The sibling hashes needed to prove all elements in the range.
@@ -363,12 +359,15 @@ where
 }
 
 impl<H: Hasher> RangeProof<H> {
-    /// Verifies that a given range of `leaves` starting at `start_position` are included
+    /// Verifies that a given range of `leaves` starting at `position` are included
     /// in a Binary Merkle Tree with `root` using the provided `hasher`.
+    ///
+    /// The proof contains the minimal set of sibling digests needed to reconstruct
+    /// the root for all elements in the range.
     pub fn verify(
         &self,
         hasher: &mut H,
-        start_position: u32,
+        position: u32,
         leaves: &[H::Digest],
         root: &H::Digest,
     ) -> Result<(), Error> {
@@ -380,7 +379,7 @@ impl<H: Hasher> RangeProof<H> {
         // Compute position-hashed leaves
         let mut nodes: Vec<(usize, H::Digest)> = Vec::new();
         for (i, leaf) in leaves.iter().enumerate() {
-            let position = start_position + i as u32;
+            let position = position + i as u32;
             hasher.update(&position.to_be_bytes());
             hasher.update(leaf);
             nodes.push((position as usize, hasher.finalize()));
@@ -467,13 +466,8 @@ impl<H: Hasher> Read for RangeProof<H> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        // Configure range limits for nested vectors
-        let outer_range: RangeCfg = (..=MAX_LEVELS).into();
-        let inner_range: RangeCfg = (..=MAX_SIBLINGS).into();
-
-        // Read the nested vector with range limits
-        let siblings_by_level =
-            Vec::<Vec<H::Digest>>::read_cfg(reader, &(outer_range, (inner_range, ())))?;
+        let levels: RangeCfg = (..=MAX_LEVELS).into();
+        let siblings_by_level = Vec::<Vec<H::Digest>>::read_cfg(reader, &(levels, (levels, ())))?;
 
         Ok(Self { siblings_by_level })
     }
