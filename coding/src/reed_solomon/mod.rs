@@ -332,23 +332,16 @@ fn extract_data(shards: Vec<Vec<u8>>, k: usize) -> Vec<u8> {
     data.take(data_len).collect()
 }
 
-/// Encode data using a Reed-Solomon coder and insert it into a [bmt].
-///
-/// # Parameters
-///
-/// - `total`: The total number of chunks to generate.
-/// - `min`: The minimum number of chunks required to decode the data.
-/// - `data`: The data to encode.
-///
-/// # Returns
-///
-/// - `root`: The root of the [bmt].
-/// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
-pub fn encode<H: Hasher>(
-    total: u16,
-    min: u16,
-    data: Vec<u8>,
-) -> Result<(H::Digest, Vec<Chunk<H>>), Error> {
+/// Type alias for the internal encoding result.
+type Encoding<H> = (
+    <H as Hasher>::Digest,
+    Vec<Vec<u8>>, // all shards
+    Vec<Vec<u8>>, // data shards only
+);
+
+/// Common encoding logic shared by encode() and prove().
+/// Returns (root, all_shards, data_shards_only)
+fn encode_inner<H: Hasher>(total: u16, min: u16, data: Vec<u8>) -> Result<Encoding<H>, Error> {
     // Validate parameters
     assert!(total > min);
     assert!(min > 0);
@@ -377,6 +370,10 @@ pub fn encode<H: Hasher>(
         .recovery_iter()
         .map(|shard| shard.to_vec())
         .collect();
+
+    // Store data shards before extending
+    let data_shards = shards[..k].to_vec();
+
     shards.extend(recovery_shards);
 
     // Build Merkle tree
@@ -390,6 +387,40 @@ pub fn encode<H: Hasher>(
     }
     let tree = builder.build();
     let root = tree.root();
+
+    Ok((root, shards, data_shards))
+}
+
+/// Encode data using a Reed-Solomon coder and insert it into a [bmt].
+///
+/// # Parameters
+///
+/// - `total`: The total number of chunks to generate.
+/// - `min`: The minimum number of chunks required to decode the data.
+/// - `data`: The data to encode.
+///
+/// # Returns
+///
+/// - `root`: The root of the [bmt].
+/// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
+pub fn encode<H: Hasher>(
+    total: u16,
+    min: u16,
+    data: Vec<u8>,
+) -> Result<(H::Digest, Vec<Chunk<H>>), Error> {
+    let (root, shards, _) = encode_inner::<H>(total, min, data)?;
+    let n = total as usize;
+
+    // Build tree to generate proofs
+    let mut builder = Builder::<H>::new(n);
+    let mut hasher = H::new();
+    for shard in &shards {
+        builder.add(&{
+            hasher.update(shard);
+            hasher.finalize()
+        });
+    }
+    let tree = builder.build();
 
     // Generate chunks
     let mut chunks = Vec::with_capacity(n);
@@ -422,41 +453,10 @@ pub fn prove<H: Hasher>(
     min: u16,
     data: Vec<u8>,
 ) -> Result<(H::Digest, Data<H>), Error> {
-    // Validate parameters
-    assert!(total > min);
-    assert!(min > 0);
+    let (root, shards, data_shards) = encode_inner::<H>(total, min, data)?;
     let n = total as usize;
-    let k = min as usize;
-    let m = n - k;
-    if data.len() > u32::MAX as usize {
-        return Err(Error::InvalidDataLength(data.len()));
-    }
 
-    // Prepare data
-    let mut shards = prepare_data(data, k, m);
-    let shard_len = shards[0].len();
-
-    // Create encoder
-    let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::ReedSolomon)?;
-    for shard in &shards {
-        encoder
-            .add_original_shard(shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-
-    // Compute recovery shards
-    let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    let recovery_shards: Vec<Vec<u8>> = encoding
-        .recovery_iter()
-        .map(|shard| shard.to_vec())
-        .collect();
-
-    // Store data shards for minimal proof before moving
-    let data_shards = shards[..k].to_vec();
-
-    shards.extend(recovery_shards);
-
-    // Build Merkle tree
+    // Build tree to generate range proof
     let mut builder = Builder::<H>::new(n);
     let mut hasher = H::new();
     for shard in &shards {
@@ -466,7 +466,6 @@ pub fn prove<H: Hasher>(
         });
     }
     let tree = builder.build();
-    let root = tree.root();
 
     // Generate range proof for minimal proof
     let proof = tree
