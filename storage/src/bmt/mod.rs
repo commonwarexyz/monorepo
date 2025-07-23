@@ -210,8 +210,8 @@ impl<H: Hasher> Tree<H> {
         }
         let end_position = position
             .checked_add(count)
-            .and_then(|p| p.checked_sub(1))
-            .ok_or(Error::InvalidPosition(position))?;
+            .ok_or(Error::InvalidPosition(position))?
+            - 1;
         if end_position >= leaf_count {
             return Err(Error::InvalidPosition(end_position));
         }
