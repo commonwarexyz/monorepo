@@ -7,10 +7,10 @@ use crate::{
         min_active,
         types::{
             Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
-            Nullification, Nullify, Proposal, View, Viewable, Voter,
+            Nullification, Nullify, Proposal, View, Voter,
         },
     },
-    Automaton, Relay, Reporter, ThresholdSupervisor, LATENCY,
+    Automaton, Relay, Reporter, ThresholdSupervisor, Viewable, LATENCY,
 };
 use commonware_cryptography::{
     bls12381::primitives::{

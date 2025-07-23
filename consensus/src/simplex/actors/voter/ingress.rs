@@ -1,4 +1,7 @@
-use crate::simplex::types::{Notarization, Nullification, View, Viewable};
+use crate::{
+    simplex::types::{Notarization, Nullification, View},
+    Viewable,
+};
 use commonware_cryptography::{Digest, Signature};
 use futures::{channel::mpsc, SinkExt};
 
@@ -9,6 +12,8 @@ pub enum Message<S: Signature, D: Digest> {
 }
 
 impl<S: Signature, D: Digest> Viewable for Message<S, D> {
+    type View = View;
+
     fn view(&self) -> View {
         match self {
             Message::Notarization(notarization) => notarization.view(),
