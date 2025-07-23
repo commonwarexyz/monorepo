@@ -122,7 +122,7 @@ impl<P: Array> SafeTip<P> {
                 .lo
                 .last_entry()
                 .map(|e| *e.key())
-                .is_none_or(|max_lo| max_lo <= new);
+                .map_or(true, |max_lo| max_lo <= new);
 
             // Case 3: The value can remain in the `hi` heap.
             if stay_in_hi {
@@ -187,7 +187,7 @@ impl<P: Array> SafeTip<P> {
             .hi
             .first_entry()
             .map(|e| *e.key())
-            .is_none_or(|min_hi| min_hi >= new);
+            .map_or(true, |min_hi| min_hi >= new);
 
         // Case 2: The value can remain in the `lo` heap.
         if stay_in_lo {
