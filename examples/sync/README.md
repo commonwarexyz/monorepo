@@ -2,12 +2,12 @@
 
  [![Crates.io](https://img.shields.io/crates/v/commonware-sync.svg)](https://crates.io/crates/commonware-sync)
 
-Synchronize state between a server and client with [adb::any::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/struct.Any.html).
+Continuously synchronize state between a server and client with [adb::any::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/struct.Any.html).
 
 ## Components
 
 - [Server](src/bin/server.rs): Serves historical operations and proofs to clients.
-- [Client](src/bin/client.rs): Starting from an empty database, syncs to the server's database state.
+- [Client](src/bin/client.rs): Continuously syncs to the server's database state.
 - [Resolver](src/resolver.rs): Used by client to communicate with server.
 - [Protocol](src/protocol.rs): Defines network messages.
 
@@ -40,7 +40,7 @@ Server options:
 - `-i, --initial-ops <COUNT>`: Number of initial operations to create (default: 100)
 - `-d, --storage-dir <PATH>`: Storage directory for database (default: /tmp/commonware-sync/server-{RANDOM_SUFFIX})
 - `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9090)
-- `-t, --op-interval <DURATION>`: Interval for adding new operations in 's' or 'ms' (default: 100ms)
+- `-t, --op-interval <DURATION>`: Interval for adding new operations ('ms', 's', 'm', 'h') (default: 100ms)
 - `-o, --ops-per-interval <COUNT>`: Number of operations to add each interval (default: 5)
 
 ### Running the Client
@@ -50,7 +50,7 @@ Server options:
 cargo run --bin client
 
 # Connect with custom settings
-cargo run --bin client -- --server 127.0.0.1:8080 --batch-size 25 --storage-dir /tmp/my_client --metrics-port 9091 --target-update-interval 3s
+cargo run --bin client -- --server 127.0.0.1:8080 --batch-size 25 --storage-dir /tmp/my_client --metrics-port 9091 --target-update-interval 3s --sync-interval 5s
 ```
 
 Client options:
@@ -58,7 +58,8 @@ Client options:
 - `-b, --batch-size <SIZE>`: Batch size for fetching operations (default: 50)
 - `-d, --storage-dir <PATH>`: Storage directory for local database (default: /tmp/commonware-sync/client-{RANDOM_SUFFIX})
 - `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9091)
-- `-t, --target-update-interval <DURATION>`: Interval for requesting target updates in 's' or 'ms' (default: 1s)
+- `-t, --target-update-interval <DURATION>`: Interval for requesting target updates ('ms', 's', 'm', 'h') (default: 1s)
+- `-i, --sync-interval <DURATION>`: Interval between sync operations ('ms', 's', 'm', 'h') (default: 10s)
 
 ## Example Session
 
@@ -78,19 +79,20 @@ Client options:
 
 2. **In another terminal, run the client:**
    ```bash
-   cargo run --bin client -- --batch-size 25 --target-update-interval 3s
+   cargo run --bin client -- --batch-size 25 --target-update-interval 3s --sync-interval 5s
    ```
 
    You should see output like:
    ```
-   INFO starting sync to server server=127.0.0.1:8080
-   INFO establishing connection server_addr=127.0.0.1:8080
-   INFO connected server_addr=127.0.0.1:8080
-   INFO initial sync target target=SyncTarget { root: 234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3, lower_bound_ops: 74, upper_bound_ops: 144 }
-   INFO sync configuration batch_size=25 lower_bound=74 upper_bound=144 target_update_interval=3s
-   INFO starting sync
-   INFO sync completed successfully target_root=234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3 lower_bound_ops=74 upper_bound_ops=144 log_size=145 valid_batches_received=3 invalid_batches_received=0
+   INFO starting continuous sync process
+   INFO starting sync sync_iteration=1 target=SyncTarget { root: 234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3, lower_bound_ops: 74, upper_bound_ops: 144 } server=127.0.0.1:8080 batch_size=25 target_update_interval=3s
+   INFO ✅ sync completed successfully sync_iteration=1 database_ops=145 root=234bc873fac6d19f96b172fb910ca51b0acbb94858420ae0c6e5e4fc4cc6e4f3 sync_interval=5s
+   INFO starting sync sync_iteration=2 target=SyncTarget { root: a47d3c2e8b1f9c045e6d2b8a7c9f1e4d3a6b5c8e2f4a7d1e9c2b5a8f3e6d9c2b, lower_bound_ops: 74, upper_bound_ops: 162 } server=127.0.0.1:8080 batch_size=25 target_update_interval=3s
+   INFO ✅ sync completed successfully sync_iteration=2 database_ops=163 root=a47d3c2e8b1f9c045e6d2b8a7c9f1e4d3a6b5c8e2f4a7d1e9c2b5a8f3e6d9c2b sync_interval=5s
+   ...
    ```
+
+   The client will continue syncing indefinitely, with each iteration showing a new sync_iteration value.
 
 ## Metrics
 
@@ -107,11 +109,16 @@ curl http://localhost:9090/metrics
 
 1. **Server Setup**: Server starts, populates database with initial operations, and listens for connections
 2. **Continuous Operation Generation**: Server continuously adds new operations at the specified interval
-3. **Client Connection**: Client establishes connection to server
-4. **Initial Sync Target**: Client requests server metadata to determine initial sync target (inactivity floor, size, and digest of the server's database)
-5. **Dynamic Target Updates**: Client periodically requests target updates during sync to handle new operations added by the server
-6. **Completion**: Client continues until all operations are applied and state matches server's target
-7. **Cleanup**: Client disconnects and stops; Server keeps running and adding operations
+3. **Client Startup**: Client starts continuous sync process
+4. **Sync Iteration Loop**: For each sync iteration:
+   - **Database Initialization**: Client opens a new database (or reopens existing one)
+   - **Connection**: Client establishes connection to server
+   - **Initial Sync Target**: Client requests server metadata to determine sync target (inactivity floor, size, and root digest)
+   - **Dynamic Target Updates**: Client periodically requests target updates during sync to handle new operations added by the server
+   - **Sync Completion**: Client continues until all operations are applied and state matches server's target
+   - **Database Closure**: Client closes the database to prepare for next iteration
+   - **Wait Period**: Client waits for the configured sync interval before starting next iteration
+5. **Continuous Operation**: This process continues indefinitely, allowing the client to stay synchronized with the ever-changing server state
 
 ## Adapting to Production
 
