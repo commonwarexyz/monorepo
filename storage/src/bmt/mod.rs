@@ -1407,13 +1407,11 @@ mod tests {
             let mut hasher = Sha256::default();
 
             // Test range including the last element (which may require duplicate handling)
-            if tree_size >= 2 {
-                let start = tree_size - 2;
-                let proof = tree.range_proof(start as u32, 2).unwrap();
-                assert!(proof
-                    .verify(&mut hasher, start as u32, &digests[start..tree_size], &root)
-                    .is_ok());
-            }
+            let start = tree_size - 2;
+            let proof = tree.range_proof(start as u32, 2).unwrap();
+            assert!(proof
+                .verify(&mut hasher, start as u32, &digests[start..tree_size], &root)
+                .is_ok());
         }
     }
 }
