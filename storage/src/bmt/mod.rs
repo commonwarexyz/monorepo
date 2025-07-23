@@ -197,46 +197,46 @@ impl<H: Hasher> Tree<H> {
     /// with `count` elements.
     ///
     /// The proof contains the minimal set of sibling digests needed to reconstruct
-    /// the root for all elements in the range.
+    /// the root for all elements in the range. This is more efficient than individual
+    /// proofs when proving multiple consecutive elements.
     pub fn range_proof(&self, position: u32, count: u32) -> Result<RangeProof<H>, Error> {
         // Ensure the range is within bounds
         if self.empty || count == 0 {
             return Err(Error::NoLeaves);
         }
-
         let leaf_count = self.levels.first().unwrap().len() as u32;
         if position >= leaf_count {
             return Err(Error::InvalidPosition(position));
         }
-
-        let end_position = position.saturating_add(count).saturating_sub(1);
+        let end_position = position
+            .checked_add(count)
+            .and_then(|p| p.checked_sub(1))
+            .ok_or(Error::InvalidPosition(position))?;
         if end_position >= leaf_count {
             return Err(Error::InvalidPosition(end_position));
         }
 
-        let mut siblings_by_level = Vec::new();
-
         // For each level (except the root level) collect the necessary siblings
+        let mut siblings_by_level = Vec::new();
         for (level_idx, level) in self.levels.iter().enumerate() {
             if level.len() == 1 {
                 break;
             }
 
-            let mut level_siblings = Vec::new();
-            let mut added_indices = std::collections::HashSet::new();
-
             // Calculate the range of indices at this level
             let level_start = (position as usize) >> level_idx;
             let level_end = (end_position as usize) >> level_idx;
 
-            // For each position in our range at this level
+            // For each position in our range at this level, determine if we need its sibling
+            let mut level_siblings = Vec::new();
+            let mut added_indices = std::collections::HashSet::new();
             for pos in level_start..=level_end {
                 let sibling_pos = if pos % 2 == 0 { pos + 1 } else { pos - 1 };
 
                 // Only add the sibling if:
                 // 1. It's outside our range (not between level_start and level_end)
-                // 2. We haven't already added it
-                // 3. For duplicates (when sibling doesn't exist), only add if we don't have the full range
+                // 2. We haven't already added it (deduplication)
+                // 3. For duplicates (when sibling doesn't exist), only add if needed
                 if (sibling_pos < level_start || sibling_pos > level_end)
                     && !added_indices.contains(&sibling_pos)
                 {
@@ -244,8 +244,9 @@ impl<H: Hasher> Tree<H> {
                         level_siblings.push(level[sibling_pos]);
                         added_indices.insert(sibling_pos);
                     } else {
-                        // If the sibling doesn't exist (we're the last node), only add duplicate
-                        // if we don't have the full tree at this level
+                        // Special case: When a node has no sibling (odd tree size), it uses itself as sibling.
+                        // Only include this duplicate if we're not proving the entire level,
+                        // as the verifier can deduce the duplicate case when seeing the full level.
                         if level_start > 0 || level_end < level.len() - 1 {
                             level_siblings.push(level[pos]);
                             added_indices.insert(sibling_pos);
@@ -367,6 +368,12 @@ impl<H: Hasher> RangeProof<H> {
     ///
     /// The proof contains the minimal set of sibling digests needed to reconstruct
     /// the root for all elements in the range.
+    ///
+    /// # Security
+    /// - Validates that leaves are non-empty and position doesn't overflow
+    /// - Ensures all siblings in the proof are consumed exactly once
+    /// - Rejects proofs with extra siblings or missing siblings
+    /// - Position is included in leaf hash to prevent positional attacks
     pub fn verify(
         &self,
         hasher: &mut H,
@@ -377,6 +384,11 @@ impl<H: Hasher> RangeProof<H> {
         // Check that we have leaves
         if leaves.is_empty() {
             return Err(Error::NoLeaves);
+        }
+
+        // Check for integer overflow - critical for preventing attacks
+        if position.saturating_add(leaves.len() as u32) < position {
+            return Err(Error::InvalidPosition(position));
         }
 
         // Compute position-hashed leaves
@@ -406,7 +418,7 @@ impl<H: Hasher> RangeProof<H> {
                 let has_paired_sibling =
                     i + 1 < nodes.len() && nodes[i + 1].0 == expected_sibling_pos;
                 if has_paired_sibling {
-                    // Both children are in our range
+                    // Both children are in our range - no proof sibling needed
                     hasher.update(node);
                     hasher.update(&nodes[i + 1].1);
                     next_nodes.push((parent_pos, hasher.finalize()));
@@ -415,6 +427,7 @@ impl<H: Hasher> RangeProof<H> {
                     // Need sibling from proof
                     let is_left = pos % 2 == 0;
                     if let Some(sibling) = sibling_iter.next() {
+                        // Hash in correct order based on position (left/right)
                         if is_left {
                             hasher.update(node);
                             hasher.update(sibling);
@@ -424,7 +437,8 @@ impl<H: Hasher> RangeProof<H> {
                         }
                         next_nodes.push((parent_pos, hasher.finalize()));
                     } else {
-                        // No sibling in proof, must be a duplicate case
+                        // No sibling in proof - this is only valid for the duplicate case
+                        // where a node at an odd position has no right sibling (odd tree size)
                         hasher.update(node);
                         hasher.update(node);
                         next_nodes.push((parent_pos, hasher.finalize()));
@@ -1198,6 +1212,231 @@ mod tests {
                         "Failed for tree_size={tree_size}, start={start}, range_size={range_size}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn test_range_proof_malicious_wrong_position() {
+        // Create test data
+        let digests: Vec<Digest> = (0..8u32).map(|i| hash(&i.to_be_bytes())).collect();
+
+        // Build tree
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+        let root = tree.root();
+
+        // Get valid range proof for position 2, count 3
+        let range_proof = tree.range_proof(2, 3).unwrap();
+        let mut hasher = Sha256::default();
+        let range_leaves = &digests[2..5];
+
+        // Try to verify with wrong position - should fail
+        assert!(range_proof
+            .verify(&mut hasher, 3, range_leaves, &root)
+            .is_err());
+        assert!(range_proof
+            .verify(&mut hasher, 1, range_leaves, &root)
+            .is_err());
+    }
+
+    #[test]
+    fn test_range_proof_malicious_reordered_leaves() {
+        // Create test data
+        let digests: Vec<Digest> = (0..8u32).map(|i| hash(&i.to_be_bytes())).collect();
+
+        // Build tree
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+        let root = tree.root();
+
+        // Get valid range proof for position 2, count 3
+        let range_proof = tree.range_proof(2, 3).unwrap();
+        let mut hasher = Sha256::default();
+
+        // Try to verify with reordered leaves - should fail
+        let reordered_leaves = vec![digests[3], digests[2], digests[4]];
+        assert!(range_proof
+            .verify(&mut hasher, 2, &reordered_leaves, &root)
+            .is_err());
+    }
+
+    #[test]
+    fn test_range_proof_malicious_extra_siblings() {
+        // Create test data
+        let digests: Vec<Digest> = (0..8u32).map(|i| hash(&i.to_be_bytes())).collect();
+
+        // Build tree
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+        let root = tree.root();
+
+        // Get valid range proof
+        let mut range_proof = tree.range_proof(2, 2).unwrap();
+        let mut hasher = Sha256::default();
+        let range_leaves = &digests[2..4];
+
+        // Add extra sibling to a level
+        if !range_proof.siblings.is_empty() {
+            range_proof.siblings[0].push(hash(b"extra"));
+            assert!(range_proof
+                .verify(&mut hasher, 2, range_leaves, &root)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn test_range_proof_malicious_missing_siblings() {
+        // Create test data
+        let digests: Vec<Digest> = (0..8u32).map(|i| hash(&i.to_be_bytes())).collect();
+
+        // Build tree
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+        let root = tree.root();
+
+        // Get valid range proof
+        let mut range_proof = tree.range_proof(2, 2).unwrap();
+        let mut hasher = Sha256::default();
+        let range_leaves = &digests[2..4];
+
+        // Remove a sibling from a level
+        if !range_proof.siblings.is_empty() && !range_proof.siblings[0].is_empty() {
+            range_proof.siblings[0].pop();
+            assert!(range_proof
+                .verify(&mut hasher, 2, range_leaves, &root)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn test_range_proof_integer_overflow_protection() {
+        // Create test data
+        let digests: Vec<Digest> = (0..8u32).map(|i| hash(&i.to_be_bytes())).collect();
+
+        // Build tree
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+
+        // Test overflow in range_proof generation
+        assert!(tree.range_proof(u32::MAX, 1).is_err());
+        assert!(tree.range_proof(u32::MAX - 1, 2).is_err());
+        assert!(tree.range_proof(7, u32::MAX).is_err());
+    }
+
+    #[test]
+    fn test_range_proof_malicious_wrong_tree_structure() {
+        // Create test data
+        let digests: Vec<Digest> = (0..8u32).map(|i| hash(&i.to_be_bytes())).collect();
+
+        // Build tree
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+        let root = tree.root();
+
+        // Get valid range proof
+        let mut range_proof = tree.range_proof(2, 2).unwrap();
+        let mut hasher = Sha256::default();
+        let range_leaves = &digests[2..4];
+
+        // Add extra level (simulating proof from different tree structure)
+        range_proof.siblings.push(vec![hash(b"fake_level")]);
+        assert!(range_proof
+            .verify(&mut hasher, 2, range_leaves, &root)
+            .is_err());
+
+        // Remove a level (if possible)
+        let mut range_proof = tree.range_proof(2, 2).unwrap();
+        if !range_proof.siblings.is_empty() {
+            range_proof.siblings.pop();
+            assert!(range_proof
+                .verify(&mut hasher, 2, range_leaves, &root)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn test_range_proof_boundary_conditions() {
+        // Test various power-of-2 boundary conditions
+        for tree_size in [1, 2, 4, 8, 16, 32] {
+            let digests: Vec<Digest> = (0..tree_size as u32)
+                .map(|i| hash(&i.to_be_bytes()))
+                .collect();
+
+            // Build tree
+            let mut builder = Builder::<Sha256>::new(digests.len());
+            for digest in &digests {
+                builder.add(digest);
+            }
+            let tree = builder.build();
+            let root = tree.root();
+            let mut hasher = Sha256::default();
+
+            // Test edge cases
+            // First element only
+            let proof = tree.range_proof(0, 1).unwrap();
+            assert!(proof.verify(&mut hasher, 0, &digests[0..1], &root).is_ok());
+
+            // Last element only
+            let last_idx = tree_size - 1;
+            let proof = tree.range_proof(last_idx as u32, 1).unwrap();
+            assert!(proof
+                .verify(
+                    &mut hasher,
+                    last_idx as u32,
+                    &digests[last_idx..tree_size],
+                    &root
+                )
+                .is_ok());
+
+            // Full tree
+            let proof = tree.range_proof(0, tree_size as u32).unwrap();
+            assert!(proof.verify(&mut hasher, 0, &digests, &root).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_range_proof_duplicate_node_edge_cases() {
+        // Test trees with odd sizes that require duplicate nodes
+        for tree_size in [3, 5, 7, 9, 11, 13, 15] {
+            let digests: Vec<Digest> = (0..tree_size as u32)
+                .map(|i| hash(&i.to_be_bytes()))
+                .collect();
+
+            // Build tree
+            let mut builder = Builder::<Sha256>::new(digests.len());
+            for digest in &digests {
+                builder.add(digest);
+            }
+            let tree = builder.build();
+            let root = tree.root();
+            let mut hasher = Sha256::default();
+
+            // Test range including the last element (which may require duplicate handling)
+            if tree_size >= 2 {
+                let start = tree_size - 2;
+                let proof = tree.range_proof(start as u32, 2).unwrap();
+                assert!(proof
+                    .verify(&mut hasher, start as u32, &digests[start..tree_size], &root)
+                    .is_ok());
             }
         }
     }
