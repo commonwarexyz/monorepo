@@ -11,18 +11,67 @@ use crate::{
         operation::Operation,
     },
     journal::fixed::{Config as JConfig, Journal},
-    mmr::{self, iterator::leaf_num_to_pos},
+    mmr::{self, iterator::leaf_num_to_pos, verification::Proof},
     translator::Translator,
 };
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{
     telemetry::metrics::histogram::{Buckets, Timed},
     Clock, Metrics as MetricsTrait, Storage,
 };
 use commonware_utils::{Array, NZU64};
+use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, info, warn};
+
+/// Represents a batch of operations that has been fetched and validated
+struct ValidatedBatch<D: Digest, K: Array, V: Array> {
+    start_pos: u64,
+    operations: Vec<Operation<K, V>>,
+    proof: Proof<D>,
+}
+
+/// Future representing an in-flight fetch operation
+type FetchFuture<D, K, V> = BoxFuture<'static, (u64, Result<GetOperationsResult<D, K, V>, Error>)>;
+
+/// Pipeline for managing parallel fetches
+struct FetchPipeline<D: Digest, K: Array, V: Array> {
+    /// Position of next operation to fetch
+    next_fetch_pos: u64,
+
+    /// Position of next operation to apply
+    next_apply_pos: u64,
+
+    /// Target position (inclusive)
+    target_pos: u64,
+
+    /// Completed fetches waiting to be applied (ordered by position)
+    pending_apply: std::collections::BTreeMap<u64, ValidatedBatch<D, K, V>>,
+
+    /// Maximum concurrent fetches
+    max_concurrent: usize,
+}
+
+impl<D: Digest, K: Array, V: Array> FetchPipeline<D, K, V> {
+    fn new(start_pos: u64, target_pos: u64, max_concurrent: usize) -> Self {
+        Self {
+            next_fetch_pos: start_pos,
+            next_apply_pos: start_pos,
+            target_pos,
+            pending_apply: std::collections::BTreeMap::new(),
+            max_concurrent,
+        }
+    }
+
+    fn can_spawn_more(&self, in_flight_count: usize) -> bool {
+        in_flight_count < self.max_concurrent && self.next_fetch_pos <= self.target_pos
+    }
+
+    fn is_complete(&self) -> bool {
+        self.next_apply_pos > self.target_pos
+    }
+}
 
 /// Configuration for the sync client
 pub struct Config<E, K, V, H, T, R>
@@ -161,6 +210,482 @@ where
     },
     /// Sync completed. Database is fully constructed.
     Done { db: adb::any::Any<E, K, V, H, T> },
+}
+
+/// New client implementation using pipeline architecture for parallel fetching
+pub(super) struct ClientV2<E, K, V, H, T, R>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
+    /// Configuration
+    config: Config<E, K, V, H, T, R>,
+
+    /// Operations journal
+    log: Journal<E, Operation<K, V>>,
+
+    /// Hasher for root digests
+    hasher: mmr::hasher::Standard<H>,
+
+    /// Metrics
+    metrics: Metrics<E>,
+
+    /// Current sync target
+    target: SyncTarget<H::Digest>,
+
+    /// Pinned nodes for MMR
+    pinned_nodes: Option<Vec<H::Digest>>,
+
+    /// Pipeline for managing parallel fetches
+    pipeline: FetchPipeline<H::Digest, K, V>,
+
+    /// In-flight fetch requests
+    in_flight: FuturesUnordered<FetchFuture<H::Digest, K, V>>,
+
+    /// Completed database (when sync is done)
+    completed_db: Option<adb::any::Any<E, K, V, H, T>>,
+}
+
+impl<E, K, V, H, T, R> ClientV2<E, K, V, H, T, R>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
+    /// Create a new sync client with pipeline architecture
+    pub(crate) async fn new(config: Config<E, K, V, H, T, R>) -> Result<Self, Error> {
+        // Validate bounds (inclusive)
+        if config.target.lower_bound_ops > config.target.upper_bound_ops {
+            return Err(Error::InvalidTarget {
+                lower_bound_pos: config.target.lower_bound_ops,
+                upper_bound_pos: config.target.upper_bound_ops,
+            });
+        }
+
+        // Initialize the operations journal
+        let log = Journal::<E, Operation<K, V>>::init_sync(
+            config.context.clone().with_label("log"),
+            JConfig {
+                partition: config.db_config.log_journal_partition.clone(),
+                items_per_blob: config.db_config.log_items_per_blob,
+                write_buffer: config.db_config.log_write_buffer,
+                buffer_pool: config.db_config.buffer_pool.clone(),
+            },
+            config.target.lower_bound_ops,
+            config.target.upper_bound_ops,
+        )
+        .await
+        .map_err(adb::Error::JournalError)
+        .map_err(Error::Adb)?;
+
+        // Check how many operations are already in the log
+        let log_size = log
+            .size()
+            .await
+            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+        // Initialize pipeline
+        let pipeline = FetchPipeline::new(
+            log_size,
+            config.target.upper_bound_ops,
+            5, // TODO: make this configurable
+        );
+
+        // Check if we already have all operations
+        let (log, completed_db) = if log_size == config.target.upper_bound_ops + 1 {
+            // Build the database immediately
+            let db = adb::any::Any::init_synced(
+                config.context.clone(),
+                SyncConfig {
+                    db_config: config.db_config.clone(),
+                    log,
+                    lower_bound: config.target.lower_bound_ops,
+                    upper_bound: config.target.upper_bound_ops,
+                    pinned_nodes: None,
+                    apply_batch_size: config.apply_batch_size,
+                },
+            )
+            .await
+            .map_err(Error::Adb)?;
+
+            // Create a dummy journal since we already completed
+            let dummy_log = Journal::<E, Operation<K, V>>::init_sync(
+                config.context.clone().with_label("dummy"),
+                JConfig {
+                    partition: "dummy".to_string(),
+                    items_per_blob: 1,
+                    write_buffer: 1,
+                    buffer_pool: config.db_config.buffer_pool.clone(),
+                },
+                0,
+                0,
+            )
+            .await
+            .map_err(adb::Error::JournalError)
+            .map_err(Error::Adb)?;
+
+            (dummy_log, Some(db))
+        } else {
+            (log, None)
+        };
+
+        let metrics = Metrics::new(config.context.clone());
+        let target = config.target.clone();
+        let hasher = mmr::hasher::Standard::<H>::new();
+
+        Ok(Self {
+            config,
+            log,
+            hasher,
+            metrics,
+            target,
+            pinned_nodes: None,
+            pipeline,
+            in_flight: FuturesUnordered::new(),
+            completed_db,
+        })
+    }
+
+    /// Spawn new fetch operations if we have capacity and more to fetch
+    fn spawn_fetches(&mut self) {
+        while self.pipeline.can_spawn_more(self.in_flight.len()) {
+            let start_pos = self.pipeline.next_fetch_pos;
+            let remaining = self.pipeline.target_pos - start_pos + 1;
+            let batch_size = std::cmp::min(self.config.fetch_batch_size.get(), remaining);
+
+            // We can't move the resolver, so we'll need to handle this differently
+            // For now, let's just track what needs to be fetched
+            debug!(
+                start_pos = start_pos,
+                batch_size = batch_size,
+                "would spawn fetch operation (not implemented yet)"
+            );
+
+            self.pipeline.next_fetch_pos += batch_size;
+        }
+    }
+
+    /// Process any completed fetch operations
+    async fn process_completed_fetches(&mut self) -> Result<(), Error> {
+        // Use poll_next to check for completed futures without blocking
+        while let Some((start_pos, result)) = self.in_flight.next().await {
+            match result {
+                Ok(GetOperationsResult {
+                    proof,
+                    operations,
+                    success_tx,
+                }) => {
+                    let operations_len = operations.len() as u64;
+
+                    // Verify proof
+                    let proof_valid = {
+                        let _timer = self.metrics.proof_verification_duration.timer();
+                        adb::any::Any::<E, K, V, H, T>::verify_proof(
+                            &mut self.hasher,
+                            &proof,
+                            start_pos,
+                            &operations,
+                            &self.target.root,
+                        )
+                    };
+
+                    let _ = success_tx.send(proof_valid);
+
+                    if proof_valid {
+                        self.metrics.valid_batches_received.inc();
+                        self.metrics.operations_fetched.inc_by(operations_len);
+
+                        // Extract pinned nodes from first batch if needed
+                        if self.pinned_nodes.is_none() && start_pos == self.target.lower_bound_ops {
+                            let start_mmr_pos = leaf_num_to_pos(start_pos);
+                            let end_mmr_pos = leaf_num_to_pos(start_pos + operations_len - 1);
+                            match proof.extract_pinned_nodes(start_mmr_pos, end_mmr_pos) {
+                                Ok(nodes) => {
+                                    debug!(
+                                        pinned_nodes_count = nodes.len(),
+                                        "extracted pinned nodes from first batch"
+                                    );
+                                    self.pinned_nodes = Some(nodes);
+                                }
+                                Err(e) => {
+                                    warn!(error = ?e, "failed to extract pinned nodes");
+                                    self.metrics.invalid_batches_received.inc();
+                                    // TODO: Retry the fetch
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Store the validated batch for ordered application
+                        self.pipeline.pending_apply.insert(
+                            start_pos,
+                            ValidatedBatch {
+                                start_pos,
+                                operations,
+                                proof,
+                            },
+                        );
+
+                        debug!(
+                            start_pos = start_pos,
+                            operations_len = operations_len,
+                            pending_count = self.pipeline.pending_apply.len(),
+                            "stored validated batch"
+                        );
+                    } else {
+                        debug!(start_pos = start_pos, "proof verification failed");
+                        self.metrics.invalid_batches_received.inc();
+                        // TODO: Retry the fetch
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        start_pos = start_pos,
+                        error = ?e,
+                        "fetch operation failed"
+                    );
+                    return Err(Error::Resolver(Box::new(e)));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply any batches that are ready (consecutive starting from next_apply_pos)
+    async fn apply_ready_batches(&mut self) -> Result<(), Error> {
+        while let Some(batch) = self
+            .pipeline
+            .pending_apply
+            .remove(&self.pipeline.next_apply_pos)
+        {
+            let _timer = self.metrics.apply_duration.timer();
+
+            debug!(
+                start_pos = batch.start_pos,
+                operations_count = batch.operations.len(),
+                "applying batch"
+            );
+
+            // Apply all operations in the batch
+            let operations_count = batch.operations.len() as u64;
+            for op in batch.operations {
+                self.log
+                    .append(op)
+                    .await
+                    .map_err(adb::Error::JournalError)
+                    .map_err(Error::Adb)?;
+            }
+
+            // Update next position to apply
+            self.pipeline.next_apply_pos = batch.start_pos + operations_count;
+
+            // Check if we've completed sync
+            if self.pipeline.is_complete() {
+                self.complete_sync().await?;
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Complete the sync process by building the final database
+    async fn complete_sync(&mut self) -> Result<(), Error> {
+        if self.completed_db.is_some() {
+            // Already completed
+            return Ok(());
+        }
+
+        info!(
+            target_root = ?self.target.root,
+            lower_bound_ops = self.target.lower_bound_ops,
+            upper_bound_ops = self.target.upper_bound_ops,
+            "building final database"
+        );
+
+        // Build the complete database from the log
+        let db = adb::any::Any::init_synced(
+            self.config.context.clone(),
+            SyncConfig {
+                db_config: self.config.db_config.clone(),
+                log: std::mem::replace(
+                    &mut self.log,
+                    // Create a dummy journal as placeholder
+                    Journal::<E, Operation<K, V>>::init_sync(
+                        self.config.context.clone().with_label("dummy2"),
+                        JConfig {
+                            partition: "dummy2".to_string(),
+                            items_per_blob: 1,
+                            write_buffer: 1,
+                            buffer_pool: self.config.db_config.buffer_pool.clone(),
+                        },
+                        0,
+                        0,
+                    )
+                    .await
+                    .map_err(adb::Error::JournalError)
+                    .map_err(Error::Adb)?,
+                ),
+                lower_bound: self.target.lower_bound_ops,
+                upper_bound: self.target.upper_bound_ops,
+                pinned_nodes: self.pinned_nodes.clone(),
+                apply_batch_size: self.config.apply_batch_size,
+            },
+        )
+        .await
+        .map_err(Error::Adb)?;
+
+        // Verify the final root digest matches the target
+        let mut hasher = mmr::hasher::Standard::<H>::new();
+        let got_root = db.root(&mut hasher);
+        if got_root != self.target.root {
+            return Err(Error::RootMismatch {
+                expected: Box::new(self.target.root),
+                actual: Box::new(got_root),
+            });
+        }
+
+        info!(
+            target_root = ?self.target.root,
+            valid_batches_received = self.metrics.valid_batches_received.get(),
+            invalid_batches_received = self.metrics.invalid_batches_received.get(),
+            "sync completed successfully"
+        );
+
+        self.completed_db = Some(db);
+        Ok(())
+    }
+
+    /// Run the complete sync process
+    pub(crate) async fn sync(mut self) -> Result<adb::any::Any<E, K, V, H, T>, Error> {
+        info!("starting sync with pipeline architecture");
+
+        // Check if already completed during initialization
+        if let Some(db) = self.completed_db {
+            return Ok(db);
+        }
+
+        loop {
+            // For now, implement sequential fetching
+            // TODO: Make this truly parallel once we figure out resolver ownership
+            if self.pipeline.next_fetch_pos <= self.pipeline.target_pos {
+                let start_pos = self.pipeline.next_fetch_pos;
+                let remaining = self.pipeline.target_pos - start_pos + 1;
+                let batch_size = std::cmp::min(self.config.fetch_batch_size.get(), remaining);
+
+                debug!(
+                    start_pos = start_pos,
+                    batch_size = batch_size,
+                    "fetching operations"
+                );
+
+                // Fetch operations
+                let result = {
+                    let _timer = self.metrics.fetch_duration.timer();
+                    let target_size = self.target.upper_bound_ops + 1;
+                    self.config
+                        .resolver
+                        .get_operations(
+                            target_size,
+                            start_pos,
+                            NonZeroU64::new(batch_size).unwrap(),
+                        )
+                        .await
+                };
+
+                match result {
+                    Ok(GetOperationsResult {
+                        proof,
+                        operations,
+                        success_tx,
+                    }) => {
+                        let operations_len = operations.len() as u64;
+
+                        // Verify proof
+                        let proof_valid = {
+                            let _timer = self.metrics.proof_verification_duration.timer();
+                            adb::any::Any::<E, K, V, H, T>::verify_proof(
+                                &mut self.hasher,
+                                &proof,
+                                start_pos,
+                                &operations,
+                                &self.target.root,
+                            )
+                        };
+
+                        let _ = success_tx.send(proof_valid);
+
+                        if proof_valid {
+                            self.metrics.valid_batches_received.inc();
+                            self.metrics.operations_fetched.inc_by(operations_len);
+
+                            // Extract pinned nodes from first batch if needed
+                            if self.pinned_nodes.is_none()
+                                && start_pos == self.target.lower_bound_ops
+                            {
+                                let start_mmr_pos = leaf_num_to_pos(start_pos);
+                                let end_mmr_pos = leaf_num_to_pos(start_pos + operations_len - 1);
+                                match proof.extract_pinned_nodes(start_mmr_pos, end_mmr_pos) {
+                                    Ok(nodes) => {
+                                        debug!(
+                                            pinned_nodes_count = nodes.len(),
+                                            "extracted pinned nodes from first batch"
+                                        );
+                                        self.pinned_nodes = Some(nodes);
+                                    }
+                                    Err(e) => {
+                                        warn!(error = ?e, "failed to extract pinned nodes");
+                                        self.metrics.invalid_batches_received.inc();
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            // Store the validated batch
+                            self.pipeline.pending_apply.insert(
+                                start_pos,
+                                ValidatedBatch {
+                                    start_pos,
+                                    operations,
+                                    proof,
+                                },
+                            );
+
+                            self.pipeline.next_fetch_pos += operations_len;
+                        } else {
+                            debug!(start_pos = start_pos, "proof verification failed");
+                            self.metrics.invalid_batches_received.inc();
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        return Err(Error::Resolver(Box::new(e)));
+                    }
+                }
+            }
+
+            // Apply any ready batches
+            self.apply_ready_batches().await?;
+
+            // Check if complete
+            if self.completed_db.is_some() {
+                return Ok(self.completed_db.unwrap());
+            }
+
+            // If we have nothing more to fetch and nothing to apply, something went wrong
+            if self.pipeline.next_fetch_pos > self.pipeline.target_pos
+                && self.pipeline.pending_apply.is_empty()
+            {
+                return Err(Error::InvalidState);
+            }
+        }
+    }
 }
 
 impl<E, K, V, H, T, R> Client<E, K, V, H, T, R>
@@ -1738,6 +2263,60 @@ pub(crate) mod tests {
             // Cleanup
             target_db.destroy().await.unwrap();
             reopened_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that ClientV2 produces the same result as Client
+    #[test]
+    fn test_client_v2_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate target database
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(100);
+            apply_ops(&mut target_db, target_ops.clone()).await;
+            target_db.commit().await.unwrap();
+
+            let mut hasher = create_test_hasher();
+            let target_root = target_db.root(&mut hasher);
+            let lower_bound = target_db.inactivity_floor_loc;
+            let upper_bound = target_db.op_count() - 1;
+
+            // Test with ClientV2
+            let config = Config {
+                db_config: create_test_config(context.next_u64()),
+                fetch_batch_size: NZU64!(10),
+                target: SyncTarget {
+                    root: target_root,
+                    lower_bound_ops: lower_bound,
+                    upper_bound_ops: upper_bound,
+                },
+                context: context.clone(),
+                resolver: &target_db,
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+                update_receiver: None,
+            };
+
+            let client_v2 = ClientV2::new(config).await.unwrap();
+            let synced_db = client_v2.sync().await.unwrap();
+
+            // Verify the result
+            assert_eq!(synced_db.root(&mut hasher), target_root);
+            assert_eq!(synced_db.op_count(), upper_bound + 1);
+            assert_eq!(synced_db.inactivity_floor_loc, lower_bound);
+
+            // Verify operations match
+            for op in &target_ops {
+                if let Some(key) = op.to_key() {
+                    let target_value = target_db.get(key).await.unwrap();
+                    let synced_value = synced_db.get(key).await.unwrap();
+                    assert_eq!(target_value, synced_value);
+                }
+            }
+
+            synced_db.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
         });
     }
 }
