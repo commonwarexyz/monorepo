@@ -402,6 +402,12 @@ where
     }
 }
 
+/// A node tracked during range proof verification.
+struct Node<D: Digest> {
+    position: usize,
+    digest: D,
+}
+
 impl<H: Hasher> RangeProof<H> {
     /// Verifies that a given range of `leaves` starting at `position` are included
     /// in a Binary Merkle Tree with `root` using the provided `hasher`.
@@ -426,19 +432,22 @@ impl<H: Hasher> RangeProof<H> {
         }
 
         // Compute position-hashed leaves
-        let mut nodes: Vec<(usize, H::Digest)> = Vec::new();
+        let mut nodes: Vec<Node<H::Digest>> = Vec::new();
         for (i, leaf) in leaves.iter().enumerate() {
             let leaf_position = position + i as u32;
             hasher.update(&leaf_position.to_be_bytes());
             hasher.update(leaf);
-            nodes.push((leaf_position as usize, hasher.finalize()));
+            nodes.push(Node {
+                position: leaf_position as usize,
+                digest: hasher.finalize(),
+            });
         }
 
         // Process each level
         for bounds in self.siblings.iter() {
             // Check if we should have a left sibling
-            let first_pos = nodes[0].0;
-            let last_pos = nodes[nodes.len() - 1].0;
+            let first_pos = nodes[0].position;
+            let last_pos = nodes[nodes.len() - 1].position;
             let needs_left = first_pos % 2 == 1;
             let needs_right = last_pos % 2 == 0;
 
@@ -455,31 +464,41 @@ impl<H: Hasher> RangeProof<H> {
             let mut next_nodes = Vec::new();
             if let Some(left) = &bounds.left {
                 // The first node in our range needs its left sibling
-                let (pos, node) = &nodes[0];
+                let node = &nodes[0];
                 hasher.update(left);
-                hasher.update(node);
-                next_nodes.push((pos / 2, hasher.finalize()));
+                hasher.update(&node.digest);
+                next_nodes.push(Node {
+                    position: node.position / 2,
+                    digest: hasher.finalize(),
+                });
                 i = 1;
             }
 
             // Process pairs of nodes in our range
             while i < nodes.len() {
-                let (pos, node) = &nodes[i];
-                let parent_pos = pos / 2;
+                // Compute the parent position
+                let node = &nodes[i];
+                let parent_pos = node.position / 2;
 
                 // Check if we have a pair within our range
-                if i + 1 < nodes.len() && nodes[i + 1].0 == pos + 1 {
+                if i + 1 < nodes.len() && nodes[i + 1].position == node.position + 1 {
                     // We have both children in our range
-                    hasher.update(node);
-                    hasher.update(&nodes[i + 1].1);
-                    next_nodes.push((parent_pos, hasher.finalize()));
+                    hasher.update(&node.digest);
+                    hasher.update(&nodes[i + 1].digest);
+                    next_nodes.push(Node {
+                        position: parent_pos,
+                        digest: hasher.finalize(),
+                    });
                     i += 2;
                 } else if i == nodes.len() - 1 {
                     // This is the last node and it should have a right sibling
                     let right = bounds.right.as_ref().unwrap();
-                    hasher.update(node);
+                    hasher.update(&node.digest);
                     hasher.update(right);
-                    next_nodes.push((parent_pos, hasher.finalize()));
+                    next_nodes.push(Node {
+                        position: parent_pos,
+                        digest: hasher.finalize(),
+                    });
                     i += 1;
                 } else {
                     // Single node in the middle (shouldn't happen for contiguous range)
@@ -494,7 +513,7 @@ impl<H: Hasher> RangeProof<H> {
         if nodes.len() != 1 {
             return Err(Error::UnalignedProof);
         }
-        let computed = nodes[0].1;
+        let computed = nodes[0].digest;
         if computed == *root {
             Ok(())
         } else {
