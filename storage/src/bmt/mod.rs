@@ -346,7 +346,10 @@ impl<H: Hasher> Proof<H> {
 /// A pair of sibling digests, one on the left boundary and one on the right boundary.
 #[derive(Clone, Debug, Eq)]
 pub struct Bounds<D: Digest> {
+    /// The left sibling digest.
     pub left: Option<D>,
+
+    /// The right sibling digest.
     pub right: Option<D>,
 }
 
