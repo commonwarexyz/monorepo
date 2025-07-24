@@ -12,4 +12,6 @@ pub mod config;
 pub mod finalizer;
 pub mod handler;
 pub mod ingress;
-pub mod types;
+
+#[cfg(test)]
+pub mod mocks;
