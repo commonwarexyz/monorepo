@@ -49,6 +49,10 @@ use thiserror::Error;
 /// has more than 2^255 leaves).
 const MAX_LEVELS: usize = u8::MAX as usize;
 
+/// Because range proofs require contiguous leaves, there should never be more than 2 siblings
+/// per level.
+const MAX_LEVEL_SIBLINGS: usize = 2;
+
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
 #[derive(Error, Debug)]
 pub enum Error {
@@ -458,7 +462,8 @@ impl<H: Hasher> Read for RangeProof<H> {
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let levels: RangeCfg = (..=MAX_LEVELS).into();
-        let siblings = Vec::<Vec<H::Digest>>::read_cfg(reader, &(levels, (levels, ())))?;
+        let level_siblings: RangeCfg = (..=MAX_LEVEL_SIBLINGS).into();
+        let siblings = Vec::<Vec<H::Digest>>::read_cfg(reader, &(levels, (level_siblings, ())))?;
 
         Ok(Self { siblings })
     }
