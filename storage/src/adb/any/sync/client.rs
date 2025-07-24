@@ -781,7 +781,7 @@ where
 async fn build_database<E, K, V, H, T, R>(
     config: Config<E, K, V, H, T, R>,
     log: Journal<E, Operation<K, V>>,
-    pinned_nodes: &Option<Vec<H::Digest>>,
+    pinned_nodes: Option<Vec<H::Digest>>,
     metrics: &Metrics<E>,
 ) -> Result<adb::any::Any<E, K, V, H, T>, Error>
 where
@@ -801,11 +801,11 @@ where
     let db = adb::any::Any::init_synced(
         config.context.clone(),
         SyncConfig {
-            db_config: config.db_config.clone(),
+            db_config: config.db_config,
             log,
             lower_bound: config.target.lower_bound_ops,
             upper_bound: config.target.upper_bound_ops,
-            pinned_nodes: pinned_nodes.clone(),
+            pinned_nodes,
             apply_batch_size: config.apply_batch_size,
         },
     )
@@ -869,12 +869,18 @@ where
     fill_fetch_queue(&mut config, &mut state).await?;
 
     loop {
-        // Handle target updates or batch completions
+        if state
+            .is_sync_complete(&log, config.target.upper_bound_ops)
+            .await?
+        {
+            return build_database(config, log, state.pinned_nodes, &metrics).await;
+        }
+
         let should_handle_updates = config.update_receiver.is_some();
         let has_pending_fetches = !state.pending_fetches.is_empty();
 
         if should_handle_updates && has_pending_fetches {
-            // Both target updates and batch completions possible - use select!
+            // Both target updates and batch completions possible - race them
             select! {
                 target_update = config.update_receiver.as_mut().unwrap().next() => {
                     if let Some(new_target) = target_update {
@@ -888,30 +894,22 @@ where
                 },
             }
         } else if has_pending_fetches {
-            // Only batch completions possible
+            // Only outstanding fetch requests to handle
             if let Some((start_pos, result)) = state.pending_fetches.next().await {
                 handle_batch_completion(start_pos, result, &mut config, &mut state, &metrics)
                     .await?;
             }
-        } else if should_handle_updates {
-            // Only target updates possible - wait for one
-            if let Some(ref mut receiver) = config.update_receiver {
-                if let Some(new_target) = receiver.next().await {
-                    log = handle_target_update(new_target, &mut config, &mut state, log, &metrics)
-                        .await?;
-                }
-            }
+        } else {
+            return Err(Error::AlreadyComplete);
         }
 
-        // Apply contiguous verified batches
         log = apply_contiguous_batches(log, &mut state, &metrics, config.apply_batch_size).await?;
 
-        // Check if sync is complete
         if state
             .is_sync_complete(&log, config.target.upper_bound_ops)
             .await?
         {
-            return build_database(config, log, &state.pinned_nodes, &metrics).await;
+            return build_database(config, log, state.pinned_nodes, &metrics).await;
         }
     }
 }
