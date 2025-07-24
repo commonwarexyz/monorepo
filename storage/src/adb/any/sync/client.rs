@@ -28,6 +28,174 @@ use super::{
     Error, SyncTarget, SyncTargetUpdateReceiver,
 };
 
+/// Result of executing one sync step
+///
+/// Generic parameters:
+/// - `C`: The client type (for continuation)
+/// - `D`: The database type (for completion)
+pub enum SyncStepResult<C, D> {
+    /// Sync should continue with the updated client
+    Continue(C),
+    /// Sync is complete with the final database
+    Complete(D),
+}
+
+/// A stateful sync client that encapsulates all sync state and configuration
+///
+/// This client uses a functional ownership pattern: each step consumes the client
+/// and returns either a new client (to continue) or the final database (when complete).
+pub struct SyncClient<E, K, V, H, T, R>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
+    config: Config<E, K, V, H, T, R>,
+    state: SyncState<E, K, V, H>,
+    log: Journal<E, Operation<K, V>>,
+    metrics: Metrics<E>,
+}
+
+impl<E, K, V, H, T, R> SyncClient<E, K, V, H, T, R>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
+    /// Create a new sync client and perform initialization
+    ///
+    /// This performs the same initialization as the old `initialize_sync` function,
+    /// but encapsulates all state within the client.
+    pub async fn new(config: Config<E, K, V, H, T, R>) -> Result<Self, Error> {
+        // Validate configuration
+        config.validate()?;
+
+        // Initialize the operations journal
+        let log = Journal::<E, Operation<K, V>>::init_sync(
+            config.context.clone().with_label("log"),
+            JConfig {
+                partition: config.db_config.log_journal_partition.clone(),
+                items_per_blob: config.db_config.log_items_per_blob,
+                write_buffer: config.db_config.log_write_buffer,
+                buffer_pool: config.db_config.buffer_pool.clone(),
+            },
+            config.target.lower_bound_ops,
+            config.target.upper_bound_ops,
+        )
+        .await
+        .map_err(adb::Error::JournalError)
+        .map_err(Error::Adb)?;
+
+        // Get current log size to initialize sync state
+        let log_size = log
+            .size()
+            .await
+            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+        // Assert invariant from Journal::init_sync
+        assert!(log_size <= config.target.upper_bound_ops + 1);
+
+        // Initialize sync state
+        let state = SyncState::new(log_size);
+
+        // Initialize metrics
+        let metrics = Metrics::new(config.context.clone());
+
+        // Create client
+        let mut client = Self {
+            config,
+            state,
+            log,
+            metrics,
+        };
+
+        // Initialize parallel fetching
+        fill_fetch_queue(&mut client.config, &mut client.state).await?;
+
+        // Note: We don't check for immediate completion here - let the first step() call handle it.
+        // This keeps the initialization logic simple and consistent.
+
+        Ok(client)
+    }
+
+    /// Execute one step of the sync process
+    ///
+    /// This performs one iteration of the main sync loop:
+    /// 1. Check if sync is complete  
+    /// 2. Wait for and handle the next event (target update or batch completion)
+    /// 3. Apply any operations that are now contiguous
+    ///
+    /// Returns either a new client to continue with, or the final database if complete.
+    pub async fn step(
+        mut self,
+    ) -> Result<SyncStepResult<Self, adb::any::Any<E, K, V, H, T>>, Error> {
+        // Check if sync is complete
+        if self
+            .state
+            .is_sync_complete(&self.log, self.config.target.upper_bound_ops)
+            .await?
+        {
+            let database = build_database(
+                self.config,
+                self.log,
+                self.state.pinned_nodes.clone(),
+                &self.metrics,
+            )
+            .await?;
+            return Ok(SyncStepResult::Complete(database));
+        }
+
+        // Wait for a target update or a batch completion
+        select! {
+            target_update = async {
+                if let Some(ref mut receiver) = self.config.update_receiver {
+                    receiver.next().await
+                } else {
+                    future::pending().await // Never resolves when no receiver
+                }
+            } => {
+                if let Some(new_target) = target_update {
+                    self.log = handle_target_update(
+                        new_target,
+                        &mut self.config,
+                        &mut self.state,
+                        self.log,
+                        &self.metrics
+                    ).await?;
+                }
+            },
+            batch_result = self.state.pending_fetches.next() => {
+                if let Some((start_pos, result)) = batch_result {
+                    handle_batch_completion(
+                        start_pos,
+                        result,
+                        &mut self.config,
+                        &mut self.state,
+                        &self.metrics
+                    ).await?;
+                }
+            },
+        }
+
+        // Apply operations that are now contiguous with the current log size
+        self.log = apply_contiguous_batches(
+            self.log,
+            &mut self.state,
+            &self.metrics,
+            self.config.apply_batch_size,
+        )
+        .await?;
+
+        Ok(SyncStepResult::Continue(self))
+    }
+}
+
 /// Configuration for the sync client
 pub struct Config<E, K, V, H, T, R>
 where
@@ -678,58 +846,6 @@ where
     Ok(log)
 }
 
-/// Initialize the sync process by validating config and setting up the journal
-async fn initialize_sync<E, K, V, H, T, R>(
-    config: Config<E, K, V, H, T, R>,
-) -> Result<
-    (
-        Config<E, K, V, H, T, R>,
-        Journal<E, Operation<K, V>>,
-        Metrics<E>,
-    ),
-    Error,
->
-where
-    E: Storage + Clock + MetricsTrait,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
-{
-    // Validate configuration
-    config.validate()?;
-
-    // Initialize the operations journal.
-    // It may have data in the target range.
-    let log = Journal::<E, Operation<K, V>>::init_sync(
-        config.context.clone().with_label("log"),
-        JConfig {
-            partition: config.db_config.log_journal_partition.clone(),
-            items_per_blob: config.db_config.log_items_per_blob,
-            write_buffer: config.db_config.log_write_buffer,
-            buffer_pool: config.db_config.buffer_pool.clone(),
-        },
-        config.target.lower_bound_ops,
-        config.target.upper_bound_ops,
-    )
-    .await
-    .map_err(adb::Error::JournalError)
-    .map_err(Error::Adb)?;
-
-    // Check how many operations are already in the log.
-    let log_size = log
-        .size()
-        .await
-        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-
-    // Assert invariant from [Journal::init_sync]
-    assert!(log_size <= config.target.upper_bound_ops + 1);
-
-    let metrics = Metrics::new(config.context.clone());
-    Ok((config, log, metrics))
-}
-
 /// Reinitialize the log for a target update
 async fn reinitialize_log_for_target_update<E, K, V, T>(
     mut log: Journal<E, Operation<K, V>>,
@@ -840,6 +956,8 @@ where
 /// and apply operations to reconstruct the database's operation log.
 ///
 /// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
+///
+/// This function creates a SyncClient and runs it to completion using the step-based API.
 pub async fn sync<E, K, V, H, T, R>(
     config: Config<E, K, V, H, T, R>,
 ) -> Result<adb::any::Any<E, K, V, H, T>, Error>
@@ -853,52 +971,15 @@ where
 {
     info!("starting sync");
 
-    // Initialize sync
-    let (mut config, mut log, metrics) = initialize_sync(config).await?;
+    // Create client and initialize all state
+    let mut client = SyncClient::new(config).await?;
 
-    // Get current log size to initialize sync state
-    let log_size = log
-        .size()
-        .await
-        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-
-    // Initialize sync state
-    let mut state = SyncState::new(log_size);
-
-    // Initialize parallel fetching
-    fill_fetch_queue(&mut config, &mut state).await?;
-
+    // Run sync to completion using step-based API
     loop {
-        // Check if sync is complete
-        if state
-            .is_sync_complete(&log, config.target.upper_bound_ops)
-            .await?
-        {
-            return build_database(config, log, state.pinned_nodes, &metrics).await;
+        match client.step().await? {
+            SyncStepResult::Continue(new_client) => client = new_client,
+            SyncStepResult::Complete(database) => return Ok(database),
         }
-
-        // Wait for a target update or a batch completion
-        select! {
-            target_update = async {
-                if let Some(ref mut receiver) = config.update_receiver {
-                    receiver.next().await
-                } else {
-                    future::pending().await // There is no update receiver. This will never resolve.
-                }
-            } => {
-                if let Some(new_target) = target_update {
-                    log = handle_target_update(new_target, &mut config, &mut state, log, &metrics).await?;
-                }
-            },
-            batch_result = state.pending_fetches.next() => {
-                if let Some((start_pos, result)) = batch_result {
-                    handle_batch_completion(start_pos, result, &mut config, &mut state, &metrics).await?;
-                }
-            },
-        }
-
-        // Apply operations that are now contiguous with the current log size
-        log = apply_contiguous_batches(log, &mut state, &metrics, config.apply_batch_size).await?;
     }
 }
 
@@ -1534,6 +1615,61 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             reopened_db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_sync_step_example() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create a simple target database with a few operations
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(5);
+            apply_ops(&mut target_db, target_ops).await;
+            target_db.commit().await.unwrap();
+
+            let mut hasher = create_test_hasher();
+            let upper_bound_ops = target_db.op_count() - 1;
+            let root = target_db.root(&mut hasher);
+            let lower_bound_ops = target_db.inactivity_floor_loc;
+
+            // Set up sync configuration
+            let config = Config {
+                db_config: create_test_config(context.next_u64()),
+                fetch_batch_size: NZU64!(2),
+                target: SyncTarget {
+                    root,
+                    lower_bound_ops,
+                    upper_bound_ops,
+                },
+                context: context.clone(),
+                resolver: AnyResolver::new(target_db),
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 1,
+                update_receiver: None,
+            };
+
+            // Create sync client
+            let mut client = SyncClient::new(config).await.unwrap();
+
+            // Use client.step() to control sync progression
+            let mut step_count = 0;
+            let final_db = loop {
+                match client.step().await.unwrap() {
+                    SyncStepResult::Continue(new_client) => {
+                        client = new_client;
+                        step_count += 1;
+                        // Can inspect client state between steps
+                        assert!(step_count < 100, "Too many steps, likely infinite loop");
+                    }
+                    SyncStepResult::Complete(database) => {
+                        break database;
+                    }
+                }
+            };
+            assert_eq!(final_db.op_count(), upper_bound_ops + 1);
+            assert!(step_count > 0, "Should have taken at least one step");
         });
     }
 
