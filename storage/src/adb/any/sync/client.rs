@@ -424,7 +424,6 @@ fn validate_target_update<H: Hasher>(
 /// Queue batches of operations to be fetched from the resolver
 async fn fill_fetch_queue<E, K, V, H, T, R>(
     config: &mut Config<E, K, V, H, T, R>,
-    _log: &Journal<E, Operation<K, V>>,
     state: &mut SyncState<E, K, V, H>,
 ) -> Result<(), Error>
 where
@@ -483,7 +482,7 @@ where
             (start_pos, result)
         }));
 
-        current_pos += batch_size.get(); // Move to next batch position
+        current_pos += batch_size.get();
     }
 
     Ok(())
@@ -892,7 +891,7 @@ where
     let mut state = SyncState::new(log_size);
 
     // Initialize parallel fetching
-    fill_fetch_queue(&mut config, &log, &mut state).await?;
+    fill_fetch_queue(&mut config, &mut state).await?;
 
     loop {
         // Handle target updates or batch completions
@@ -987,7 +986,7 @@ where
     state.reset(new_log_size);
 
     // Reinitialize parallel fetching
-    fill_fetch_queue(config, &log, state).await?;
+    fill_fetch_queue(config, state).await?;
 
     Ok(log)
 }
