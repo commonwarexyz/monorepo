@@ -382,12 +382,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// # Repair
     ///
-    /// Like
-    /// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
-    /// and
-    /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-    /// the first invalid data read will be considered the new end of the journal (and the
-    /// underlying [Blob] will be truncated to the last valid item).
+    /// Like [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
+    /// and [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
+    /// the first invalid data read will be considered the new end of the journal (and the underlying [Blob] will be
+    /// truncated to the last valid item).
     pub async fn replay(
         &self,
         buffer: usize,
@@ -592,36 +590,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok(Some(item))
     }
 
-    /// Returns the item at the given `section` and `offset`, along with the offset of the next item
-    /// in the section, if any.
-    pub async fn get_with_next(
-        &self,
-        section: u64,
-        offset: u32,
-    ) -> Result<Option<(V, Option<u32>)>, Error> {
-        self.prune_guard(section, false)?;
-        let blob = match self.blobs.get(&section) {
-            Some(blob) => blob,
-            None => return Ok(None),
-        };
-
-        // Perform a multi-op read.
-        let (next_offset, _, item) = Self::read(
-            self.cfg.compression.is_some(),
-            &self.cfg.codec_config,
-            blob,
-            offset,
-        )
-        .await?;
-
-        let max_offset = compute_next_offset(blob.size().await)?;
-        if next_offset < max_offset {
-            Ok(Some((item, Some(next_offset))))
-        } else {
-            Ok(Some((item, None)))
-        }
-    }
-
     /// Retrieves an item from `Journal` at a given `section` and `offset` with a given size.
     pub async fn get_exact(
         &self,
@@ -656,6 +624,11 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             Some(blob) => Ok(blob.size().await),
             None => Ok(0),
         }
+    }
+
+    /// Rewinds the journal to the given `section` and `offset`, removing any data beyond it.
+    pub async fn rewind_to_offset(&mut self, section: u64, offset: u32) -> Result<(), Error> {
+        self.rewind(section, offset as u64 * ITEM_ALIGNMENT).await
     }
 
     /// Rewinds the journal to the given `section` and `size`.
@@ -944,31 +917,6 @@ mod tests {
                 assert_eq!(actual_index, expected_index);
                 assert_eq!(actual_data, expected_data);
             }
-
-            // Verify we can retrieve the items using get_with_next.
-            let (item, next_offset) = journal.get_with_next(1, 0).await.unwrap().unwrap();
-            assert_eq!(item, 1);
-            assert_eq!(next_offset, Some(1));
-
-            let (item, next_offset) = journal.get_with_next(1, 1).await.unwrap().unwrap();
-            assert_eq!(item, 2);
-            assert!(next_offset.is_none());
-
-            let (item, next_offset) = journal.get_with_next(2, 0).await.unwrap().unwrap();
-            assert_eq!(item, 3);
-            assert!(next_offset.is_none());
-
-            let (item, next_offset) = journal.get_with_next(3, 0).await.unwrap().unwrap();
-            assert_eq!(item, 4);
-            assert!(next_offset.is_none());
-
-            // Verify we can't retrieve an item beyond the end of the section.
-            let result = journal.get_with_next(3, 1).await;
-            assert!(result.is_err());
-
-            // Verify we can't retrieve an item from a non-existent section.
-            let result = journal.get_with_next(4, 0).await.unwrap();
-            assert!(result.is_none());
 
             // Cleanup
             journal.destroy().await.expect("Failed to destroy journal");

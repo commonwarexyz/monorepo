@@ -59,10 +59,10 @@ pub struct Config<T: Translator, C> {
     pub log_items_per_section: u64,
 
     /// The name of the [RStorage] partition used for the location map.
-    pub location_map_partition: String,
+    pub locations_map_journal_partition: String,
 
     /// The number of items to put in each blob in the location map.
-    pub location_map_items_per_blob: u64,
+    pub locations_map_items_per_blob: u64,
 
     /// The translator used by the compressed index.
     pub translator: T,
@@ -82,7 +82,7 @@ pub struct Append<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher,
     /// # Invariant
     ///
     /// The number of leaves in this MMR always equals the number of operations in the unpruned
-    /// `log` and `location_map`.
+    /// `log` and `locations_map`.
     mmr: Mmr<E, H>,
 
     /// A log of all operations applied to the db in order of occurrence. The _location_ of an
@@ -99,7 +99,7 @@ pub struct Append<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher,
 
     /// A fixed-length journal that maps an operation's location to its offset within its respective
     /// section of the log. (The section number is derived from location.)
-    location_map: FJournal<E, U32>,
+    locations_map: FJournal<E, U32>,
 
     /// A map from each active key to the location of the operation that set its value.
     ///
@@ -148,11 +148,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let mut location_map = FJournal::init(
-            context.with_label("location_map"),
+        let mut locations_map = FJournal::init(
+            context.with_label("locations_map"),
             FConfig {
-                partition: cfg.location_map_partition,
-                items_per_blob: cfg.location_map_items_per_blob,
+                partition: cfg.locations_map_journal_partition,
+                items_per_blob: cfg.locations_map_items_per_blob,
                 write_buffer: cfg.log_write_buffer,
                 buffer_pool: cfg.buffer_pool.clone(),
             },
@@ -166,7 +166,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             cfg.log_items_per_section,
             &mut mmr,
             &mut log,
-            &mut location_map,
+            &mut locations_map,
             &mut snapshot,
         )
         .await?;
@@ -175,7 +175,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             mmr,
             log,
             log_size,
-            location_map,
+            locations_map,
             log_items_per_section: cfg.log_items_per_section,
             snapshot,
             hasher,
@@ -194,30 +194,30 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// # Post-condition
     ///
-    /// The number of operations in the log, location_map, and the number of leaves in the MMR are
+    /// The number of operations in the log, locations_map, and the number of leaves in the MMR are
     /// equal.
     pub(super) async fn build_snapshot_from_log(
         hasher: &mut Standard<H>,
         log_items_per_section: u64,
         mmr: &mut Mmr<E, H>,
         log: &mut VJournal<E, Variable<K, V>>,
-        location_map: &mut FJournal<E, U32>,
+        locations_map: &mut FJournal<E, U32>,
         snapshot: &mut Index<T, u64>,
     ) -> Result<u64, Error> {
         // Align the mmr with the location map. Any elements we remove here that are still in the
         // log will be re-added later.
         let mut mmr_leaves = leaf_pos_to_num(mmr.size()).unwrap();
-        let location_map_size = location_map.size().await?;
-        if location_map_size > mmr_leaves {
+        let locations_map_size = locations_map.size().await?;
+        if locations_map_size > mmr_leaves {
             warn!(
                 mmr_leaves,
-                location_map_size, "rewinding misaligned location map"
+                locations_map_size, "rewinding misaligned locations map"
             );
-            location_map.rewind(mmr_leaves).await?;
+            locations_map.rewind(mmr_leaves).await?;
         }
-        if mmr_leaves > location_map_size {
-            warn!(mmr_leaves, location_map_size, "rewinding misaligned mmr");
-            mmr.pop((mmr_leaves - location_map_size) as usize).await?;
+        if mmr_leaves > locations_map_size {
+            warn!(mmr_leaves, locations_map_size, "rewinding misaligned mmr");
+            mmr.pop((mmr_leaves - locations_map_size) as usize).await?;
         }
 
         // The number of operations in the log.
@@ -231,7 +231,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // Replay the log from inception to build the snapshot, keeping track of any uncommitted
         // operations that must be rolled back, and any log operations that need to be re-added to
-        // the MMR & location_map.
+        // the MMR & locations_map.
         {
             let stream = log.replay(SNAPSHOT_READ_BUFFER_SIZE).await?;
             pin_mut!(stream);
@@ -256,7 +256,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                 offset, "operation was missing from MMR/location map"
                             );
                             mmr.add(hasher, &op.encode()).await?;
-                            location_map.append(offset.into()).await?;
+                            locations_map.append(offset.into()).await?;
                             mmr_leaves += 1;
                         }
                         match op {
@@ -282,14 +282,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 "rewinding over uncommitted operations at end of log"
             );
             let new_last_section = end_loc / log_items_per_section;
-            log.rewind(new_last_section, end_offset as u64 * 16).await?; // FIX THIS HACK
+            log.rewind_to_offset(new_last_section, end_offset).await?;
             log.sync(new_last_section).await?;
             log_size = end_loc;
         }
 
         // Pop any MMR elements that are ahead of the last log commit point.
         if mmr_leaves > log_size {
-            location_map.rewind(log_size).await?;
+            locations_map.rewind(log_size).await?;
 
             let op_count = mmr_leaves - log_size;
             warn!(op_count, "popping uncommitted MMR operations");
@@ -298,7 +298,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // Confirm post-conditions hold.
         assert_eq!(log_size, leaf_pos_to_num(mmr.size()).unwrap());
-        assert_eq!(log_size, location_map.size().await?);
+        assert_eq!(log_size, locations_map.size().await?);
 
         Ok(log_size)
     }
@@ -338,7 +338,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Get the value of the operation with location `loc` in the db if it matches `key`. The
     /// location is assumed valid and this function panics otherwise.
     pub async fn get_from_loc(&self, key: &K, loc: u64) -> Result<Option<V>, Error> {
-        match self.location_map.read(loc).await {
+        match self.locations_map.read(loc).await {
             Ok(offset) => {
                 return self.get_from_offset(key, loc, offset.to_u32()).await;
             }
@@ -403,7 +403,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.log_size += 1;
         let new_section = self.current_section();
         let (offset, _) = self.log.append(section, op).await?;
-        self.location_map.append(offset.into()).await?;
+        self.locations_map.append(offset.into()).await?;
         if section != new_section {
             self.log.sync(section).await?;
         }
@@ -449,7 +449,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let mut ops = Vec::with_capacity((end_index - start_index + 1) as usize);
         for index in start_index..=end_index {
             let section = index / self.log_items_per_section;
-            let offset = self.location_map.read(index).await?.to_u32();
+            let offset = self.locations_map.read(index).await?.to_u32();
             let Some(op) = self.log.get(section, offset).await? else {
                 panic!("no log item at index {index}");
             };
@@ -490,7 +490,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         try_join!(
             self.mmr.sync(&mut self.hasher).map_err(Error::MmrError),
             self.log.sync(section).map_err(Error::JournalError),
-            self.location_map.sync().map_err(Error::JournalError),
+            self.locations_map.sync().map_err(Error::JournalError),
         )?;
 
         Ok(())
@@ -501,7 +501,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         try_join!(
             self.log.close().map_err(Error::JournalError),
             self.mmr.close(&mut self.hasher).map_err(Error::MmrError),
-            self.location_map.close().map_err(Error::JournalError),
+            self.locations_map.close().map_err(Error::JournalError),
         )?;
 
         Ok(())
@@ -512,7 +512,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         try_join!(
             self.log.destroy().map_err(Error::JournalError),
             self.mmr.destroy().map_err(Error::MmrError),
-            self.location_map.destroy().map_err(Error::JournalError),
+            self.locations_map.destroy().map_err(Error::JournalError),
         )?;
 
         Ok(())
@@ -544,8 +544,8 @@ pub(super) mod test {
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             log_write_buffer: 1024,
-            location_map_partition: format!("location_map_{suffix}"),
-            location_map_items_per_blob: 7,
+            locations_map_journal_partition: format!("locations_map_journal_{suffix}"),
+            locations_map_items_per_blob: 7,
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
