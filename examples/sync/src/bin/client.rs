@@ -159,6 +159,7 @@ where
         hasher: Standard::new(),
         apply_batch_size: 1024,
         update_receiver: Some(update_receiver),
+        max_concurrent_fetches: 1, // TODO: make this configurable
     };
 
     // Sync to the server's state

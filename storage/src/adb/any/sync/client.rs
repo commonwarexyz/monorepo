@@ -11,7 +11,7 @@ use crate::{
         operation::Operation,
     },
     journal::fixed::{Config as JConfig, Journal},
-    mmr::{self, iterator::leaf_num_to_pos, verification::Proof},
+    mmr::{self, iterator::leaf_num_to_pos},
     translator::Translator,
 };
 use commonware_cryptography::{Digest, Hasher};
@@ -20,7 +20,7 @@ use commonware_runtime::{
     Clock, Metrics as MetricsTrait, Storage,
 };
 use commonware_utils::{Array, NZU64};
-use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
+use futures::{stream::FuturesUnordered, StreamExt};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, info, warn};
@@ -29,11 +29,8 @@ use tracing::{debug, info, warn};
 struct ValidatedBatch<D: Digest, K: Array, V: Array> {
     start_pos: u64,
     operations: Vec<Operation<K, V>>,
-    proof: Proof<D>,
+    _phantom: std::marker::PhantomData<D>,
 }
-
-/// Future representing an in-flight fetch operation
-type FetchFuture<D, K, V> = BoxFuture<'static, (u64, Result<GetOperationsResult<D, K, V>, Error>)>;
 
 /// Pipeline for managing parallel fetches
 struct FetchPipeline<D: Digest, K: Array, V: Array> {
@@ -108,6 +105,10 @@ where
     /// before committing the database while applying operations.
     /// Higher value will cause more memory usage during sync.
     pub apply_batch_size: usize,
+
+    /// Maximum number of concurrent fetch operations.
+    /// Higher values can improve throughput but increase memory usage.
+    pub max_concurrent_fetches: usize,
 }
 
 /// Prometheus metrics for the sync client.
@@ -201,7 +202,7 @@ where
     hasher: mmr::hasher::Standard<H>,
 
     /// Metrics
-    metrics: Metrics<E>,
+    metrics: Arc<Metrics<E>>,
 
     /// Current sync target
     target: SyncTarget<H::Digest>,
@@ -211,9 +212,6 @@ where
 
     /// Pipeline for managing parallel fetches
     pipeline: FetchPipeline<H::Digest, K, V>,
-
-    /// In-flight fetch requests
-    in_flight: FuturesUnordered<FetchFuture<H::Digest, K, V>>,
 
     /// Completed database (when sync is done)
     completed_db: Option<adb::any::Any<E, K, V, H, T>>,
@@ -264,7 +262,7 @@ where
         let pipeline = FetchPipeline::new(
             log_size,
             config.target.upper_bound_ops,
-            5, // TODO: make this configurable
+            config.max_concurrent_fetches,
         );
 
         // Check if we already have all operations
@@ -313,119 +311,15 @@ where
             config,
             log,
             hasher,
-            metrics,
+            metrics: Arc::new(metrics),
             target,
             pinned_nodes: None,
             pipeline,
-            in_flight: FuturesUnordered::new(),
             completed_db,
         })
     }
 
-    /// Spawn new fetch operations if we have capacity and more to fetch
-    fn spawn_fetches(&mut self) {
-        while self.pipeline.can_spawn_more(self.in_flight.len()) {
-            let start_pos = self.pipeline.next_fetch_pos;
-            let remaining = self.pipeline.target_pos - start_pos + 1;
-            let batch_size = std::cmp::min(self.config.fetch_batch_size.get(), remaining);
 
-            // We can't move the resolver, so we'll need to handle this differently
-            // For now, let's just track what needs to be fetched
-            debug!(
-                start_pos = start_pos,
-                batch_size = batch_size,
-                "would spawn fetch operation (not implemented yet)"
-            );
-
-            self.pipeline.next_fetch_pos += batch_size;
-        }
-    }
-
-    /// Process any completed fetch operations
-    async fn process_completed_fetches(&mut self) -> Result<(), Error> {
-        // Use poll_next to check for completed futures without blocking
-        while let Some((start_pos, result)) = self.in_flight.next().await {
-            match result {
-                Ok(GetOperationsResult {
-                    proof,
-                    operations,
-                    success_tx,
-                }) => {
-                    let operations_len = operations.len() as u64;
-
-                    // Verify proof
-                    let proof_valid = {
-                        let _timer = self.metrics.proof_verification_duration.timer();
-                        adb::any::Any::<E, K, V, H, T>::verify_proof(
-                            &mut self.hasher,
-                            &proof,
-                            start_pos,
-                            &operations,
-                            &self.target.root,
-                        )
-                    };
-
-                    let _ = success_tx.send(proof_valid);
-
-                    if proof_valid {
-                        self.metrics.valid_batches_received.inc();
-                        self.metrics.operations_fetched.inc_by(operations_len);
-
-                        // Extract pinned nodes from first batch if needed
-                        if self.pinned_nodes.is_none() && start_pos == self.target.lower_bound_ops {
-                            let start_mmr_pos = leaf_num_to_pos(start_pos);
-                            let end_mmr_pos = leaf_num_to_pos(start_pos + operations_len - 1);
-                            match proof.extract_pinned_nodes(start_mmr_pos, end_mmr_pos) {
-                                Ok(nodes) => {
-                                    debug!(
-                                        pinned_nodes_count = nodes.len(),
-                                        "extracted pinned nodes from first batch"
-                                    );
-                                    self.pinned_nodes = Some(nodes);
-                                }
-                                Err(e) => {
-                                    warn!(error = ?e, "failed to extract pinned nodes");
-                                    self.metrics.invalid_batches_received.inc();
-                                    // TODO: Retry the fetch
-                                    continue;
-                                }
-                            }
-                        }
-
-                        // Store the validated batch for ordered application
-                        self.pipeline.pending_apply.insert(
-                            start_pos,
-                            ValidatedBatch {
-                                start_pos,
-                                operations,
-                                proof,
-                            },
-                        );
-
-                        debug!(
-                            start_pos = start_pos,
-                            operations_len = operations_len,
-                            pending_count = self.pipeline.pending_apply.len(),
-                            "stored validated batch"
-                        );
-                    } else {
-                        debug!(start_pos = start_pos, "proof verification failed");
-                        self.metrics.invalid_batches_received.inc();
-                        // TODO: Retry the fetch
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        start_pos = start_pos,
-                        error = ?e,
-                        "fetch operation failed"
-                    );
-                    return Err(Error::Resolver(Box::new(e)));
-                }
-            }
-        }
-        Ok(())
-    }
 
     /// Apply any batches that are ready (consecutive starting from next_apply_pos)
     async fn apply_ready_batches(&mut self) -> Result<(), Error> {
@@ -531,7 +425,7 @@ where
         Ok(())
     }
 
-    /// Run the complete sync process
+    /// Run the complete sync process with parallel batch fetching
     pub(crate) async fn sync(mut self) -> Result<adb::any::Any<E, K, V, H, T>, Error> {
         info!("starting sync with pipeline architecture");
 
@@ -544,100 +438,161 @@ where
             // Handle any pending target updates
             self = self.handle_target_updates().await?;
 
-            // For now, implement sequential fetching
-            // TODO: Make this truly parallel once we figure out resolver ownership
-            if self.pipeline.next_fetch_pos <= self.pipeline.target_pos {
+            // Calculate how many fetches we can do in parallel
+            let mut fetch_tasks = Vec::new();
+            while self.pipeline.can_spawn_more(fetch_tasks.len()) {
                 let start_pos = self.pipeline.next_fetch_pos;
                 let remaining = self.pipeline.target_pos - start_pos + 1;
                 let batch_size = std::cmp::min(self.config.fetch_batch_size.get(), remaining);
 
-                debug!(
-                    start_pos = start_pos,
-                    batch_size = batch_size,
-                    "fetching operations"
+                fetch_tasks.push((start_pos, batch_size));
+                self.pipeline.next_fetch_pos += batch_size;
+            }
+
+            // Execute fetches in parallel using FuturesUnordered
+            if !fetch_tasks.is_empty() {
+                info!(
+                    fetch_count = fetch_tasks.len(),
+                    max_concurrent = self.pipeline.max_concurrent,
+                    "executing {} parallel fetch operations",
+                    fetch_tasks.len()
                 );
 
-                // Fetch operations
-                let result = {
-                    let _timer = self.metrics.fetch_duration.timer();
+                let mut futures = FuturesUnordered::new();
+                for (start_pos, batch_size) in fetch_tasks {
                     let target_size = self.target.upper_bound_ops + 1;
-                    self.config
-                        .resolver
-                        .get_operations(
-                            target_size,
-                            start_pos,
-                            NonZeroU64::new(batch_size).unwrap(),
-                        )
-                        .await
-                };
+                    let resolver = &self.config.resolver;
+                    let metrics = self.metrics.clone();
 
-                match result {
-                    Ok(GetOperationsResult {
-                        proof,
-                        operations,
-                        success_tx,
-                    }) => {
-                        let operations_len = operations.len() as u64;
+                    debug!(
+                        start_pos = start_pos,
+                        batch_size = batch_size,
+                        "spawning concurrent fetch future"
+                    );
 
-                        // Verify proof
-                        let proof_valid = {
-                            let _timer = self.metrics.proof_verification_duration.timer();
-                            adb::any::Any::<E, K, V, H, T>::verify_proof(
-                                &mut self.hasher,
-                                &proof,
+                    // Create and immediately await each fetch
+                    let future = async move {
+                        let _timer = metrics.fetch_duration.timer();
+                        debug!(
+                            start_pos = start_pos,
+                            "fetch operation starting"
+                        );
+                        let result = resolver
+                            .get_operations(
+                                target_size,
                                 start_pos,
-                                &operations,
-                                &self.target.root,
+                                NonZeroU64::new(batch_size).unwrap(),
                             )
-                        };
+                            .await;
+                        debug!(
+                            start_pos = start_pos,
+                            success = result.is_ok(),
+                            "fetch operation completed"
+                        );
+                        (start_pos, result)
+                    };
+                    futures.push(future);
+                }
 
-                        let _ = success_tx.send(proof_valid);
+                info!(
+                    "all {} fetch futures spawned, waiting for concurrent completion",
+                    futures.len()
+                );
 
-                        if proof_valid {
-                            self.metrics.valid_batches_received.inc();
-                            self.metrics.operations_fetched.inc_by(operations_len);
+                // Process all fetch results as they complete (in any order)
+                let mut completed_count = 0;
+                while let Some((start_pos, result)) = futures.next().await {
+                    completed_count += 1;
+                    debug!(
+                        start_pos = start_pos,
+                        completed_count = completed_count,
+                        remaining = futures.len(),
+                        "processing completed fetch (parallel execution)"
+                    );
 
-                            // Extract pinned nodes from first batch if needed
-                            if self.pinned_nodes.is_none()
-                                && start_pos == self.target.lower_bound_ops
-                            {
-                                let start_mmr_pos = leaf_num_to_pos(start_pos);
-                                let end_mmr_pos = leaf_num_to_pos(start_pos + operations_len - 1);
-                                match proof.extract_pinned_nodes(start_mmr_pos, end_mmr_pos) {
-                                    Ok(nodes) => {
-                                        debug!(
-                                            pinned_nodes_count = nodes.len(),
-                                            "extracted pinned nodes from first batch"
-                                        );
-                                        self.pinned_nodes = Some(nodes);
-                                    }
-                                    Err(e) => {
-                                        warn!(error = ?e, "failed to extract pinned nodes");
-                                        self.metrics.invalid_batches_received.inc();
-                                        continue;
+                    match result {
+                        Ok(GetOperationsResult {
+                            proof,
+                            operations,
+                            success_tx,
+                        }) => {
+                            let operations_len = operations.len() as u64;
+
+                            // Verify proof
+                            let proof_valid = {
+                                let _timer = self.metrics.proof_verification_duration.timer();
+                                adb::any::Any::<E, K, V, H, T>::verify_proof(
+                                    &mut self.hasher,
+                                    &proof,
+                                    start_pos,
+                                    &operations,
+                                    &self.target.root,
+                                )
+                            };
+
+                            let _ = success_tx.send(proof_valid);
+
+                            if proof_valid {
+                                self.metrics.valid_batches_received.inc();
+                                self.metrics.operations_fetched.inc_by(operations_len);
+
+                                // Extract pinned nodes from first batch if needed
+                                if self.pinned_nodes.is_none()
+                                    && start_pos == self.target.lower_bound_ops
+                                {
+                                    let start_mmr_pos = leaf_num_to_pos(start_pos);
+                                    let end_mmr_pos = leaf_num_to_pos(start_pos + operations_len - 1);
+                                    match proof.extract_pinned_nodes(start_mmr_pos, end_mmr_pos) {
+                                        Ok(nodes) => {
+                                            debug!(
+                                                pinned_nodes_count = nodes.len(),
+                                                "extracted pinned nodes from first batch"
+                                            );
+                                            self.pinned_nodes = Some(nodes);
+                                        }
+                                        Err(e) => {
+                                            warn!(error = ?e, "failed to extract pinned nodes");
+                                            self.metrics.invalid_batches_received.inc();
+                                            // Reset fetch position to retry
+                                            self.pipeline.next_fetch_pos = start_pos;
+                                            continue;
+                                        }
                                     }
                                 }
-                            }
 
-                            // Store the validated batch
-                            self.pipeline.pending_apply.insert(
-                                start_pos,
-                                ValidatedBatch {
+                                // Store the validated batch for ordered application
+                                self.pipeline.pending_apply.insert(
                                     start_pos,
-                                    operations,
-                                    proof,
-                                },
-                            );
+                                    ValidatedBatch {
+                                        start_pos,
+                                        operations,
+                                        _phantom: std::marker::PhantomData,
+                                    },
+                                );
 
-                            self.pipeline.next_fetch_pos += operations_len;
-                        } else {
-                            debug!(start_pos = start_pos, "proof verification failed");
-                            self.metrics.invalid_batches_received.inc();
-                            continue;
+                                debug!(
+                                    start_pos = start_pos,
+                                    operations_len = operations_len,
+                                    pending_count = self.pipeline.pending_apply.len(),
+                                    "stored validated batch"
+                                );
+                            } else {
+                                debug!(start_pos = start_pos, "proof verification failed");
+                                self.metrics.invalid_batches_received.inc();
+                                // Reset fetch position to retry
+                                self.pipeline.next_fetch_pos = start_pos;
+                            }
                         }
-                    }
-                    Err(e) => {
-                        return Err(Error::Resolver(Box::new(e)));
+                        Err(e) => {
+                            warn!(
+                                start_pos = start_pos,
+                                error = ?e,
+                                "fetch operation failed"
+                            );
+                            // Reset fetch position to retry
+                            self.pipeline.next_fetch_pos = start_pos;
+                            return Err(Error::Resolver(Box::new(e)));
+                        }
                     }
                 }
             }
@@ -778,7 +733,7 @@ where
         self.pipeline = FetchPipeline::new(
             current_log_size,
             new_target.upper_bound_ops,
-            5, // TODO: make this configurable
+            self.config.max_concurrent_fetches,
         );
 
         // Clear any pending batches as they may be stale
@@ -927,6 +882,7 @@ pub(crate) mod tests {
                 hasher,
                 apply_batch_size: 1024,
                 update_receiver: None,
+                max_concurrent_fetches: 5,
             };
             let mut got_db = sync(config).await.unwrap();
 
@@ -1053,6 +1009,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: None,
+                max_concurrent_fetches: 5,
             };
 
             let result = Client::new(config).await;
@@ -1105,6 +1062,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: None,
+                max_concurrent_fetches: 5,
             };
 
             let synced_db = sync(config).await.unwrap();
@@ -1180,6 +1138,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: None,
+                max_concurrent_fetches: 5,
             };
             let sync_db = sync(config).await.unwrap();
 
@@ -1275,6 +1234,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: None,
+                max_concurrent_fetches: 5,
             };
             let sync_db = sync(config).await.unwrap();
 
@@ -1342,6 +1302,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: Some(update_receiver),
+                max_concurrent_fetches: 5,
             };
             let client = Client::new(config).await.unwrap();
 
@@ -1397,6 +1358,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: Some(update_receiver),
+                max_concurrent_fetches: 5,
             };
             let client = Client::new(config).await.unwrap();
 
@@ -1451,6 +1413,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: Some(update_receiver),
+                max_concurrent_fetches: 5,
             };
             let client = Client::new(config).await.unwrap();
 
@@ -1512,6 +1475,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: Some(update_receiver),
+                max_concurrent_fetches: 5,
             };
             let client = Client::new(config).await.unwrap();
 
@@ -1564,6 +1528,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: Some(update_receiver),
+                max_concurrent_fetches: 5,
             };
 
             // Complete the sync
@@ -1642,6 +1607,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: Some(update_receiver),
+                max_concurrent_fetches: 5,
             };
             let mut client = Client::new(config).await.unwrap();
 
@@ -1780,6 +1746,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: Some(update_receiver),
+                max_concurrent_fetches: 5,
             };
             let mut client = Client::new(config).await.unwrap();
 
@@ -1890,6 +1857,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: None,
+                max_concurrent_fetches: 5,
             };
             let synced_db = sync(config).await.unwrap();
 
@@ -1964,6 +1932,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: None,
+                max_concurrent_fetches: 5,
             };
 
             let client = Client::new(config).await.unwrap();
@@ -2027,6 +1996,7 @@ pub(crate) mod tests {
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: Some(update_receiver),
+                max_concurrent_fetches: 5,
             };
 
             let client = Client::new(config).await.unwrap();
