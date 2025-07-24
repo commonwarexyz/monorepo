@@ -217,7 +217,7 @@ impl<H: Hasher> Tree<H> {
         }
 
         // For each level (except the root level) collect the necessary siblings
-        let mut siblings_by_level = Vec::new();
+        let mut siblings = Vec::new();
         for (level_idx, level) in self.levels.iter().enumerate() {
             // If the level has only one node, we're done
             if level.len() == 1 {
@@ -248,12 +248,10 @@ impl<H: Hasher> Tree<H> {
                 right = Some(level[level_end]);
             }
 
-            siblings_by_level.push(Bounds { left, right });
+            siblings.push(Bounds { left, right });
         }
 
-        Ok(RangeProof {
-            siblings: siblings_by_level,
-        })
+        Ok(RangeProof { siblings })
     }
 }
 
