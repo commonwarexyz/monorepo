@@ -453,10 +453,10 @@ impl<H: Hasher> RangeProof<H> {
             // If we have a left sibling, we need to include it
             let mut i = 0;
             let mut next_nodes = Vec::new();
-            if let Some(left_sib) = &bounds.left {
+            if let Some(left) = &bounds.left {
                 // The first node in our range needs its left sibling
                 let (pos, node) = &nodes[0];
-                hasher.update(left_sib);
+                hasher.update(left);
                 hasher.update(node);
                 next_nodes.push((pos / 2, hasher.finalize()));
                 i = 1;
@@ -476,14 +476,11 @@ impl<H: Hasher> RangeProof<H> {
                     i += 2;
                 } else if i == nodes.len() - 1 {
                     // This is the last node and it should have a right sibling
-                    if let Some(right_sib) = &bounds.right {
-                        hasher.update(node);
-                        hasher.update(right_sib);
-                        next_nodes.push((parent_pos, hasher.finalize()));
-                        i += 1;
-                    } else {
-                        return Err(Error::UnalignedProof);
-                    }
+                    let right = bounds.right.as_ref().unwrap();
+                    hasher.update(node);
+                    hasher.update(right);
+                    next_nodes.push((parent_pos, hasher.finalize()));
+                    i += 1;
                 } else {
                     // Single node in the middle (shouldn't happen for contiguous range)
                     return Err(Error::UnalignedProof);
