@@ -436,24 +436,34 @@ where
 {
     let target_size = config.target.upper_bound_ops + 1;
 
-    // Special case: If we don't have pinned nodes, extract them first
+    // Special case: If we don't have pinned nodes, we need to extract them
+    // from the first operation we actually need to fetch, not always from lower_bound_ops
     if !state.has_pinned_nodes() {
-        let pinned_nodes_batch_size = std::cmp::min(
+        // Find the first gap we need to fetch - this is where we'll extract pinned nodes
+        let search_start = std::cmp::max(config.target.lower_bound_ops, state.next_apply_pos);
+        if let Some((gap_start, gap_end)) = find_next_gap_to_fetch::<K, V>(
+            search_start,
+            config.target.upper_bound_ops,
+            &state.verified_batches,
+            &state.outstanding_requests,
             config.fetch_batch_size.get(),
-            target_size.saturating_sub(config.target.lower_bound_ops),
-        );
-        if let Some(batch_size) = NonZeroU64::new(pinned_nodes_batch_size) {
-            state.add_outstanding_request(config.target.lower_bound_ops);
+        ) {
+            // Request from the first gap to extract pinned nodes
+            let gap_size = gap_end - gap_start + 1;
+            let batch_size = std::cmp::min(config.fetch_batch_size.get(), gap_size);
+            if let Some(batch_size) = NonZeroU64::new(batch_size) {
+                state.add_outstanding_request(gap_start);
 
-            let resolver = config.resolver.clone();
-            let start_pos = config.target.lower_bound_ops;
+                let resolver = config.resolver.clone();
+                let start_pos = gap_start;
 
-            state.pending_fetches.push(Box::pin(async move {
-                let result = resolver
-                    .get_operations(target_size, start_pos, batch_size)
-                    .await;
-                (start_pos, result)
-            }));
+                state.pending_fetches.push(Box::pin(async move {
+                    let result = resolver
+                        .get_operations(target_size, start_pos, batch_size)
+                        .await;
+                    (start_pos, result)
+                }));
+            }
         }
         return Ok(()); // Don't make additional requests until we have pinned nodes
     }
@@ -466,8 +476,10 @@ where
 
     for _ in 0..requests_to_make {
         // Find the next gap that needs to be fetched
+        // For existing databases, start from next_apply_pos instead of lower_bound_ops
+        let search_start = std::cmp::max(config.target.lower_bound_ops, state.next_apply_pos);
         let Some((gap_start, gap_end)) = find_next_gap_to_fetch::<K, V>(
-            config.target.lower_bound_ops,
+            search_start,
             config.target.upper_bound_ops,
             &state.verified_batches,
             &state.outstanding_requests,
@@ -536,8 +548,7 @@ where
                 metrics.invalid_batches_received.inc();
                 let _ = success_tx.send(false);
 
-                // Retry the request
-                send_next_request(config, state, Some(start_pos)).await?;
+                fill_fetch_queue(config, state).await?;
                 return Ok(());
             }
 
@@ -558,13 +569,12 @@ where
                 debug!(start_pos, "proof verification failed, retrying");
                 metrics.invalid_batches_received.inc();
 
-                // Retry the request
-                send_next_request(config, state, Some(start_pos)).await?;
+                fill_fetch_queue(config, state).await?;
                 return Ok(());
             }
 
-            // Install pinned nodes on first successful batch starting from lower_bound_ops
-            if !state.has_pinned_nodes() && start_pos == config.target.lower_bound_ops {
+            // Install pinned nodes on first successful batch (can be from any position)
+            if !state.has_pinned_nodes() {
                 let start_pos_mmr = leaf_num_to_pos(start_pos);
                 let end_pos_mmr = leaf_num_to_pos(start_pos + operations_len - 1);
                 match proof.extract_pinned_nodes(start_pos_mmr, end_pos_mmr) {
@@ -575,8 +585,7 @@ where
                         warn!(start_pos, "failed to extract pinned nodes, retrying");
                         metrics.invalid_batches_received.inc();
 
-                        // Retry the request
-                        send_next_request(config, state, Some(start_pos)).await?;
+                        fill_fetch_queue(config, state).await?;
                         return Ok(());
                     }
                 }
@@ -590,57 +599,13 @@ where
             // Update highest_received_pos if this batch extends our contiguous coverage
             state.update_next_apply_pos(start_pos, operations_len);
 
-            // Send next request to maintain parallelism
-            send_next_request(config, state, None).await?;
+            // Fill queue to maintain parallelism
+            fill_fetch_queue(config, state).await?;
         }
         Err(e) => {
             warn!(start_pos, error = ?e, "batch fetch failed, retrying");
-
-            // Retry the request
-            send_next_request(config, state, Some(start_pos)).await?;
+            fill_fetch_queue(config, state).await?;
         }
-    }
-
-    Ok(())
-}
-
-/// Send the next batch request to maintain max_outstanding_requests
-async fn send_next_request<E, K, V, H, T, R>(
-    config: &Config<E, K, V, H, T, R>,
-    state: &mut SyncState<E, K, V, H>,
-    retry_pos: Option<u64>,
-) -> Result<(), Error>
-where
-    E: Storage + Clock + MetricsTrait,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
-{
-    let start_pos = if let Some(retry_pos) = retry_pos {
-        retry_pos
-    } else {
-        // Use the original simple logic - next position to apply
-        state.next_apply_pos
-    };
-
-    // Calculate batch size - either our configured size or fill the remaining gap
-    let target_size = config.target.upper_bound_ops + 1;
-    let remaining_ops = target_size - start_pos;
-    let batch_size = std::cmp::min(config.fetch_batch_size.get(), remaining_ops);
-
-    if let Some(batch_size) = NonZeroU64::new(batch_size) {
-        state.add_outstanding_request(start_pos);
-
-        let resolver = config.resolver.clone();
-
-        state.pending_fetches.push(Box::pin(async move {
-            let result = resolver
-                .get_operations(target_size, start_pos, batch_size)
-                .await;
-            (start_pos, result)
-        }));
     }
 
     Ok(())
