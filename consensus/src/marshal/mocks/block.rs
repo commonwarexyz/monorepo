@@ -1,3 +1,7 @@
+use bytes::{Buf, BufMut};
+use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_cryptography::{Committable, Digest, Digestible, Hasher};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block<D: Digest> {
     /// The parent block's digest.

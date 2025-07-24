@@ -69,4 +69,7 @@ pub struct Config<V: Variant, P: PublicKey, Z: Coordinator<PublicKey = P>, B: Bl
 
     /// Codec configuration for block type.
     pub codec_config: B::Cfg,
+
+    /// Maximum number of blocks to repair at once
+    pub max_repair: u64,
 }

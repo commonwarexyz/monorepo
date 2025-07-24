@@ -29,7 +29,7 @@ pub enum Message<V: Variant, B: Block> {
         /// The block to broadcast.
         payload: B,
     },
-    /// A notification that a block has been verified by the consensus engine.
+    /// A notification that a block has been verified by the application.
     Verified {
         /// The view in which the block was verified.
         view: u64,
@@ -130,24 +130,21 @@ pub enum Orchestration<B: Block> {
     /// A request to get the next finalized block.
     Get {
         /// The height of the block to get.
-        next: u64,
+        height: u64,
         /// A channel to send the block, if found.
         result: oneshot::Sender<Option<B>>,
     },
     /// A notification that a block has been processed by the application.
     Processed {
         /// The height of the processed block.
-        next: u64,
+        height: u64,
         /// The digest of the processed block.
         digest: B::Commitment,
     },
     /// A request to repair a gap in the finalized block sequence.
     Repair {
         /// The height at which to start repairing.
-        next: u64,
-        /// A channel to send the result of the repair attempt (true if a block
-        /// was repaired).
-        result: oneshot::Sender<bool>,
+        height: u64,
     },
 }
 
@@ -164,12 +161,12 @@ impl<B: Block> Orchestrator<B> {
     }
 
     /// Gets the finalized block at the given height.
-    pub async fn get(&mut self, next: u64) -> Option<B> {
+    pub async fn get(&mut self, height: u64) -> Option<B> {
         let (response, receiver) = oneshot::channel();
         if self
             .sender
             .send(Orchestration::Get {
-                next,
+                height,
                 result: response,
             })
             .await
@@ -182,10 +179,10 @@ impl<B: Block> Orchestrator<B> {
     }
 
     /// Notifies the actor that a block has been processed.
-    pub async fn processed(&mut self, next: u64, digest: B::Commitment) {
+    pub async fn processed(&mut self, height: u64, digest: B::Commitment) {
         if self
             .sender
-            .send(Orchestration::Processed { next, digest })
+            .send(Orchestration::Processed { height, digest })
             .await
             .is_err()
         {
@@ -194,20 +191,14 @@ impl<B: Block> Orchestrator<B> {
     }
 
     /// Attempts to repair a gap in the block sequence.
-    pub async fn repair(&mut self, next: u64) -> bool {
-        let (response, receiver) = oneshot::channel();
+    pub async fn repair(&mut self, height: u64) {
         if self
             .sender
-            .send(Orchestration::Repair {
-                next,
-                result: response,
-            })
+            .send(Orchestration::Repair { height })
             .await
             .is_err()
         {
             error!("Failed to send repair message to actor: receiver dropped");
-            return false;
         }
-        receiver.await.unwrap_or(false)
     }
 }

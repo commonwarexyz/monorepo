@@ -1,6 +1,6 @@
 use crate::{marshal::ingress::Orchestrator, Block};
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
-use commonware_storage::metadata::Metadata;
+use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::array::{FixedBytes, U64};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::gauge::Gauge;
@@ -12,10 +12,19 @@ where
     B: Block,
     R: Spawner + Clock + Metrics + Storage,
 {
+    // Metadata store that stores the last indexed height.
     metadata: Metadata<R, FixedBytes<1>, U64>,
-    contiguous_height: Gauge,
+
+    // Orchestrator that stores the finalized blocks.
     orchestrator: Orchestrator<B>,
-    finalizer_receiver: mpsc::Receiver<()>,
+
+    // Notifier to indicate that the finalized blocks have been updated and should be re-queried.
+    notifier_rx: mpsc::Receiver<()>,
+
+    // ---------- Metrics ----------
+    contiguous_height: Gauge,
+
+    // ---------- Phantom data ----------
     _digest: PhantomData<B::Digest>,
 }
 
@@ -24,41 +33,58 @@ where
     B: Block,
     R: Spawner + Clock + Metrics + Storage,
 {
-    pub fn new(
-        metadata: Metadata<R, FixedBytes<1>, U64>,
-        contiguous_height: Gauge,
+    /// Initialize the finalizer.
+    pub async fn new(
+        context: R,
+        partition_prefix: String,
         orchestrator: Orchestrator<B>,
-        finalizer_receiver: mpsc::Receiver<()>,
+        notifier_rx: mpsc::Receiver<()>,
     ) -> Self {
+        // Initialize metadata
+        let metadata = Metadata::init(
+            context.with_label("metadata"),
+            metadata::Config {
+                partition: format!("{partition_prefix}-metadata"),
+                codec_config: (),
+            },
+        )
+        .await
+        .expect("Failed to initialize metadata");
+
+        // Initialize metrics
+        let contiguous_height = Gauge::default();
+        context.register(
+            "contiguous_height",
+            "Contiguous height of application",
+            contiguous_height.clone(),
+        );
+
         Self {
             metadata,
             contiguous_height,
             orchestrator,
-            finalizer_receiver,
+            notifier_rx,
             _digest: PhantomData,
         }
     }
 
+    /// Run the finalizer.
     pub async fn run(mut self) {
-        // Initialize last indexed from metadata store
+        // Initialize last indexed from metadata store.
+        // If the key does not exist, we assume the genesis block (height 0) has been indexed.
         let latest_key = FixedBytes::new([0u8]);
-        let mut last_indexed = if let Some(bytes) = self.metadata.get(&latest_key) {
-            bytes
-                .to_vec()
-                .try_into()
-                .map(u64::from_be_bytes)
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        let mut height = self.metadata.get(&latest_key).map_or(0, |x| x.to_u64());
 
         // Index all finalized blocks.
         //
         // If using state sync, this is not necessary.
         loop {
             // Check if the next block is available
-            let next = last_indexed + 1;
-            if let Some(block) = self.orchestrator.get(next).await {
+            height += 1;
+            if let Some(block) = self.orchestrator.get(height).await {
+                // Sanity-check that the block height matches the expected height.
+                assert!(block.height() == height, "block height mismatch");
+
                 // In an application that maintains state, you would compute the state transition function here.
                 //
                 // After an unclean shutdown (where the finalizer metadata is not synced after some height is processed by the application),
@@ -74,7 +100,7 @@ where
                 // (on restart).
                 if let Err(e) = self
                     .metadata
-                    .put_sync(latest_key.clone(), next.into())
+                    .put_sync(latest_key.clone(), height.into())
                     .await
                 {
                     error!("Failed to update metadata: {e}");
@@ -82,23 +108,22 @@ where
                 }
 
                 // Update the latest indexed
-                self.contiguous_height.set(next as i64);
-                last_indexed = next;
-                info!(height = next, "indexed finalized block");
+                self.contiguous_height.set(height as i64);
+                info!(height, "indexed finalized block");
 
                 // Update last view processed (if we have a finalization for this block)
-                self.orchestrator.processed(next, block.commitment()).await;
+                self.orchestrator
+                    .processed(height, block.commitment())
+                    .await;
                 continue;
             }
 
             // Try to connect to our latest handled block (may not exist finalizations for some heights)
-            if self.orchestrator.repair(next).await {
-                continue;
-            }
+            self.orchestrator.repair(height).await;
 
             // If nothing to do, wait for some message from someone that the finalized store was updated
-            debug!(height = next, "waiting to index finalized block");
-            let _ = self.finalizer_receiver.next().await;
+            debug!(height, "waiting to index finalized block");
+            let _ = self.notifier_rx.next().await;
         }
     }
 }
