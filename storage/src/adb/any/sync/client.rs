@@ -181,31 +181,20 @@ where
     // Initialize sync
     let (mut config, mut log, metrics, mut pinned_nodes) = initialize_sync(config).await?;
 
-    // Main sync loop
     loop {
         // Handle any pending target updates
-        let (updated_config, updated_log, updated_pinned_nodes) =
-            handle_target_updates(config, log, pinned_nodes).await?;
-        config = updated_config;
-        log = updated_log;
-        pinned_nodes = updated_pinned_nodes;
+        (config, log, pinned_nodes) = handle_target_updates(config, log, pinned_nodes).await?;
 
         // Check if sync is complete and return database if so
         if is_sync_complete(&config, &log).await? {
-            return build_final_database(config, log, &pinned_nodes, &metrics).await;
+            return build_database(config, log, &pinned_nodes, &metrics).await;
         }
 
         // Fetch and verify a batch of operations
-        let (operations, new_pinned_nodes) =
-            fetch_and_verify_batch(&mut config, &log, &pinned_nodes, &metrics).await?;
+        let operations = get_operations(&mut config, &log, &mut pinned_nodes, &metrics).await?;
 
         // Apply operations to the log
         log = apply_operations_to_log(log, operations, &metrics).await?;
-
-        // Update pinned nodes if they were established in this batch
-        if let Some(nodes) = new_pinned_nodes {
-            pinned_nodes = Some(nodes);
-        }
     }
 }
 
@@ -387,7 +376,7 @@ where
 }
 
 /// Build the final database once sync is complete
-async fn build_final_database<E, K, V, H, T, R>(
+async fn build_database<E, K, V, H, T, R>(
     config: Config<E, K, V, H, T, R>,
     log: Journal<E, Operation<K, V>>,
     pinned_nodes: &Option<Vec<H::Digest>>,
@@ -444,12 +433,12 @@ where
 }
 
 /// Fetch and verify a batch of operations from the resolver
-async fn fetch_and_verify_batch<E, K, V, H, T, R>(
+async fn get_operations<E, K, V, H, T, R>(
     config: &mut Config<E, K, V, H, T, R>,
     log: &Journal<E, Operation<K, V>>,
-    pinned_nodes: &Option<Vec<H::Digest>>,
+    pinned_nodes: &mut Option<Vec<H::Digest>>,
     metrics: &Metrics<E>,
-) -> Result<(Vec<Operation<K, V>>, Option<Vec<H::Digest>>), Error>
+) -> Result<Vec<Operation<K, V>>, Error>
 where
     E: Storage + Clock + MetricsTrait,
     K: Array,
@@ -531,26 +520,26 @@ where
         }
 
         // Install pinned nodes on first successful batch.
-        let new_pinned_nodes = if pinned_nodes.is_none() {
+        if pinned_nodes.is_none() {
             let start_pos = leaf_num_to_pos(log_size);
             let end_pos = leaf_num_to_pos(log_size + operations_len - 1);
             match proof.extract_pinned_nodes(start_pos, end_pos) {
-                Ok(nodes) => Some(nodes),
+                Ok(nodes) => {
+                    *pinned_nodes = Some(nodes);
+                }
                 Err(_) => {
                     warn!("failed to extract pinned nodes, retrying");
                     metrics.invalid_batches_received.inc();
                     continue;
                 }
             }
-        } else {
-            None
-        };
+        }
 
         // Record successful batch metrics
         metrics.valid_batches_received.inc();
         metrics.operations_fetched.inc_by(operations_len);
 
-        return Ok((operations, new_pinned_nodes));
+        return Ok(operations);
     }
 }
 
