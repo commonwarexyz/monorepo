@@ -60,10 +60,6 @@ pub enum Error {
     NoLeaves,
     #[error("unaligned proof")]
     UnalignedProof,
-    #[error("too many levels: {0}")]
-    TooManyLevels(usize),
-    #[error("invalid digest")]
-    InvalidDigest,
 }
 
 /// Constructor for a Binary Merkle Tree (BMT).
