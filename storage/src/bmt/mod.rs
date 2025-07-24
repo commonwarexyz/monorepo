@@ -477,7 +477,7 @@ impl<H: Hasher> RangeProof<H> {
                     i += 2;
                 } else if i == nodes.len() - 1 {
                     // This is the last node and it should have a right sibling
-                    let right = bounds.right.as_ref().unwrap();
+                    let right = bounds.right.as_ref().ok_or(Error::UnalignedProof)?;
                     hasher.update(&node.digest);
                     hasher.update(right);
                     next_nodes.push(Node {
