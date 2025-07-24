@@ -197,7 +197,7 @@ impl<H: Hasher> Tree<H> {
     /// proofs when proving multiple consecutive elements.
     pub fn range_proof(&self, start: u32, end: u32) -> Result<RangeProof<H>, Error> {
         // For empty trees, return an empty proof
-        if self.empty {
+        if self.empty && start == 0 && end == 0 {
             return Ok(RangeProof::default());
         }
 
@@ -1498,15 +1498,25 @@ mod tests {
         let tree = builder.build();
         let root = tree.root();
 
-        // Empty tree should return default range proof for any range
+        // Empty tree should return default range proof only for (0, 0)
         let range_proof = tree.range_proof(0, 0).unwrap();
         assert!(range_proof.siblings.is_empty());
         assert_eq!(range_proof, RangeProof::default());
 
-        // Also works for other ranges (they all return empty proof for empty tree)
-        assert!(tree.range_proof(0, 1).is_ok());
-        assert!(tree.range_proof(1, 1).is_ok());
-        assert!(tree.range_proof(1, 2).is_ok());
+        // All other combinations should fail
+        let invalid_ranges = vec![
+            (0, 1),
+            (0, 10),
+            (1, 1),
+            (1, 2),
+            (5, 5),
+            (10, 10),
+            (0, u32::MAX),
+            (u32::MAX, u32::MAX),
+        ];
+        for (start, end) in invalid_ranges {
+            assert!(tree.range_proof(start, end).is_err());
+        }
 
         // Verify empty range proof against empty tree root
         let mut hasher = Sha256::default();
@@ -1525,6 +1535,11 @@ mod tests {
         let wrong_root = hash(b"wrong");
         assert!(range_proof
             .verify(&mut hasher, 0, empty_leaves, &wrong_root)
+            .is_err());
+
+        // Should fail with wrong position
+        assert!(range_proof
+            .verify(&mut hasher, 1, empty_leaves, &root)
             .is_err());
     }
 
