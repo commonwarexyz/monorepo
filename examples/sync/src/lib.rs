@@ -31,7 +31,7 @@ pub type Value = commonware_cryptography::sha256::Digest;
 pub type Database<E> = commonware_storage::adb::any::Any<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = commonware_storage::adb::operation::Operation<Key, Value>;
+pub type Operation = commonware_storage::adb::operation::Fixed<Key, Value>;
 
 /// Translator type for the database.
 pub type Translator = commonware_storage::translator::EightCap;
