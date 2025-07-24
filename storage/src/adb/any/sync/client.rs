@@ -166,7 +166,7 @@ fn validate_target_update<H: Hasher>(
 ///
 /// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
 pub async fn sync<E, K, V, H, T, R>(
-    mut config: Config<E, K, V, H, T, R>,
+    config: Config<E, K, V, H, T, R>,
 ) -> Result<adb::any::Any<E, K, V, H, T>, Error>
 where
     E: Storage + Clock + MetricsTrait,
@@ -178,6 +178,57 @@ where
 {
     info!("starting sync");
 
+    // Initialize sync
+    let (mut config, mut log, metrics, mut pinned_nodes) = initialize_sync(config).await?;
+
+    // Main sync loop
+    loop {
+        // Handle any pending target updates
+        let (updated_config, updated_log, updated_pinned_nodes) =
+            handle_target_updates(config, log, pinned_nodes).await?;
+        config = updated_config;
+        log = updated_log;
+        pinned_nodes = updated_pinned_nodes;
+
+        // Check if sync is complete and return database if so
+        if is_sync_complete(&config, &log).await? {
+            return build_final_database(config, log, &pinned_nodes, &metrics).await;
+        }
+
+        // Fetch and verify a batch of operations
+        let (operations, new_pinned_nodes) =
+            fetch_and_verify_batch(&mut config, &log, &pinned_nodes, &metrics).await?;
+
+        // Apply operations to the log
+        log = apply_operations_to_log(log, operations, &metrics).await?;
+
+        // Update pinned nodes if they were established in this batch
+        if let Some(nodes) = new_pinned_nodes {
+            pinned_nodes = Some(nodes);
+        }
+    }
+}
+
+/// Initialize the sync process by validating config and setting up the journal
+async fn initialize_sync<E, K, V, H, T, R>(
+    config: Config<E, K, V, H, T, R>,
+) -> Result<
+    (
+        Config<E, K, V, H, T, R>,
+        Journal<E, Operation<K, V>>,
+        Metrics<E>,
+        Option<Vec<H::Digest>>,
+    ),
+    Error,
+>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
     // Validate bounds (inclusive)
     if config.target.lower_bound_ops > config.target.upper_bound_ops {
         return Err(Error::InvalidTarget {
@@ -188,7 +239,7 @@ where
 
     // Initialize the operations journal.
     // It may have data in the target range.
-    let mut log = Journal::<E, Operation<K, V>>::init_sync(
+    let log = Journal::<E, Operation<K, V>>::init_sync(
         config.context.clone().with_label("log"),
         JConfig {
             partition: config.db_config.log_journal_partition.clone(),
@@ -211,197 +262,210 @@ where
 
     // Assert invariant from [Journal::init_sync]
     assert!(log_size <= config.target.upper_bound_ops + 1);
-    if log_size == config.target.upper_bound_ops + 1 {
-        // We already have all the operations we need in the log.
-        // Build the database immediately without fetching more operations.
-        let db = adb::any::Any::init_synced(
-            config.context.clone(),
-            SyncConfig {
-                db_config: config.db_config.clone(),
-                log,
-                lower_bound: config.target.lower_bound_ops,
-                upper_bound: config.target.upper_bound_ops,
-                pinned_nodes: None,
-                apply_batch_size: config.apply_batch_size,
-            },
-        )
-        .await
-        .map_err(Error::Adb)?;
 
-        return Ok(db);
-    }
+    // If we already have all operations, this will be detected in check_sync_completion
+    // Just continue with normal initialization
 
     let metrics = Metrics::new(config.context.clone());
-    let mut pinned_nodes: Option<Vec<H::Digest>> = None;
+    Ok((config, log, metrics, None))
+}
 
-    // Main sync loop
-    loop {
-        // Handle any pending target updates
-        let mut new_target = None;
-        if let Some(ref mut receiver) = config.update_receiver {
-            // Only apply the last update, if any.
-            while let Ok(Some(new_target_)) = receiver.try_next() {
-                new_target = Some(new_target_);
-            }
+/// Handle any pending target updates
+async fn handle_target_updates<E, K, V, H, T, R>(
+    mut config: Config<E, K, V, H, T, R>,
+    mut log: Journal<E, Operation<K, V>>,
+    mut pinned_nodes: Option<Vec<H::Digest>>,
+) -> Result<
+    (
+        Config<E, K, V, H, T, R>,
+        Journal<E, Operation<K, V>>,
+        Option<Vec<H::Digest>>,
+    ),
+    Error,
+>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
+    let mut new_target = None;
+    if let Some(ref mut receiver) = config.update_receiver {
+        // Only apply the last update, if any.
+        while let Ok(Some(new_target_)) = receiver.try_next() {
+            new_target = Some(new_target_);
         }
+    }
 
-        if let Some(new_target) = new_target {
-            validate_target_update::<H>(&config.target, &new_target)?;
+    if let Some(new_target) = new_target {
+        validate_target_update::<H>(&config.target, &new_target)?;
 
-            info!(
-                old_target = ?config.target,
-                new_target = ?new_target,
-                "applying target update"
-            );
+        info!(
+            old_target = ?config.target,
+            new_target = ?new_target,
+            "applying target update"
+        );
 
-            // Check if the existing log contains data in the updated sync range
-            let log_size = log
-                .size()
-                .await
-                .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-
-            log = if log_size <= new_target.lower_bound_ops {
-                // Log is stale (last element is before the new lower bound)
-                // Reinitialize the log with the new sync range
-                log.close()
-                    .await
-                    .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-
-                debug!(
-                    log_size,
-                    old_bounds = ?config.target,
-                    new_bounds = ?new_target,
-                    "log is stale, reinitializing"
-                );
-                Journal::<E, Operation<K, V>>::init_sync(
-                    config.context.clone().with_label("log"),
-                    JConfig {
-                        partition: config.db_config.log_journal_partition.clone(),
-                        items_per_blob: config.db_config.log_items_per_blob,
-                        write_buffer: config.db_config.log_write_buffer,
-                        buffer_pool: config.db_config.buffer_pool.clone(),
-                    },
-                    new_target.lower_bound_ops,
-                    new_target.upper_bound_ops,
-                )
-                .await
-                .map_err(adb::Error::JournalError)
-                .map_err(Error::Adb)?
-            } else {
-                debug!(
-                    log_size,
-                    old_bounds = ?config.target,
-                    new_bounds = ?new_target,
-                    "pruning log"
-                );
-                // Log contains data in the updated sync range, prune normally
-                log.prune(new_target.lower_bound_ops)
-                    .await
-                    .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-                log
-            };
-
-            // Update the target
-            config.target = new_target;
-
-            // Request a minimal proof for the new lower bound to extract correct pinned nodes
-            let GetOperationsResult {
-                proof,
-                operations: _,
-                success_tx,
-            } = {
-                let target_size = config.target.upper_bound_ops + 1;
-                config
-                    .resolver
-                    .get_operations(target_size, config.target.lower_bound_ops, NZU64!(1))
-                    .await?
-            };
-
-            // Extract pinned nodes for the new pruning boundary
-            let start_pos = leaf_num_to_pos(config.target.lower_bound_ops);
-            let end_pos = leaf_num_to_pos(config.target.lower_bound_ops);
-            let new_pinned_nodes = match proof.extract_pinned_nodes(start_pos, end_pos) {
-                Ok(nodes) => {
-                    let _ = success_tx.send(true);
-                    nodes
-                }
-                Err(e) => {
-                    warn!(error = ?e, "failed to extract pinned nodes for new target");
-                    let _ = success_tx.send(false);
-                    return Err(Error::InvalidState);
-                }
-            };
-
-            debug!(
-                lower_bound_ops = config.target.lower_bound_ops,
-                pinned_nodes_count = new_pinned_nodes.len(),
-                "extracted pinned nodes for new target"
-            );
-
-            // Update pinned nodes and continue with fetch phase
-            pinned_nodes = Some(new_pinned_nodes);
-        }
-
-        // Get current position in the log
+        // Check if the existing log contains data in the updated sync range
         let log_size = log
             .size()
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
-        // Calculate the target log size (upper bound is inclusive)
-        let target_log_size = config
-            .target
-            .upper_bound_ops
-            .checked_add(1)
-            .ok_or(Error::InvalidState)?;
+        if log_size <= new_target.lower_bound_ops {
+            // Log is stale, reinitialize it
+            log.close()
+                .await
+                .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
-        // Check if we've completed sync
-        if log_size >= target_log_size {
-            if log_size > target_log_size {
-                warn!(log_size, target_log_size, "log size exceeded sync target");
-                return Err(Error::InvalidState);
-            }
-
-            // Build the complete database from the log
-            let db = adb::any::Any::init_synced(
-                config.context.clone(),
-                SyncConfig {
-                    db_config: config.db_config.clone(),
-                    log,
-                    lower_bound: config.target.lower_bound_ops,
-                    upper_bound: config.target.upper_bound_ops,
-                    pinned_nodes,
-                    apply_batch_size: config.apply_batch_size,
+            log = Journal::<E, Operation<K, V>>::init_sync(
+                config.context.clone().with_label("log"),
+                JConfig {
+                    partition: config.db_config.log_journal_partition.clone(),
+                    items_per_blob: config.db_config.log_items_per_blob,
+                    write_buffer: config.db_config.log_write_buffer,
+                    buffer_pool: config.db_config.buffer_pool.clone(),
                 },
+                new_target.lower_bound_ops,
+                new_target.upper_bound_ops,
             )
             .await
+            .map_err(adb::Error::JournalError)
             .map_err(Error::Adb)?;
-
-            // Verify the final root digest matches the target
-            let mut hasher = mmr::hasher::Standard::<H>::new();
-            let got_root = db.root(&mut hasher);
-            if got_root != config.target.root {
-                return Err(Error::RootMismatch {
-                    expected: Box::new(config.target.root),
-                    actual: Box::new(got_root),
-                });
-            }
-
-            info!(
-                target_root = ?config.target.root,
-                lower_bound_ops = config.target.lower_bound_ops,
-                upper_bound_ops = config.target.upper_bound_ops,
-                log_size = log_size,
-                valid_batches_received = metrics.valid_batches_received.get(),
-                invalid_batches_received = metrics.invalid_batches_received.get(),
-                "sync completed successfully");
-
-            return Ok(db);
+        } else {
+            // Prune the log
+            log.prune(new_target.lower_bound_ops)
+                .await
+                .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
         }
+
+        config.target = new_target;
+        pinned_nodes = None; // Reset pinned nodes after target update
+    }
+
+    Ok((config, log, pinned_nodes))
+}
+
+/// Check if sync is complete
+async fn is_sync_complete<E, K, V, H, T, R>(
+    config: &Config<E, K, V, H, T, R>,
+    log: &Journal<E, Operation<K, V>>,
+) -> Result<bool, Error>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
+    // Get current position in the log
+    let log_size = log
+        .size()
+        .await
+        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+    // Calculate the target log size (upper bound is inclusive)
+    let target_log_size = config
+        .target
+        .upper_bound_ops
+        .checked_add(1)
+        .ok_or(Error::InvalidState)?;
+
+    // Check if we've completed sync
+    if log_size >= target_log_size {
+        if log_size > target_log_size {
+            warn!(log_size, target_log_size, "log size exceeded sync target");
+            return Err(Error::InvalidState);
+        }
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+/// Build the final database once sync is complete
+async fn build_final_database<E, K, V, H, T, R>(
+    config: Config<E, K, V, H, T, R>,
+    log: Journal<E, Operation<K, V>>,
+    pinned_nodes: &Option<Vec<H::Digest>>,
+    metrics: &Metrics<E>,
+) -> Result<adb::any::Any<E, K, V, H, T>, Error>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
+    let log_size = log
+        .size()
+        .await
+        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+    // Build the complete database from the log
+    let db = adb::any::Any::init_synced(
+        config.context.clone(),
+        SyncConfig {
+            db_config: config.db_config.clone(),
+            log,
+            lower_bound: config.target.lower_bound_ops,
+            upper_bound: config.target.upper_bound_ops,
+            pinned_nodes: pinned_nodes.clone(),
+            apply_batch_size: config.apply_batch_size,
+        },
+    )
+    .await
+    .map_err(Error::Adb)?;
+
+    // Verify the final root digest matches the target
+    let mut hasher = mmr::hasher::Standard::<H>::new();
+    let got_root = db.root(&mut hasher);
+    if got_root != config.target.root {
+        return Err(Error::RootMismatch {
+            expected: Box::new(config.target.root),
+            actual: Box::new(got_root),
+        });
+    }
+
+    info!(
+        target_root = ?config.target.root,
+        lower_bound_ops = config.target.lower_bound_ops,
+        upper_bound_ops = config.target.upper_bound_ops,
+        log_size = log_size,
+        valid_batches_received = metrics.valid_batches_received.get(),
+        invalid_batches_received = metrics.invalid_batches_received.get(),
+        "sync completed successfully");
+
+    Ok(db)
+}
+
+/// Fetch and verify a batch of operations from the resolver
+async fn fetch_and_verify_batch<E, K, V, H, T, R>(
+    config: &mut Config<E, K, V, H, T, R>,
+    log: &Journal<E, Operation<K, V>>,
+    pinned_nodes: &Option<Vec<H::Digest>>,
+    metrics: &Metrics<E>,
+) -> Result<(Vec<Operation<K, V>>, Option<Vec<H::Digest>>), Error>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
+    loop {
+        let log_size = log
+            .size()
+            .await
+            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
         // Calculate remaining operations to sync (inclusive upper bound)
         let remaining_ops = config.target.upper_bound_ops - log_size + 1;
-
         let batch_size = std::cmp::min(config.fetch_batch_size.get(), remaining_ops);
         let batch_size = NonZeroU64::new(batch_size).ok_or(Error::InvalidState)?;
 
@@ -467,34 +531,53 @@ where
         }
 
         // Install pinned nodes on first successful batch.
-        if pinned_nodes.is_none() {
+        let new_pinned_nodes = if pinned_nodes.is_none() {
             let start_pos = leaf_num_to_pos(log_size);
             let end_pos = leaf_num_to_pos(log_size + operations_len - 1);
-            let Ok(new_pinned_nodes) = proof.extract_pinned_nodes(start_pos, end_pos) else {
-                warn!("failed to extract pinned nodes, retrying");
-                metrics.invalid_batches_received.inc();
-                continue;
-            };
-            pinned_nodes = Some(new_pinned_nodes);
-        }
+            match proof.extract_pinned_nodes(start_pos, end_pos) {
+                Ok(nodes) => Some(nodes),
+                Err(_) => {
+                    warn!("failed to extract pinned nodes, retrying");
+                    metrics.invalid_batches_received.inc();
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
 
         // Record successful batch metrics
         metrics.valid_batches_received.inc();
         metrics.operations_fetched.inc_by(operations_len);
 
-        // Apply operations to the log
-        {
-            let _timer = metrics.apply_duration.timer();
-            for op in operations.into_iter() {
-                log.append(op)
-                    .await
-                    .map_err(adb::Error::JournalError)
-                    .map_err(Error::Adb)?;
-                // No need to sync here -- the log will periodically sync its storage
-                // and we will also sync when we're done.
-            }
+        return Ok((operations, new_pinned_nodes));
+    }
+}
+
+/// Apply a batch of operations to the log
+async fn apply_operations_to_log<E, K, V>(
+    mut log: Journal<E, Operation<K, V>>,
+    operations: Vec<Operation<K, V>>,
+    metrics: &Metrics<E>,
+) -> Result<Journal<E, Operation<K, V>>, Error>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+{
+    // Apply operations to the log
+    {
+        let _timer = metrics.apply_duration.timer();
+        for op in operations.into_iter() {
+            log.append(op)
+                .await
+                .map_err(adb::Error::JournalError)
+                .map_err(Error::Adb)?;
+            // No need to sync here -- the log will periodically sync its storage
+            // and we will also sync when we're done.
         }
     }
+    Ok(log)
 }
 
 #[cfg(test)]
@@ -511,7 +594,7 @@ pub(crate) mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
     use commonware_utils::NZU64;
-    use futures::{channel::mpsc, SinkExt};
+
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
     use std::collections::{HashMap, HashSet};
     use test_case::test_case;
