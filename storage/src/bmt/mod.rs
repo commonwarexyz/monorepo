@@ -219,6 +219,7 @@ impl<H: Hasher> Tree<H> {
         // For each level (except the root level) collect the necessary siblings
         let mut siblings_by_level = Vec::new();
         for (level_idx, level) in self.levels.iter().enumerate() {
+            // If the level has only one node, we're done
             if level.len() == 1 {
                 break;
             }
@@ -227,34 +228,27 @@ impl<H: Hasher> Tree<H> {
             let level_start = (position as usize) >> level_idx;
             let level_end = (end_position as usize) >> level_idx;
 
-            // For a contiguous range, we need at most 2 siblings per level:
-            // - Left sibling: if our range doesn't start at an even boundary
-            // - Right sibling: if our range doesn't end at an odd boundary
-            let mut left_sibling = None;
-            let mut right_sibling = None;
-
             // Check if we need a left sibling
+            let mut left = None;
             if level_start % 2 == 1 {
                 // Our range starts at an odd index, so we need the even sibling to the left
-                left_sibling = Some(level[level_start - 1]);
+                left = Some(level[level_start - 1]);
             }
 
             // Check if we need a right sibling
+            let mut right = None;
             if level_end % 2 == 0 && level_end + 1 < level.len() {
                 // Our range ends at an even index, so we need the odd sibling to the right
-                right_sibling = Some(level[level_end + 1]);
+                right = Some(level[level_end + 1]);
             } else if level_end % 2 == 0 && level_end + 1 >= level.len() {
                 // If no right child exists, use a duplicate of the current node.
                 //
                 // This doesn't affect the robustness of the proof (allow a non-existent position
                 // to be proven or enable multiple proofs to be generated from a single leaf).
-                right_sibling = Some(level[level_end]);
+                right = Some(level[level_end]);
             }
 
-            siblings_by_level.push(Bounds {
-                left: left_sibling,
-                right: right_sibling,
-            });
+            siblings_by_level.push(Bounds { left, right });
         }
 
         Ok(RangeProof {
