@@ -196,10 +196,12 @@ impl<H: Hasher> Tree<H> {
     /// the root for all elements in the range. This is more efficient than individual
     /// proofs when proving multiple consecutive elements.
     pub fn range_proof(&self, start: u32, end: u32) -> Result<RangeProof<H>, Error> {
-        // Ensure the range is within bounds
-        if self.empty {
-            return Err(Error::NoLeaves);
+        // For empty trees, return an empty proof
+        if self.empty && start == 0 && end == 0 {
+            return Ok(RangeProof::default());
         }
+
+        // Ensure the range is within bounds
         if start > end {
             return Err(Error::InvalidPosition(start));
         }
@@ -391,6 +393,12 @@ where
     }
 }
 
+impl<H: Hasher> Default for RangeProof<H> {
+    fn default() -> Self {
+        Self { siblings: vec![] }
+    }
+}
+
 /// A node tracked during range proof verification.
 struct Node<D: Digest> {
     position: usize,
@@ -410,6 +418,19 @@ impl<H: Hasher> RangeProof<H> {
         leaves: &[H::Digest],
         root: &H::Digest,
     ) -> Result<(), Error> {
+        // Handle empty tree case
+        if position == 0 && leaves.is_empty() && self.siblings.is_empty() {
+            let empty_root = hasher.finalize();
+            if empty_root == *root {
+                return Ok(());
+            } else {
+                return Err(Error::InvalidProof(
+                    empty_root.to_string(),
+                    root.to_string(),
+                ));
+            }
+        }
+
         // Check that we have leaves and the position is valid
         if leaves.is_empty() {
             return Err(Error::NoLeaves);
@@ -477,7 +498,7 @@ impl<H: Hasher> RangeProof<H> {
                     i += 2;
                 } else if i == nodes.len() - 1 {
                     // This is the last node and it should have a right sibling
-                    let right = bounds.right.as_ref().unwrap();
+                    let right = bounds.right.as_ref().ok_or(Error::UnalignedProof)?;
                     hasher.update(&node.digest);
                     hasher.update(right);
                     next_nodes.push(Node {
@@ -1456,6 +1477,99 @@ mod tests {
             let proof = tree.range_proof(0, (tree_size - 1) as u32).unwrap();
             assert!(proof.verify(&mut hasher, 0, &digests, &root).is_ok());
         }
+    }
+
+    #[test]
+    fn test_empty_tree_proof() {
+        // Build an empty tree
+        let builder = Builder::<Sha256>::new(0);
+        let tree = builder.build();
+
+        // Empty tree should fail for any position since there are no elements
+        assert!(tree.proof(0).is_err());
+        assert!(tree.proof(1).is_err());
+        assert!(tree.proof(100).is_err());
+    }
+
+    #[test]
+    fn test_empty_tree_range_proof() {
+        // Build an empty tree
+        let builder = Builder::<Sha256>::new(0);
+        let tree = builder.build();
+        let root = tree.root();
+
+        // Empty tree should return default range proof only for (0, 0)
+        let range_proof = tree.range_proof(0, 0).unwrap();
+        assert!(range_proof.siblings.is_empty());
+        assert_eq!(range_proof, RangeProof::default());
+
+        // All other combinations should fail
+        let invalid_ranges = vec![
+            (0, 1),
+            (0, 10),
+            (1, 1),
+            (1, 2),
+            (5, 5),
+            (10, 10),
+            (0, u32::MAX),
+            (u32::MAX, u32::MAX),
+        ];
+        for (start, end) in invalid_ranges {
+            assert!(tree.range_proof(start, end).is_err());
+        }
+
+        // Verify empty range proof against empty tree root
+        let mut hasher = Sha256::default();
+        let empty_leaves: &[Digest] = &[];
+        assert!(range_proof
+            .verify(&mut hasher, 0, empty_leaves, &root)
+            .is_ok());
+
+        // Should fail with non-empty leaves
+        let non_empty_leaves = vec![hash(b"leaf")];
+        assert!(range_proof
+            .verify(&mut hasher, 0, &non_empty_leaves, &root)
+            .is_err());
+
+        // Should fail with wrong root
+        let wrong_root = hash(b"wrong");
+        assert!(range_proof
+            .verify(&mut hasher, 0, empty_leaves, &wrong_root)
+            .is_err());
+
+        // Should fail with wrong position
+        assert!(range_proof
+            .verify(&mut hasher, 1, empty_leaves, &root)
+            .is_err());
+    }
+
+    #[test]
+    fn test_empty_range_proof_serialization() {
+        let range_proof = RangeProof::<Sha256>::default();
+        let mut serialized = range_proof.encode();
+        let deserialized = RangeProof::<Sha256>::decode(&mut serialized).unwrap();
+        assert_eq!(range_proof, deserialized);
+    }
+
+    #[test]
+    fn test_empty_tree_root_consistency() {
+        // Create multiple empty trees and verify they have the same root
+        let mut roots = Vec::new();
+        for _ in 0..5 {
+            let builder = Builder::<Sha256>::new(0);
+            let tree = builder.build();
+            roots.push(tree.root());
+        }
+
+        // All empty trees should have the same root
+        for i in 1..roots.len() {
+            assert_eq!(roots[0], roots[i]);
+        }
+
+        // The root should be the hash of empty data
+        let mut hasher = Sha256::default();
+        let expected_root = hasher.finalize();
+        assert_eq!(roots[0], expected_root);
     }
 
     #[test]

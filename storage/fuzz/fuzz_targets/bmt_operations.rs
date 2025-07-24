@@ -199,12 +199,9 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::RangeProofFullTree => {
                 if let Some(ref t) = tree {
-                    // Test full tree range proof
-                    if !leaf_values.is_empty() {
-                        let last_idx = (leaf_values.len() - 1) as u32;
-                        if let Ok(rp) = t.range_proof(0, last_idx) {
-                            range_proof = Some(rp);
-                        }
+                    let last_idx = leaf_values.len().saturating_sub(1) as u32;
+                    if let Ok(rp) = t.range_proof(0, last_idx) {
+                        range_proof = Some(rp);
                     }
                 }
             }
