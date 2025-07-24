@@ -46,10 +46,13 @@ pub struct Config<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::threshold_simplex::{
-        actors::{batcher, resolver},
-        mocks,
-        types::{Finalization, Finalize, Notarization, Notarize, Proposal, Viewable, Voter},
+    use crate::{
+        threshold_simplex::{
+            actors::{batcher, resolver},
+            mocks,
+            types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
+        },
+        Viewable,
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{

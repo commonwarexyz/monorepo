@@ -2,9 +2,8 @@ use crate::{
     threshold_simplex::types::{
         Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization, Finalize,
         Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Seed, Seedable, View,
-        Viewable,
     },
-    Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu,
+    Monitor, Reporter, Supervisor as Su, ThresholdSupervisor as TSu, Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{

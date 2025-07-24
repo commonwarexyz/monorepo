@@ -6,7 +6,6 @@
 //! expect breaking changes and occasional instability.
 
 pub mod aggregation;
-pub mod marshal;
 pub mod ordered_broadcast;
 pub mod simplex;
 pub mod threshold_simplex;
@@ -17,6 +16,8 @@ cfg_if::cfg_if! {
         use commonware_cryptography::{Digest, Digestible, Committable, PublicKey};
         use futures::channel::{oneshot, mpsc};
         use std::future::Future;
+
+        pub mod marshal;
 
         /// Histogram buckets for measuring consensus latency.
         const LATENCY: [f64; 36] = [
