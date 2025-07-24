@@ -43,7 +43,8 @@ fn bench_prove_range(c: &mut Criterion) {
                                 let start = sampler.gen_range(0..=(n - range_size));
                                 range_proofs.push((
                                     start,
-                                    tree.range_proof(start as u32, (start + range_size - 1) as u32).unwrap(),
+                                    tree.range_proof(start as u32, (start + range_size - 1) as u32)
+                                        .unwrap(),
                                 ));
                             }
                             range_proofs
