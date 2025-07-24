@@ -34,9 +34,6 @@ enum BmtOperation {
     BuildLargeTree {
         size: u8,
     },
-    ProofOutOfBounds {
-        position: u32,
-    },
     // Range proof operations
     GenerateRangeProof {
         start: u32,
@@ -51,14 +48,6 @@ enum BmtOperation {
         data: Vec<u8>,
     },
     // Range proof edge cases
-    RangeProofInvalidRange {
-        start: u32,
-        end: u32,
-    },
-    RangeProofOutOfBounds {
-        start: u32,
-        end: u32,
-    },
     RangeProofSingleElement {
         position: u32,
     },
@@ -116,11 +105,8 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::GenerateProof { position } => {
                 if let Some(ref t) = tree {
-                    // Only attempt proof generation for valid positions
-                    if (*position as usize) < leaf_values.len() {
-                        if let Ok(p) = t.proof(*position) {
-                            proof = Some(p);
-                        }
+                    if let Ok(p) = t.proof(*position) {
+                        proof = Some(p);
                     }
                 }
             }
@@ -166,40 +152,27 @@ fn fuzz(input: FuzzInput) {
                 tree = Some(b.build());
             }
 
-            BmtOperation::ProofOutOfBounds { position } => {
-                if let Some(ref t) = tree {
-                    let _ = t.proof(*position);
-                }
-            }
-
             // Range proof operations
             BmtOperation::GenerateRangeProof { start, end } => {
                 if let Some(ref t) = tree {
-                    // Ensure start <= end to avoid panic in range_proof
-                    let safe_start = *start;
-                    let safe_end = *end;
-
-                    if safe_start <= safe_end {
-                        if let Ok(rp) = t.range_proof(safe_start, safe_end) {
-                            range_proof = Some(rp);
-                        }
+                    if let Ok(rp) = t.range_proof(*start, *end) {
+                        range_proof = Some(rp);
                     }
                 }
             }
 
             BmtOperation::VerifyRangeProof {
                 start_position,
-                leaf_values: verify_values,
+                leaf_values,
             } => {
                 if let (Some(ref rp), Some(ref t)) = (&range_proof, &tree) {
-                    let mut hasher = Sha256::default();
-                    let root = t.root();
-
                     // Convert leaf values to digests
-                    let leaf_digests: Vec<_> = verify_values
-                        .iter()
-                        .map(|v| hash(&v.to_be_bytes()))
-                        .collect();
+                    let mut hasher = Sha256::default();
+                    let leaf_digests: Vec<_> =
+                        leaf_values.iter().map(|v| hash(&v.to_be_bytes())).collect();
+
+                    // Verify range proof
+                    let root = t.root();
                     let _ = rp.verify(&mut hasher, *start_position, &leaf_digests, &root);
                 }
             }
@@ -215,22 +188,6 @@ fn fuzz(input: FuzzInput) {
             }
 
             // Range proof edge cases
-            BmtOperation::RangeProofInvalidRange { start, end } => {
-                if let Some(ref t) = tree {
-                    // Test invalid ranges (start > end)
-                    if *start > *end {
-                        let _ = t.range_proof(*start, *end);
-                    }
-                }
-            }
-
-            BmtOperation::RangeProofOutOfBounds { start, end } => {
-                if let Some(ref t) = tree {
-                    // Test out of bounds ranges
-                    let _ = t.range_proof(*start, *end);
-                }
-            }
-
             BmtOperation::RangeProofSingleElement { position } => {
                 if let Some(ref t) = tree {
                     // Test single element range proof
@@ -261,17 +218,15 @@ fn fuzz(input: FuzzInput) {
                     // Generate a range proof at proof_start position
                     let count = (*leaf_count as usize).clamp(1, 10);
                     let end = proof_start.saturating_add(count as u32 - 1);
-
                     if let Ok(rp) = t.range_proof(*proof_start, end) {
-                        let mut hasher = Sha256::default();
-                        let root = t.root();
-
                         // Create some leaf digests for verification
+                        let mut hasher = Sha256::default();
                         let leaf_digests: Vec<_> = (0..count)
                             .map(|i| hash(&(i as u64).to_be_bytes()))
                             .collect();
 
                         // Verify with wrong position (verify_start instead of proof_start)
+                        let root = t.root();
                         let _ = rp.verify(&mut hasher, *verify_start, &leaf_digests, &root);
                     }
                 }
@@ -282,14 +237,15 @@ fn fuzz(input: FuzzInput) {
                 tampered_values,
             } => {
                 if let (Some(ref rp), Some(ref t)) = (&range_proof, &tree) {
+                    // Generate tampered digests
                     let mut hasher = Sha256::default();
-                    let root = t.root();
-
-                    // Verify with tampered values
                     let tampered_digests: Vec<_> = tampered_values
                         .iter()
                         .map(|v| hash(&v.to_be_bytes()))
                         .collect();
+
+                    // Verify with tampered digests
+                    let root = t.root();
                     let _ = rp.verify(&mut hasher, *start, &tampered_digests, &root);
                 }
             }
