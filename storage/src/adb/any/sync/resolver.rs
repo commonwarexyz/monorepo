@@ -25,7 +25,7 @@ pub struct GetOperationsResult<D: Digest, K: Array, V: Array> {
 }
 
 /// Trait for network communication with the sync server
-pub trait Resolver {
+pub trait Resolver: Clone + Send + 'static {
     type Digest: Digest;
     type Key: Array;
     type Value: Array;
@@ -36,32 +36,76 @@ pub trait Resolver {
     /// `size` operations.
     #[allow(clippy::type_complexity)]
     fn get_operations(
-        &self,
+        self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error>>;
+    ) -> impl Future<Output = Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error>>
+           + Send;
 }
 
-impl<E, K, V, H, T> Resolver for Any<E, K, V, H, T>
+/// Cloneable wrapper for Any database that can be used as a Resolver
+#[derive(Clone)]
+pub struct AnyResolver<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
     V: Array,
     H: Hasher,
-    T: Translator,
+    T: Translator + Send + Sync + 'static,
+    T::Key: Send + Sync,
+{
+    inner: Arc<RwLock<Any<E, K, V, H, T>>>,
+}
+
+impl<E, K, V, H, T> AnyResolver<E, K, V, H, T>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator + Send + Sync + 'static,
+    T::Key: Send + Sync,
+{
+    /// Create a new AnyResolver wrapping the given database
+    pub fn new(db: Any<E, K, V, H, T>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(db)),
+        }
+    }
+
+    /// Create a new AnyResolver from an existing Arc<RwLock<Any>>
+    pub fn new_from_arc(arc: Arc<RwLock<Any<E, K, V, H, T>>>) -> Self {
+        Self { inner: arc }
+    }
+
+    /// Extract the inner Arc<RwLock<Any>> from this resolver
+    pub fn into_inner(self) -> Arc<RwLock<Any<E, K, V, H, T>>> {
+        self.inner
+    }
+}
+
+impl<E, K, V, H, T> Resolver for AnyResolver<E, K, V, H, T>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator + Send + Sync + 'static,
+    T::Key: Send + Sync,
 {
     type Digest = H::Digest;
     type Key = K;
     type Value = V;
 
     async fn get_operations(
-        &self,
+        self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<GetOperationsResult<H::Digest, Self::Key, Self::Value>, Error> {
-        self.historical_proof(size, start_loc, max_ops.get())
+    ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error> {
+        let db = self.inner.read().await;
+        db.historical_proof(size, start_loc, max_ops.get())
             .await
             .map_err(Error::Adb)
             .map(|(proof, operations)| GetOperationsResult {
@@ -73,51 +117,12 @@ where
     }
 }
 
-/// Blanket implementation for any borrowed type that implements Resolver
-impl<T> Resolver for &T
-where
-    T: Resolver,
-{
-    type Digest = T::Digest;
-    type Key = T::Key;
-    type Value = T::Value;
-
-    async fn get_operations(
-        &self,
-        size: u64,
-        start_loc: u64,
-        max_ops: NonZeroU64,
-    ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error> {
-        (*self).get_operations(size, start_loc, max_ops).await
-    }
-}
-
-impl<T> Resolver for Arc<RwLock<T>>
-where
-    T: Resolver,
-{
-    type Digest = T::Digest;
-    type Key = T::Key;
-    type Value = T::Value;
-
-    async fn get_operations(
-        &self,
-        size: u64,
-        start_loc: u64,
-        max_ops: NonZeroU64,
-    ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error> {
-        self.read()
-            .await
-            .get_operations(size, start_loc, max_ops)
-            .await
-    }
-}
-
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
     use std::marker::PhantomData;
 
+    #[derive(Clone)]
     pub struct FailResolver<D, K, V> {
         _digest: PhantomData<D>,
         _key: PhantomData<K>,
@@ -135,7 +140,7 @@ pub(super) mod tests {
         type Value = V;
 
         async fn get_operations(
-            &self,
+            self,
             _size: u64,
             _start_loc: u64,
             _max_ops: NonZeroU64,

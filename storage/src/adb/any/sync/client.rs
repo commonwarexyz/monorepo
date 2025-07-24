@@ -3,7 +3,7 @@ use crate::{
         self,
         any::{
             sync::{
-                resolver::{GetOperationsResult, Resolver},
+                resolver::{AnyResolver, GetOperationsResult, Resolver},
                 Error, SyncTarget, SyncTargetUpdateReceiver,
             },
             SyncConfig,
@@ -15,95 +15,14 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
-use commonware_macros::select;
 use commonware_runtime::{
     telemetry::metrics::histogram::{Buckets, Timed},
-    Clock, Metrics as MetricsTrait, Spawner, Storage,
+    Clock, Metrics as MetricsTrait, Storage,
 };
-use commonware_utils::{Array, NZU64};
-use futures::{
-    channel::{mpsc, oneshot},
-    stream::FuturesUnordered,
-    Future, StreamExt,
-};
+use commonware_utils::Array;
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
-use std::{collections::BTreeMap, collections::BTreeSet, num::NonZeroU64, pin::Pin, sync::Arc};
+use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, info, warn};
-
-/// Request for operations from the resolver task
-#[derive(Debug)]
-struct ResolverRequest<H: Hasher, K: Array, V: Array> {
-    target_size: u64,
-    log_size: u64,
-    batch_size: NonZeroU64,
-    response_tx: oneshot::Sender<Result<GetOperationsResult<H::Digest, K, V>, Error>>,
-}
-
-/// Handle to communicate with the resolver task
-struct ResolverHandle<H: Hasher, K: Array, V: Array> {
-    request_tx: mpsc::UnboundedSender<ResolverRequest<H, K, V>>,
-}
-
-impl<H: Hasher, K: Array, V: Array> ResolverHandle<H, K, V> {
-    /// Send a request for operations
-    async fn get_operations(
-        &self,
-        target_size: u64,
-        log_size: u64,
-        batch_size: NonZeroU64,
-    ) -> Result<GetOperationsResult<H::Digest, K, V>, Error> {
-        let (response_tx, response_rx) = oneshot::channel();
-        let request = ResolverRequest {
-            target_size,
-            log_size,
-            batch_size,
-            response_tx,
-        };
-
-        self.request_tx
-            .unbounded_send(request)
-            .map_err(|_| Error::Internal("resolver task stopped".to_string()))?;
-
-        response_rx
-            .await
-            .map_err(|_| Error::Internal("resolver response channel closed".to_string()))?
-    }
-}
-
-/// Spawn a resolver task that handles operations requests
-fn spawn_resolver_task<E, K, V, H, T, R>(context: &E, resolver: R) -> ResolverHandle<H, K, V>
-where
-    E: Storage + Clock + MetricsTrait + commonware_runtime::Spawner,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V> + Send + 'static,
-{
-    let (request_tx, mut request_rx) = mpsc::unbounded();
-
-    // Spawn the resolver task
-    context.with_label("resolver_task").spawn(|_| async move {
-        while let Some(request) = request_rx.next().await {
-            let ResolverRequest {
-                target_size,
-                log_size,
-                batch_size,
-                response_tx,
-            } = request;
-
-            // Execute the resolver operation
-            let result = resolver
-                .get_operations(target_size, log_size, batch_size)
-                .await;
-
-            // Send response back (ignore if receiver dropped)
-            let _ = response_tx.send(result);
-        }
-    });
-
-    ResolverHandle { request_tx }
-}
 
 /// Configuration for the sync client
 pub struct Config<E, K, V, H, T, R>
@@ -563,6 +482,7 @@ where
             let target_size = config.target.upper_bound_ops + 1;
             config
                 .resolver
+                .clone()
                 .get_operations(target_size, log_size, batch_size)
                 .await?
         };
@@ -744,6 +664,9 @@ pub(crate) mod tests {
             }
 
             let db_config = create_test_config(context.next_u64());
+
+            // Wrap target_db in Arc<RwLock> for resolver and continued use
+            let target_db_arc = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 db_config: db_config.clone(),
                 fetch_batch_size,
@@ -753,7 +676,7 @@ pub(crate) mod tests {
                     upper_bound_ops: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
                 },
                 context: context.clone(),
-                resolver: &target_db,
+                resolver: AnyResolver::new_from_arc(target_db_arc.clone()),
                 hasher,
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -795,19 +718,19 @@ pub(crate) mod tests {
                 new_kvs.insert(key, value);
             }
             apply_ops(&mut got_db, new_ops.clone()).await;
-            apply_ops(&mut target_db, new_ops).await;
+            apply_ops(&mut *target_db_arc.write().await, new_ops).await;
             got_db.commit().await.unwrap();
-            target_db.commit().await.unwrap();
+            target_db_arc.write().await.commit().await.unwrap();
 
             // Verify that the databases match
             for (key, value) in &new_kvs {
                 let got_value = got_db.get(key).await.unwrap().unwrap();
-                let target_value = target_db.get(key).await.unwrap().unwrap();
+                let target_value = target_db_arc.read().await.get(key).await.unwrap().unwrap();
                 assert_eq!(got_value, target_value);
                 assert_eq!(got_value, *value);
             }
 
-            let final_target_root = target_db.root(&mut hasher);
+            let final_target_root = target_db_arc.write().await.root(&mut hasher);
             assert_eq!(got_db.root(&mut hasher), final_target_root);
 
             // Capture the database state before closing
@@ -880,7 +803,7 @@ pub(crate) mod tests {
                     upper_bound_ops: 30,
                 },
                 context,
-                resolver: &target_db,
+                resolver: AnyResolver::new(target_db),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -933,7 +856,7 @@ pub(crate) mod tests {
                     upper_bound_ops,
                 },
                 context,
-                resolver: &target_db,
+                resolver: AnyResolver::new(target_db),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -1000,6 +923,7 @@ pub(crate) mod tests {
             let upper_bound_ops = target_db.op_count() - 1; // Up to the last operation
 
             // Reopen the sync database and sync it to the target database
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 db_config: sync_db_config, // Use same config as before
                 fetch_batch_size: NZU64!(10),
@@ -1009,7 +933,7 @@ pub(crate) mod tests {
                     upper_bound_ops,
                 },
                 context: context.clone(),
-                resolver: &target_db,
+                resolver: AnyResolver::new_from_arc(target_db.clone()),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -1019,11 +943,14 @@ pub(crate) mod tests {
 
             // Verify database state
             assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
-            assert_eq!(sync_db.inactivity_floor_loc, target_db.inactivity_floor_loc);
+            assert_eq!(
+                sync_db.inactivity_floor_loc,
+                target_db.read().await.inactivity_floor_loc
+            );
             assert_eq!(sync_db.oldest_retained_loc().unwrap(), lower_bound_ops);
             assert_eq!(
                 sync_db.log.size().await.unwrap(),
-                target_db.log.size().await.unwrap()
+                target_db.read().await.log.size().await.unwrap()
             );
             assert_eq!(
                 sync_db.ops.pruned_to_pos(),
@@ -1034,14 +961,14 @@ pub(crate) mod tests {
 
             // Verify that the operations in the overlapping range are present and correct
             for i in lower_bound_ops..original_db_op_count {
-                let expected_op = target_db.log.read(i).await.unwrap();
+                let expected_op = target_db.read().await.log.read(i).await.unwrap();
                 let synced_op = sync_db.log.read(i).await.unwrap();
                 assert_eq!(expected_op, synced_op);
             }
 
             for target_op in &original_ops {
                 if let Some(key) = target_op.to_key() {
-                    let target_value = target_db.get(key).await.unwrap();
+                    let target_value = target_db.read().await.get(key).await.unwrap();
                     let synced_value = sync_db.get(key).await.unwrap();
                     assert_eq!(target_value, synced_value);
                 }
@@ -1052,7 +979,12 @@ pub(crate) mod tests {
             assert_eq!(sync_db.get(last_key).await.unwrap(), Some(last_value));
 
             sync_db.destroy().await.unwrap();
-            target_db.destroy().await.unwrap();
+            Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+                .into_inner()
+                .destroy()
+                .await
+                .unwrap();
         });
     }
 
@@ -1173,7 +1105,7 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                resolver: &target_db,
+                resolver: AnyResolver::new(target_db),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: Some(update_receiver),
@@ -1228,7 +1160,7 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                resolver: &target_db,
+                resolver: AnyResolver::new(target_db),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: Some(update_receiver),
@@ -1283,7 +1215,7 @@ pub(crate) mod tests {
                     lower_bound_ops: 1,
                     upper_bound_ops: 10,
                 },
-                resolver: &target_db,
+                resolver: AnyResolver::new(target_db),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: Some(update_receiver),
@@ -1345,7 +1277,7 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                resolver: &target_db,
+                resolver: AnyResolver::new(target_db),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: Some(update_receiver),
@@ -1398,7 +1330,7 @@ pub(crate) mod tests {
                     lower_bound_ops: lower_bound,
                     upper_bound_ops: upper_bound,
                 },
-                resolver: &target_db,
+                resolver: AnyResolver::new(target_db),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 update_receiver: Some(update_receiver),
@@ -1722,6 +1654,7 @@ pub(crate) mod tests {
             // Perform sync
             let db_config = create_test_config(42);
             let context_clone = context.clone();
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 db_config: db_config.clone(),
                 fetch_batch_size: NZU64!(5),
@@ -1731,7 +1664,7 @@ pub(crate) mod tests {
                     upper_bound_ops: upper_bound,
                 },
                 context,
-                resolver: &target_db,
+                resolver: AnyResolver::new_from_arc(target_db.clone()),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -1775,7 +1708,12 @@ pub(crate) mod tests {
             assert_eq!(reopened_db.ops.pruned_to_pos(), expected_pruned_to_pos);
 
             // Cleanup
-            target_db.destroy().await.unwrap();
+            Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+                .into_inner()
+                .destroy()
+                .await
+                .unwrap();
             reopened_db.destroy().await.unwrap();
         });
     }

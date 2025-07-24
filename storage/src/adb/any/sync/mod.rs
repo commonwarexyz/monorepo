@@ -73,6 +73,9 @@ pub enum Error {
     /// Resolver error
     #[error("resolver error: {0:?}")]
     Resolver(Box<dyn fmt::Debug + Send + Sync>),
+    /// Internal error
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 impl<D: Digest> Write for SyncTarget<D> {
