@@ -15,6 +15,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
+use commonware_macros::select;
 use commonware_runtime::{
     telemetry::metrics::histogram::{Buckets, Timed},
     Clock, Metrics as MetricsTrait, Storage,
@@ -212,11 +213,80 @@ where
     .await?;
 
     loop {
-        // Handle any pending target updates first
-        (config, log, pinned_nodes) = handle_target_updates(config, log, pinned_nodes).await?;
+        // Handle target updates or batch completions
+        let should_handle_updates = config.update_receiver.is_some();
+        let has_pending_fetches = !pending_fetches.is_empty();
 
-        // If we have pending fetches, wait for one to complete
-        if !pending_fetches.is_empty() {
+        if should_handle_updates && has_pending_fetches {
+            // Both target updates and batch completions possible - use select!
+            select! {
+                target_update = config.update_receiver.as_mut().unwrap().next() => {
+                    if let Some(new_target) = target_update {
+                        validate_target_update::<H>(&config.target, &new_target)?;
+
+                        info!(
+                            old_target = ?config.target,
+                            new_target = ?new_target,
+                            "applying target update"
+                        );
+
+                        // Update config target
+                        config.target = new_target;
+
+                        // Clear all parallel state and reinitialize
+                        verified_batches.clear();
+                        outstanding_requests.clear();
+                        pending_fetches.clear();
+                        pinned_nodes = None;
+
+                        // Reinitialize log if needed
+                        let log_size = log.size().await.map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+                        if log_size <= config.target.lower_bound_ops {
+                            log.close().await.map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+                            log = Journal::<E, Operation<K, V>>::init_sync(
+                                config.context.clone().with_label("log"),
+                                JConfig {
+                                    partition: config.db_config.log_journal_partition.clone(),
+                                    items_per_blob: config.db_config.log_items_per_blob,
+                                    write_buffer: config.db_config.log_write_buffer,
+                                    buffer_pool: config.db_config.buffer_pool.clone(),
+                                },
+                                config.target.lower_bound_ops,
+                                config.target.upper_bound_ops,
+                            )
+                            .await
+                            .map_err(adb::Error::JournalError)
+                            .map_err(Error::Adb)?;
+                        }
+
+                        // Reinitialize parallel fetching
+                        initialize_parallel_fetches(
+                            &mut config,
+                            &log,
+                            &mut outstanding_requests,
+                            &mut pending_fetches,
+                            &metrics,
+                        ).await?;
+                    }
+                },
+
+                batch_result = pending_fetches.next() => {
+                    if let Some(batch_result) = batch_result {
+                        handle_batch_completion(
+                            batch_result,
+                            &mut config,
+                            &log,
+                            &mut verified_batches,
+                            &mut outstanding_requests,
+                            &mut pending_fetches,
+                            &mut pinned_nodes,
+                            &metrics,
+                        ).await?;
+                    }
+                },
+            }
+        } else if has_pending_fetches {
+            // Only batch completions possible
             if let Some(batch_result) = pending_fetches.next().await {
                 handle_batch_completion(
                     batch_result,
@@ -229,6 +299,63 @@ where
                     &metrics,
                 )
                 .await?;
+            }
+        } else if should_handle_updates {
+            // Only target updates possible - wait for one
+            if let Some(ref mut receiver) = config.update_receiver {
+                if let Some(new_target) = receiver.next().await {
+                    validate_target_update::<H>(&config.target, &new_target)?;
+
+                    info!(
+                        old_target = ?config.target,
+                        new_target = ?new_target,
+                        "applying target update"
+                    );
+
+                    // Update config target
+                    config.target = new_target;
+
+                    // Clear all parallel state and reinitialize
+                    verified_batches.clear();
+                    outstanding_requests.clear();
+                    pending_fetches.clear();
+                    pinned_nodes = None;
+
+                    // Reinitialize log if needed
+                    let log_size = log
+                        .size()
+                        .await
+                        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+                    if log_size <= config.target.lower_bound_ops {
+                        log.close()
+                            .await
+                            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+                        log = Journal::<E, Operation<K, V>>::init_sync(
+                            config.context.clone().with_label("log"),
+                            JConfig {
+                                partition: config.db_config.log_journal_partition.clone(),
+                                items_per_blob: config.db_config.log_items_per_blob,
+                                write_buffer: config.db_config.log_write_buffer,
+                                buffer_pool: config.db_config.buffer_pool.clone(),
+                            },
+                            config.target.lower_bound_ops,
+                            config.target.upper_bound_ops,
+                        )
+                        .await
+                        .map_err(adb::Error::JournalError)
+                        .map_err(Error::Adb)?;
+                    }
+
+                    // Reinitialize parallel fetching
+                    initialize_parallel_fetches(
+                        &mut config,
+                        &log,
+                        &mut outstanding_requests,
+                        &mut pending_fetches,
+                        &metrics,
+                    )
+                    .await?;
+                }
             }
         }
 
@@ -613,84 +740,6 @@ where
     Ok((config, log, metrics, None))
 }
 
-/// Handle any pending target updates
-async fn handle_target_updates<E, K, V, H, T, R>(
-    mut config: Config<E, K, V, H, T, R>,
-    mut log: Journal<E, Operation<K, V>>,
-    mut pinned_nodes: Option<Vec<H::Digest>>,
-) -> Result<
-    (
-        Config<E, K, V, H, T, R>,
-        Journal<E, Operation<K, V>>,
-        Option<Vec<H::Digest>>,
-    ),
-    Error,
->
-where
-    E: Storage + Clock + MetricsTrait,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
-{
-    let mut new_target = None;
-    if let Some(ref mut receiver) = config.update_receiver {
-        // Only apply the last update, if any.
-        while let Ok(Some(new_target_)) = receiver.try_next() {
-            new_target = Some(new_target_);
-        }
-    }
-
-    if let Some(new_target) = new_target {
-        validate_target_update::<H>(&config.target, &new_target)?;
-
-        info!(
-            old_target = ?config.target,
-            new_target = ?new_target,
-            "applying target update"
-        );
-
-        // Check if the existing log contains data in the updated sync range
-        let log_size = log
-            .size()
-            .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-
-        if log_size <= new_target.lower_bound_ops {
-            // Log is stale, reinitialize it
-            log.close()
-                .await
-                .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-
-            log = Journal::<E, Operation<K, V>>::init_sync(
-                config.context.clone().with_label("log"),
-                JConfig {
-                    partition: config.db_config.log_journal_partition.clone(),
-                    items_per_blob: config.db_config.log_items_per_blob,
-                    write_buffer: config.db_config.log_write_buffer,
-                    buffer_pool: config.db_config.buffer_pool.clone(),
-                },
-                new_target.lower_bound_ops,
-                new_target.upper_bound_ops,
-            )
-            .await
-            .map_err(adb::Error::JournalError)
-            .map_err(Error::Adb)?;
-        } else {
-            // Prune the log
-            log.prune(new_target.lower_bound_ops)
-                .await
-                .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-        }
-
-        config.target = new_target;
-        pinned_nodes = None; // Reset pinned nodes after target update
-    }
-
-    Ok((config, log, pinned_nodes))
-}
-
 /// Check if sync is complete
 async fn is_sync_complete<E, K, V, H, T, R>(
     config: &Config<E, K, V, H, T, R>,
@@ -784,118 +833,6 @@ where
         "sync completed successfully");
 
     Ok(db)
-}
-
-/// Fetch and verify a batch of operations from the resolver
-async fn get_operations<E, K, V, H, T, R>(
-    config: &mut Config<E, K, V, H, T, R>,
-    log: &Journal<E, Operation<K, V>>,
-    pinned_nodes: &mut Option<Vec<H::Digest>>,
-    metrics: &Metrics<E>,
-) -> Result<Vec<Operation<K, V>>, Error>
-where
-    E: Storage + Clock + MetricsTrait,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
-{
-    loop {
-        let log_size = log
-            .size()
-            .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-
-        // Calculate remaining operations to sync (inclusive upper bound)
-        let remaining_ops = config.target.upper_bound_ops - log_size + 1;
-        let batch_size = std::cmp::min(config.fetch_batch_size.get(), remaining_ops);
-        let batch_size = NonZeroU64::new(batch_size).ok_or(Error::InvalidState)?;
-
-        debug!(
-            target_root = ?config.target.root,
-            lower_bound_pos = config.target.lower_bound_ops,
-            upper_bound_pos = config.target.upper_bound_ops,
-            current_pos = log_size,
-            remaining_ops = remaining_ops,
-            batch_size = batch_size.get(),
-            "fetching proof and operations"
-        );
-
-        // Get proof and operations from resolver
-        let GetOperationsResult {
-            proof,
-            operations,
-            success_tx,
-        } = {
-            let _timer = metrics.fetch_duration.timer();
-            let target_size = config.target.upper_bound_ops + 1;
-            config
-                .resolver
-                .clone()
-                .get_operations(target_size, log_size, batch_size)
-                .await?
-        };
-
-        let operations_len = operations.len() as u64;
-
-        // Validate that we didn't get more operations than requested
-        // or that we didn't get an empty proof. We should never get an empty proof
-        // because we will never request an empty proof (i.e. a proof over an empty database).
-        if operations_len > batch_size.get() || operations_len == 0 {
-            debug!(
-                operations_len,
-                batch_size = batch_size.get(),
-                "received invalid batch size from resolver"
-            );
-            metrics.invalid_batches_received.inc();
-            let _ = success_tx.send(false);
-            continue;
-        }
-
-        debug!(operations_len, "received operations from resolver");
-
-        // Verify the proof is valid over the given operations
-        let proof_valid = {
-            let _timer = metrics.proof_verification_duration.timer();
-            adb::any::Any::<E, K, V, H, T>::verify_proof(
-                &mut config.hasher,
-                &proof,
-                log_size,
-                &operations,
-                &config.target.root,
-            )
-        };
-        let _ = success_tx.send(proof_valid);
-
-        if !proof_valid {
-            debug!("proof verification failed, retrying");
-            metrics.invalid_batches_received.inc();
-            continue;
-        }
-
-        // Install pinned nodes on first successful batch.
-        if pinned_nodes.is_none() {
-            let start_pos = leaf_num_to_pos(log_size);
-            let end_pos = leaf_num_to_pos(log_size + operations_len - 1);
-            match proof.extract_pinned_nodes(start_pos, end_pos) {
-                Ok(nodes) => {
-                    *pinned_nodes = Some(nodes);
-                }
-                Err(_) => {
-                    warn!("failed to extract pinned nodes, retrying");
-                    metrics.invalid_batches_received.inc();
-                    continue;
-                }
-            }
-        }
-
-        // Record successful batch metrics
-        metrics.valid_batches_received.inc();
-        metrics.operations_fetched.inc_by(operations_len);
-
-        return Ok(operations);
-    }
 }
 
 /// Apply a batch of operations to the log
