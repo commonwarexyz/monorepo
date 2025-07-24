@@ -128,8 +128,5 @@ where
     R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
     let client = Client::new(config).await?;
-    match client {
-        Client::Done { db } => Ok(db),
-        _ => client.sync().await,
-    }
+    client.sync().await
 }
