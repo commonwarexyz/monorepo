@@ -251,7 +251,10 @@ impl<H: Hasher> Tree<H> {
                 right_sibling = Some(level[level_end]);
             }
 
-            siblings_by_level.push((left_sibling, right_sibling));
+            siblings_by_level.push(Bounds {
+                left: left_sibling,
+                right: right_sibling,
+            });
         }
 
         Ok(RangeProof {
@@ -429,12 +432,12 @@ impl<H: Hasher> RangeProof<H> {
         }
 
         // Process each level
-        for (left_sibling, right_sibling) in self.siblings.iter() {
+        for bounds in self.siblings.iter() {
             let mut next_nodes = Vec::new();
 
             // If we have a left sibling, we need to include it
             let mut i = 0;
-            if let Some(left_sib) = left_sibling {
+            if let Some(left_sib) = &bounds.left {
                 // The first node in our range needs its left sibling
                 let (pos, node) = &nodes[0];
                 if pos % 2 != 1 {
@@ -460,7 +463,7 @@ impl<H: Hasher> RangeProof<H> {
                     i += 2;
                 } else if i == nodes.len() - 1 {
                     // This is the last node and it needs a right sibling
-                    if let Some(right_sib) = right_sibling {
+                    if let Some(right_sib) = &bounds.right {
                         if pos % 2 != 0 {
                             return Err(Error::UnalignedProof);
                         }
@@ -495,33 +498,7 @@ impl<H: Hasher> RangeProof<H> {
 
 impl<H: Hasher> Write for RangeProof<H> {
     fn write(&self, writer: &mut impl BufMut) {
-        // Write the number of levels
-        (self.siblings.len() as u8).write(writer);
-
-        // Write each level's siblings
-        for (left, right) in &self.siblings {
-            // Write left sibling presence flag and data
-            match left {
-                Some(digest) => {
-                    true.write(writer);
-                    digest.write(writer);
-                }
-                None => {
-                    false.write(writer);
-                }
-            }
-
-            // Write right sibling presence flag and data
-            match right {
-                Some(digest) => {
-                    true.write(writer);
-                    digest.write(writer);
-                }
-                None => {
-                    false.write(writer);
-                }
-            }
-        }
+        self.siblings.write(writer);
     }
 }
 
@@ -529,55 +506,14 @@ impl<H: Hasher> Read for RangeProof<H> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        // Read the number of levels
-        let num_levels = u8::read(reader)? as usize;
-        if num_levels > MAX_LEVELS {
-            return Err(commonware_codec::Error::InvalidUsize);
-        }
-
-        let mut siblings = Vec::with_capacity(num_levels);
-
-        // Read each level's siblings
-        for _ in 0..num_levels {
-            // Read left sibling
-            let left = if bool::read(reader)? {
-                Some(H::Digest::read(reader)?)
-            } else {
-                None
-            };
-
-            // Read right sibling
-            let right = if bool::read(reader)? {
-                Some(H::Digest::read(reader)?)
-            } else {
-                None
-            };
-
-            siblings.push((left, right));
-        }
-
+        let siblings = Vec::<Bounds<H::Digest>>::read_range(reader, ..=MAX_LEVELS)?;
         Ok(Self { siblings })
     }
 }
 
 impl<H: Hasher> EncodeSize for RangeProof<H> {
     fn encode_size(&self) -> usize {
-        let mut size = 1; // u8 for number of levels
-
-        for (left, right) in &self.siblings {
-            // Each sibling has a bool flag + optional digest
-            size += 1; // bool for left
-            if left.is_some() {
-                size += std::mem::size_of::<H::Digest>();
-            }
-
-            size += 1; // bool for right
-            if right.is_some() {
-                size += std::mem::size_of::<H::Digest>();
-            }
-        }
-
-        size
+        self.siblings.encode_size()
     }
 }
 
