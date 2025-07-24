@@ -437,13 +437,7 @@ where
 {
     let target_size = config.target.upper_bound_ops + 1;
 
-    let current_pos = if !state.has_pinned_nodes() {
-        std::cmp::max(state.next_apply_pos, config.target.lower_bound_ops)
-    } else {
-        state.next_apply_pos
-    };
-
-    // If we don't have pinned nodes, make a special request to extract them first
+    // Special case: If we don't have pinned nodes, extract them first
     if !state.has_pinned_nodes() {
         let pinned_nodes_batch_size = std::cmp::min(
             config.fetch_batch_size.get(),
@@ -462,31 +456,34 @@ where
                 (start_pos, result)
             }));
         }
-    } else {
-        // Start initial batch requests up to max_outstanding_requests
-        for _ in 0..config.max_outstanding_requests {
-            if current_pos >= target_size {
-                break;
-            }
+        return Ok(()); // Don't make additional requests until we have pinned nodes
+    }
 
-            let remaining_ops = target_size - current_pos;
-            let batch_size = std::cmp::min(config.fetch_batch_size.get(), remaining_ops);
-            if let Some(batch_size) = NonZeroU64::new(batch_size) {
-                state.add_outstanding_request(current_pos);
+    // Normal case: Fill the fetch queue with multiple concurrent requests
+    // Start from where our log currently ends (next_apply_pos)
+    let mut current_pos = state.next_apply_pos;
+    let requests_to_make = config
+        .max_outstanding_requests
+        .saturating_sub(state.outstanding_requests.len());
 
-                let resolver = config.resolver.clone();
-                let start_pos = current_pos;
+    for _ in 0..requests_to_make {
+        let Some(remaining_ops) = NonZeroU64::new(target_size - current_pos) else {
+            break;
+        };
+        let batch_size = std::cmp::min(config.fetch_batch_size, remaining_ops);
+        state.add_outstanding_request(current_pos);
 
-                state.pending_fetches.push(Box::pin(async move {
-                    let result = resolver
-                        .get_operations(target_size, start_pos, batch_size)
-                        .await;
-                    (start_pos, result)
-                }));
+        let resolver = config.resolver.clone();
+        let start_pos = current_pos;
 
-                break; // Only start one request initially, let completion handler start more
-            }
-        }
+        state.pending_fetches.push(Box::pin(async move {
+            let result = resolver
+                .get_operations(target_size, start_pos, batch_size)
+                .await;
+            (start_pos, result)
+        }));
+
+        current_pos += batch_size.get(); // Move to next batch position
     }
 
     Ok(())
