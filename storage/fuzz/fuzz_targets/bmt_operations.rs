@@ -133,8 +133,6 @@ fn fuzz(input: FuzzInput) {
                     let mut hasher = Sha256::default();
                     let leaf_digest = hash(&leaf_value.to_be_bytes());
                     let root = t.root();
-
-                    // Don't panic on verification failures - they're expected
                     let _ = p.verify(&mut hasher, &leaf_digest, *position, &root);
                 }
             }
@@ -202,9 +200,7 @@ fn fuzz(input: FuzzInput) {
                         .iter()
                         .map(|v| hash(&v.to_be_bytes()))
                         .collect();
-
                     if !leaf_digests.is_empty() {
-                        // Don't panic on verification failures - they're expected
                         let _ = rp.verify(&mut hasher, *start_position, &leaf_digests, &root);
                     }
                 }
@@ -296,7 +292,6 @@ fn fuzz(input: FuzzInput) {
                         .iter()
                         .map(|v| hash(&v.to_be_bytes()))
                         .collect();
-
                     if !tampered_digests.is_empty() {
                         let _ = rp.verify(&mut hasher, *start, &tampered_digests, &root);
                     }
