@@ -3,7 +3,7 @@ use crate::{
         self,
         any::{
             sync::{
-                resolver::{AnyResolver, GetOperationsResult, Resolver},
+                resolver::{GetOperationsResult, Resolver},
                 Error, SyncTarget, SyncTargetUpdateReceiver,
             },
             SyncConfig,
@@ -866,7 +866,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         adb::any::{
-            sync::{resolver::tests::FailResolver, sync},
+            sync::{resolver::tests::FailResolver, resolver::AnyResolver, sync},
             test::{apply_ops, create_test_db, create_test_ops},
         },
         translator,

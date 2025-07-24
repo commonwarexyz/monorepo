@@ -158,6 +158,7 @@ where
         resolver,
         hasher: Standard::new(),
         apply_batch_size: 1024,
+        max_outstanding_requests: 1,
         update_receiver: Some(update_receiver),
     };
 

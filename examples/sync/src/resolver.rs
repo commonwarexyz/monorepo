@@ -126,7 +126,7 @@ where
     type Value = crate::Value;
 
     async fn get_operations(
-        &self,
+        self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
