@@ -21,7 +21,7 @@ use commonware_storage::{
     metadata::{self, Metadata},
     translator::TwoCap,
 };
-use commonware_utils::array::{FixedBytes, U64};
+use commonware_utils::{array::U64, Array};
 use futures::{channel::mpsc, try_join, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use prometheus_client::metrics::gauge::Gauge;
@@ -62,9 +62,6 @@ pub struct Actor<
     // We store this separately because we may not have the finalization for a block
     blocks: immutable::Archive<R, B::Commitment, B>,
 
-    // Finalizer storage
-    metadata: Metadata<R, FixedBytes<1>, U64>,
-
     // Latest height metric
     finalized_height: Gauge,
     // Indexed height metric
@@ -75,6 +72,9 @@ pub struct Actor<
 
     // Codec configuration
     codec_config: B::Cfg,
+
+    // Partition prefix
+    partition_prefix: String,
 
     _variant: PhantomData<V>,
 }
@@ -185,17 +185,6 @@ impl<
         .expect("Failed to initialize blocks archive");
         info!(elapsed = ?start.elapsed(), "restored block archive");
 
-        // Initialize finalizer metadata
-        let metadata = Metadata::init(
-            context.with_label("metadata"),
-            metadata::Config {
-                partition: format!("{}-metadata", config.partition_prefix),
-                codec_config: (),
-            },
-        )
-        .await
-        .expect("Failed to initialize metadata");
-
         // Create metrics
         let finalized_height = Gauge::default();
         context.register(
@@ -226,18 +215,52 @@ impl<
                 notarized,
                 finalized,
                 blocks,
-                metadata,
 
                 finalized_height,
                 contiguous_height,
                 activity_timeout: config.activity_timeout,
                 codec_config: config.codec_config,
+                partition_prefix: config.partition_prefix,
                 _variant: PhantomData,
             },
             Mailbox::new(sender),
         )
     }
 
+    /// Helper to initialize a resolver.
+    fn init_resolver<K: Array>(
+        context: &R,
+        coordinator: Z,
+        mailbox_size: usize,
+        public_key: P,
+        backfill_quota: Quota,
+        backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+    ) -> (mpsc::Receiver<handler::Message<K>>, p2p::Mailbox<K>) {
+        let (handler, receiver) = mpsc::channel(mailbox_size);
+        let handler = Handler::new(handler);
+        let (resolver_engine, resolver) = p2p::Engine::new(
+            context.with_label("resolver"),
+            p2p::Config {
+                coordinator,
+                consumer: handler.clone(),
+                producer: handler,
+                mailbox_size,
+                requester_config: requester::Config {
+                    public_key,
+                    rate_limit: backfill_quota,
+                    initial: Duration::from_secs(1),
+                    timeout: Duration::from_secs(2),
+                },
+                fetch_retry_timeout: Duration::from_millis(100),
+                priority_requests: false,
+                priority_responses: false,
+            },
+        );
+        resolver_engine.start(backfill);
+        (receiver, resolver)
+    }
+
+    /// Start the actor.
     pub fn start(
         mut self,
         buffer: buffered::Mailbox<P, B>,
@@ -262,80 +285,52 @@ impl<
         backfill_by_view: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
         // Initialize resolver by digest
-        let (handler, mut by_digest_receiver) = mpsc::channel(self.mailbox_size);
-        let handler = Handler::new(handler);
-        let (resolver_by_digest_engine, mut resolver_by_digest) = p2p::Engine::new(
-            self.context.with_label("resolver"),
-            p2p::Config {
-                coordinator: self.coordinator.clone(),
-                consumer: handler.clone(),
-                producer: handler,
-                mailbox_size: self.mailbox_size,
-                requester_config: requester::Config {
-                    public_key: self.public_key.clone(),
-                    rate_limit: self.backfill_quota,
-                    initial: Duration::from_secs(1),
-                    timeout: Duration::from_secs(2),
-                },
-                fetch_retry_timeout: Duration::from_millis(100), // prevent busy loop
-                priority_requests: false,
-                priority_responses: false,
-            },
+        let (mut by_digest_receiver, mut resolver_by_digest) = Self::init_resolver(
+            &self.context,
+            self.coordinator.clone(),
+            self.mailbox_size,
+            self.public_key.clone(),
+            self.backfill_quota,
+            backfill_by_digest,
         );
-        resolver_by_digest_engine.start(backfill_by_digest);
 
         // Initialize resolver by height
-        let (handler, mut by_height_receiver) = mpsc::channel(self.mailbox_size);
-        let handler = Handler::new(handler);
-        let (resolver_by_height_engine, mut resolver_by_height) = p2p::Engine::new(
-            self.context.with_label("resolver"),
-            p2p::Config {
-                coordinator: self.coordinator.clone(),
-                consumer: handler.clone(),
-                producer: handler,
-                mailbox_size: self.mailbox_size,
-                requester_config: requester::Config {
-                    public_key: self.public_key.clone(),
-                    rate_limit: self.backfill_quota,
-                    initial: Duration::from_secs(1),
-                    timeout: Duration::from_secs(2),
-                },
-                fetch_retry_timeout: Duration::from_millis(100), // prevent busy loop
-                priority_requests: false,
-                priority_responses: false,
-            },
+        let (mut by_height_receiver, mut resolver_by_height) = Self::init_resolver(
+            &self.context,
+            self.coordinator.clone(),
+            self.mailbox_size,
+            self.public_key.clone(),
+            self.backfill_quota,
+            backfill_by_height,
         );
-        resolver_by_height_engine.start(backfill_by_height);
 
         // Initialize resolver by view
-        let (handler, mut by_view_receiver) = mpsc::channel(self.mailbox_size);
-        let handler = Handler::new(handler);
-        let (resolver_by_view_engine, mut resolver_by_view) = p2p::Engine::new(
-            self.context.with_label("resolver"),
-            p2p::Config {
-                coordinator: self.coordinator.clone(),
-                consumer: handler.clone(),
-                producer: handler,
-                mailbox_size: self.mailbox_size,
-                requester_config: requester::Config {
-                    public_key: self.public_key.clone(),
-                    rate_limit: self.backfill_quota,
-                    initial: Duration::from_secs(1),
-                    timeout: Duration::from_secs(2),
-                },
-                fetch_retry_timeout: Duration::from_millis(100), // prevent busy loop
-                priority_requests: false,
-                priority_responses: false,
-            },
+        let (mut by_view_receiver, mut resolver_by_view) = Self::init_resolver(
+            &self.context,
+            self.coordinator.clone(),
+            self.mailbox_size,
+            self.public_key.clone(),
+            self.backfill_quota,
+            backfill_by_view,
         );
-        resolver_by_view_engine.start(backfill_by_view);
+
+        // Initialize finalizer metadata
+        let metadata = Metadata::init(
+            self.context.with_label("metadata"),
+            metadata::Config {
+                partition: format!("{}-metadata", self.partition_prefix),
+                codec_config: (),
+            },
+        )
+        .await
+        .expect("Failed to initialize metadata");
 
         // Process all finalized blocks in order (fetching any that are missing)
         let (mut finalizer_sender, finalizer_receiver) = mpsc::channel::<()>(1);
         let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(2); // buffer to send processed while moving forward
         let orchestrator = Orchestrator::new(orchestrator_sender);
         let finalizer = Finalizer::new(
-            self.metadata,
+            metadata,
             self.contiguous_height.clone(),
             orchestrator,
             finalizer_receiver,
@@ -388,20 +383,18 @@ impl<
                                 };
                         }
                         Message::Notarization { notarization } => {
+                            let view = notarization.proposal.view;
+
                             // Check if in buffer
                             let proposal = &notarization.proposal;
-                            let mut block =  buffer.get(None, proposal.payload, None).await.into_iter().next();
+                            let mut block = buffer.get(None, proposal.payload, None).await.into_iter().next();
 
                             // Check if in verified blocks
                             if block.is_none() {
-                                block = match self.verified.get(Identifier::Key(&proposal.payload)).await {
-                                    Ok(block) => block,
-                                    Err(e) => panic!("Failed to get verified block: {e}"),
-                                };
+                                block = self.get_verified(Identifier::Key(&proposal.payload)).await;
                             }
 
                             // If found, store notarization
-                            let view = notarization.proposal.view;
                             if let Some(block) = block {
                                 let height = block.height();
                                 let commitment = proposal.payload;
@@ -439,18 +432,12 @@ impl<
 
                             // Check if in verified
                             if block.is_none() {
-                                block = match self.verified.get(Identifier::Key(&proposal.payload)).await {
-                                    Ok(block) => block,
-                                    Err(e) => panic!("Failed to get verified block: {e}"),
-                                };
+                                block = self.get_verified(Identifier::Key(&proposal.payload)).await;
                             }
 
                             // Check if in notarized
                             if block.is_none() {
-                                block = match self.notarized.get(Identifier::Key(&proposal.payload)).await {
-                                    Ok(notarized) => notarized.map(|n| n.block),
-                                    Err(e) => panic!("Failed to get notarized block: {e}"),
-                                };
+                                block = self.get_notarization(Identifier::Key(&proposal.payload)).await.map(|n| n.block);
                             }
 
                             // If found, store finalization
@@ -504,22 +491,14 @@ impl<
                             }
 
                             // Check verified blocks
-                            let block = match self.verified.get(Identifier::Key(&payload)).await {
-                                Ok(block) => block,
-                                Err(e) => panic!("Failed to get verified block: {e}"),
-                            };
-                            if let Some(block) = block {
+                            if let Some(block) = self.get_verified(Identifier::Key(&payload)).await {
                                 debug!(height = block.height(), "found block in verified");
                                 let _ = response.send(block);
                                 continue;
                             }
 
                             // Check if in notarized blocks
-                            let notarization = match self.notarized.get(Identifier::Key(&payload)).await {
-                                Ok(notarized) => notarized,
-                                Err(e) => panic!("Failed to get notarized block: {e}"),
-                            };
-                            if let Some(notarization) = notarization {
+                            if let Some(notarization) = self.get_notarization(Identifier::Key(&payload)).await {
                                 let block = notarization.block;
                                 debug!(height = block.height(), "found block in notarized");
                                 let _ = response.send(block);
@@ -527,11 +506,7 @@ impl<
                             }
 
                             // Check if in finalized blocks
-                            let block = match self.blocks.get(Identifier::Key(&payload)).await {
-                                Ok(block) => block,
-                                Err(e) => panic!("Failed to get finalized block: {e}"),
-                            };
-                            if let Some(block) = block {
+                            if let Some(block) = self.get_block(Identifier::Key(&payload)).await {
                                 debug!(height = block.height(), "found block in finalized");
                                 let _ = response.send(block);
                                 continue;
@@ -558,11 +533,8 @@ impl<
                     match orchestrator_message {
                         Orchestration::Get { next, result } => {
                             // Check if in blocks
-                            let block = match self.blocks.get(Identifier::Index(next)).await {
-                                Ok(block) => block,
-                                Err(e) => panic!("Failed to get finalized block: {e}"),
-                            };
-                            result.send(block).unwrap_or_else(|_| warn!("Failed to send block to orchestrator"));
+                            let block = self.get_block(Identifier::Index(next)).await;
+                            result.send(block).unwrap_or_else(|_| warn!(?next, "Failed to send block to orchestrator"));
                         }
                         Orchestration::Processed { next, digest } => {
                             // Cancel any outstanding requests (by height and by digest)
@@ -570,11 +542,7 @@ impl<
                             resolver_by_digest.cancel(digest).await;
 
                             // If finalization exists, mark as last_view_processed
-                            let finalization = match self.finalized.get(Identifier::Index(next)).await {
-                                Ok(finalization) => finalization,
-                                Err(e) => panic!("Failed to get finalized block: {e}"),
-                            };
-                            if let Some(finalization) = finalization {
+                            if let Some(finalization) = self.get_finalization(Identifier::Index(next)).await {
                                 last_view_processed = finalization.proposal.view;
                             }
 
@@ -583,28 +551,21 @@ impl<
                         }
                         Orchestration::Repair { next, result } => {
                             // Find next gap
-                            let (_, start_next) = self.blocks.next_gap(next);
-                            let Some(start_next) = start_next else {
-                                result.send(false).unwrap_or_else(|_| warn!("Failed to send repair result"));
+                            let (_, Some(start_next)) = self.blocks.next_gap(next) else {
+                                result.send(false).unwrap_or_else(|_| warn!(?next, "Failed to send repair result"));
                                 continue;
                             };
 
                             // If we are at some height greater than genesis, attempt to repair the parent
                             if next > 0 {
                                 // Get gapped block
-                                let gapped_block = match self.blocks.get(Identifier::Index(start_next)).await {
-                                    Ok(Some(block)) => block,
-                                    Ok(None) => panic!("Gapped block missing that should exist: {start_next}"),
-                                    Err(e) => panic!("Failed to get finalized block: {e}"),
+                                let Some(gapped_block) = self.get_block(Identifier::Index(start_next)).await else {
+                                    panic!("Gapped block missing that should exist: {start_next}");
                                 };
 
                                 // Attempt to repair one block from other sources
                                 let target_block = gapped_block.parent();
-                                let verified = match self.verified.get(Identifier::Key(&target_block)).await {
-                                    Ok(block) => block,
-                                    Err(e) => panic!("Failed to get verified block: {e}"),
-                                };
-                                if let Some(verified) = verified {
+                                if let Some(verified) = self.get_verified(Identifier::Key(&target_block)).await {
                                     let height = verified.height();
                                     if let Err(e) = self.blocks.put_sync(height, target_block, verified).await {
                                         panic!("Failed to insert finalized block: {e}");
@@ -613,12 +574,8 @@ impl<
                                     result.send(true).unwrap_or_else(|_| warn!("Failed to send repair result"));
                                     continue;
                                 }
-                                let notarization = match self.notarized.get(Identifier::Key(&target_block)).await {
-                                    Ok(notarized) => notarized,
-                                    Err(e) => panic!("Failed to get notarized block: {e}"),
-                                };
-                                if let Some(notarization) = notarization {
-                                let height = notarization.block.height();
+                                if let Some(notarization) = self.get_notarization(Identifier::Key(&target_block)).await {
+                                    let height = notarization.block.height();
                                     if let Err(e) = self.blocks.put_sync(height, target_block, notarization.block).await {
                                         panic!("Failed to insert finalized block: {e}");
                                     }
@@ -664,31 +621,19 @@ impl<
                             }
 
                             // Get verified block
-                            let block = match self.verified.get(Identifier::Key(&commitment)).await {
-                                Ok(block) => block,
-                                Err(e) => panic!("Failed to get verified block: {e}"),
-                            };
-                            if let Some(block) = block {
+                            if let Some(block) = self.get_verified(Identifier::Key(&commitment)).await {
                                 let _ = response.send(block.encode().into());
                                 continue;
                             }
 
                             // Get notarized block
-                            let notarization = match self.notarized.get(Identifier::Key(&commitment)).await {
-                                Ok(notarized) => notarized,
-                                Err(e) => panic!("Failed to get notarized block: {e}"),
-                            };
-                            if let Some(notarized) = notarization {
+                            if let Some(notarized) = self.get_notarization(Identifier::Key(&commitment)).await {
                                 let _ = response.send(notarized.block.encode().into());
                                 continue;
                             }
 
                             // Get block
-                            let block = match self.blocks.get(Identifier::Key(&commitment)).await {
-                                Ok(block) => block,
-                                Err(e) => panic!("Failed to get finalized block: {e}"),
-                            };
-                            if let Some(block) = block {
+                            if let Some(block) = self.get_block(Identifier::Key(&commitment)).await {
                                 let _ = response.send(block.encode().into());
                                 continue;
                             };
@@ -732,21 +677,13 @@ impl<
                         handler::Message::Produce { key, response } => {
                             let height = key.to_u64();
                             // Get finalization
-                            let finalization = match self.finalized.get(Identifier::Index(height)).await {
-                                Ok(finalization) => finalization,
-                                Err(e) => panic!("Failed to get finalization: {e}"),
-                            };
-                            let Some(finalization) = finalization else {
+                            let Some(finalization) = self.get_finalization(Identifier::Index(height)).await else {
                                 debug!(height, "finalization missing on request");
                                 continue;
                             };
 
                             // Get block
-                            let block = match self.blocks.get(Identifier::Index(height)).await {
-                                Ok(block) => block,
-                                Err(e) => panic!("Failed to get finalized block: {e}"),
-                            };
-                            let Some(block) = block else {
+                            let Some(block) = self.get_block(Identifier::Index(height)).await else {
                                 debug!(height, "finalized block missing on request");
                                 continue;
                             };
@@ -799,11 +736,7 @@ impl<
                     match message {
                         handler::Message::Produce { key, response } => {
                             let view = key.to_u64();
-                            let notarization = match self.notarized.get(Identifier::Index(view)).await {
-                                Ok(notarized) => notarized,
-                                Err(e) => panic!("Failed to get notarized block: {e}"),
-                            };
-                            if let Some(notarized) = notarization {
+                            if let Some(notarized) = self.get_notarization(Identifier::Index(view)).await {
                                 let _ = response.send(notarized.encode().into());
                             } else {
                                 debug!(view, "notarization missing on request");
@@ -847,6 +780,40 @@ impl<
                     }
                 },
             }
+        }
+    }
+
+    async fn get_block<'a>(&'a self, id: Identifier<'a, B::Commitment>) -> Option<B> {
+        match self.blocks.get(id).await {
+            Ok(block) => block,
+            Err(e) => panic!("Failed to get finalized block: {e}"),
+        }
+    }
+
+    async fn get_finalization<'a>(
+        &'a self,
+        id: Identifier<'a, B::Commitment>,
+    ) -> Option<Finalization<V, B::Commitment>> {
+        match self.finalized.get(id).await {
+            Ok(finalization) => finalization,
+            Err(e) => panic!("Failed to get finalization: {e}"),
+        }
+    }
+
+    async fn get_notarization<'a>(
+        &'a self,
+        id: Identifier<'a, B::Commitment>,
+    ) -> Option<Notarized<V, B>> {
+        match self.notarized.get(id).await {
+            Ok(notarization) => notarization,
+            Err(e) => panic!("Failed to get notarization: {e}"),
+        }
+    }
+
+    async fn get_verified<'a>(&'a self, id: Identifier<'a, B::Commitment>) -> Option<B> {
+        match self.verified.get(id).await {
+            Ok(verified) => verified,
+            Err(e) => panic!("Failed to get verified block: {e}"),
         }
     }
 }
