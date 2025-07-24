@@ -1,0 +1,26 @@
+name: Specification
+
+on:
+  pull_request:
+    paths:
+      - "pipeline/minimmit/spec"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v4
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          check-latest: true
+
+      - name: Install quint
+        run: npm i @informalsystems/quint@0.26.0 -g
+
+      - name: Run test
+        run: cd pipeline/minimmit/spec && make typecheck && make test
