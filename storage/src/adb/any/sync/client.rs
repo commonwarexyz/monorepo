@@ -459,21 +459,33 @@ where
     }
 
     // Normal case: Fill the fetch queue with multiple concurrent requests
-    // Start from where our log currently ends (next_apply_pos)
-    let mut current_pos = state.next_apply_pos;
+    // Use gap detection to find what actually needs to be fetched
     let requests_to_make = config
         .max_outstanding_requests
         .saturating_sub(state.outstanding_requests.len());
 
     for _ in 0..requests_to_make {
-        let Some(remaining_ops) = NonZeroU64::new(target_size - current_pos) else {
-            break;
+        // Find the next gap that needs to be fetched
+        let Some((gap_start, gap_end)) = find_next_gap_to_fetch::<K, V>(
+            config.target.lower_bound_ops,
+            config.target.upper_bound_ops,
+            &state.verified_batches,
+            &state.outstanding_requests,
+            config.fetch_batch_size.get(),
+        ) else {
+            break; // No more gaps to fill
         };
-        let batch_size = std::cmp::min(config.fetch_batch_size, remaining_ops);
-        state.add_outstanding_request(current_pos);
+
+        // Calculate how much of this gap to request in this batch
+        let gap_size = gap_end - gap_start + 1; // gap_end is inclusive
+        let batch_size = std::cmp::min(config.fetch_batch_size.get(), gap_size);
+        let batch_size =
+            NonZeroU64::new(batch_size).expect("batch_size should be > 0 since gap exists");
+
+        state.add_outstanding_request(gap_start);
 
         let resolver = config.resolver.clone();
-        let start_pos = current_pos;
+        let start_pos = gap_start;
 
         state.pending_fetches.push(Box::pin(async move {
             let result = resolver
@@ -481,8 +493,6 @@ where
                 .await;
             (start_pos, result)
         }));
-
-        current_pos += batch_size.get();
     }
 
     Ok(())
