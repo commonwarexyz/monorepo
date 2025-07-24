@@ -415,12 +415,10 @@ impl<H: Hasher> RangeProof<H> {
         leaves: &[H::Digest],
         root: &H::Digest,
     ) -> Result<(), Error> {
-        // Check that we have leaves
+        // Check that we have leaves and the position is valid
         if leaves.is_empty() {
             return Err(Error::NoLeaves);
         }
-
-        // Check for integer overflow - critical for preventing attacks
         if position.checked_add(leaves.len() as u32).is_none() {
             return Err(Error::InvalidPosition(position));
         }
@@ -1277,7 +1275,7 @@ mod tests {
         let mut hasher = Sha256::default();
         let range_leaves = &digests[2..5];
 
-        // Try to verify with wrong position - should fail
+        // Try to verify with wrong position
         assert!(range_proof
             .verify(&mut hasher, 3, range_leaves, &root)
             .is_err());
@@ -1303,7 +1301,7 @@ mod tests {
         let range_proof = tree.range_proof(2, 3).unwrap();
         let mut hasher = Sha256::default();
 
-        // Try to verify with reordered leaves - should fail
+        // Try to verify with reordered leaves
         let reordered_leaves = vec![digests[3], digests[2], digests[4]];
         assert!(range_proof
             .verify(&mut hasher, 2, &reordered_leaves, &root)
