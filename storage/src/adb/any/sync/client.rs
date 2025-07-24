@@ -275,6 +275,10 @@ where
                                 .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
                         }
 
+                        // CRITICAL: Reset highest_received_pos to current log size after target update
+                        let new_log_size = log.size().await.map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+                        highest_received_pos = new_log_size;
+
                         // Reinitialize parallel fetching
                         initialize_parallel_fetches(
                             &mut config,
@@ -369,6 +373,13 @@ where
                             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
                     }
 
+                    // CRITICAL: Reset highest_received_pos to current log size after target update
+                    let new_log_size = log
+                        .size()
+                        .await
+                        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+                    highest_received_pos = new_log_size;
+
                     // Reinitialize parallel fetching
                     initialize_parallel_fetches(
                         &mut config,
@@ -441,21 +452,17 @@ where
         *highest_received_pos
     };
 
-    // Start initial batch requests up to max_outstanding_requests
-    // Note: We can't assume batch sizes, so we start conservatively and let
-    // the completion handler start more requests based on actual received data
-    for _ in 0..config.max_outstanding_requests {
-        if current_pos >= target_size {
-            break;
-        }
-
-        let remaining_ops = target_size - current_pos;
-        let batch_size = std::cmp::min(config.fetch_batch_size.get(), remaining_ops);
-        if let Some(batch_size) = NonZeroU64::new(batch_size) {
-            outstanding_requests.insert(current_pos);
+    // If we don't have pinned nodes, make a special request to extract them first
+    if pinned_nodes.is_none() {
+        let pinned_nodes_batch_size = std::cmp::min(
+            config.fetch_batch_size.get(),
+            target_size.saturating_sub(config.target.lower_bound_ops),
+        );
+        if let Some(batch_size) = NonZeroU64::new(pinned_nodes_batch_size) {
+            outstanding_requests.insert(config.target.lower_bound_ops);
 
             let resolver = config.resolver.clone();
-            let start_pos = current_pos;
+            let start_pos = config.target.lower_bound_ops;
 
             pending_fetches.push(Box::pin(async move {
                 let result = resolver
@@ -463,10 +470,35 @@ where
                     .await;
                 (start_pos, result)
             }));
+        }
+    } else {
+        // Start initial batch requests up to max_outstanding_requests
+        // Note: We can't assume batch sizes, so we start conservatively and let
+        // the completion handler start more requests based on actual received data
+        for _ in 0..config.max_outstanding_requests {
+            if current_pos >= target_size {
+                break;
+            }
 
-            // Don't increment current_pos by batch_size since we don't know how much we'll get
-            // The completion handler will determine the next position based on actual received data
-            break; // Only start one request initially, let completion handler start more
+            let remaining_ops = target_size - current_pos;
+            let batch_size = std::cmp::min(config.fetch_batch_size.get(), remaining_ops);
+            if let Some(batch_size) = NonZeroU64::new(batch_size) {
+                outstanding_requests.insert(current_pos);
+
+                let resolver = config.resolver.clone();
+                let start_pos = current_pos;
+
+                pending_fetches.push(Box::pin(async move {
+                    let result = resolver
+                        .get_operations(target_size, start_pos, batch_size)
+                        .await;
+                    (start_pos, result)
+                }));
+
+                // Don't increment current_pos by batch_size since we don't know how much we'll get
+                // The completion handler will determine the next position based on actual received data
+                break; // Only start one request initially, let completion handler start more
+            }
         }
     }
 
