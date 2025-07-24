@@ -15,14 +15,95 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
+use commonware_macros::select;
 use commonware_runtime::{
     telemetry::metrics::histogram::{Buckets, Timed},
-    Clock, Metrics as MetricsTrait, Storage,
+    Clock, Metrics as MetricsTrait, Spawner, Storage,
 };
 use commonware_utils::{Array, NZU64};
+use futures::{
+    channel::{mpsc, oneshot},
+    stream::FuturesUnordered,
+    Future, StreamExt,
+};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
-use std::{num::NonZeroU64, sync::Arc};
+use std::{collections::BTreeMap, collections::BTreeSet, num::NonZeroU64, pin::Pin, sync::Arc};
 use tracing::{debug, info, warn};
+
+/// Request for operations from the resolver task
+#[derive(Debug)]
+struct ResolverRequest<H: Hasher, K: Array, V: Array> {
+    target_size: u64,
+    log_size: u64,
+    batch_size: NonZeroU64,
+    response_tx: oneshot::Sender<Result<GetOperationsResult<H::Digest, K, V>, Error>>,
+}
+
+/// Handle to communicate with the resolver task
+struct ResolverHandle<H: Hasher, K: Array, V: Array> {
+    request_tx: mpsc::UnboundedSender<ResolverRequest<H, K, V>>,
+}
+
+impl<H: Hasher, K: Array, V: Array> ResolverHandle<H, K, V> {
+    /// Send a request for operations
+    async fn get_operations(
+        &self,
+        target_size: u64,
+        log_size: u64,
+        batch_size: NonZeroU64,
+    ) -> Result<GetOperationsResult<H::Digest, K, V>, Error> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = ResolverRequest {
+            target_size,
+            log_size,
+            batch_size,
+            response_tx,
+        };
+
+        self.request_tx
+            .unbounded_send(request)
+            .map_err(|_| Error::Internal("resolver task stopped".to_string()))?;
+
+        response_rx
+            .await
+            .map_err(|_| Error::Internal("resolver response channel closed".to_string()))?
+    }
+}
+
+/// Spawn a resolver task that handles operations requests
+fn spawn_resolver_task<E, K, V, H, T, R>(context: &E, resolver: R) -> ResolverHandle<H, K, V>
+where
+    E: Storage + Clock + MetricsTrait + commonware_runtime::Spawner,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V> + Send + 'static,
+{
+    let (request_tx, mut request_rx) = mpsc::unbounded();
+
+    // Spawn the resolver task
+    context.with_label("resolver_task").spawn(|_| async move {
+        while let Some(request) = request_rx.next().await {
+            let ResolverRequest {
+                target_size,
+                log_size,
+                batch_size,
+                response_tx,
+            } = request;
+
+            // Execute the resolver operation
+            let result = resolver
+                .get_operations(target_size, log_size, batch_size)
+                .await;
+
+            // Send response back (ignore if receiver dropped)
+            let _ = response_tx.send(result);
+        }
+    });
+
+    ResolverHandle { request_tx }
+}
 
 /// Configuration for the sync client
 pub struct Config<E, K, V, H, T, R>
@@ -59,6 +140,10 @@ where
     /// before committing the database while applying operations.
     /// Higher value will cause more memory usage during sync.
     pub apply_batch_size: usize,
+
+    /// Maximum number of outstanding requests for operation batches.
+    /// Higher values increase parallelism but also memory usage.
+    pub max_outstanding_requests: usize,
 }
 
 /// Prometheus metrics for the sync client.
@@ -671,6 +756,7 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher,
                 apply_batch_size: 1024,
+                max_outstanding_requests: 1,
                 update_receiver: None,
             };
             let mut got_db = sync(config).await.unwrap();
@@ -797,6 +883,7 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 1,
                 update_receiver: None,
             };
 
@@ -849,6 +936,7 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 1,
                 update_receiver: None,
             };
 
@@ -924,6 +1012,7 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 1,
                 update_receiver: None,
             };
             let sync_db = sync(config).await.unwrap();
@@ -1019,6 +1108,7 @@ pub(crate) mod tests {
                 resolver,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 1,
                 update_receiver: None,
             };
             let sync_db = sync(config).await.unwrap();
@@ -1644,6 +1734,7 @@ pub(crate) mod tests {
                 resolver: &target_db,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 1,
                 update_receiver: None,
             };
             let synced_db = sync(config).await.unwrap();
