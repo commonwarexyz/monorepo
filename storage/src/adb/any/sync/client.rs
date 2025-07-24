@@ -10,7 +10,7 @@ use commonware_runtime::{
     telemetry::metrics::histogram::{Buckets, Timed},
     Clock, Metrics as MetricsTrait, Storage,
 };
-use commonware_utils::{Array, NZU64};
+use commonware_utils::Array;
 use futures::{stream::FuturesUnordered, StreamExt};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{
@@ -437,41 +437,56 @@ where
 {
     let target_size = config.target.upper_bound_ops + 1;
 
-    // If we don't have pinned nodes, request a proof for the first operation
-    // to extract them
+    let current_pos = if !state.has_pinned_nodes() {
+        std::cmp::max(state.next_apply_pos, config.target.lower_bound_ops)
+    } else {
+        state.next_apply_pos
+    };
+
+    // If we don't have pinned nodes, make a special request to extract them first
     if !state.has_pinned_nodes() {
-        state.add_outstanding_request(config.target.lower_bound_ops);
+        let pinned_nodes_batch_size = std::cmp::min(
+            config.fetch_batch_size.get(),
+            target_size.saturating_sub(config.target.lower_bound_ops),
+        );
+        if let Some(batch_size) = NonZeroU64::new(pinned_nodes_batch_size) {
+            state.add_outstanding_request(config.target.lower_bound_ops);
 
-        let resolver = config.resolver.clone();
-        let start_pos = config.target.lower_bound_ops;
-        state.pending_fetches.push(Box::pin(async move {
-            let result = resolver
-                .get_operations(target_size, start_pos, NZU64!(1))
-                .await;
-            (start_pos, result)
-        }));
-    }
+            let resolver = config.resolver.clone();
+            let start_pos = config.target.lower_bound_ops;
 
-    // Start initial batch requests up to max_outstanding_requests
-    let mut current_pos = state.next_apply_pos; // TODO have separate next_fetch_pos?
-    for _ in state.outstanding_requests.len()..config.max_outstanding_requests {
-        if current_pos >= target_size {
-            break;
+            state.pending_fetches.push(Box::pin(async move {
+                let result = resolver
+                    .get_operations(target_size, start_pos, batch_size)
+                    .await;
+                (start_pos, result)
+            }));
         }
+    } else {
+        // Start initial batch requests up to max_outstanding_requests
+        for _ in 0..config.max_outstanding_requests {
+            if current_pos >= target_size {
+                break;
+            }
 
-        let remaining_ops = NZU64!(target_size - current_pos);
-        let batch_size = std::cmp::min(config.fetch_batch_size, remaining_ops);
-        state.add_outstanding_request(current_pos);
+            let remaining_ops = target_size - current_pos;
+            let batch_size = std::cmp::min(config.fetch_batch_size.get(), remaining_ops);
+            if let Some(batch_size) = NonZeroU64::new(batch_size) {
+                state.add_outstanding_request(current_pos);
 
-        let resolver = config.resolver.clone();
-        let start_pos = current_pos;
-        state.pending_fetches.push(Box::pin(async move {
-            let result = resolver
-                .get_operations(target_size, start_pos, batch_size)
-                .await;
-            (start_pos, result)
-        }));
-        current_pos += batch_size.get();
+                let resolver = config.resolver.clone();
+                let start_pos = current_pos;
+
+                state.pending_fetches.push(Box::pin(async move {
+                    let result = resolver
+                        .get_operations(target_size, start_pos, batch_size)
+                        .await;
+                    (start_pos, result)
+                }));
+
+                break; // Only start one request initially, let completion handler start more
+            }
+        }
     }
 
     Ok(())
@@ -600,19 +615,8 @@ where
     let start_pos = if let Some(retry_pos) = retry_pos {
         retry_pos
     } else {
-        // Find the next gap that needs to be fetched
-        if let Some((gap_start, _gap_end)) = find_next_gap_to_fetch::<K, V>(
-            config.target.lower_bound_ops,
-            config.target.upper_bound_ops,
-            &state.verified_batches,
-            &state.outstanding_requests,
-            config.fetch_batch_size.get(),
-        ) {
-            gap_start
-        } else {
-            // No gaps found - we're done or everything is in flight
-            return Ok(());
-        }
+        // Use the original simple logic - next position to apply
+        state.next_apply_pos
     };
 
     // Calculate batch size - either our configured size or fill the remaining gap
