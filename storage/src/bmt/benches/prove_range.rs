@@ -6,64 +6,44 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 const SAMPLE_SIZE: usize = 100;
 
 fn bench_prove_range(c: &mut Criterion) {
-    for n in [100, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000] {
-        for range_size in [10, 50, 100, 500] {
-            // Skip if range size is larger than tree size
-            if range_size > n {
-                continue;
-            }
-
-            // Populate Binary Merkle Tree
-            let mut builder = Builder::<Sha256>::new(n);
-            let mut elements = Vec::with_capacity(n);
-            let mut sampler = StdRng::seed_from_u64(0);
-            for _ in 0..n {
-                let element = sha256::Digest::random(&mut sampler);
-                builder.add(&element);
-                elements.push(element);
-            }
-            let tree = builder.build();
-            let root = tree.root();
-
-            // Benchmark range proof generation and verification
-            c.bench_function(
-                &format!(
-                    "{}/n={} range_size={} samples={}",
-                    module_path!(),
-                    n,
-                    range_size,
-                    SAMPLE_SIZE
-                ),
-                |b| {
-                    b.iter_batched(
-                        || {
-                            // Generate random starting positions for range proofs
-                            let mut range_proofs = Vec::with_capacity(SAMPLE_SIZE);
-                            for _ in 0..SAMPLE_SIZE {
-                                let start = sampler.gen_range(0..=(n - range_size));
-                                range_proofs.push((
-                                    start,
-                                    tree.range_proof(start as u32, (start + range_size - 1) as u32)
-                                        .unwrap(),
-                                ));
-                            }
-                            range_proofs
-                        },
-                        |range_proofs| {
-                            let mut hasher = Sha256::new();
-                            for (start, proof) in range_proofs {
-                                // Verify range proof
-                                let range_leaves = &elements[start..start + range_size];
-                                assert!(proof
-                                    .verify(&mut hasher, start as u32, range_leaves, &root)
-                                    .is_ok());
-                            }
-                        },
-                        criterion::BatchSize::SmallInput,
-                    )
-                },
-            );
+    for n in [250, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000] {
+        // Populate Binary Merkle Tree
+        let mut builder = Builder::<Sha256>::new(n);
+        let mut elements = Vec::with_capacity(n);
+        let mut sampler = StdRng::seed_from_u64(0);
+        for _ in 0..n {
+            let element = sha256::Digest::random(&mut sampler);
+            builder.add(&element);
+            elements.push(element);
         }
+        let tree = builder.build();
+        let root = tree.root();
+
+        // Prove range of proofs for random starting positions
+        c.bench_function(
+            &format!("{}/n={} items={}", module_path!(), n, SAMPLE_SIZE),
+            |b| {
+                b.iter_batched(
+                    || {
+                        let start = sampler.gen_range(0..(n - SAMPLE_SIZE));
+                        let end = start + SAMPLE_SIZE;
+                        (
+                            start,
+                            end,
+                            tree.range_proof(start as u32, end as u32).unwrap(),
+                        )
+                    },
+                    |(start, end, proof)| {
+                        let mut hasher = Sha256::new();
+                        let range_leaves = &elements[start..=end];
+                        assert!(proof
+                            .verify(&mut hasher, start as u32, range_leaves, &root)
+                            .is_ok());
+                    },
+                    criterion::BatchSize::SmallInput,
+                )
+            },
+        );
     }
 }
 
