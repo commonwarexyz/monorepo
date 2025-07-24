@@ -237,15 +237,17 @@ impl<H: Hasher> Tree<H> {
 
             // Check if we need a right sibling
             let mut right = None;
-            if level_end % 2 == 0 && level_end + 1 < level.len() {
-                // Our range ends at an even index, so we need the odd sibling to the right
-                right = Some(level[level_end + 1]);
-            } else if level_end % 2 == 0 && level_end + 1 >= level.len() {
-                // If no right child exists, use a duplicate of the current node.
-                //
-                // This doesn't affect the robustness of the proof (allow a non-existent position
-                // to be proven or enable multiple proofs to be generated from a single leaf).
-                right = Some(level[level_end]);
+            if level_end % 2 == 0 {
+                if level_end + 1 < level.len() {
+                    // Our range ends at an even index, so we need the odd sibling to the right
+                    right = Some(level[level_end + 1]);
+                } else {
+                    // If no right child exists, use a duplicate of the current node.
+                    //
+                    // This doesn't affect the robustness of the proof (allow a non-existent position
+                    // to be proven or enable multiple proofs to be generated from a single leaf).
+                    right = Some(level[level_end]);
+                }
             }
 
             siblings.push(Bounds { left, right });
