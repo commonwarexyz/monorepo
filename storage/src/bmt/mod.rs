@@ -442,8 +442,6 @@ impl<H: Hasher> RangeProof<H> {
             let last_pos = nodes[nodes.len() - 1].position;
             let needs_left = first_pos % 2 == 1;
             let needs_right = last_pos % 2 == 0;
-
-            // Validate that we have exactly the siblings we need
             if needs_left != bounds.left.is_some() {
                 return Err(Error::UnalignedProof);
             }
