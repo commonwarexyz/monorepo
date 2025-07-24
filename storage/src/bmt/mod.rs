@@ -47,10 +47,6 @@ use thiserror::Error;
 
 /// There should never be more than 255 levels in a proof (would mean the Binary Merkle Tree
 /// has more than 2^255 leaves).
-///
-/// Note: This constant represents the maximum tree height, NOT the maximum number of siblings
-/// at any level. For range proofs, each level can have at most 2 siblings (left and right
-/// boundaries), not MAX_LEVELS siblings.
 const MAX_LEVELS: usize = u8::MAX as usize;
 
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
@@ -193,27 +189,26 @@ impl<H: Hasher> Tree<H> {
         Ok(Proof { siblings })
     }
 
-    /// Generates a Merkle range proof for a contiguous set of leaves starting at `position`
-    /// with `count` elements.
+    /// Generates a Merkle range proof for a contiguous set of leaves from `start`
+    /// to `end` (inclusive).
     ///
     /// The proof contains the minimal set of sibling digests needed to reconstruct
     /// the root for all elements in the range. This is more efficient than individual
     /// proofs when proving multiple consecutive elements.
-    pub fn range_proof(&self, position: u32, count: u32) -> Result<RangeProof<H>, Error> {
+    pub fn range_proof(&self, start: u32, end: u32) -> Result<RangeProof<H>, Error> {
         // Ensure the range is within bounds
-        if self.empty || count == 0 {
+        if self.empty {
             return Err(Error::NoLeaves);
         }
-        let leaf_count = self.levels.first().unwrap().len() as u32;
-        if position >= leaf_count {
-            return Err(Error::InvalidPosition(position));
+        if start > end {
+            return Err(Error::InvalidPosition(start));
         }
-        let end_position = position
-            .checked_add(count)
-            .ok_or(Error::InvalidPosition(position))?
-            - 1;
-        if end_position >= leaf_count {
-            return Err(Error::InvalidPosition(end_position));
+        let leaf_count = self.levels.first().unwrap().len() as u32;
+        if start >= leaf_count {
+            return Err(Error::InvalidPosition(start));
+        }
+        if end >= leaf_count {
+            return Err(Error::InvalidPosition(end));
         }
 
         // For each level (except the root level) collect the necessary siblings
@@ -225,8 +220,8 @@ impl<H: Hasher> Tree<H> {
             }
 
             // Calculate the range of indices at this level
-            let level_start = (position as usize) >> level_idx;
-            let level_end = (end_position as usize) >> level_idx;
+            let level_start = (start as usize) >> level_idx;
+            let level_end = (end as usize) >> level_idx;
 
             // Check if we need a left sibling
             let mut left = None;
@@ -1063,7 +1058,7 @@ mod tests {
         let root = tree.root();
 
         // Test range proof for elements 2-5
-        let range_proof = tree.range_proof(2, 4).unwrap();
+        let range_proof = tree.range_proof(2, 5).unwrap();
         let mut hasher = Sha256::default();
         let range_leaves = &digests[2..6];
 
@@ -1094,7 +1089,7 @@ mod tests {
 
         // Test single element range proof
         for (i, digest) in digests.iter().enumerate() {
-            let range_proof = tree.range_proof(i as u32, 1).unwrap();
+            let range_proof = tree.range_proof(i as u32, i as u32).unwrap();
             let mut hasher = Sha256::default();
 
             let result = range_proof.verify(&mut hasher, i as u32, &[*digest], &root);
@@ -1116,7 +1111,7 @@ mod tests {
         let root = tree.root();
 
         // Test full tree range proof
-        let range_proof = tree.range_proof(0, digests.len() as u32).unwrap();
+        let range_proof = tree.range_proof(0, (digests.len() - 1) as u32).unwrap();
         let mut hasher = Sha256::default();
         assert!(range_proof.verify(&mut hasher, 0, &digests, &root).is_ok());
     }
@@ -1136,19 +1131,19 @@ mod tests {
         let mut hasher = Sha256::default();
 
         // Test first half
-        let range_proof = tree.range_proof(0, 8).unwrap();
+        let range_proof = tree.range_proof(0, 7).unwrap();
         assert!(range_proof
             .verify(&mut hasher, 0, &digests[0..8], &root)
             .is_ok());
 
         // Test second half
-        let range_proof = tree.range_proof(8, 7).unwrap();
+        let range_proof = tree.range_proof(8, 14).unwrap();
         assert!(range_proof
             .verify(&mut hasher, 8, &digests[8..15], &root)
             .is_ok());
 
         // Test last elements
-        let range_proof = tree.range_proof(13, 2).unwrap();
+        let range_proof = tree.range_proof(13, 14).unwrap();
         assert!(range_proof
             .verify(&mut hasher, 13, &digests[13..15], &root)
             .is_ok());
@@ -1167,10 +1162,10 @@ mod tests {
         let tree = builder.build();
 
         // Test invalid ranges
-        assert!(tree.range_proof(8, 1).is_err()); // Start out of bounds
-        assert!(tree.range_proof(0, 9).is_err()); // Count too large
-        assert!(tree.range_proof(5, 4).is_err()); // Would exceed bounds
-        assert!(tree.range_proof(0, 0).is_err()); // Zero count
+        assert!(tree.range_proof(8, 8).is_err()); // Start out of bounds
+        assert!(tree.range_proof(0, 8).is_err()); // End out of bounds
+        assert!(tree.range_proof(5, 8).is_err()); // End out of bounds
+        assert!(tree.range_proof(2, 1).is_err()); // Start > end
     }
 
     #[test]
@@ -1187,7 +1182,7 @@ mod tests {
         let root = tree.root();
 
         // Get valid range proof
-        let range_proof = tree.range_proof(2, 3).unwrap();
+        let range_proof = tree.range_proof(2, 4).unwrap();
         let mut hasher = Sha256::default();
         let range_leaves = &digests[2..5];
 
@@ -1242,7 +1237,9 @@ mod tests {
             // Test various range sizes
             for range_size in 1..=tree_size.min(8) {
                 for start in 0..=(tree_size - range_size) {
-                    let range_proof = tree.range_proof(start as u32, range_size as u32).unwrap();
+                    let range_proof = tree
+                        .range_proof(start as u32, (start + range_size - 1) as u32)
+                        .unwrap();
                     let end = start + range_size;
                     assert!(
                         range_proof
@@ -1268,8 +1265,8 @@ mod tests {
         let tree = builder.build();
         let root = tree.root();
 
-        // Get valid range proof for position 2, count 3
-        let range_proof = tree.range_proof(2, 3).unwrap();
+        // Get valid range proof for position 2 to 4
+        let range_proof = tree.range_proof(2, 4).unwrap();
         let mut hasher = Sha256::default();
         let range_leaves = &digests[2..5];
 
@@ -1295,8 +1292,8 @@ mod tests {
         let tree = builder.build();
         let root = tree.root();
 
-        // Get valid range proof for position 2, count 3
-        let range_proof = tree.range_proof(2, 3).unwrap();
+        // Get valid range proof for position 2 to 4
+        let range_proof = tree.range_proof(2, 4).unwrap();
         let mut hasher = Sha256::default();
 
         // Try to verify with reordered leaves
@@ -1320,7 +1317,7 @@ mod tests {
         let root = tree.root();
 
         // Get valid range proof
-        let mut range_proof = tree.range_proof(2, 2).unwrap();
+        let mut range_proof = tree.range_proof(2, 3).unwrap();
         let mut hasher = Sha256::default();
         let range_leaves = &digests[2..4];
 
@@ -1351,7 +1348,7 @@ mod tests {
         let root = tree.root();
 
         // Get valid range proof for a single element (which needs siblings)
-        let mut range_proof = tree.range_proof(2, 1).unwrap();
+        let mut range_proof = tree.range_proof(2, 2).unwrap();
         let mut hasher = Sha256::default();
         let range_leaves = &digests[2..3];
 
@@ -1380,8 +1377,8 @@ mod tests {
         let tree = builder.build();
 
         // Test overflow in range_proof generation
-        assert!(tree.range_proof(u32::MAX, 1).is_err());
-        assert!(tree.range_proof(u32::MAX - 1, 2).is_err());
+        assert!(tree.range_proof(u32::MAX, u32::MAX).is_err());
+        assert!(tree.range_proof(u32::MAX - 1, u32::MAX).is_err());
         assert!(tree.range_proof(7, u32::MAX).is_err());
     }
 
@@ -1399,7 +1396,7 @@ mod tests {
         let root = tree.root();
 
         // Get valid range proof
-        let mut range_proof = tree.range_proof(2, 2).unwrap();
+        let mut range_proof = tree.range_proof(2, 3).unwrap();
         let mut hasher = Sha256::default();
         let range_leaves = &digests[2..4];
 
@@ -1440,12 +1437,12 @@ mod tests {
 
             // Test edge cases
             // First element only
-            let proof = tree.range_proof(0, 1).unwrap();
+            let proof = tree.range_proof(0, 0).unwrap();
             assert!(proof.verify(&mut hasher, 0, &digests[0..1], &root).is_ok());
 
             // Last element only
             let last_idx = tree_size - 1;
-            let proof = tree.range_proof(last_idx as u32, 1).unwrap();
+            let proof = tree.range_proof(last_idx as u32, last_idx as u32).unwrap();
             assert!(proof
                 .verify(
                     &mut hasher,
@@ -1456,7 +1453,7 @@ mod tests {
                 .is_ok());
 
             // Full tree
-            let proof = tree.range_proof(0, tree_size as u32).unwrap();
+            let proof = tree.range_proof(0, (tree_size - 1) as u32).unwrap();
             assert!(proof.verify(&mut hasher, 0, &digests, &root).is_ok());
         }
     }
@@ -1485,7 +1482,7 @@ mod tests {
         ];
 
         for (start, count) in test_cases {
-            let range_proof = tree.range_proof(start, count).unwrap();
+            let range_proof = tree.range_proof(start, start + count - 1).unwrap();
             let end = start as usize + count as usize;
 
             // Verify the proof works
@@ -1555,7 +1552,9 @@ mod tests {
 
             // Test range including the last element (which may require duplicate handling)
             let start = tree_size - 2;
-            let proof = tree.range_proof(start as u32, 2).unwrap();
+            let proof = tree
+                .range_proof(start as u32, (tree_size - 1) as u32)
+                .unwrap();
             assert!(proof
                 .verify(&mut hasher, start as u32, &digests[start..tree_size], &root)
                 .is_ok());

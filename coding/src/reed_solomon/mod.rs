@@ -437,7 +437,7 @@ pub fn translate<H: Hasher>(
 
     // Generate range proof for minimal proof
     let proof = tree
-        .range_proof(0, min as u32)
+        .range_proof(0, (min - 1) as u32)
         .map_err(|_| Error::InvalidProof)?;
     let proof = Data::new(shards, proof);
 
