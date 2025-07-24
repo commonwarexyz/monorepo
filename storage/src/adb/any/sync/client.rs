@@ -10,7 +10,7 @@ use commonware_runtime::{
     telemetry::metrics::histogram::{Buckets, Timed},
     Clock, Metrics as MetricsTrait, Storage,
 };
-use commonware_utils::Array;
+use commonware_utils::{Array, NZU64};
 use futures::{stream::FuturesUnordered, StreamExt};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{
@@ -176,8 +176,8 @@ where
     /// Set of batch start positions that have outstanding requests
     pub outstanding_requests: BTreeSet<u64>,
 
-    /// Track the highest contiguous position we've received (not requested)
-    pub highest_received_pos: u64,
+    /// The next position to apply to the log
+    pub next_apply_pos: u64,
 
     /// Pending fetch futures
     pub pending_fetches: FuturesUnordered<
@@ -204,11 +204,11 @@ where
     H: Hasher,
 {
     /// Create a new sync state
-    pub fn new(initial_log_size: u64) -> Self {
+    fn new(initial_log_size: u64) -> Self {
         Self {
             verified_batches: BTreeMap::new(),
             outstanding_requests: BTreeSet::new(),
-            highest_received_pos: initial_log_size,
+            next_apply_pos: initial_log_size,
             pending_fetches: FuturesUnordered::new(),
             pinned_nodes: None,
             _phantom: PhantomData,
@@ -216,16 +216,16 @@ where
     }
 
     /// Reset state for a target update
-    pub fn reset(&mut self, new_log_size: u64) {
+    fn reset(&mut self, new_log_size: u64) {
         self.verified_batches.clear();
         self.outstanding_requests.clear();
         self.pending_fetches.clear();
         self.pinned_nodes = None;
-        self.highest_received_pos = new_log_size;
+        self.next_apply_pos = new_log_size;
     }
 
     /// Check if sync is complete based on the current log size and target
-    pub async fn is_sync_complete(
+    async fn is_sync_complete(
         &self,
         log: &Journal<E, Operation<K, V>>,
         target_upper_bound: u64,
@@ -252,40 +252,41 @@ where
         Ok(false)
     }
 
-    /// Update the highest received position if this batch extends contiguous coverage
-    pub fn update_highest_received_pos(&mut self, start_pos: u64, operations_len: u64) {
-        if start_pos == self.highest_received_pos {
-            self.highest_received_pos = start_pos + operations_len;
+    /// Update the next position to apply to the log
+    /// TODO remove extra arg?
+    fn update_next_apply_pos(&mut self, start_pos: u64, operations_len: u64) {
+        if start_pos == self.next_apply_pos {
+            self.next_apply_pos = start_pos + operations_len;
         }
     }
 
-    /// Store a verified batch
-    pub fn store_verified_batch(&mut self, start_pos: u64, operations: Vec<Operation<K, V>>) {
+    /// Store a verified batch of operations
+    fn store_batch(&mut self, start_pos: u64, operations: Vec<Operation<K, V>>) {
         self.verified_batches.insert(start_pos, operations);
     }
 
-    /// Remove and return the next contiguous batch starting from the given position
-    pub fn take_contiguous_batch(&mut self, start_pos: u64) -> Option<Vec<Operation<K, V>>> {
+    /// Remove and return the batch of operations starting at the given position
+    fn take_batch(&mut self, start_pos: u64) -> Option<Vec<Operation<K, V>>> {
         self.verified_batches.remove(&start_pos)
     }
 
     /// Add an outstanding request
-    pub fn add_outstanding_request(&mut self, start_pos: u64) {
+    fn add_outstanding_request(&mut self, start_pos: u64) {
         self.outstanding_requests.insert(start_pos);
     }
 
     /// Remove an outstanding request
-    pub fn remove_outstanding_request(&mut self, start_pos: u64) {
+    fn remove_outstanding_request(&mut self, start_pos: u64) {
         self.outstanding_requests.remove(&start_pos);
     }
 
-    /// Set pinned nodes (should only be called once)
-    pub fn set_pinned_nodes(&mut self, nodes: Vec<H::Digest>) {
+    /// Set pinned nodes
+    fn set_pinned_nodes(&mut self, nodes: Vec<H::Digest>) {
         self.pinned_nodes = Some(nodes);
     }
 
     /// Check if we have pinned nodes
-    pub fn has_pinned_nodes(&self) -> bool {
+    fn has_pinned_nodes(&self) -> bool {
         self.pinned_nodes.is_some()
     }
 }
@@ -315,8 +316,8 @@ fn validate_target_update<H: Hasher>(
     Ok(())
 }
 
-/// Initialize parallel fetching by starting initial batch requests
-async fn initialize_parallel_fetches<E, K, V, H, T, R>(
+/// Queue batches of operations to be fetched from the resolver
+async fn fill_fetch_queue<E, K, V, H, T, R>(
     config: &mut Config<E, K, V, H, T, R>,
     _log: &Journal<E, Operation<K, V>>,
     state: &mut SyncState<E, K, V, H>,
@@ -331,58 +332,41 @@ where
 {
     let target_size = config.target.upper_bound_ops + 1;
 
-    // If we don't have pinned nodes, we must ensure our first request can extract them
-    // This means starting from at least lower_bound_ops, but not re-requesting existing operations
-    let current_pos = if !state.has_pinned_nodes() {
-        std::cmp::max(state.highest_received_pos, config.target.lower_bound_ops)
-    } else {
-        state.highest_received_pos
-    };
-
-    // If we don't have pinned nodes, make a special request to extract them first
+    // If we don't have pinned nodes, request a proof for the first operation
+    // to extract them
     if !state.has_pinned_nodes() {
-        let pinned_nodes_batch_size = std::cmp::min(
-            config.fetch_batch_size.get(),
-            target_size.saturating_sub(config.target.lower_bound_ops),
-        );
-        if let Some(batch_size) = NonZeroU64::new(pinned_nodes_batch_size) {
-            state.add_outstanding_request(config.target.lower_bound_ops);
+        state.add_outstanding_request(config.target.lower_bound_ops);
 
-            let resolver = config.resolver.clone();
-            let start_pos = config.target.lower_bound_ops;
+        let resolver = config.resolver.clone();
+        let start_pos = config.target.lower_bound_ops;
+        state.pending_fetches.push(Box::pin(async move {
+            let result = resolver
+                .get_operations(target_size, start_pos, NZU64!(1))
+                .await;
+            (start_pos, result)
+        }));
+    }
 
-            state.pending_fetches.push(Box::pin(async move {
-                let result = resolver
-                    .get_operations(target_size, start_pos, batch_size)
-                    .await;
-                (start_pos, result)
-            }));
+    // Start initial batch requests up to max_outstanding_requests
+    let mut current_pos = state.next_apply_pos; // TODO have separate next_fetch_pos?
+    for _ in state.outstanding_requests.len()..config.max_outstanding_requests {
+        if current_pos >= target_size {
+            break;
         }
-    } else {
-        // Start initial batch requests up to max_outstanding_requests
-        for _ in 0..config.max_outstanding_requests {
-            if current_pos >= target_size {
-                break;
-            }
 
-            let remaining_ops = target_size - current_pos;
-            let batch_size = std::cmp::min(config.fetch_batch_size.get(), remaining_ops);
-            if let Some(batch_size) = NonZeroU64::new(batch_size) {
-                state.add_outstanding_request(current_pos);
+        let remaining_ops = NZU64!(target_size - current_pos);
+        let batch_size = std::cmp::min(config.fetch_batch_size, remaining_ops);
+        state.add_outstanding_request(current_pos);
 
-                let resolver = config.resolver.clone();
-                let start_pos = current_pos;
-
-                state.pending_fetches.push(Box::pin(async move {
-                    let result = resolver
-                        .get_operations(target_size, start_pos, batch_size)
-                        .await;
-                    (start_pos, result)
-                }));
-
-                break; // Only start one request initially, let completion handler start more
-            }
-        }
+        let resolver = config.resolver.clone();
+        let start_pos = current_pos;
+        state.pending_fetches.push(Box::pin(async move {
+            let result = resolver
+                .get_operations(target_size, start_pos, batch_size)
+                .await;
+            (start_pos, result)
+        }));
+        current_pos += batch_size.get();
     }
 
     Ok(())
@@ -472,12 +456,12 @@ where
             }
 
             // Store verified batch
-            state.store_verified_batch(start_pos, operations);
+            state.store_batch(start_pos, operations);
             metrics.valid_batches_received.inc();
             metrics.operations_fetched.inc_by(operations_len);
 
             // Update highest_received_pos if this batch extends our contiguous coverage
-            state.update_highest_received_pos(start_pos, operations_len);
+            state.update_next_apply_pos(start_pos, operations_len);
 
             // Send next request to maintain parallelism
             send_next_request(config, state, None).await?;
@@ -513,7 +497,7 @@ where
         retry_pos
     } else {
         // Use the highest contiguous position we've actually received
-        state.highest_received_pos
+        state.next_apply_pos
     };
 
     if start_pos >= target_size {
@@ -559,7 +543,7 @@ where
     let mut current_pos = log_size;
 
     // Collect contiguous operations starting from current log size
-    while let Some(operations) = state.take_contiguous_batch(current_pos) {
+    while let Some(operations) = state.take_batch(current_pos) {
         let operations_len = operations.len() as u64;
         operations_to_apply.extend(operations);
         current_pos += operations_len;
@@ -793,7 +777,7 @@ where
     let mut state = SyncState::new(log_size);
 
     // Initialize parallel fetching
-    initialize_parallel_fetches(&mut config, &log, &mut state).await?;
+    fill_fetch_queue(&mut config, &log, &mut state).await?;
 
     loop {
         // Handle target updates or batch completions
@@ -887,7 +871,7 @@ where
     state.reset(new_log_size);
 
     // Reinitialize parallel fetching
-    initialize_parallel_fetches(config, &log, state).await?;
+    fill_fetch_queue(config, &log, state).await?;
 
     Ok(log)
 }
