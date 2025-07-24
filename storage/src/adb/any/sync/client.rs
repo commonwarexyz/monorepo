@@ -11,7 +11,7 @@ use commonware_runtime::{
     Clock, Metrics as MetricsTrait, Storage,
 };
 use commonware_utils::Array;
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{future, stream::FuturesUnordered, StreamExt};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -869,6 +869,7 @@ where
     fill_fetch_queue(&mut config, &mut state).await?;
 
     loop {
+        // Check if sync is complete
         if state
             .is_sync_complete(&log, config.target.upper_bound_ops)
             .await?
@@ -876,41 +877,28 @@ where
             return build_database(config, log, state.pinned_nodes, &metrics).await;
         }
 
-        let should_handle_updates = config.update_receiver.is_some();
-        let has_pending_fetches = !state.pending_fetches.is_empty();
-
-        if should_handle_updates && has_pending_fetches {
-            // Both target updates and batch completions possible - race them
-            select! {
-                target_update = config.update_receiver.as_mut().unwrap().next() => {
-                    if let Some(new_target) = target_update {
-                        log = handle_target_update(new_target, &mut config, &mut state, log, &metrics).await?;
-                    }
-                },
-                batch_result = state.pending_fetches.next() => {
-                    if let Some((start_pos, result)) = batch_result {
-                        handle_batch_completion(start_pos, result, &mut config, &mut state, &metrics).await?;
-                    }
-                },
-            }
-        } else if has_pending_fetches {
-            // Only outstanding fetch requests to handle
-            if let Some((start_pos, result)) = state.pending_fetches.next().await {
-                handle_batch_completion(start_pos, result, &mut config, &mut state, &metrics)
-                    .await?;
-            }
-        } else {
-            return Err(Error::AlreadyComplete);
+        // Wait for a target update or a batch completion
+        select! {
+            target_update = async {
+                if let Some(ref mut receiver) = config.update_receiver {
+                    receiver.next().await
+                } else {
+                    future::pending().await // There is no update receiver. This will never resolve.
+                }
+            } => {
+                if let Some(new_target) = target_update {
+                    log = handle_target_update(new_target, &mut config, &mut state, log, &metrics).await?;
+                }
+            },
+            batch_result = state.pending_fetches.next() => {
+                if let Some((start_pos, result)) = batch_result {
+                    handle_batch_completion(start_pos, result, &mut config, &mut state, &metrics).await?;
+                }
+            },
         }
 
+        // Apply operations that are now contiguous with the current log size
         log = apply_contiguous_batches(log, &mut state, &metrics, config.apply_batch_size).await?;
-
-        if state
-            .is_sync_complete(&log, config.target.upper_bound_ops)
-            .await?
-        {
-            return build_database(config, log, state.pinned_nodes, &metrics).await;
-        }
     }
 }
 
