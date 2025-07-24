@@ -200,9 +200,7 @@ fn fuzz(input: FuzzInput) {
                         .iter()
                         .map(|v| hash(&v.to_be_bytes()))
                         .collect();
-                    if !leaf_digests.is_empty() {
-                        let _ = rp.verify(&mut hasher, *start_position, &leaf_digests, &root);
-                    }
+                    let _ = rp.verify(&mut hasher, *start_position, &leaf_digests, &root);
                 }
             }
 
@@ -292,9 +290,7 @@ fn fuzz(input: FuzzInput) {
                         .iter()
                         .map(|v| hash(&v.to_be_bytes()))
                         .collect();
-                    if !tampered_digests.is_empty() {
-                        let _ = rp.verify(&mut hasher, *start, &tampered_digests, &root);
-                    }
+                    let _ = rp.verify(&mut hasher, *start, &tampered_digests, &root);
                 }
             }
         }
