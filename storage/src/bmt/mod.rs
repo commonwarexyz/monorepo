@@ -435,14 +435,25 @@ impl<H: Hasher> RangeProof<H> {
         for bounds in self.siblings.iter() {
             let mut next_nodes = Vec::new();
 
+            // Check if we should have a left sibling
+            let first_pos = nodes[0].0;
+            let last_pos = nodes[nodes.len() - 1].0;
+            let needs_left = first_pos % 2 == 1;
+            let needs_right = last_pos % 2 == 0;
+
+            // Validate that we have exactly the siblings we need
+            if needs_left != bounds.left.is_some() {
+                return Err(Error::UnalignedProof);
+            }
+            if needs_right != bounds.right.is_some() {
+                return Err(Error::UnalignedProof);
+            }
+
             // If we have a left sibling, we need to include it
             let mut i = 0;
             if let Some(left_sib) = &bounds.left {
                 // The first node in our range needs its left sibling
                 let (pos, node) = &nodes[0];
-                if pos % 2 != 1 {
-                    return Err(Error::UnalignedProof);
-                }
                 hasher.update(left_sib);
                 hasher.update(node);
                 next_nodes.push((pos / 2, hasher.finalize()));
@@ -462,11 +473,8 @@ impl<H: Hasher> RangeProof<H> {
                     next_nodes.push((parent_pos, hasher.finalize()));
                     i += 2;
                 } else if i == nodes.len() - 1 {
-                    // This is the last node and it needs a right sibling
+                    // This is the last node and it should have a right sibling
                     if let Some(right_sib) = &bounds.right {
-                        if pos % 2 != 0 {
-                            return Err(Error::UnalignedProof);
-                        }
                         hasher.update(node);
                         hasher.update(right_sib);
                         next_nodes.push((parent_pos, hasher.finalize()));
@@ -1473,14 +1481,9 @@ mod tests {
             let end = start as usize + count as usize;
 
             // Verify the proof works
-            assert!(
-                range_proof
-                    .verify(&mut hasher, start, &digests[start as usize..end], &root)
-                    .is_ok(),
-                "Valid proof failed for range [{}, {})",
-                start,
-                end
-            );
+            assert!(range_proof
+                .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                .is_ok());
 
             // For each level with siblings, try removing them and verify the proof fails
             for level_idx in 0..range_proof.siblings.len() {
@@ -1490,30 +1493,36 @@ mod tests {
                 if bounds.left.is_some() {
                     let mut tampered_proof = range_proof.clone();
                     tampered_proof.siblings[level_idx].left = None;
-                    assert!(
-                        tampered_proof
-                            .verify(&mut hasher, start, &digests[start as usize..end], &root)
-                            .is_err(),
-                        "Proof should fail when left sibling removed at level {} for range [{}, {})",
-                        level_idx,
-                        start,
-                        end
-                    );
+                    assert!(tampered_proof
+                        .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                        .is_err());
                 }
 
                 // If there's a right sibling, removing it should make the proof fail
                 if bounds.right.is_some() {
                     let mut tampered_proof = range_proof.clone();
                     tampered_proof.siblings[level_idx].right = None;
-                    assert!(
-                        tampered_proof
-                            .verify(&mut hasher, start, &digests[start as usize..end], &root)
-                            .is_err(),
-                        "Proof should fail when right sibling removed at level {} for range [{}, {})",
-                        level_idx,
-                        start,
-                        end
-                    );
+                    assert!(tampered_proof
+                        .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                        .is_err());
+                }
+
+                // If there's no left sibling, adding one should make the proof fail
+                if bounds.left.is_none() {
+                    let mut tampered_proof = range_proof.clone();
+                    tampered_proof.siblings[level_idx].left = Some(hash(b"fake_left"));
+                    assert!(tampered_proof
+                        .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                        .is_err());
+                }
+
+                // If there's no right sibling, adding one should make the proof fail
+                if bounds.right.is_none() {
+                    let mut tampered_proof = range_proof.clone();
+                    tampered_proof.siblings[level_idx].right = Some(hash(b"fake_right"));
+                    assert!(tampered_proof
+                        .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                        .is_err());
                 }
             }
         }
