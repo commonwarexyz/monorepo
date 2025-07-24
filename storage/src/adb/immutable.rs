@@ -28,7 +28,7 @@ use tracing::warn;
 /// enough, so we don't make it configurable.
 const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 
-/// Configuration for an [Append] only authenticated db.
+/// Configuration for an [Immutable] authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
     /// The name of the [RStorage] partition used for the MMR's backing journal.
@@ -59,10 +59,10 @@ pub struct Config<T: Translator, C> {
     pub log_items_per_section: u64,
 
     /// The name of the [RStorage] partition used for the location map.
-    pub locations_map_journal_partition: String,
+    pub locations_journal_partition: String,
 
     /// The number of items to put in each blob in the location map.
-    pub locations_map_items_per_blob: u64,
+    pub locations_items_per_blob: u64,
 
     /// The translator used by the compressed index.
     pub translator: T,
@@ -74,15 +74,15 @@ pub struct Config<T: Translator, C> {
     pub buffer_pool: PoolRef,
 }
 
-/// An append-only key-value ADB based on an MMR over its log of operations, supporting
-/// authentication of key-value pairs.
-pub struct Append<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
+/// An authenticatable key-value database based on an MMR that does not allow updates or deletions
+/// of previously set keys.
+pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
     ///
     /// The number of leaves in this MMR always equals the number of operations in the unpruned
-    /// `log` and `locations_map`.
+    /// `log` and `locations`.
     mmr: Mmr<E, H>,
 
     /// A log of all operations applied to the db in order of occurrence. The _location_ of an
@@ -99,7 +99,7 @@ pub struct Append<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher,
 
     /// A fixed-length journal that maps an operation's location to its offset within its respective
     /// section of the log. (The section number is derived from location.)
-    locations_map: FJournal<E, U32>,
+    locations: FJournal<E, U32>,
 
     /// A map from each active key to the location of the operation that set its value.
     ///
@@ -113,9 +113,9 @@ pub struct Append<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher,
 }
 
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    Append<E, K, V, H, T>
+    Immutable<E, K, V, H, T>
 {
-    /// Returns an [Append] adb initialized from `cfg`. Any uncommitted log operations will be
+    /// Returns an [Immutable] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
         context: E,
@@ -148,11 +148,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let mut locations_map = FJournal::init(
-            context.with_label("locations_map"),
+        let mut locations = FJournal::init(
+            context.with_label("locations"),
             FConfig {
-                partition: cfg.locations_map_journal_partition,
-                items_per_blob: cfg.locations_map_items_per_blob,
+                partition: cfg.locations_journal_partition,
+                items_per_blob: cfg.locations_items_per_blob,
                 write_buffer: cfg.log_write_buffer,
                 buffer_pool: cfg.buffer_pool.clone(),
             },
@@ -166,16 +166,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             cfg.log_items_per_section,
             &mut mmr,
             &mut log,
-            &mut locations_map,
+            &mut locations,
             &mut snapshot,
         )
         .await?;
 
-        let db = Append {
+        let db = Immutable {
             mmr,
             log,
             log_size,
-            locations_map,
+            locations,
             log_items_per_section: cfg.log_items_per_section,
             snapshot,
             hasher,
@@ -194,30 +194,31 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// # Post-condition
     ///
-    /// The number of operations in the log, locations_map, and the number of leaves in the MMR are
+    /// The number of operations in the log, locations, and the number of leaves in the MMR are
     /// equal.
     pub(super) async fn build_snapshot_from_log(
         hasher: &mut Standard<H>,
         log_items_per_section: u64,
         mmr: &mut Mmr<E, H>,
         log: &mut VJournal<E, Variable<K, V>>,
-        locations_map: &mut FJournal<E, U32>,
+        locations: &mut FJournal<E, U32>,
         snapshot: &mut Index<T, u64>,
     ) -> Result<u64, Error> {
         // Align the mmr with the location map. Any elements we remove here that are still in the
         // log will be re-added later.
         let mut mmr_leaves = leaf_pos_to_num(mmr.size()).unwrap();
-        let locations_map_size = locations_map.size().await?;
-        if locations_map_size > mmr_leaves {
+        let locations_size = locations.size().await?;
+        if locations_size > mmr_leaves {
             warn!(
                 mmr_leaves,
-                locations_map_size, "rewinding misaligned locations map"
+                locations_size, "rewinding misaligned locations map"
             );
-            locations_map.rewind(mmr_leaves).await?;
+            locations.rewind(mmr_leaves).await?;
         }
-        if mmr_leaves > locations_map_size {
-            warn!(mmr_leaves, locations_map_size, "rewinding misaligned mmr");
-            mmr.pop((mmr_leaves - locations_map_size) as usize).await?;
+        if mmr_leaves > locations_size {
+            warn!(mmr_leaves, locations_size, "rewinding misaligned mmr");
+            mmr.pop((mmr_leaves - locations_size) as usize).await?;
+            mmr_leaves = locations_size;
         }
 
         // The number of operations in the log.
@@ -231,7 +232,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // Replay the log from inception to build the snapshot, keeping track of any uncommitted
         // operations that must be rolled back, and any log operations that need to be re-added to
-        // the MMR & locations_map.
+        // the MMR & locations.
         {
             let stream = log.replay(SNAPSHOT_READ_BUFFER_SIZE).await?;
             pin_mut!(stream);
@@ -256,7 +257,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                 offset, "operation was missing from MMR/location map"
                             );
                             mmr.add(hasher, &op.encode()).await?;
-                            locations_map.append(offset.into()).await?;
+                            locations.append(offset.into()).await?;
                             mmr_leaves += 1;
                         }
                         match op {
@@ -265,7 +266,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                             }
                             Variable::Commit() => {
                                 for (key, loc) in uncommitted_ops.iter() {
-                                    Append::<E, K, V, H, T>::set_loc(snapshot, key, *loc).await?;
+                                    Immutable::<E, K, V, H, T>::set_loc(snapshot, key, *loc)
+                                        .await?;
                                 }
                                 uncommitted_ops.clear();
                                 end_loc = log_size;
@@ -289,7 +291,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // Pop any MMR elements that are ahead of the last log commit point.
         if mmr_leaves > log_size {
-            locations_map.rewind(log_size).await?;
+            locations.rewind(log_size).await?;
 
             let op_count = mmr_leaves - log_size;
             warn!(op_count, "popping uncommitted MMR operations");
@@ -298,7 +300,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // Confirm post-conditions hold.
         assert_eq!(log_size, leaf_pos_to_num(mmr.size()).unwrap());
-        assert_eq!(log_size, locations_map.size().await?);
+        assert_eq!(log_size, locations.size().await?);
 
         Ok(log_size)
     }
@@ -338,7 +340,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Get the value of the operation with location `loc` in the db if it matches `key`. The
     /// location is assumed valid and this function panics otherwise.
     pub async fn get_from_loc(&self, key: &K, loc: u64) -> Result<Option<V>, Error> {
-        match self.locations_map.read(loc).await {
+        match self.locations.read(loc).await {
             Ok(offset) => {
                 return self.get_from_offset(key, loc, offset.to_u32()).await;
             }
@@ -379,7 +381,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// `commit`. Attempting to set an already-set key results in undefined behavior.
     pub async fn set(&mut self, key: K, value: V) -> Result<(), Error> {
         let loc = self.log_size;
-        Append::<E, K, V, H, T>::set_loc(&mut self.snapshot, &key, loc).await?;
+        Immutable::<E, K, V, H, T>::set_loc(&mut self.snapshot, &key, loc).await?;
 
         let op = Variable::Set(key, value);
         self.apply_op(op).await
@@ -400,11 +402,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.mmr.add_batched(&mut self.hasher, &op.encode()).await?;
 
         let section = self.current_section();
-        self.log_size += 1;
-        let new_section = self.current_section();
         let (offset, _) = self.log.append(section, op).await?;
-        self.locations_map.append(offset.into()).await?;
-        if section != new_section {
+        self.log_size += 1;
+        self.locations.append(offset.into()).await?;
+
+        if section != self.current_section() {
             self.log.sync(section).await?;
         }
 
@@ -449,7 +451,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let mut ops = Vec::with_capacity((end_index - start_index + 1) as usize);
         for index in start_index..=end_index {
             let section = index / self.log_items_per_section;
-            let offset = self.locations_map.read(index).await?.to_u32();
+            let offset = self.locations.read(index).await?.to_u32();
             let Some(op) = self.log.get(section, offset).await? else {
                 panic!("no log item at index {index}");
             };
@@ -469,7 +471,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         root_digest: &H::Digest,
     ) -> bool {
         let start_pos = leaf_num_to_pos(start_loc);
-
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
 
         proof.verify_range_inclusion(hasher, &elements, start_pos, root_digest)
@@ -490,7 +491,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         try_join!(
             self.mmr.sync(&mut self.hasher).map_err(Error::MmrError),
             self.log.sync(section).map_err(Error::JournalError),
-            self.locations_map.sync().map_err(Error::JournalError),
+            self.locations.sync().map_err(Error::JournalError),
         )?;
 
         Ok(())
@@ -501,7 +502,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         try_join!(
             self.log.close().map_err(Error::JournalError),
             self.mmr.close(&mut self.hasher).map_err(Error::MmrError),
-            self.locations_map.close().map_err(Error::JournalError),
+            self.locations.close().map_err(Error::JournalError),
         )?;
 
         Ok(())
@@ -512,8 +513,61 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         try_join!(
             self.log.destroy().map_err(Error::JournalError),
             self.mmr.destroy().map_err(Error::MmrError),
-            self.locations_map.destroy().map_err(Error::JournalError),
+            self.locations.destroy().map_err(Error::JournalError),
         )?;
+
+        Ok(())
+    }
+
+    /// Simulate a failed commit that successfully writes the log to the commit point, but without
+    /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening.
+    #[cfg(test)]
+    pub async fn simulate_failed_commit_mmr(mut self, write_limit: usize) -> Result<(), Error> {
+        self.apply_op(Variable::Commit()).await?;
+        self.log.close().await?;
+        self.locations.close().await?;
+        self.mmr
+            .simulate_partial_sync(&mut self.hasher, write_limit)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Simulate a failed commit that successfully writes the MMR to the commit point, but without
+    /// fully committing the log, requiring rollback of the MMR and log upon reopening.
+    #[cfg(test)]
+    pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error> {
+        self.apply_op(Variable::Commit()).await?;
+        let mut section = self.current_section();
+
+        self.mmr.close(&mut self.hasher).await?;
+        // Rewind the operation log over the commit op to force rollback to the previous commit.
+        let mut size = self.log.size(section).await?;
+        if size == 0 {
+            section -= 1;
+            size = self.log.size(section).await?;
+        }
+        self.log.rewind(section, size - 1).await?;
+        self.log.close().await?;
+
+        Ok(())
+    }
+
+    /// Simulate a failed commit that successfully writes the log to the commit point, but without
+    /// fully committing the locations.
+    #[cfg(test)]
+    pub async fn simulate_failed_commit_locations(
+        mut self,
+        operations_to_trim: u64,
+    ) -> Result<(), Error> {
+        self.apply_op(Variable::Commit()).await?;
+        let op_count = self.op_count();
+        assert!(op_count >= operations_to_trim);
+
+        self.log.close().await?;
+        self.mmr.close(&mut self.hasher).await?;
+        self.locations.rewind(op_count - operations_to_trim).await?;
+        self.locations.close().await?;
 
         Ok(())
     }
@@ -544,8 +598,8 @@ pub(super) mod test {
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             log_write_buffer: 1024,
-            locations_map_journal_partition: format!("locations_map_journal_{suffix}"),
-            locations_map_items_per_blob: 7,
+            locations_journal_partition: format!("locations_journal_{suffix}"),
+            locations_items_per_blob: 7,
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -553,17 +607,17 @@ pub(super) mod test {
     }
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type AppendTest = Append<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+    type ImmutableTest = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
-    /// Return an [Append] database initialized with a fixed config.
-    async fn open_db(context: deterministic::Context) -> AppendTest {
-        AppendTest::init(context, db_config("partition"))
+    /// Return an [Immutable] database initialized with a fixed config.
+    async fn open_db(context: deterministic::Context) -> ImmutableTest {
+        ImmutableTest::init(context, db_config("partition"))
             .await
             .unwrap()
     }
 
     #[test_traced("WARN")]
-    pub fn test_append_db_empty() {
+    pub fn test_immutable_db_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
@@ -596,7 +650,7 @@ pub(super) mod test {
     }
 
     #[test_traced("DEBUG")]
-    pub fn test_append_db_build_basic() {
+    pub fn test_immutable_db_build_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Build a db with 2 keys.
@@ -653,7 +707,7 @@ pub(super) mod test {
     }
 
     #[test_traced("WARN")]
-    pub fn test_append_db_build_and_authenticate() {
+    pub fn test_immutable_db_build_and_authenticate() {
         let executor = deterministic::Runner::default();
         // Build a db with `ELEMENTS` key/value pairs and prove ranges over them.
         const ELEMENTS: u64 = 2_000;
@@ -689,7 +743,7 @@ pub(super) mod test {
             let max_ops = 5;
             for i in 0..db.op_count() {
                 let (proof, log) = db.proof(i, max_ops).await.unwrap();
-                assert!(AppendTest::verify_proof(
+                assert!(ImmutableTest::verify_proof(
                     &mut hasher,
                     &proof,
                     i,
@@ -697,6 +751,130 @@ pub(super) mod test {
                     &root
                 ));
             }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    pub fn test_immutable_db_recovery_from_failed_mmr_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Insert 1000 keys then sync.
+            const ELEMENTS: u64 = 1000;
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
+
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![i as u8; 100];
+                db.set(k, v).await.unwrap();
+            }
+
+            assert_eq!(db.op_count(), ELEMENTS);
+            db.sync().await.unwrap();
+            let halfway_root = db.root(&mut hasher);
+
+            // Insert another 1000 keys then simulate a failed close and test recovery.
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![i as u8; 100];
+                db.set(k, v).await.unwrap();
+            }
+
+            // We partially write only 101 of the cached MMR nodes to simulate a failure.
+            db.simulate_failed_commit_mmr(101).await.unwrap();
+
+            // Recovery should replay the log to regenerate the mmr.
+            let db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 2001);
+            let root = db.root(&mut hasher);
+            assert_ne!(root, halfway_root);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    pub fn test_immutable_db_recovery_from_failed_locations_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Insert 1000 keys then sync.
+            const ELEMENTS: u64 = 1000;
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
+
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![i as u8; 100];
+                db.set(k, v).await.unwrap();
+            }
+
+            assert_eq!(db.op_count(), ELEMENTS);
+            db.sync().await.unwrap();
+            let halfway_root = db.root(&mut hasher);
+
+            // Insert another 1000 keys then simulate a failed close and test recovery.
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![i as u8; 100];
+                db.set(k, v).await.unwrap();
+            }
+
+            // Simulate failure to write the full locations map.
+            db.simulate_failed_commit_locations(101).await.unwrap();
+
+            // Recovery should replay the log to regenerate the locations map.
+            let db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 2001);
+            let root = db.root(&mut hasher);
+            assert_ne!(root, halfway_root);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    pub fn test_immutable_db_recovery_from_failed_log_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
+
+            // Insert a single key and then commit to create a first commit point.
+            let k1 = Sha256::fill(1u8);
+            let v1 = vec![1, 2, 3];
+            db.set(k1, v1).await.unwrap();
+            db.commit().await.unwrap();
+            let first_commit_root = db.root(&mut hasher);
+
+            // Insert 1000 keys then sync.
+            const ELEMENTS: u64 = 1000;
+
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![i as u8; 100];
+                db.set(k, v).await.unwrap();
+            }
+
+            assert_eq!(db.op_count(), ELEMENTS + 2);
+            db.sync().await.unwrap();
+
+            // Insert another 1000 keys then simulate a failed close and test recovery.
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![i as u8; 100];
+                db.set(k, v).await.unwrap();
+            }
+
+            // Simulate failure to write the full locations map.
+            db.simulate_failed_commit_log().await.unwrap();
+
+            // Recovery should back up to previous commit point.
+            let db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 2);
+            let root = db.root(&mut hasher);
+            assert_eq!(root, first_commit_root);
 
             db.destroy().await.unwrap();
         });
