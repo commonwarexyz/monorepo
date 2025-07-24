@@ -41,17 +41,17 @@
 //! ```
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, RangeCfg, Read, ReadRangeExt, Write};
-use commonware_cryptography::Hasher;
+use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_cryptography::{Digest, Hasher};
 use thiserror::Error;
 
 /// There should never be more than 255 levels in a proof (would mean the Binary Merkle Tree
 /// has more than 2^255 leaves).
+///
+/// Note: This constant represents the maximum tree height, NOT the maximum number of siblings
+/// at any level. For range proofs, each level can have at most 2 siblings (left and right
+/// boundaries), not MAX_LEVELS siblings.
 const MAX_LEVELS: usize = u8::MAX as usize;
-
-/// Because range proofs require contiguous leaves, there should never be more than 2 siblings
-/// per level.
-const MAX_LEVEL_SIBLINGS: usize = 2;
 
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
 #[derive(Error, Debug)]
@@ -217,8 +217,9 @@ impl<H: Hasher> Tree<H> {
         }
 
         // For each level (except the root level) collect the necessary siblings
-        let mut siblings_by_level = Vec::new();
+        let mut siblings = Vec::new();
         for (level_idx, level) in self.levels.iter().enumerate() {
+            // If the level has only one node, we're done
             if level.len() == 1 {
                 break;
             }
@@ -227,37 +228,30 @@ impl<H: Hasher> Tree<H> {
             let level_start = (position as usize) >> level_idx;
             let level_end = (end_position as usize) >> level_idx;
 
-            // For each position in our range at this level, determine if we need its sibling
-            let mut level_siblings = Vec::new();
-            let mut added_indices = std::collections::HashSet::new();
-            for pos in level_start..=level_end {
-                let sibling = if pos % 2 == 0 { pos + 1 } else { pos - 1 };
-
-                // Only add the sibling if:
-                // 1. It's outside our range (not between level_start and level_end)
-                // 2. We haven't already added it
-                if (sibling < level_start || sibling > level_end)
-                    && !added_indices.contains(&sibling)
-                {
-                    if sibling < level.len() {
-                        level_siblings.push(level[sibling]);
-                    } else {
-                        // If no right child exists, use a duplicate of the current node.
-                        //
-                        // This doesn't affect the robustness of the proof (allow a non-existent position
-                        // to be proven or enable multiple proofs to be generated from a single leaf).
-                        level_siblings.push(level[pos]);
-                    }
-                    added_indices.insert(sibling);
-                }
+            // Check if we need a left sibling
+            let mut left = None;
+            if level_start % 2 == 1 {
+                // Our range starts at an odd index, so we need the even sibling to the left
+                left = Some(level[level_start - 1]);
             }
 
-            siblings_by_level.push(level_siblings);
+            // Check if we need a right sibling
+            let mut right = None;
+            if level_end % 2 == 0 && level_end + 1 < level.len() {
+                // Our range ends at an even index, so we need the odd sibling to the right
+                right = Some(level[level_end + 1]);
+            } else if level_end % 2 == 0 && level_end + 1 >= level.len() {
+                // If no right child exists, use a duplicate of the current node.
+                //
+                // This doesn't affect the robustness of the proof (allow a non-existent position
+                // to be proven or enable multiple proofs to be generated from a single leaf).
+                right = Some(level[level_end]);
+            }
+
+            siblings.push(Bounds { left, right });
         }
 
-        Ok(RangeProof {
-            siblings: siblings_by_level,
-        })
+        Ok(RangeProof { siblings })
     }
 }
 
@@ -341,13 +335,54 @@ impl<H: Hasher> Proof<H> {
     }
 }
 
+/// A pair of sibling digests, one on the left boundary and one on the right boundary.
+#[derive(Clone, Debug, Eq)]
+pub struct Bounds<D: Digest> {
+    /// The left sibling digest.
+    pub left: Option<D>,
+
+    /// The right sibling digest.
+    pub right: Option<D>,
+}
+
+impl<D: Digest> PartialEq for Bounds<D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.left == other.left && self.right == other.right
+    }
+}
+
+impl<D: Digest> Write for Bounds<D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.left.write(writer);
+        self.right.write(writer);
+    }
+}
+
+impl<D: Digest> Read for Bounds<D> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            left: Option::<D>::read(reader)?,
+            right: Option::<D>::read(reader)?,
+        })
+    }
+}
+
+impl<D: Digest> EncodeSize for Bounds<D> {
+    fn encode_size(&self) -> usize {
+        self.left.encode_size() + self.right.encode_size()
+    }
+}
+
 /// A Merkle range proof for a contiguous set of leaves in a Binary Merkle Tree.
 #[derive(Clone, Debug, Eq)]
 pub struct RangeProof<H: Hasher> {
     /// The sibling digests needed to prove all elements in the range.
     ///
-    /// Organized by level, from leaves to root.
-    pub siblings: Vec<Vec<H::Digest>>,
+    /// Organized by level, from leaves to root. Each level can have at most
+    /// 2 siblings (one on the left boundary and one on the right boundary).
+    pub siblings: Vec<Bounds<H::Digest>>,
 }
 
 impl<H: Hasher> PartialEq for RangeProof<H>
@@ -357,6 +392,12 @@ where
     fn eq(&self, other: &Self) -> bool {
         self.siblings == other.siblings
     }
+}
+
+/// A node tracked during range proof verification.
+struct Node<D: Digest> {
+    position: usize,
+    digest: D,
 }
 
 impl<H: Hasher> RangeProof<H> {
@@ -383,56 +424,78 @@ impl<H: Hasher> RangeProof<H> {
         }
 
         // Compute position-hashed leaves
-        let mut nodes: Vec<(usize, H::Digest)> = Vec::new();
+        let mut nodes: Vec<Node<H::Digest>> = Vec::new();
         for (i, leaf) in leaves.iter().enumerate() {
             let leaf_position = position + i as u32;
             hasher.update(&leaf_position.to_be_bytes());
             hasher.update(leaf);
-            nodes.push((leaf_position as usize, hasher.finalize()));
+            nodes.push(Node {
+                position: leaf_position as usize,
+                digest: hasher.finalize(),
+            });
         }
 
         // Process each level
-        for level_siblings in self.siblings.iter() {
-            let mut next_nodes = Vec::new();
-            let mut sibling_iter = level_siblings.iter();
+        for bounds in self.siblings.iter() {
+            // Check if we should have a left sibling
+            let first_pos = nodes[0].position;
+            let last_pos = nodes[nodes.len() - 1].position;
+            let needs_left = first_pos % 2 == 1;
+            let needs_right = last_pos % 2 == 0;
 
-            // Process nodes in order
-            let mut i = 0;
-            while i < nodes.len() {
-                let (pos, node) = &nodes[i];
-                let parent_pos = pos / 2;
-
-                // Check if next node is the sibling
-                let expected_sibling_pos = if pos % 2 == 0 { Some(pos + 1) } else { None };
-                let has_paired_sibling =
-                    i + 1 < nodes.len() && expected_sibling_pos == Some(nodes[i + 1].0);
-                if has_paired_sibling {
-                    // Both children are in our range - no proof sibling needed
-                    hasher.update(node);
-                    hasher.update(&nodes[i + 1].1);
-                    next_nodes.push((parent_pos, hasher.finalize()));
-                    i += 2;
-                } else {
-                    // Need sibling from proof
-                    let is_left = pos % 2 == 0;
-                    let sibling = sibling_iter.next().ok_or(Error::UnalignedProof)?;
-
-                    // Hash in correct order based on position (left/right)
-                    if is_left {
-                        hasher.update(node);
-                        hasher.update(sibling);
-                    } else {
-                        hasher.update(sibling);
-                        hasher.update(node);
-                    }
-                    next_nodes.push((parent_pos, hasher.finalize()));
-                    i += 1;
-                }
+            // Validate that we have exactly the siblings we need
+            if needs_left != bounds.left.is_some() {
+                return Err(Error::UnalignedProof);
+            }
+            if needs_right != bounds.right.is_some() {
+                return Err(Error::UnalignedProof);
             }
 
-            // Verify we used all siblings at this level
-            if sibling_iter.next().is_some() {
-                return Err(Error::UnalignedProof);
+            // If we have a left sibling, we need to include it
+            let mut i = 0;
+            let mut next_nodes = Vec::new();
+            if let Some(left) = &bounds.left {
+                // The first node in our range needs its left sibling
+                let node = &nodes[0];
+                hasher.update(left);
+                hasher.update(&node.digest);
+                next_nodes.push(Node {
+                    position: node.position / 2,
+                    digest: hasher.finalize(),
+                });
+                i = 1;
+            }
+
+            // Process pairs of nodes in our range
+            while i < nodes.len() {
+                // Compute the parent position
+                let node = &nodes[i];
+                let parent_pos = node.position / 2;
+
+                // Check if we have a pair within our range
+                if i + 1 < nodes.len() && nodes[i + 1].position == node.position + 1 {
+                    // We have both children in our range
+                    hasher.update(&node.digest);
+                    hasher.update(&nodes[i + 1].digest);
+                    next_nodes.push(Node {
+                        position: parent_pos,
+                        digest: hasher.finalize(),
+                    });
+                    i += 2;
+                } else if i == nodes.len() - 1 {
+                    // This is the last node and it should have a right sibling
+                    let right = bounds.right.as_ref().unwrap();
+                    hasher.update(&node.digest);
+                    hasher.update(right);
+                    next_nodes.push(Node {
+                        position: parent_pos,
+                        digest: hasher.finalize(),
+                    });
+                    i += 1;
+                } else {
+                    // Single node in the middle (shouldn't happen for contiguous range)
+                    return Err(Error::UnalignedProof);
+                }
             }
 
             nodes = next_nodes;
@@ -442,7 +505,7 @@ impl<H: Hasher> RangeProof<H> {
         if nodes.len() != 1 {
             return Err(Error::UnalignedProof);
         }
-        let computed = nodes[0].1;
+        let computed = nodes[0].digest;
         if computed == *root {
             Ok(())
         } else {
@@ -461,10 +524,7 @@ impl<H: Hasher> Read for RangeProof<H> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let levels: RangeCfg = (..=MAX_LEVELS).into();
-        let level_siblings: RangeCfg = (..=MAX_LEVEL_SIBLINGS).into();
-        let siblings = Vec::<Vec<H::Digest>>::read_cfg(reader, &(levels, (level_siblings, ())))?;
-
+        let siblings = Vec::<Bounds<H::Digest>>::read_range(reader, ..=MAX_LEVELS)?;
         Ok(Self { siblings })
     }
 }
@@ -1147,8 +1207,12 @@ mod tests {
         // Test with tampered proof
         let mut tampered_proof = range_proof.clone();
         assert!(!tampered_proof.siblings.is_empty());
-        assert!(!tampered_proof.siblings[0].is_empty());
-        tampered_proof.siblings[0][0] = hash(b"tampered");
+        // Tamper with the first level's left sibling if it exists
+        if let Some(ref mut left) = tampered_proof.siblings[0].left {
+            *left = hash(b"tampered");
+        } else if let Some(ref mut right) = tampered_proof.siblings[0].right {
+            *right = hash(b"tampered");
+        }
         assert!(tampered_proof
             .verify(&mut hasher, 2, range_leaves, &root)
             .is_err());
@@ -1262,9 +1326,14 @@ mod tests {
         let mut hasher = Sha256::default();
         let range_leaves = &digests[2..4];
 
-        // Add extra sibling to a level
+        // Tamper by setting both siblings when there should only be one or two
         assert!(!range_proof.siblings.is_empty());
-        range_proof.siblings[0].push(hash(b"extra"));
+        // Force an invalid state by modifying the siblings
+        if range_proof.siblings[0].left.is_none() {
+            range_proof.siblings[0].left = Some(hash(b"extra"));
+        } else if range_proof.siblings[0].right.is_none() {
+            range_proof.siblings[0].right = Some(hash(b"extra"));
+        }
         assert!(range_proof
             .verify(&mut hasher, 2, range_leaves, &root)
             .is_err());
@@ -1290,10 +1359,11 @@ mod tests {
 
         // The proof should have siblings at the first level
         assert!(!range_proof.siblings.is_empty());
-        assert!(!range_proof.siblings[0].is_empty());
+        assert!(range_proof.siblings[0].left.is_some() || range_proof.siblings[0].right.is_some());
 
         // Remove a sibling from a level
-        range_proof.siblings[0].pop();
+        range_proof.siblings[0].left = None;
+        range_proof.siblings[0].right = None;
         assert!(range_proof
             .verify(&mut hasher, 2, range_leaves, &root)
             .is_err());
@@ -1336,7 +1406,10 @@ mod tests {
         let range_leaves = &digests[2..4];
 
         // Add extra level (simulating proof from different tree structure)
-        range_proof.siblings.push(vec![hash(b"fake_level")]);
+        range_proof.siblings.push(Bounds {
+            left: Some(hash(b"fake_level")),
+            right: None,
+        });
         assert!(range_proof
             .verify(&mut hasher, 2, range_leaves, &root)
             .is_err());
@@ -1387,6 +1460,81 @@ mod tests {
             // Full tree
             let proof = tree.range_proof(0, tree_size as u32).unwrap();
             assert!(proof.verify(&mut hasher, 0, &digests, &root).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_range_proof_bounds_usage() {
+        // This test ensures that all bounds in a range proof are actually used during verification
+        // and that we don't have unnecessary siblings
+        let digests: Vec<Digest> = (0..16u32).map(|i| hash(&i.to_be_bytes())).collect();
+
+        // Build tree
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+        let root = tree.root();
+        let mut hasher = Sha256::default();
+
+        // Test various ranges
+        let test_cases = vec![
+            (1, 2),  // Range starting at odd index (needs left sibling)
+            (4, 4),  // Range starting at even index ending at odd (needs right sibling)
+            (3, 6),  // Range with both boundaries needing siblings
+            (0, 16), // Full tree (no siblings needed at leaf level)
+        ];
+
+        for (start, count) in test_cases {
+            let range_proof = tree.range_proof(start, count).unwrap();
+            let end = start as usize + count as usize;
+
+            // Verify the proof works
+            assert!(range_proof
+                .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                .is_ok());
+
+            // For each level with siblings, try removing them and verify the proof fails
+            for level_idx in 0..range_proof.siblings.len() {
+                let bounds = &range_proof.siblings[level_idx];
+
+                // If there's a left sibling, removing it should make the proof fail
+                if bounds.left.is_some() {
+                    let mut tampered_proof = range_proof.clone();
+                    tampered_proof.siblings[level_idx].left = None;
+                    assert!(tampered_proof
+                        .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                        .is_err());
+                }
+
+                // If there's a right sibling, removing it should make the proof fail
+                if bounds.right.is_some() {
+                    let mut tampered_proof = range_proof.clone();
+                    tampered_proof.siblings[level_idx].right = None;
+                    assert!(tampered_proof
+                        .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                        .is_err());
+                }
+
+                // If there's no left sibling, adding one should make the proof fail
+                if bounds.left.is_none() {
+                    let mut tampered_proof = range_proof.clone();
+                    tampered_proof.siblings[level_idx].left = Some(hash(b"fake_left"));
+                    assert!(tampered_proof
+                        .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                        .is_err());
+                }
+
+                // If there's no right sibling, adding one should make the proof fail
+                if bounds.right.is_none() {
+                    let mut tampered_proof = range_proof.clone();
+                    tampered_proof.siblings[level_idx].right = Some(hash(b"fake_right"));
+                    assert!(tampered_proof
+                        .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                        .is_err());
+                }
+            }
         }
     }
 
