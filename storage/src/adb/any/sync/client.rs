@@ -20,8 +20,13 @@ use commonware_runtime::{
     Clock, Metrics as MetricsTrait, Storage,
 };
 use commonware_utils::Array;
+use futures::{stream::FuturesUnordered, StreamExt};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
-use std::{num::NonZeroU64, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU64,
+    sync::Arc,
+};
 use tracing::{debug, info, warn};
 
 /// Configuration for the sync client
@@ -163,10 +168,8 @@ fn validate_target_update<H: Hasher>(
 
 /// Synchronizes a database by fetching, verifying, and applying operations from a remote source.
 ///
-/// We repeatedly:
-/// 1. Fetch operations in batches from a Resolver (i.e. a server of operations)
-/// 2. Verify cryptographic proofs for each batch to ensure correctness
-/// 3. Apply operations to reconstruct the database's operation log.
+/// We fetch operations in parallel batches from a Resolver, verify cryptographic proofs,
+/// and apply operations to reconstruct the database's operation log.
 ///
 /// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
 pub async fn sync<E, K, V, H, T, R>(
@@ -185,21 +188,368 @@ where
     // Initialize sync
     let (mut config, mut log, metrics, mut pinned_nodes) = initialize_sync(config).await?;
 
+    // State for parallel batch fetching
+    let mut verified_batches: BTreeMap<u64, Vec<Operation<K, V>>> = BTreeMap::new();
+    let mut outstanding_requests: BTreeSet<u64> = BTreeSet::new();
+    let mut pending_fetches: FuturesUnordered<
+        std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = (u64, Result<GetOperationsResult<H::Digest, K, V>, Error>),
+                    > + Send,
+            >,
+        >,
+    > = FuturesUnordered::new();
+
+    // Initialize parallel fetching
+    initialize_parallel_fetches(
+        &mut config,
+        &log,
+        &mut outstanding_requests,
+        &mut pending_fetches,
+        &metrics,
+    )
+    .await?;
+
     loop {
-        // Handle any pending target updates
+        // Handle any pending target updates first
         (config, log, pinned_nodes) = handle_target_updates(config, log, pinned_nodes).await?;
 
-        // Check if sync is complete and return database if so
+        // If we have pending fetches, wait for one to complete
+        if !pending_fetches.is_empty() {
+            if let Some(batch_result) = pending_fetches.next().await {
+                handle_batch_completion(
+                    batch_result,
+                    &mut config,
+                    &log,
+                    &mut verified_batches,
+                    &mut outstanding_requests,
+                    &mut pending_fetches,
+                    &mut pinned_nodes,
+                    &metrics,
+                )
+                .await?;
+            }
+        }
+
+        // Apply contiguous verified batches
+        log = apply_contiguous_batches(
+            log,
+            &mut verified_batches,
+            &metrics,
+            config.apply_batch_size,
+        )
+        .await?;
+
+        // Check if sync is complete
         if is_sync_complete(&config, &log).await? {
             return build_database(config, log, &pinned_nodes, &metrics).await;
         }
-
-        // Fetch and verify a batch of operations
-        let operations = get_operations(&mut config, &log, &mut pinned_nodes, &metrics).await?;
-
-        // Apply operations to the log
-        log = apply_operations_to_log(log, operations, &metrics).await?;
     }
+}
+
+/// Initialize parallel fetching by starting initial batch requests
+async fn initialize_parallel_fetches<E, K, V, H, T, R>(
+    config: &mut Config<E, K, V, H, T, R>,
+    log: &Journal<E, Operation<K, V>>,
+    outstanding_requests: &mut BTreeSet<u64>,
+    pending_fetches: &mut FuturesUnordered<
+        std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = (u64, Result<GetOperationsResult<H::Digest, K, V>, Error>),
+                    > + Send,
+            >,
+        >,
+    >,
+    _metrics: &Metrics<E>,
+) -> Result<(), Error>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
+    let log_size = log
+        .size()
+        .await
+        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+    let target_size = config.target.upper_bound_ops + 1;
+    let mut current_pos = log_size;
+
+    // Start initial batch requests up to max_outstanding_requests
+    for _ in 0..config.max_outstanding_requests {
+        if current_pos >= target_size {
+            break;
+        }
+
+        let remaining_ops = target_size - current_pos;
+        let batch_size = std::cmp::min(config.fetch_batch_size.get(), remaining_ops);
+        if let Some(batch_size) = NonZeroU64::new(batch_size) {
+            outstanding_requests.insert(current_pos);
+
+            let resolver = config.resolver.clone();
+            let start_pos = current_pos;
+
+            pending_fetches.push(Box::pin(async move {
+                let result = resolver
+                    .get_operations(target_size, start_pos, batch_size)
+                    .await;
+                (start_pos, result)
+            }));
+
+            current_pos += batch_size.get();
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle completion of a batch fetch
+async fn handle_batch_completion<E, K, V, H, T, R>(
+    (start_pos, result): (u64, Result<GetOperationsResult<H::Digest, K, V>, Error>),
+    config: &mut Config<E, K, V, H, T, R>,
+    log: &Journal<E, Operation<K, V>>,
+    verified_batches: &mut BTreeMap<u64, Vec<Operation<K, V>>>,
+    outstanding_requests: &mut BTreeSet<u64>,
+    pending_fetches: &mut FuturesUnordered<
+        std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = (u64, Result<GetOperationsResult<H::Digest, K, V>, Error>),
+                    > + Send,
+            >,
+        >,
+    >,
+    pinned_nodes: &mut Option<Vec<H::Digest>>,
+    metrics: &Metrics<E>,
+) -> Result<(), Error>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
+    // Remove from outstanding requests
+    outstanding_requests.remove(&start_pos);
+
+    match result {
+        Ok(GetOperationsResult {
+            proof,
+            operations,
+            success_tx,
+        }) => {
+            let operations_len = operations.len() as u64;
+            let _batch_size = NonZeroU64::new(operations_len).ok_or(Error::InvalidState)?;
+
+            // Validate batch size
+            if operations_len > config.fetch_batch_size.get() || operations_len == 0 {
+                debug!(
+                    operations_len,
+                    batch_size = config.fetch_batch_size.get(),
+                    start_pos,
+                    "received invalid batch size from resolver"
+                );
+                metrics.invalid_batches_received.inc();
+                let _ = success_tx.send(false);
+
+                // Retry the request
+                send_next_request(
+                    config,
+                    log,
+                    outstanding_requests,
+                    pending_fetches,
+                    Some(start_pos),
+                )
+                .await?;
+                return Ok(());
+            }
+
+            // Verify the proof
+            let proof_valid = {
+                let _timer = metrics.proof_verification_duration.timer();
+                adb::any::Any::<E, K, V, H, T>::verify_proof(
+                    &mut config.hasher,
+                    &proof,
+                    start_pos,
+                    &operations,
+                    &config.target.root,
+                )
+            };
+            let _ = success_tx.send(proof_valid);
+
+            if !proof_valid {
+                debug!(start_pos, "proof verification failed, retrying");
+                metrics.invalid_batches_received.inc();
+
+                // Retry the request
+                send_next_request(
+                    config,
+                    log,
+                    outstanding_requests,
+                    pending_fetches,
+                    Some(start_pos),
+                )
+                .await?;
+                return Ok(());
+            }
+
+            // Install pinned nodes on first successful batch
+            if pinned_nodes.is_none() && start_pos == config.target.lower_bound_ops {
+                let start_pos_mmr = leaf_num_to_pos(start_pos);
+                let end_pos_mmr = leaf_num_to_pos(start_pos + operations_len - 1);
+                match proof.extract_pinned_nodes(start_pos_mmr, end_pos_mmr) {
+                    Ok(nodes) => {
+                        *pinned_nodes = Some(nodes);
+                    }
+                    Err(_) => {
+                        warn!(start_pos, "failed to extract pinned nodes, retrying");
+                        metrics.invalid_batches_received.inc();
+
+                        // Retry the request
+                        send_next_request(
+                            config,
+                            log,
+                            outstanding_requests,
+                            pending_fetches,
+                            Some(start_pos),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                }
+            }
+
+            // Store verified batch
+            verified_batches.insert(start_pos, operations);
+            metrics.valid_batches_received.inc();
+            metrics.operations_fetched.inc_by(operations_len);
+
+            // Send next request to maintain parallelism
+            send_next_request(config, log, outstanding_requests, pending_fetches, None).await?;
+        }
+        Err(e) => {
+            warn!(start_pos, error = ?e, "batch fetch failed, retrying");
+
+            // Retry the request
+            send_next_request(
+                config,
+                log,
+                outstanding_requests,
+                pending_fetches,
+                Some(start_pos),
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Send the next batch request to maintain max_outstanding_requests
+async fn send_next_request<E, K, V, H, T, R>(
+    config: &Config<E, K, V, H, T, R>,
+    log: &Journal<E, Operation<K, V>>,
+    outstanding_requests: &mut BTreeSet<u64>,
+    pending_fetches: &mut FuturesUnordered<
+        std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = (u64, Result<GetOperationsResult<H::Digest, K, V>, Error>),
+                    > + Send,
+            >,
+        >,
+    >,
+    retry_pos: Option<u64>,
+) -> Result<(), Error>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
+    let target_size = config.target.upper_bound_ops + 1;
+
+    let start_pos = if let Some(retry_pos) = retry_pos {
+        retry_pos
+    } else {
+        // Find the next position to request
+        let log_size = log
+            .size()
+            .await
+            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+        outstanding_requests.last().copied().unwrap_or(log_size) + config.fetch_batch_size.get()
+    };
+
+    if start_pos >= target_size {
+        return Ok(());
+    }
+
+    let remaining_ops = target_size - start_pos;
+    let batch_size = std::cmp::min(config.fetch_batch_size.get(), remaining_ops);
+    if let Some(batch_size) = NonZeroU64::new(batch_size) {
+        outstanding_requests.insert(start_pos);
+
+        let resolver = config.resolver.clone();
+
+        pending_fetches.push(Box::pin(async move {
+            let result = resolver
+                .get_operations(target_size, start_pos, batch_size)
+                .await;
+            (start_pos, result)
+        }));
+    }
+
+    Ok(())
+}
+
+/// Apply contiguous verified batches to the log
+async fn apply_contiguous_batches<E, K, V>(
+    mut log: Journal<E, Operation<K, V>>,
+    verified_batches: &mut BTreeMap<u64, Vec<Operation<K, V>>>,
+    metrics: &Metrics<E>,
+    apply_batch_size: usize,
+) -> Result<Journal<E, Operation<K, V>>, Error>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+{
+    let log_size = log
+        .size()
+        .await
+        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+    let mut operations_to_apply = Vec::new();
+    let mut current_pos = log_size;
+
+    // Collect contiguous operations starting from current log size
+    while let Some(operations) = verified_batches.remove(&current_pos) {
+        let operations_len = operations.len() as u64;
+        operations_to_apply.extend(operations);
+        current_pos += operations_len;
+
+        // Apply in batches to avoid memory issues
+        if operations_to_apply.len() >= apply_batch_size {
+            log = apply_operations_to_log(log, operations_to_apply, metrics).await?;
+            operations_to_apply = Vec::new();
+        }
+    }
+
+    // Apply remaining operations
+    if !operations_to_apply.is_empty() {
+        log = apply_operations_to_log(log, operations_to_apply, metrics).await?;
+    }
+
+    Ok(log)
 }
 
 /// Initialize the sync process by validating config and setting up the journal
