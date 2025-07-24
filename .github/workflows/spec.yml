@@ -5,6 +5,9 @@ on:
     paths:
       - "pipeline/minimmit/spec"
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
