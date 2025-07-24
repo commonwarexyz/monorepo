@@ -40,6 +40,8 @@ struct Config {
     target_update_interval: Duration,
     /// Interval between sync operations.
     sync_interval: Duration,
+    /// Maximum number of outstanding requests.
+    max_outstanding_requests: usize,
 }
 
 /// Periodically request target updates from server and send them to sync client
@@ -158,7 +160,7 @@ where
         resolver,
         hasher: Standard::new(),
         apply_batch_size: 1024,
-        max_outstanding_requests: 1,
+        max_outstanding_requests: config.max_outstanding_requests,
         update_receiver: Some(update_receiver),
     };
 
@@ -267,6 +269,14 @@ fn main() {
                 .help("Interval between sync operations ('ms', 's', 'm', 'h')")
                 .default_value("10s"),
         )
+        .arg(
+            Arg::new("max-outstanding-requests")
+                .short('r')
+                .long("max-outstanding-requests")
+                .value_name("COUNT")
+                .help("Maximum number of outstanding sync requests")
+                .default_value("1"),
+        )
         .get_matches();
 
     let config = Config {
@@ -319,6 +329,14 @@ fn main() {
                 eprintln!("❌ Invalid sync interval: {e}");
                 std::process::exit(1);
             }),
+        max_outstanding_requests: matches
+            .get_one::<String>("max-outstanding-requests")
+            .unwrap()
+            .parse()
+            .unwrap_or_else(|e| {
+                eprintln!("❌ Invalid max outstanding requests: {e}");
+                std::process::exit(1);
+            }),
     };
 
     info!(
@@ -328,6 +346,7 @@ fn main() {
         metrics_port = config.metrics_port,
         target_update_interval = ?config.target_update_interval,
         sync_interval = ?config.sync_interval,
+        max_outstanding_requests = config.max_outstanding_requests,
         "client starting with configuration"
     );
 
