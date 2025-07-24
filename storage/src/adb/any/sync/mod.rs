@@ -1,7 +1,7 @@
 use crate::{
     adb::any::{
         sync::{
-            client::{Client, Config},
+            client::{sync as client_sync, Config},
             resolver::Resolver,
         },
         Any,
@@ -116,6 +116,7 @@ impl<D: Digest> Read for SyncTarget<D> {
 /// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
 //
 // TODO(#1214) Parallelize operation fetching: https://github.com/commonwarexyz/monorepo/issues/1214
+// TODO remove this function and use the client directly
 pub async fn sync<E, K, V, H, T, R>(
     config: Config<E, K, V, H, T, R>,
 ) -> Result<Any<E, K, V, H, T>, Error>
@@ -127,9 +128,5 @@ where
     T: Translator,
     R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
-    let client = Client::new(config).await?;
-    match client {
-        Client::Done { db } => Ok(db),
-        _ => client.sync().await,
-    }
+    client_sync(config).await
 }
