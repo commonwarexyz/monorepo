@@ -113,7 +113,7 @@
 //! ```
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Hasher;
 use commonware_storage::bmt::{self, Builder};
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
@@ -139,7 +139,7 @@ pub enum Error {
     InvalidIndex(u16),
 }
 
-/// Data that has been encoded using a Reed-Solomon coder and inserted into a [bmt].
+/// A piece of data from a Reed-Solomon encoded object.
 #[derive(Clone)]
 pub struct Chunk<H: Hasher> {
     /// The shard of encoded data.
@@ -163,7 +163,12 @@ impl<H: Hasher> Chunk<H> {
     }
 
     /// Verify a [Chunk] against the given root.
-    pub fn verify(&self, root: &H::Digest) -> bool {
+    pub fn verify(&self, index: u16, root: &H::Digest) -> bool {
+        // Ensure the index matches
+        if index != self.index {
+            return false;
+        }
+
         // Compute shard digest
         let mut hasher = H::new();
         hasher.update(&self.shard);
@@ -203,6 +208,81 @@ impl<H: Hasher> Read for Chunk<H> {
 impl<H: Hasher> EncodeSize for Chunk<H> {
     fn encode_size(&self) -> usize {
         self.shard.encode_size() + self.index.encode_size() + self.proof.encode_size()
+    }
+}
+
+/// All data shards from a Reed-Solomon encoded object.
+///
+/// This is more efficient than individual chunks when transmitting complete blocks.
+/// Includes a [bmt::RangeProof] to prove the data shards are part of the commitment.
+#[derive(Clone)]
+pub struct Data<H: Hasher> {
+    /// The data shards.
+    pub shards: Vec<Vec<u8>>,
+
+    /// Range proof for indices 0..k (proving all data shards are part of the commitment).
+    pub proof: bmt::RangeProof<H>,
+}
+
+impl<H: Hasher> Data<H> {
+    /// Create a new [Data] from data shards and range proof.
+    pub fn new(shards: Vec<Vec<u8>>, proof: bmt::RangeProof<H>) -> Self {
+        Self { shards, proof }
+    }
+
+    /// Verify the [Data] against a known root.
+    ///
+    /// This verifies that the data shards are part of the [bmt] commitment.
+    pub fn verify(&self, min: u16, root: &H::Digest) -> bool {
+        // Ensure we have the correct number of data shards
+        let k = min as usize;
+        if self.shards.len() != k {
+            return false;
+        }
+
+        // Hash the data shards
+        let mut hasher = H::new();
+        let mut shards = Vec::with_capacity(k);
+        for shard in &self.shards {
+            hasher.update(shard);
+            shards.push(hasher.finalize());
+        }
+
+        // Verify the range proof for indices 0..k
+        self.proof.verify(&mut hasher, 0, &shards, root).is_ok()
+    }
+
+    /// Extract the original data from the [Data].
+    pub fn extract(self) -> Vec<u8> {
+        let k = self.shards.len();
+        extract_data(self.shards, k)
+    }
+}
+
+impl<H: Hasher> Write for Data<H> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.shards.write(writer);
+        self.proof.write(writer);
+    }
+}
+
+impl<H: Hasher> Read for Data<H> {
+    /// The maximum size of each shard.
+    type Cfg = usize;
+
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let shard_count: RangeCfg = (1..=u16::MAX as usize).into();
+        let shard_size: RangeCfg = (..=*cfg).into();
+        let shards = Vec::<Vec<u8>>::read_cfg(reader, &(shard_count, (shard_size, ())))?;
+        let proof = bmt::RangeProof::<H>::read(reader)?;
+
+        Ok(Self { shards, proof })
+    }
+}
+
+impl<H: Hasher> EncodeSize for Data<H> {
+    fn encode_size(&self) -> usize {
+        self.shards.encode_size() + self.proof.encode_size()
     }
 }
 
@@ -249,23 +329,11 @@ fn extract_data(shards: Vec<Vec<u8>>, k: usize) -> Vec<u8> {
     data.take(data_len).collect()
 }
 
-/// Encode data using a Reed-Solomon coder and insert it into a [bmt].
-///
-/// # Parameters
-///
-/// - `total`: The total number of chunks to generate.
-/// - `min`: The minimum number of chunks required to decode the data.
-/// - `data`: The data to encode.
-///
-/// # Returns
-///
-/// - `root`: The root of the [bmt].
-/// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
-pub fn encode<H: Hasher>(
-    total: u16,
-    min: u16,
-    data: Vec<u8>,
-) -> Result<(H::Digest, Vec<Chunk<H>>), Error> {
+/// Type alias for the internal encoding result.
+pub type Encoding<H> = (bmt::Tree<H>, Vec<Vec<u8>>);
+
+/// Common encoding logic shared by [encode()] and [translate()].
+pub fn encode_inner<H: Hasher>(total: u16, min: u16, data: Vec<u8>) -> Result<Encoding<H>, Error> {
     // Validate parameters
     assert!(total > min);
     assert!(min > 0);
@@ -306,7 +374,31 @@ pub fn encode<H: Hasher>(
         });
     }
     let tree = builder.build();
+
+    Ok((tree, shards))
+}
+
+/// Encode data using a Reed-Solomon coder and insert it into a [bmt].
+///
+/// # Parameters
+///
+/// - `total`: The total number of chunks to generate.
+/// - `min`: The minimum number of chunks required to decode the data.
+/// - `data`: The data to encode.
+///
+/// # Returns
+///
+/// - `root`: The root of the [bmt].
+/// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
+pub fn encode<H: Hasher>(
+    total: u16,
+    min: u16,
+    data: Vec<u8>,
+) -> Result<(H::Digest, Vec<Chunk<H>>), Error> {
+    // Encode data
+    let (tree, shards) = encode_inner::<H>(total, min, data)?;
     let root = tree.root();
+    let n = total as usize;
 
     // Generate chunks
     let mut chunks = Vec::with_capacity(n);
@@ -316,6 +408,40 @@ pub fn encode<H: Hasher>(
     }
 
     Ok((root, chunks))
+}
+
+/// Translate data into a single proof over all data shards.
+///
+/// # Parameters
+///
+/// - `total`: The total number of chunks to generate.
+/// - `min`: The minimum number of chunks required to decode the data.
+/// - `data`: The data to encode.
+///
+/// # Returns
+///
+/// - `root`: The root of the [bmt].
+/// - `data`: All data shards from the encoded object (and a range proof that they are part of the `root`).
+pub fn translate<H: Hasher>(
+    total: u16,
+    min: u16,
+    data: Vec<u8>,
+) -> Result<(H::Digest, Data<H>), Error> {
+    // Encode data
+    let (tree, mut shards) = encode_inner::<H>(total, min, data)?;
+    let root = tree.root();
+    let k = min as usize;
+
+    // Truncate to data shards only
+    shards.truncate(k);
+
+    // Generate range proof for minimal proof
+    let proof = tree
+        .range_proof(0, (min - 1) as u32)
+        .map_err(|_| Error::InvalidProof)?;
+    let proof = Data::new(shards, proof);
+
+    Ok((root, proof))
 }
 
 /// Decode data from a set of [Chunk]s.
@@ -363,7 +489,7 @@ pub fn decode<H: Hasher>(
         seen.insert(index);
 
         // Verify Merkle proof
-        if !chunk.verify(root) {
+        if !chunk.verify(chunk.index, root) {
             return Err(Error::InvalidProof);
         }
 
@@ -436,6 +562,7 @@ pub fn decode<H: Hasher>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::{Decode, Encode};
     use commonware_cryptography::Sha256;
 
     #[test]
@@ -447,6 +574,11 @@ mod tests {
         // Encode the data
         let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
         assert_eq!(chunks.len(), total as usize);
+
+        // Verify all chunks
+        for i in 0..total {
+            assert!(chunks[i as usize].verify(i, &root));
+        }
 
         // Try to decode with exactly min (all original shards)
         let minimal = chunks.into_iter().take(min as usize).collect();
@@ -525,6 +657,21 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_index() {
+        let data = b"Test invalid index";
+        let total = 5u16;
+        let min = 3u16;
+
+        // Encode data
+        let (root, chunks) = encode::<Sha256>(total, min, data.to_vec()).unwrap();
+
+        // Verify all proofs at invalid index
+        for i in 0..total {
+            assert!(!chunks[i as usize].verify(i + 1, &root));
+        }
+    }
+
+    #[test]
     #[should_panic(expected = "assertion failed: total > min")]
     fn test_invalid_total() {
         let data = b"Test parameter validation";
@@ -585,6 +732,11 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(b"malicious_data_that_wasnt_actually_encoded");
         let malicious_root = hasher.finalize();
+
+        // Verify all proofs at incorrect root
+        for i in 0..total {
+            assert!(!chunks[i as usize].verify(i, &malicious_root));
+        }
 
         // Collect valid pieces (these are legitimate fragments)
         let minimal = chunks.into_iter().take(min as usize).collect();
@@ -690,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_index() {
+    fn test_decode_invalid_index() {
         let data = b"Testing recovery pieces";
         let total = 8u16;
         let min = 3u16;
@@ -743,5 +895,60 @@ mod tests {
                 }
             ))
         ));
+    }
+
+    #[test]
+    fn test_translate() {
+        let data = b"Test data for minimal proof functionality";
+        let total = 7u16;
+        let min = 4u16;
+
+        // Encode with minimal proof
+        let (root, proof) = translate::<Sha256>(total, min, data.to_vec()).unwrap();
+
+        // Verify minimal proof
+        assert!(proof.verify(min, &root));
+
+        // Extract data from minimal proof
+        let extracted = proof.extract();
+        assert_eq!(extracted, data);
+    }
+
+    #[test]
+    fn test_translate_wrong_root() {
+        let data = b"Test data for minimal proof";
+        let total = 5u16;
+        let min = 3u16;
+
+        // Encode with minimal proof
+        let (_, proof) = translate::<Sha256>(total, min, data.to_vec()).unwrap();
+
+        // Try to verify with wrong root
+        let mut hasher = Sha256::new();
+        hasher.update(b"wrong_root");
+        let wrong_root = hasher.finalize();
+
+        assert!(!proof.verify(min, &wrong_root));
+    }
+
+    #[test]
+    fn test_translate_serialization() {
+        let data = b"Test serialization of minimal proof";
+        let total = 5u16;
+        let min = 3u16;
+
+        // Encode with minimal proof
+        let (root, proof) = translate::<Sha256>(total, min, data.to_vec()).unwrap();
+
+        // Serialize
+        let serialized = proof.encode();
+
+        // Deserialize
+        let max_shard_size = proof.shards[0].len();
+        let deserialized = Data::<Sha256>::decode_cfg(serialized, &max_shard_size).unwrap();
+
+        // Verify deserialized proof
+        assert!(deserialized.verify(min, &root));
+        assert_eq!(deserialized.extract(), data);
     }
 }
