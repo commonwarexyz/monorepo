@@ -192,6 +192,15 @@ where
     // State for parallel batch fetching
     let mut verified_batches: BTreeMap<u64, Vec<Operation<K, V>>> = BTreeMap::new();
     let mut outstanding_requests: BTreeSet<u64> = BTreeSet::new();
+
+    // Get current log size to initialize highest_received_pos
+    let log_size = log
+        .size()
+        .await
+        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+    // Track the highest contiguous position we've received (not requested)
+    let mut highest_received_pos: u64 = log_size;
     let mut pending_fetches: FuturesUnordered<
         std::pin::Pin<
             Box<
@@ -208,6 +217,8 @@ where
         &log,
         &mut outstanding_requests,
         &mut pending_fetches,
+        &mut highest_received_pos,
+        &pinned_nodes,
         &metrics,
     )
     .await?;
@@ -257,6 +268,11 @@ where
                             .await
                             .map_err(adb::Error::JournalError)
                             .map_err(Error::Adb)?;
+                        } else {
+                            // Prune the log to the new lower bound
+                            log.prune(config.target.lower_bound_ops)
+                                .await
+                                .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
                         }
 
                         // Reinitialize parallel fetching
@@ -265,6 +281,8 @@ where
                             &log,
                             &mut outstanding_requests,
                             &mut pending_fetches,
+                            &mut highest_received_pos,
+                            &pinned_nodes,
                             &metrics,
                         ).await?;
                     }
@@ -275,10 +293,10 @@ where
                         handle_batch_completion(
                             batch_result,
                             &mut config,
-                            &log,
                             &mut verified_batches,
                             &mut outstanding_requests,
                             &mut pending_fetches,
+                            &mut highest_received_pos,
                             &mut pinned_nodes,
                             &metrics,
                         ).await?;
@@ -291,10 +309,10 @@ where
                 handle_batch_completion(
                     batch_result,
                     &mut config,
-                    &log,
                     &mut verified_batches,
                     &mut outstanding_requests,
                     &mut pending_fetches,
+                    &mut highest_received_pos,
                     &mut pinned_nodes,
                     &metrics,
                 )
@@ -344,6 +362,11 @@ where
                         .await
                         .map_err(adb::Error::JournalError)
                         .map_err(Error::Adb)?;
+                    } else {
+                        // Prune the log to the new lower bound
+                        log.prune(config.target.lower_bound_ops)
+                            .await
+                            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
                     }
 
                     // Reinitialize parallel fetching
@@ -352,6 +375,8 @@ where
                         &log,
                         &mut outstanding_requests,
                         &mut pending_fetches,
+                        &mut highest_received_pos,
+                        &pinned_nodes,
                         &metrics,
                     )
                     .await?;
@@ -389,6 +414,8 @@ async fn initialize_parallel_fetches<E, K, V, H, T, R>(
             >,
         >,
     >,
+    highest_received_pos: &mut u64,
+    pinned_nodes: &Option<Vec<H::Digest>>,
     _metrics: &Metrics<E>,
 ) -> Result<(), Error>
 where
@@ -399,15 +426,24 @@ where
     T: Translator,
     R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
-    let log_size = log
+    let _log_size = log
         .size()
         .await
         .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
     let target_size = config.target.upper_bound_ops + 1;
-    let mut current_pos = log_size;
+
+    // If we don't have pinned nodes, we must ensure our first request can extract them
+    // This means starting from at least lower_bound_ops, but not re-requesting existing operations
+    let current_pos = if pinned_nodes.is_none() {
+        std::cmp::max(*highest_received_pos, config.target.lower_bound_ops)
+    } else {
+        *highest_received_pos
+    };
 
     // Start initial batch requests up to max_outstanding_requests
+    // Note: We can't assume batch sizes, so we start conservatively and let
+    // the completion handler start more requests based on actual received data
     for _ in 0..config.max_outstanding_requests {
         if current_pos >= target_size {
             break;
@@ -428,7 +464,9 @@ where
                 (start_pos, result)
             }));
 
-            current_pos += batch_size.get();
+            // Don't increment current_pos by batch_size since we don't know how much we'll get
+            // The completion handler will determine the next position based on actual received data
+            break; // Only start one request initially, let completion handler start more
         }
     }
 
@@ -439,7 +477,6 @@ where
 async fn handle_batch_completion<E, K, V, H, T, R>(
     (start_pos, result): (u64, Result<GetOperationsResult<H::Digest, K, V>, Error>),
     config: &mut Config<E, K, V, H, T, R>,
-    log: &Journal<E, Operation<K, V>>,
     verified_batches: &mut BTreeMap<u64, Vec<Operation<K, V>>>,
     outstanding_requests: &mut BTreeSet<u64>,
     pending_fetches: &mut FuturesUnordered<
@@ -451,6 +488,7 @@ async fn handle_batch_completion<E, K, V, H, T, R>(
             >,
         >,
     >,
+    highest_received_pos: &mut u64,
     pinned_nodes: &mut Option<Vec<H::Digest>>,
     metrics: &Metrics<E>,
 ) -> Result<(), Error>
@@ -488,9 +526,9 @@ where
                 // Retry the request
                 send_next_request(
                     config,
-                    log,
                     outstanding_requests,
                     pending_fetches,
+                    *highest_received_pos,
                     Some(start_pos),
                 )
                 .await?;
@@ -517,16 +555,16 @@ where
                 // Retry the request
                 send_next_request(
                     config,
-                    log,
                     outstanding_requests,
                     pending_fetches,
+                    *highest_received_pos,
                     Some(start_pos),
                 )
                 .await?;
                 return Ok(());
             }
 
-            // Install pinned nodes on first successful batch
+            // Install pinned nodes on first successful batch starting from lower_bound_ops
             if pinned_nodes.is_none() && start_pos == config.target.lower_bound_ops {
                 let start_pos_mmr = leaf_num_to_pos(start_pos);
                 let end_pos_mmr = leaf_num_to_pos(start_pos + operations_len - 1);
@@ -541,9 +579,9 @@ where
                         // Retry the request
                         send_next_request(
                             config,
-                            log,
                             outstanding_requests,
                             pending_fetches,
+                            *highest_received_pos,
                             Some(start_pos),
                         )
                         .await?;
@@ -557,8 +595,20 @@ where
             metrics.valid_batches_received.inc();
             metrics.operations_fetched.inc_by(operations_len);
 
+            // Update highest_received_pos if this batch extends our contiguous coverage
+            if start_pos == *highest_received_pos {
+                *highest_received_pos = start_pos + operations_len;
+            }
+
             // Send next request to maintain parallelism
-            send_next_request(config, log, outstanding_requests, pending_fetches, None).await?;
+            send_next_request(
+                config,
+                outstanding_requests,
+                pending_fetches,
+                *highest_received_pos,
+                None,
+            )
+            .await?;
         }
         Err(e) => {
             warn!(start_pos, error = ?e, "batch fetch failed, retrying");
@@ -566,9 +616,9 @@ where
             // Retry the request
             send_next_request(
                 config,
-                log,
                 outstanding_requests,
                 pending_fetches,
+                *highest_received_pos,
                 Some(start_pos),
             )
             .await?;
@@ -581,7 +631,6 @@ where
 /// Send the next batch request to maintain max_outstanding_requests
 async fn send_next_request<E, K, V, H, T, R>(
     config: &Config<E, K, V, H, T, R>,
-    log: &Journal<E, Operation<K, V>>,
     outstanding_requests: &mut BTreeSet<u64>,
     pending_fetches: &mut FuturesUnordered<
         std::pin::Pin<
@@ -592,6 +641,7 @@ async fn send_next_request<E, K, V, H, T, R>(
             >,
         >,
     >,
+    highest_received_pos: u64,
     retry_pos: Option<u64>,
 ) -> Result<(), Error>
 where
@@ -607,13 +657,8 @@ where
     let start_pos = if let Some(retry_pos) = retry_pos {
         retry_pos
     } else {
-        // Find the next position to request
-        let log_size = log
-            .size()
-            .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-
-        outstanding_requests.last().copied().unwrap_or(log_size) + config.fetch_batch_size.get()
+        // Use the highest contiguous position we've actually received
+        highest_received_pos
     };
 
     if start_pos >= target_size {
