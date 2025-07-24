@@ -436,8 +436,6 @@ impl<H: Hasher> RangeProof<H> {
 
         // Process each level
         for bounds in self.siblings.iter() {
-            let mut next_nodes = Vec::new();
-
             // Check if we should have a left sibling
             let first_pos = nodes[0].0;
             let last_pos = nodes[nodes.len() - 1].0;
@@ -454,6 +452,7 @@ impl<H: Hasher> RangeProof<H> {
 
             // If we have a left sibling, we need to include it
             let mut i = 0;
+            let mut next_nodes = Vec::new();
             if let Some(left_sib) = &bounds.left {
                 // The first node in our range needs its left sibling
                 let (pos, node) = &nodes[0];
