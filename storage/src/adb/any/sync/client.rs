@@ -398,7 +398,7 @@ where
         self.config.target = new_target;
 
         // Reinitialize log if needed
-        self.log = reinitialize_log_for_target_update(
+        self.log = update_log_for_target_update(
             self.log,
             self.config.context.clone(),
             &self.config.db_config,
@@ -714,8 +714,11 @@ fn validate_target_update<H: Hasher>(
     Ok(())
 }
 
-/// Reinitialize the log for a target update
-async fn reinitialize_log_for_target_update<E, K, V, T>(
+/// Reinitialize the log for a target update.
+///
+/// If the last log element is before the new lower bound, we close the log and reinitialize it.
+/// If the last log element is after the new lower bound, we prune the log to the lower bound.
+async fn update_log_for_target_update<E, K, V, T>(
     mut log: Journal<E, Fixed<K, V>>,
     context: E,
     db_config: &adb::any::Config<T>,
@@ -761,7 +764,7 @@ where
     Ok(log)
 }
 
-/// Build the final database once sync is complete
+/// Build the database from `log` and `pinned_nodes` once sync is complete.
 async fn build_database<E, K, V, H, T, R>(
     config: Config<E, K, V, H, T, R>,
     log: Journal<E, Fixed<K, V>>,
@@ -816,39 +819,6 @@ where
         "sync completed successfully");
 
     Ok(db)
-}
-
-/// Synchronizes a database by fetching, verifying, and applying operations from a remote source.
-///
-/// We fetch operations in parallel batches from a Resolver, verify cryptographic proofs,
-/// and apply operations to reconstruct the database's operation log.
-///
-/// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
-///
-/// This function creates a SyncClient and runs it to completion using the step-based API.
-pub async fn sync<E, K, V, H, T, R>(
-    config: Config<E, K, V, H, T, R>,
-) -> Result<adb::any::Any<E, K, V, H, T>, Error>
-where
-    E: Storage + Clock + MetricsTrait,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
-{
-    info!("starting sync");
-
-    // Create client and initialize all state
-    let mut client = Client::new(config).await?;
-
-    // Run sync to completion using step-based API
-    loop {
-        match client.step().await? {
-            StepResult::Continue(new_client) => client = new_client,
-            StepResult::Complete(database) => return Ok(database),
-        }
-    }
 }
 
 #[cfg(test)]

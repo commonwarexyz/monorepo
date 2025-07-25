@@ -1,6 +1,9 @@
 use crate::{
     adb::any::{
-        sync::{client::sync as client_sync, resolver::Resolver},
+        sync::{
+            client::{Client, StepResult},
+            resolver::Resolver,
+        },
         Any,
     },
     translator::Translator,
@@ -12,6 +15,7 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use futures::channel::mpsc;
 use std::fmt;
+use tracing::info;
 
 pub mod client;
 pub mod resolver;
@@ -116,9 +120,6 @@ impl<D: Digest> Read for SyncTarget<D> {
 /// 3. Apply operations to reconstruct the database's operation log.
 ///
 /// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
-//
-// TODO(#1214) Parallelize operation fetching: https://github.com/commonwarexyz/monorepo/issues/1214
-// TODO remove this function and use the client directly
 pub async fn sync<E, K, V, H, T, R>(
     config: Config<E, K, V, H, T, R>,
 ) -> Result<Any<E, K, V, H, T>, Error>
@@ -130,5 +131,16 @@ where
     T: Translator,
     R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
-    client_sync(config).await
+    info!("starting sync");
+
+    // Create client and initialize all state
+    let mut client = Client::new(config).await?;
+
+    // Run sync to completion using step-based API
+    loop {
+        match client.step().await? {
+            StepResult::Continue(new_client) => client = new_client,
+            StepResult::Complete(database) => return Ok(database),
+        }
+    }
 }
