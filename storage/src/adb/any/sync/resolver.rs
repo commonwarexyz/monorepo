@@ -35,13 +35,14 @@ pub trait Resolver: Clone + Send + 'static {
     /// Returns the operations and a proof that they were present in the database when it had
     /// `size` operations.
     #[allow(clippy::type_complexity)]
-    fn get_operations(
-        self,
+    fn get_operations<'a>(
+        &'a self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error>>
-           + Send;
+           + Send
+           + 'a;
 }
 
 /// Cloneable wrapper for Any database that can be used as a Resolver
@@ -103,7 +104,7 @@ where
     type Value = V;
 
     async fn get_operations(
-        self,
+        &self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
@@ -144,7 +145,7 @@ pub(super) mod tests {
         type Value = V;
 
         async fn get_operations(
-            self,
+            &self,
             _size: u64,
             _start_loc: u64,
             _max_ops: NonZeroU64,
