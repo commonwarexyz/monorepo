@@ -160,34 +160,35 @@ where
         }
 
         // Wait to receive a batch of operations or a target update (if enabled).
-        if let Some(ref mut receiver) = self.config.update_receiver {
+        let (start_pos, fetch_result) = if let Some(ref mut update_rx) = self.config.update_receiver
+        {
             select! {
-                new_target = receiver.next() => {
+                new_target = update_rx.next() => {
+                    // Update target
                     if let Some(new_target) = new_target {
                         self = self.handle_target_update(new_target).await?;
                     } else {
                         // Receiver closed - disable it to avoid spinning
                         self.config.update_receiver = None;
                     }
+                    return Ok(StepResult::Continue(self));
                 },
                 batch_result = self.outstanding_request_futures.next() => {
-                    if let Some((start_pos, result)) = batch_result {
-                        self.handle_batch_completion(start_pos, result).await?;
-                    } else {
-                        // We should always have at least one outstanding request.
-                        // If we don't, we should be done, but we're not.
-                        return Err(Error::SyncStalled);
-                    }
+                    // We should always have at least one outstanding request.
+                    // If we don't, we should be done, but we're not.
+                    batch_result.ok_or(Error::SyncStalled)?
                 },
             }
         } else {
             // No update receiver - wait to receive a batch of operations
-            if let Some((start_pos, result)) = self.outstanding_request_futures.next().await {
-                self.handle_batch_completion(start_pos, result).await?;
-            } else {
-                return Err(Error::SyncStalled);
-            }
-        }
+            self.outstanding_request_futures
+                .next()
+                .await
+                .ok_or(Error::SyncStalled)?
+        };
+
+        self.handle_batch_completion(start_pos, fetch_result)
+            .await?;
 
         // Apply operations that are now contiguous with the current log size
         self.apply_operations().await?;
