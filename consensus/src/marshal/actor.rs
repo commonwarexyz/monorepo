@@ -19,7 +19,7 @@ use commonware_resolver::{
 };
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::{
-    archive::{self, immutable, prunable, Archive as _, Identifier},
+    archive::{self, prunable, Archive as _, Identifier},
     translator::TwoCap,
 };
 use commonware_utils::{array::U64, Array};
@@ -69,8 +69,8 @@ pub struct Actor<
     backfill_quota: Quota,
     // Unique application namespace
     namespace: Vec<u8>,
-    // Timeout for block activity (in views)
-    activity_timeout: u64,
+    /// Minimum grace period for retaining activity after the application has processed the block
+    grace_period: u64,
     // Maximum number of blocks to repair at once
     max_repair: u64,
     // Codec configuration
@@ -80,7 +80,9 @@ pub struct Actor<
 
     // ---------- State ----------
     // Last view processed
-    last_view_processed: u64,
+    last_processed_view: u64,
+    // Last height processed
+    last_processed_height: u64,
 
     // ---------- Storage ----------
     // Blocks verified stored by view<>digest
@@ -91,11 +93,11 @@ pub struct Actor<
     #[allow(clippy::type_complexity)]
     notarized: prunable::Archive<TwoCap, R, B::Commitment, (Notarization<V, B::Commitment>, B)>,
     // Finalizations stored by height
-    finalized: immutable::Archive<R, B::Commitment, Finalization<V, B::Commitment>>,
+    finalized: prunable::Archive<TwoCap, R, B::Commitment, Finalization<V, B::Commitment>>,
     // Blocks finalized stored by height
     //
     // We store this separately because we may not have the finalization for a block
-    blocks: immutable::Archive<R, B::Commitment, B>,
+    blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
 
     // ---------- Metrics ----------
     // Latest height metric
@@ -155,25 +157,13 @@ impl<
 
         // Initialize finalizations
         let start = Instant::now();
-        let finalized = immutable::Archive::init(
+        let finalized = prunable::Archive::init(
             context.with_label("finalized"),
-            immutable::Config {
-                metadata_partition: format!("{}-finalized-metadata", config.partition_prefix),
-                freezer_table_partition: format!(
-                    "{}-finalized-freezer-table",
-                    config.partition_prefix
-                ),
-                freezer_table_initial_size: config.finalized_freezer_table_initial_size,
-                freezer_table_resize_frequency: config.freezer_table_resize_frequency,
-                freezer_table_resize_chunk_size: config.freezer_table_resize_chunk_size,
-                freezer_journal_partition: format!(
-                    "{}-finalized-freezer-journal",
-                    config.partition_prefix
-                ),
-                freezer_journal_target_size: config.freezer_journal_target_size,
-                freezer_journal_compression: config.freezer_journal_compression,
-                ordinal_partition: format!("{}-finalized-ordinal", config.partition_prefix),
-                items_per_section: config.immutable_items_per_section,
+            prunable::Config {
+                partition: format!("{}-finalized", config.partition_prefix),
+                translator: TwoCap,
+                items_per_section: config.prunable_items_per_section,
+                compression: None,
                 codec_config: (),
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
@@ -185,25 +175,13 @@ impl<
 
         // Initialize blocks
         let start = Instant::now();
-        let blocks = immutable::Archive::init(
+        let blocks = prunable::Archive::init(
             context.with_label("blocks"),
-            immutable::Config {
-                metadata_partition: format!("{}-blocks-metadata", config.partition_prefix),
-                freezer_table_partition: format!(
-                    "{}-blocks-freezer-table",
-                    config.partition_prefix
-                ),
-                freezer_table_initial_size: config.blocks_freezer_table_initial_size,
-                freezer_table_resize_frequency: config.freezer_table_resize_frequency,
-                freezer_table_resize_chunk_size: config.freezer_table_resize_chunk_size,
-                freezer_journal_partition: format!(
-                    "{}-blocks-freezer-journal",
-                    config.partition_prefix
-                ),
-                freezer_journal_target_size: config.freezer_journal_target_size,
-                freezer_journal_compression: config.freezer_journal_compression,
-                ordinal_partition: format!("{}-blocks-ordinal", config.partition_prefix),
-                items_per_section: config.immutable_items_per_section,
+            prunable::Config {
+                partition: format!("{}-blocks", config.partition_prefix),
+                translator: TwoCap,
+                items_per_section: config.prunable_items_per_section,
+                compression: None,
                 codec_config: config.codec_config.clone(),
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
@@ -241,12 +219,13 @@ impl<
                 mailbox_size: config.mailbox_size,
                 backfill_quota: config.backfill_quota,
                 namespace: config.namespace.clone(),
-                activity_timeout: config.activity_timeout,
+                grace_period: config.grace_period,
                 max_repair: config.max_repair,
                 codec_config: config.codec_config.clone(),
                 partition_prefix: config.partition_prefix,
 
-                last_view_processed: 0,
+                last_processed_view: 0,
+                last_processed_height: 0,
 
                 verified,
                 notarized,
@@ -361,15 +340,6 @@ impl<
                                 debug!(view, height, "finalized block stored");
                                 self.finalized_height.set(height as i64);
 
-                                // Prune blocks
-                                let min_view = self.last_view_processed.saturating_sub(self.activity_timeout);
-                                let verified = self.verified.prune(min_view);
-                                let notarized = self.notarized.prune(min_view);
-                                if let Err(e) = try_join!(verified, notarized) {
-                                    panic!("Failed to prune verified and notarized blocks: {e}");
-                                };
-                                debug!(min_view, "pruned verified and notarized archives");
-
                                 // Cancel useless requests
                                 resolver_by_view.retain(move|k| k > &view.into()).await;
                                 continue;
@@ -418,9 +388,26 @@ impl<
                             resolver_by_digest.cancel(digest).await;
                             resolver_by_height.retain(move |k| k > &height.into()).await;
 
-                            // If finalization exists, mark as last_view_processed
+                            // If finalization exists, prune the archives
                             if let Some(finalization) = self.get_finalization(Identifier::Index(height)).await {
-                                self.last_view_processed = finalization.proposal.view;
+                                // Trail the previous processed finalized block by the grace period
+                                let min_height = self.last_processed_height.saturating_sub(self.grace_period);
+                                let min_view = self.last_processed_view.saturating_sub(self.grace_period);
+
+                                // Prune archives
+                                match try_join!(
+                                    self.finalized.prune(min_height),
+                                    self.blocks.prune(min_height),
+                                    self.verified.prune(min_view),
+                                    self.notarized.prune(min_view),
+                                ) {
+                                    Ok(_) => debug!(min_view, "pruned archives"),
+                                    Err(e) => panic!("Failed to prune archives: {e}"),
+                                }
+
+                                // Update the last processed height and view
+                                self.last_processed_view = finalization.proposal.view;
+                                self.last_processed_height = height;
                             }
                         }
                         Orchestration::Repair { height } => {
