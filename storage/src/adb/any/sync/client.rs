@@ -148,10 +148,7 @@ where
         mut self,
     ) -> Result<SyncStepResult<Self, adb::any::Any<E, K, V, H, T>>, Error> {
         // Check if sync is complete
-        if self
-            .is_sync_complete(&self.log, self.config.target.upper_bound_ops)
-            .await?
-        {
+        if self.is_complete().await? {
             let database = build_database(
                 self.config,
                 self.log,
@@ -194,7 +191,7 @@ where
 
         // Special case: If we don't have pinned nodes, we need to extract them
         // from the first operation we actually need to fetch, not always from lower_bound_ops
-        if !self.has_pinned_nodes() {
+        if self.pinned_nodes.is_none() {
             // Find the first gap we need to fetch - this is where we'll extract pinned nodes
             let search_start =
                 std::cmp::max(self.config.target.lower_bound_ops, self.next_apply_pos);
@@ -209,7 +206,7 @@ where
                 let gap_size = gap_end - gap_start + 1;
                 let batch_size = std::cmp::min(self.config.fetch_batch_size.get(), gap_size);
                 if let Some(batch_size) = NonZeroU64::new(batch_size) {
-                    self.add_outstanding_request(gap_start);
+                    self.outstanding_requests.insert(gap_start);
 
                     let resolver = self.config.resolver.clone();
                     let start_pos = gap_start;
@@ -253,7 +250,7 @@ where
             let batch_size =
                 NonZeroU64::new(batch_size).expect("batch_size should be > 0 since gap exists");
 
-            self.add_outstanding_request(gap_start);
+            self.outstanding_requests.insert(gap_start);
 
             let resolver = self.config.resolver.clone();
             let start_pos = gap_start;
@@ -276,7 +273,7 @@ where
         result: Result<GetOperationsResult<H::Digest, K, V>, Error>,
     ) -> Result<(), Error> {
         // Remove from outstanding requests
-        self.remove_outstanding_request(start_pos);
+        self.outstanding_requests.remove(&start_pos);
 
         match result {
             Ok(GetOperationsResult {
@@ -323,12 +320,12 @@ where
                 }
 
                 // Install pinned nodes on first successful batch (can be from any position)
-                if !self.has_pinned_nodes() {
+                if self.pinned_nodes.is_none() {
                     let start_pos_mmr = leaf_num_to_pos(start_pos);
                     let end_pos_mmr = leaf_num_to_pos(start_pos + operations_len - 1);
                     match proof.extract_pinned_nodes(start_pos_mmr, end_pos_mmr) {
                         Ok(nodes) => {
-                            self.set_pinned_nodes(nodes);
+                            self.pinned_nodes = Some(nodes);
                         }
                         Err(_) => {
                             warn!(start_pos, "failed to extract pinned nodes, retrying");
@@ -341,12 +338,14 @@ where
                 }
 
                 // Store verified batch
-                self.store_batch(start_pos, operations);
+                self.verified_batches.insert(start_pos, operations);
                 self.metrics.valid_batches_received.inc();
                 self.metrics.operations_fetched.inc_by(operations_len);
 
                 // Update highest_received_pos if this batch extends our contiguous coverage
-                self.update_next_apply_pos(start_pos, operations_len);
+                if start_pos == self.next_apply_pos {
+                    self.next_apply_pos = start_pos + operations_len;
+                }
 
                 // Fill queue to maintain parallelism
                 self.fill_fetch_queue().await?;
@@ -372,7 +371,7 @@ where
         let mut current_pos = log_size;
 
         // Collect contiguous operations starting from current log size
-        while let Some(operations) = self.take_batch(current_pos) {
+        while let Some(operations) = self.verified_batches.remove(&current_pos) {
             let operations_len = operations.len() as u64;
             operations_to_apply.extend(operations);
             current_pos += operations_len;
@@ -442,7 +441,13 @@ where
             .size()
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-        self.reset(new_log_size);
+
+        // Reset state for the target update
+        self.verified_batches.clear();
+        self.outstanding_requests.clear();
+        self.pending_fetches.clear();
+        self.pinned_nodes = None;
+        self.next_apply_pos = new_log_size;
 
         // Reinitialize parallel fetching
         self.fill_fetch_queue().await?;
@@ -450,28 +455,19 @@ where
         Ok(self)
     }
 
-    /// Reset state for a target update
-    fn reset(&mut self, new_log_size: u64) {
-        self.verified_batches.clear();
-        self.outstanding_requests.clear();
-        self.pending_fetches.clear();
-        self.pinned_nodes = None;
-        self.next_apply_pos = new_log_size;
-    }
-
     /// Check if sync is complete based on the current log size and target
-    async fn is_sync_complete(
-        &self,
-        log: &Journal<E, Operation<K, V>>,
-        target_upper_bound: u64,
-    ) -> Result<bool, Error> {
-        let log_size = log
+    async fn is_complete(&self) -> Result<bool, Error> {
+        let log_size = self
+            .log
             .size()
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
         // Calculate the target log size (upper bound is inclusive)
-        let target_log_size = target_upper_bound
+        let target_log_size = self
+            .config
+            .target
+            .upper_bound_ops
             .checked_add(1)
             .ok_or(Error::InvalidState)?;
 
@@ -485,44 +481,6 @@ where
         }
 
         Ok(false)
-    }
-
-    /// Update the next position to apply to the log
-    /// TODO remove extra arg?
-    fn update_next_apply_pos(&mut self, start_pos: u64, operations_len: u64) {
-        if start_pos == self.next_apply_pos {
-            self.next_apply_pos = start_pos + operations_len;
-        }
-    }
-
-    /// Store a verified batch of operations
-    fn store_batch(&mut self, start_pos: u64, operations: Vec<Operation<K, V>>) {
-        self.verified_batches.insert(start_pos, operations);
-    }
-
-    /// Remove and return the batch of operations starting at the given position
-    fn take_batch(&mut self, start_pos: u64) -> Option<Vec<Operation<K, V>>> {
-        self.verified_batches.remove(&start_pos)
-    }
-
-    /// Add an outstanding request
-    fn add_outstanding_request(&mut self, start_pos: u64) {
-        self.outstanding_requests.insert(start_pos);
-    }
-
-    /// Remove an outstanding request
-    fn remove_outstanding_request(&mut self, start_pos: u64) {
-        self.outstanding_requests.remove(&start_pos);
-    }
-
-    /// Set pinned nodes
-    fn set_pinned_nodes(&mut self, nodes: Vec<H::Digest>) {
-        self.pinned_nodes = Some(nodes);
-    }
-
-    /// Check if we have pinned nodes
-    fn has_pinned_nodes(&self) -> bool {
-        self.pinned_nodes.is_some()
     }
 }
 
