@@ -1,12 +1,16 @@
 use crate::Message;
 use arbitrary::Unstructured;
 use commonware_codec::ReadExt;
-use commonware_cryptography::bls12381::primitives::{
-    group::{
-        Element, Scalar, Share, G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH,
-        SCALAR_LENGTH,
+use commonware_cryptography::bls12381::{
+    primitives::{
+        group::{
+            Element, Scalar, Share, G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH,
+            SCALAR_LENGTH,
+        },
+        poly::{compute_weights, Eval, Poly, Weight},
+        variant::{MinPk, MinSig, Variant},
     },
-    poly::{compute_weights, Eval, Poly, Weight},
+    tle::{Block, Ciphertext},
 };
 use std::collections::BTreeMap;
 
@@ -277,4 +281,40 @@ pub fn arbitrary_vec_of_vec_eval_g2(
     (0..outer_len)
         .map(|_| arbitrary_vec_eval_g2(u, inner_min, inner_max))
         .collect()
+}
+
+#[allow(unused)]
+pub fn arbitrary_minpk_signature(
+    u: &mut Unstructured,
+) -> Result<<MinPk as Variant>::Signature, arbitrary::Error> {
+    arbitrary_g2(u)
+}
+
+#[allow(unused)]
+pub fn arbitrary_minsig_signature(
+    u: &mut Unstructured,
+) -> Result<<MinSig as Variant>::Signature, arbitrary::Error> {
+    arbitrary_g1(u)
+}
+
+#[allow(unused)]
+pub fn arbitrary_ciphertext_minpk(
+    u: &mut Unstructured,
+) -> Result<Ciphertext<MinPk>, arbitrary::Error> {
+    Ok(Ciphertext {
+        u: arbitrary_g1(u)?,
+        v: Block::new(u.arbitrary()?),
+        w: Block::new(u.arbitrary()?),
+    })
+}
+
+#[allow(unused)]
+pub fn arbitrary_ciphertext_minsig(
+    u: &mut Unstructured,
+) -> Result<Ciphertext<MinSig>, arbitrary::Error> {
+    Ok(Ciphertext {
+        u: arbitrary_g2(u)?,
+        v: Block::new(u.arbitrary()?),
+        w: Block::new(u.arbitrary()?),
+    })
 }
