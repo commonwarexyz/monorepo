@@ -129,7 +129,7 @@ where
         // Initialize parallel fetching
         client.fill_fetch_queue().await?;
 
-        // Note: We don't check for immediate completion here - let the first step() call handle it.
+        // We don't check for immediate completion here - let the first step() call handle it.
         // This keeps the initialization logic simple and consistent.
         Ok(client)
     }
@@ -161,13 +161,14 @@ where
                     if let Some((start_pos, result)) = batch_result {
                         self.handle_batch_completion(start_pos, result).await?;
                     } else {
-                        // We should always have at least one pending fetch.
+                        // We should always have at least one outstanding request.
+                        // If we don't, we should be done, but we're not.
                         return Err(Error::SyncStalled);
                     }
                 },
             }
         } else {
-            // No update receiver - only wait for batch completions
+            // No update receiver - wait to receive a batch of operations
             if let Some((start_pos, result)) = self.outstanding_request_futures.next().await {
                 self.handle_batch_completion(start_pos, result).await?;
             } else {
@@ -176,7 +177,7 @@ where
         }
 
         // Apply operations that are now contiguous with the current log size
-        self.apply_contiguous_batches().await?;
+        self.apply_operations().await?;
 
         Ok(StepResult::Continue(self))
     }
@@ -200,7 +201,6 @@ where
         }
 
         // Normal case: Fill the fetch queue with multiple concurrent requests
-        // Use gap detection to find what actually needs to be fetched
         let requests_to_make = self
             .config
             .max_outstanding_requests
@@ -338,7 +338,7 @@ where
     }
 
     /// Apply contiguous verified batches to the log
-    async fn apply_contiguous_batches(&mut self) -> Result<(), Error> {
+    async fn apply_operations(&mut self) -> Result<(), Error> {
         let mut next_pos = self
             .log
             .size()
