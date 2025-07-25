@@ -1,4 +1,4 @@
-name: Pipeline
+name: Quint
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  quint:
+  Tests:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout the repository
