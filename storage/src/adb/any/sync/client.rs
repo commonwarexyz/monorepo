@@ -53,16 +53,18 @@ where
     fetched_operations: BTreeMap<u64, Vec<Fixed<K, V>>>,
 
     /// Start positions of batches that we've requested from the resolver
-    outstanding_requests: BTreeSet<u64>,
+    outstanding_request_locations: BTreeSet<u64>,
+
+    /// Each element is a future that will resolve to a batch of operations
+    /// that we've requested from the resolver.
+    /// Each element corresponds to an element in [outstanding_request_locations]
+    #[allow(clippy::type_complexity)] // TODO: Make simpler type
+    outstanding_request_futures: FuturesUnordered<
+        Pin<Box<dyn Future<Output = PendingOperationBatch<H::Digest, K, V>> + Send>>,
+    >,
 
     /// The next position to apply to the log
     next_apply_pos: u64,
-
-    /// Pending fetch futures
-    #[allow(clippy::type_complexity)] // TODO: Make simpler type
-    pending_fetches: FuturesUnordered<
-        Pin<Box<dyn Future<Output = PendingOperationBatch<H::Digest, K, V>> + Send>>,
-    >,
 
     /// Pinned nodes extracted from the first batch
     pinned_nodes: Option<Vec<H::Digest>>,
@@ -120,9 +122,9 @@ where
         let mut client = Self {
             config,
             fetched_operations: BTreeMap::new(),
-            outstanding_requests: BTreeSet::new(),
+            outstanding_request_locations: BTreeSet::new(),
             next_apply_pos: log_size,
-            pending_fetches: FuturesUnordered::new(),
+            outstanding_request_futures: FuturesUnordered::new(),
             pinned_nodes: None,
             log,
             metrics,
@@ -159,7 +161,7 @@ where
                         self = self.handle_target_update(new_target).await?;
                     }
                 },
-                batch_result = self.pending_fetches.next() => {
+                batch_result = self.outstanding_request_futures.next() => {
                     if let Some((start_pos, result)) = batch_result {
                         self.handle_batch_completion(start_pos, result).await?;
                     } else {
@@ -170,7 +172,7 @@ where
             }
         } else {
             // No update receiver - only wait for batch completions
-            if let Some((start_pos, result)) = self.pending_fetches.next().await {
+            if let Some((start_pos, result)) = self.outstanding_request_futures.next().await {
                 self.handle_batch_completion(start_pos, result).await?;
             } else {
                 return Err(Error::SyncStalled);
@@ -197,19 +199,19 @@ where
                 search_start,
                 self.config.target.upper_bound_ops,
                 &self.fetched_operations,
-                &self.outstanding_requests,
+                &self.outstanding_request_locations,
                 self.config.fetch_batch_size.get(),
             ) {
                 // Request from the first gap to extract pinned nodes
                 let gap_size = gap_end - gap_start + 1;
                 let batch_size = std::cmp::min(self.config.fetch_batch_size.get(), gap_size);
                 if let Some(batch_size) = NonZeroU64::new(batch_size) {
-                    self.outstanding_requests.insert(gap_start);
+                    self.outstanding_request_locations.insert(gap_start);
 
                     let resolver = self.config.resolver.clone();
                     let start_pos = gap_start;
 
-                    self.pending_fetches.push(Box::pin(async move {
+                    self.outstanding_request_futures.push(Box::pin(async move {
                         let result = resolver
                             .get_operations(target_size, start_pos, batch_size)
                             .await;
@@ -225,7 +227,7 @@ where
         let requests_to_make = self
             .config
             .max_outstanding_requests
-            .saturating_sub(self.outstanding_requests.len());
+            .saturating_sub(self.outstanding_request_locations.len());
 
         for _ in 0..requests_to_make {
             // Find the next gap that needs to be fetched
@@ -236,7 +238,7 @@ where
                 search_start,
                 self.config.target.upper_bound_ops,
                 &self.fetched_operations,
-                &self.outstanding_requests,
+                &self.outstanding_request_locations,
                 self.config.fetch_batch_size.get(),
             ) else {
                 break; // No more gaps to fill
@@ -248,12 +250,12 @@ where
             let batch_size =
                 NonZeroU64::new(batch_size).expect("batch_size should be > 0 since gap exists");
 
-            self.outstanding_requests.insert(gap_start);
+            self.outstanding_request_locations.insert(gap_start);
 
             let resolver = self.config.resolver.clone();
             let start_pos = gap_start;
 
-            self.pending_fetches.push(Box::pin(async move {
+            self.outstanding_request_futures.push(Box::pin(async move {
                 let result = resolver
                     .get_operations(target_size, start_pos, batch_size)
                     .await;
@@ -271,7 +273,7 @@ where
         result: Result<GetOperationsResult<H::Digest, K, V>, Error>,
     ) -> Result<(), Error> {
         // Remove from outstanding requests
-        self.outstanding_requests.remove(&start_pos);
+        self.outstanding_request_locations.remove(&start_pos);
 
         match result {
             Ok(GetOperationsResult {
@@ -436,8 +438,8 @@ where
 
         // Reset state for the target update
         self.fetched_operations.clear();
-        self.outstanding_requests.clear();
-        self.pending_fetches.clear();
+        self.outstanding_request_locations.clear();
+        self.outstanding_request_futures.clear();
         self.pinned_nodes = None;
         self.next_apply_pos = new_log_size;
 
