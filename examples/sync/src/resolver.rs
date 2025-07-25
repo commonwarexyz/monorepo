@@ -13,7 +13,7 @@ use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::channel::oneshot;
 use std::{net::SocketAddr, num::NonZeroU64, sync::Arc};
 use thiserror::Error;
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 /// Connection state for persistent networking.
 struct Connection<E>
@@ -51,35 +51,19 @@ where
         }
     }
 
-    /// Connect to the server if not already connected.
-    async fn get_connection(&self) -> Result<(), ResolverError> {
-        let mut connection_guard = self.connection.write().await;
-
-        // Check if we already have a connection
-        if connection_guard.is_some() {
-            return Ok(());
-        }
-
-        // Create new connection
-        info!(server_addr = %self.server_addr, "establishing connection");
-        let (sink, stream) = self
-            .context
-            .dial(self.server_addr)
-            .await
-            .map_err(|e| ResolverError::ConnectionError(format!("Failed to connect: {e}")))?;
-
-        *connection_guard = Some(Connection { sink, stream });
-        info!(server_addr = %self.server_addr, "connected");
-
-        Ok(())
-    }
-
     /// Send a request and receive a response using the persistent connection.
     async fn send_request(&self, request: Message) -> Result<Message, ResolverError> {
         // Ensure we have a connection
-        self.get_connection().await?;
-
         let mut connection_guard = self.connection.write().await;
+        if connection_guard.is_none() {
+            let (sink, stream) =
+                self.context.dial(self.server_addr).await.map_err(|e| {
+                    ResolverError::ConnectionError(format!("Failed to connect: {e}"))
+                })?;
+            *connection_guard = Some(Connection { sink, stream });
+        }
+
+        // Ensure we have a connection while holding the lock
         let connection = connection_guard
             .as_mut()
             .ok_or_else(|| ResolverError::ConnectionError("No connection available".to_string()))?;
