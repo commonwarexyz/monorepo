@@ -3,7 +3,6 @@ use super::{
     finalizer::Finalizer,
     handler::{self, Handler},
     ingress::{Mailbox, Message, Orchestration, Orchestrator},
-    resolver,
 };
 use crate::{
     threshold_simplex::types::{Finalization, Notarization},
@@ -37,10 +36,9 @@ use tracing::{debug, info, warn};
 /// When searching for a block locally, the depth of the search.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum SearchDepth {
-    Buffer,
-    Verified,
-    Notarized,
-    Finalized,
+    Verified = 1,
+    Notarized = 2,
+    Finalized = 3,
 }
 
 /// Application actor.
@@ -291,12 +289,10 @@ impl<
         // Initialize resolvers
         let (mut resolver_by_digest_rx, mut resolver_by_digest) =
             self.init_resolver::<B::Commitment>(backfill_by_digest);
-        let (mut resolver_by_height_rx, resolver_by_height) =
+        let (mut resolver_by_height_rx, mut resolver_by_height) =
             self.init_resolver::<U64>(backfill_by_height);
-        let mut resolver_by_height = resolver::Tracked::new(resolver_by_height);
-        let (mut resolver_by_view_rx, resolver_by_view) =
+        let (mut resolver_by_view_rx, mut resolver_by_view) =
             self.init_resolver::<U64>(backfill_by_view);
-        let mut resolver_by_view = resolver::Tracked::new(resolver_by_view);
 
         // Process all finalized blocks in order (fetching any that are missing)
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
@@ -359,6 +355,7 @@ impl<
                                 // Persist the finalization and block
                                 self.put_finalization(height, commitment, finalization, block, &mut notifier_tx).await;
                                 debug!(view, height, "finalized block stored");
+                                self.finalized_height.set(height as i64);
 
                                 // Prune blocks
                                 let min_view = self.last_view_processed.saturating_sub(self.activity_timeout);
@@ -370,10 +367,7 @@ impl<
                                 debug!(min_view, "pruned verified and notarized archives");
 
                                 // Cancel useless requests
-                                resolver_by_view.prune(view.into()).await;
-
-                                // Update metrics
-                                self.finalized_height.set(height as i64);
+                                resolver_by_view.retain(move|k| k > &view.into()).await;
                                 continue;
                             }
 
@@ -418,7 +412,7 @@ impl<
 
                             // Cancel any outstanding requests (by height and by digest)
                             resolver_by_digest.cancel(digest).await;
-                            resolver_by_height.prune(height.into()).await;
+                            resolver_by_height.retain(move |k| k > &height.into()).await;
 
                             // If finalization exists, mark as last_view_processed
                             if let Some(finalization) = self.get_finalization(Identifier::Index(height)).await {
@@ -435,29 +429,31 @@ impl<
 
                             // Attempt to repair the gap backwards from the end of the gap, using
                             // blocks from our local storage.
-                            let mut cursor = self.get_block(Identifier::Index(gap_end)).await.map(|b| b.parent());
-                            assert!(cursor.is_some(), "Gapped block missing that should exist: {gap_end}");
+                            let Some(mut cursor) = self.get_block(Identifier::Index(gap_end)).await else {
+                                panic!("Gapped block missing that should exist: {gap_end}");
+                            };
 
                             // Iterate backwards, repairing blocks as we go.
-                            while let Some(commitment) = cursor.take() {
-                                if let Some(parent) = self.search_for_block(&mut buffer, commitment, SearchDepth::Notarized).await {
-                                    if parent.height() < height {
-                                        break;
-                                    }
-                                    self.put_block(parent.height(), commitment, parent, &mut notifier_tx).await;
-                                    debug!(height, "repaired block");
+                            while cursor.height() > height {
+                                let commitment = cursor.parent();
+                                if let Some(block) = self.search_for_block(&mut buffer, commitment, SearchDepth::Notarized).await {
+                                    self.put_block(block.height(), commitment, block.clone(), &mut notifier_tx).await;
+                                    debug!(height = block.height(), "repaired block");
+                                    cursor = block;
                                 } else {
-                                    // Request the parent block digest
+                                    // Request the next missing block digest
                                     resolver_by_digest.fetch(commitment).await;
+                                    break;
                                 }
                             }
 
-                            // TODO: only request backwards from the last known block
-                            // Either enqueue all blocks in the gap, or the first `max_repair`
-                            // blocks in the gap.
-                            let range = height..std::cmp::min(gap_end, height + self.max_repair);
-                            debug!(range.start, range.end, "requesting missing finalized blocks");
-                            for height in range {
+                            // If we haven't fully repaired the gap, then also request any possible
+                            // finalizations for the blocks in the remaining gap. This may help
+                            // shrink the size of the gap.
+                            let gap_end = cursor.height();
+                            let gap_start = std::cmp::max(height, gap_end.saturating_sub(self.max_repair));
+                            debug!(gap_start, gap_end, "requesting any finalized blocks");
+                            for height in gap_start..gap_end {
                                 resolver_by_height.fetch(height.into()).await;
                             }
                         }
@@ -711,15 +707,12 @@ impl<
         if let Some(block) = buffer.get(None, commitment, None).await.into_iter().next() {
             return Some(block);
         }
-        if depth == SearchDepth::Buffer {
-            return None;
-        }
 
         // Check verified
         if let Some(block) = self.get_verified(Identifier::Key(&commitment)).await {
             return Some(block);
         }
-        if depth == SearchDepth::Verified {
+        if depth < SearchDepth::Notarized {
             return None;
         }
 
@@ -727,16 +720,13 @@ impl<
         if let Some((_, block)) = self.get_notarization(Identifier::Key(&commitment)).await {
             return Some(block);
         }
-        if depth == SearchDepth::Notarized {
+        if depth < SearchDepth::Finalized {
             return None;
         }
 
         // Check blocks
         if let Some(block) = self.get_block(Identifier::Key(&commitment)).await {
             return Some(block);
-        }
-        if depth == SearchDepth::Finalized {
-            return None;
         }
 
         // Not found
