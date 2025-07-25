@@ -1,7 +1,7 @@
 use crate::{
     adb::{
         any::{sync::Error, Any},
-        operation::Operation,
+        operation::Fixed,
     },
     mmr::verification::Proof,
     translator::Translator,
@@ -17,7 +17,7 @@ pub struct GetOperationsResult<D: Digest, K: Array, V: Array> {
     /// Proof that the operations are valid.
     pub proof: Proof<D>,
     /// The operations in the requested range.
-    pub operations: Vec<Operation<K, V>>,
+    pub operations: Vec<Fixed<K, V>>,
     /// A channel to send the result of the proof verification.
     /// Caller should send `true` if the proof is valid, `false` otherwise.
     /// Caller should ignore error if the channel is closed.

@@ -5,8 +5,8 @@ use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 
 const SAMPLE_SIZE: usize = 100;
 
-fn bench_prove_single_element(c: &mut Criterion) {
-    for n in [100, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000] {
+fn bench_prove_single(c: &mut Criterion) {
+    for n in [250, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000] {
         // Populate Binary Merkle Tree
         let mut builder = Builder::<Sha256>::new(n);
         let mut queries = Vec::with_capacity(n);
@@ -21,7 +21,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
 
         // Select SAMPLE_SIZE random elements without replacement and create/verify proofs
         c.bench_function(
-            &format!("{}/n={} samples={}", module_path!(), n, SAMPLE_SIZE),
+            &format!("{}/n={} items={}", module_path!(), n, SAMPLE_SIZE),
             |b| {
                 b.iter_batched(
                     || {
@@ -47,5 +47,5 @@ fn bench_prove_single_element(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_prove_single_element
+    targets = bench_prove_single
 }

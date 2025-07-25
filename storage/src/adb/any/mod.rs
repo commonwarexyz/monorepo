@@ -8,7 +8,7 @@
 //! and cannot be updated after.
 
 use crate::{
-    adb::{operation::Operation, Error},
+    adb::{operation::Fixed, Error},
     index::Index,
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
@@ -87,7 +87,7 @@ pub struct SyncConfig<E: RStorage + Metrics, K: Array, V: Array, T: Translator, 
 
     /// The [Any]'s log of operations. It has elements from `lower_bound` to `upper_bound`, inclusive.
     /// Reports `lower_bound` as its pruning boundary (oldest retained operation index).
-    pub log: Journal<E, Operation<K, V>>,
+    pub log: Journal<E, Fixed<K, V>>,
 
     /// Sync lower boundary (inclusive) - operations below this index are pruned.
     pub lower_bound: u64,
@@ -127,7 +127,7 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T:
     ///
     /// An operation's location is always equal to the number of the MMR leaf storing the digest of
     /// the operation.
-    pub(super) log: Journal<E, Operation<K, V>>,
+    pub(super) log: Journal<E, Fixed<K, V>>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
@@ -288,7 +288,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         context: E,
         cfg: Config<T>,
         hasher: &mut Standard<H>,
-    ) -> Result<(Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
+    ) -> Result<(Mmr<E, H>, Journal<E, Fixed<K, V>>), Error> {
         let mut mmr = Mmr::init(
             context.with_label("mmr"),
             hasher,
@@ -318,7 +318,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let mut log_size = log.size().await?;
         let mut rewind_leaf_num = log_size;
         while rewind_leaf_num > 0 {
-            if let Operation::Commit(_) = log.read(rewind_leaf_num - 1).await? {
+            if let Fixed::Commit(_) = log.read(rewind_leaf_num - 1).await? {
                 break;
             }
             rewind_leaf_num -= 1;
@@ -366,7 +366,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// the bitmap.
     pub(super) async fn build_snapshot_from_log<const N: usize>(
         start_leaf_num: u64,
-        log: &Journal<E, Operation<K, V>>,
+        log: &Journal<E, Fixed<K, V>>,
         snapshot: &mut Index<T, u64>,
         mut bitmap: Option<&mut Bitmap<H, N>>,
     ) -> Result<u64, Error> {
@@ -386,7 +386,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 }
                 Ok((i, op)) => {
                     match op {
-                        Operation::Deleted(key) => {
+                        Fixed::Deleted(key) => {
                             let result =
                                 Any::<E, K, V, H, T>::delete_key(snapshot, log, &key, i).await?;
                             if let Some(ref mut bitmap) = bitmap {
@@ -396,7 +396,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                                 }
                             }
                         }
-                        Operation::Update(key, _) => {
+                        Fixed::Update(key, _) => {
                             let result =
                                 Any::<E, K, V, H, T>::update_loc(snapshot, log, &key, None, i)
                                     .await?;
@@ -411,7 +411,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                                 }
                             }
                         }
-                        Operation::Commit(loc) => inactivity_floor_loc = loc,
+                        Fixed::Commit(loc) => inactivity_floor_loc = loc,
                     }
                     if let Some(ref mut bitmap) = bitmap {
                         // If we reach this point and a bit hasn't been added for the operation, then it's
@@ -433,7 +433,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// UpdateResult::NoOp is returned.
     async fn update_loc(
         snapshot: &mut Index<T, u64>,
-        log: &Journal<E, Operation<K, V>>,
+        log: &Journal<E, Fixed<K, V>>,
         key: &K,
         value: Option<&V>,
         new_loc: u64,
@@ -475,8 +475,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// Panics if the location does not reference an update operation. This should never happen
     /// unless the snapshot is buggy, or this method is being used to look up an operation
     /// independent of the snapshot contents.
-    async fn get_update_op(log: &Journal<E, Operation<K, V>>, loc: u64) -> Result<(K, V), Error> {
-        let Operation::Update(k, v) = log.read(loc).await? else {
+    async fn get_update_op(log: &Journal<E, Fixed<K, V>>, loc: u64) -> Result<(K, V), Error> {
+        let Fixed::Update(k, v) = log.read(loc).await? else {
             panic!("location does not reference update operation. loc={loc}");
         };
 
@@ -542,7 +542,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             UpdateResult::Updated(_, _) => (),
         }
 
-        let op = Operation::Update(key, value);
+        let op = Fixed::Update(key, value);
         self.apply_op(op).await?;
 
         Ok(res)
@@ -555,7 +555,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let loc = self.op_count();
         let r = Self::delete_key(&mut self.snapshot, &self.log, &key, loc).await?;
         if r.is_some() {
-            self.apply_op(Operation::Deleted(key)).await?;
+            self.apply_op(Fixed::Deleted(key)).await?;
         };
 
         Ok(r)
@@ -565,7 +565,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// associated with it.
     async fn delete_key(
         snapshot: &mut Index<T, u64>,
-        log: &Journal<E, Operation<K, V>>,
+        log: &Journal<E, Fixed<K, V>>,
         key: &K,
         delete_loc: u64,
     ) -> Result<Option<u64>, Error> {
@@ -602,7 +602,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Update the operations MMR with the given operation, and append the operation to the log. The
     /// `commit` method must be called to make any applied operation persistent & recoverable.
-    pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<u64, Error> {
+    pub(super) async fn apply_op(&mut self, op: Fixed<K, V>) -> Result<u64, Error> {
         // Update the ops MMR.
         self.ops.add_batched(&mut self.hasher, &op.encode()).await?;
         self.uncommitted_ops += 1;
@@ -625,7 +625,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         &self,
         start_loc: u64,
         max_ops: u64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Fixed<K, V>>), Error> {
         self.historical_proof(self.op_count(), start_loc, max_ops)
             .await
     }
@@ -636,7 +636,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         size: u64,
         start_loc: u64,
         max_ops: u64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Fixed<K, V>>), Error> {
         let start_pos = leaf_num_to_pos(start_loc);
         let end_loc = std::cmp::min(
             size.saturating_sub(1),
@@ -667,7 +667,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         hasher: &mut Standard<H>,
         proof: &Proof<H::Digest>,
         start_loc: u64,
-        ops: &[Operation<K, V>],
+        ops: &[Fixed<K, V>],
         root: &H::Digest,
     ) -> bool {
         let start_pos = leaf_num_to_pos(start_loc);
@@ -711,7 +711,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     // of the operation if it was active.
     pub(super) async fn move_op_if_active(
         &mut self,
-        op: Operation<K, V>,
+        op: Fixed<K, V>,
         old_loc: u64,
     ) -> Result<Option<u64>, Error> {
         // If the translated key is not in the snapshot, get a cursor to look for the key.
@@ -758,7 +758,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             self.inactivity_floor_loc += 1;
         }
 
-        self.apply_op(Operation::Commit(self.inactivity_floor_loc))
+        self.apply_op(Fixed::Commit(self.inactivity_floor_loc))
             .await?;
 
         Ok(())
@@ -821,7 +821,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening.
     #[cfg(test)]
     pub async fn simulate_failed_commit_mmr(mut self, write_limit: usize) -> Result<(), Error> {
-        self.apply_op(Operation::Commit(self.inactivity_floor_loc))
+        self.apply_op(Fixed::Commit(self.inactivity_floor_loc))
             .await?;
         self.log.close().await?;
         self.ops
@@ -835,7 +835,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// fully committing the log, requiring rollback of the MMR and log upon reopening.
     #[cfg(test)]
     pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error> {
-        self.apply_op(Operation::Commit(self.inactivity_floor_loc))
+        self.apply_op(Fixed::Commit(self.inactivity_floor_loc))
             .await?;
         self.ops.close(&mut self.hasher).await?;
         // Rewind the operation log over the commit op to force rollback to the previous commit.
@@ -922,17 +922,17 @@ pub(super) mod test {
 
     /// Create n random operations. Some portion of the updates are deletes.
     /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
-    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
+    pub(crate) fn create_test_ops(n: usize) -> Vec<Fixed<Digest, Digest>> {
         let mut rng = StdRng::seed_from_u64(1337);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
             let key = Digest::random(&mut rng);
             if i % 10 == 0 && i > 0 {
-                ops.push(Operation::Deleted(prev_key));
+                ops.push(Fixed::Deleted(prev_key));
             } else {
                 let value = Digest::random(&mut rng);
-                ops.push(Operation::Update(key, value));
+                ops.push(Fixed::Update(key, value));
                 prev_key = key;
             }
         }
@@ -940,16 +940,16 @@ pub(super) mod test {
     }
 
     /// Applies the given operations to the database.
-    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
+    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Fixed<Digest, Digest>>) {
         for op in ops {
             match op {
-                Operation::Update(key, value) => {
+                Fixed::Update(key, value) => {
                     db.update(key, value).await.unwrap();
                 }
-                Operation::Deleted(key) => {
+                Fixed::Deleted(key) => {
                     db.delete(key).await.unwrap();
                 }
-                Operation::Commit(_) => {
+                Fixed::Commit(_) => {
                     db.commit().await.unwrap();
                 }
             }
@@ -1309,7 +1309,7 @@ pub(super) mod test {
                 new_db.update(k, v).await.unwrap();
             }
             new_db
-                .apply_op(Operation::Commit(new_db.inactivity_floor_loc))
+                .apply_op(Fixed::Commit(new_db.inactivity_floor_loc))
                 .await
                 .unwrap();
             new_db.sync().await.unwrap();
@@ -1511,7 +1511,7 @@ pub(super) mod test {
     pub fn test_any_db_init_synced_empty_to_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let log = Journal::<Context, Operation<Digest, Digest>>::init(
+            let log = Journal::<Context, Fixed<Digest, Digest>>::init(
                 context.clone(),
                 JConfig {
                     partition: "sync_basic_log".into(),
@@ -1588,7 +1588,7 @@ pub(super) mod test {
             let target_hash = source_db.root(&mut hasher);
 
             // Create log with operations
-            let mut log = Journal::<_, Operation<Digest, Digest>>::init_sync(
+            let mut log = Journal::<_, Fixed<Digest, Digest>>::init_sync(
                 context.clone().with_label("ops_log"),
                 JConfig {
                     partition: format!("ops_log_{}", context.next_u64()),
@@ -1640,10 +1640,10 @@ pub(super) mod test {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &ops {
-                if let Operation::Update(key, value) = op {
+                if let Fixed::Update(key, value) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
-                } else if let Operation::Deleted(key) = op {
+                } else if let Fixed::Deleted(key) = op {
                     expected_kvs.remove(key);
                     deleted_keys.insert(*key);
                 }
@@ -1681,7 +1681,7 @@ pub(super) mod test {
                 let upper_bound = std::cmp::min(lower_bound + 49, total_ops - 1);
 
                 // Create log with operations
-                let mut log = Journal::<_, Operation<Digest, Digest>>::init_sync(
+                let mut log = Journal::<_, Fixed<Digest, Digest>>::init_sync(
                     context.clone().with_label("boundary_log"),
                     JConfig {
                         partition: format!("boundary_log_{}_{}", lower_bound, context.next_u64()),
@@ -1737,10 +1737,10 @@ pub(super) mod test {
                 let mut expected_kvs = HashMap::new();
                 let mut deleted_keys = HashSet::new();
                 for op in &ops[lower_bound as usize..=upper_bound as usize] {
-                    if let Operation::Update(key, value) = op {
+                    if let Fixed::Update(key, value) = op {
                         expected_kvs.insert(*key, *value);
                         deleted_keys.remove(key);
-                    } else if let Operation::Deleted(key) = op {
+                    } else if let Fixed::Deleted(key) = op {
                         expected_kvs.remove(key);
                         deleted_keys.insert(*key);
                     }
@@ -1842,10 +1842,10 @@ pub(super) mod test {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &original_ops {
-                if let Operation::Update(key, value) = op {
+                if let Fixed::Update(key, value) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
-                } else if let Operation::Deleted(key) = op {
+                } else if let Fixed::Deleted(key) = op {
                     expected_kvs.remove(key);
                     deleted_keys.insert(*key);
                 }
@@ -2181,7 +2181,7 @@ pub(super) mod test {
             // Changing the ops should cause verification to fail
             {
                 let mut ops = ops.clone();
-                ops[0] = Operation::Update(hash(b"key1"), hash(b"value1"));
+                ops[0] = Fixed::Update(hash(b"key1"), hash(b"value1"));
                 let root_hash = db.root(&mut hasher);
                 assert!(!AnyTest::verify_proof(
                     &mut hasher,
@@ -2193,7 +2193,7 @@ pub(super) mod test {
             }
             {
                 let mut ops = ops.clone();
-                ops.push(Operation::Update(hash(b"key1"), hash(b"value1")));
+                ops.push(Fixed::Update(hash(b"key1"), hash(b"value1")));
                 let root_hash = db.root(&mut hasher);
                 assert!(!AnyTest::verify_proof(
                     &mut hasher,

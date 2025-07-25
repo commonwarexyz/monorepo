@@ -377,14 +377,15 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok(item)
     }
 
-    /// Returns an ordered stream of all items in the journal.
+    /// Returns an ordered stream of all items in the journal, each as a tuple of (section, offset,
+    /// size, item).
     ///
     /// # Repair
     ///
     /// Like [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
     /// and [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-    /// the first invalid data read will be considered the new end of the journal (and the underlying [Blob] will be truncated to the last
-    /// valid item).
+    /// the first invalid data read will be considered the new end of the journal (and the underlying [Blob] will be
+    /// truncated to the last valid item).
     pub async fn replay(
         &self,
         buffer: usize,
@@ -623,6 +624,11 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             Some(blob) => Ok(blob.size().await),
             None => Ok(0),
         }
+    }
+
+    /// Rewinds the journal to the given `section` and `offset`, removing any data beyond it.
+    pub async fn rewind_to_offset(&mut self, section: u64, offset: u32) -> Result<(), Error> {
+        self.rewind(section, offset as u64 * ITEM_ALIGNMENT).await
     }
 
     /// Rewinds the journal to the given `section` and `size`.
@@ -911,6 +917,9 @@ mod tests {
                 assert_eq!(actual_index, expected_index);
                 assert_eq!(actual_data, expected_data);
             }
+
+            // Cleanup
+            journal.destroy().await.expect("Failed to destroy journal");
         });
     }
 

@@ -3,7 +3,7 @@ use super::{
     Error, SyncTarget, SyncTargetUpdateReceiver,
 };
 use crate::{
-    adb::{self, any::SyncConfig, operation::Operation},
+    adb::{self, any::SyncConfig, operation::Fixed},
     journal::fixed::{Config as JConfig, Journal},
     mmr::{self, iterator::leaf_num_to_pos},
     translator::Translator,
@@ -54,7 +54,7 @@ where
     config: Config<E, K, V, H, T, R>,
 
     /// Verified batches waiting to be applied, indexed by start position
-    verified_batches: BTreeMap<u64, Vec<Operation<K, V>>>,
+    verified_batches: BTreeMap<u64, Vec<Fixed<K, V>>>,
 
     /// Set of batch start positions that have outstanding requests
     outstanding_requests: BTreeSet<u64>,
@@ -73,7 +73,7 @@ where
 
     /// Journal of operations that sync fills.
     /// When it's completed, we use it to build the database.
-    log: Journal<E, Operation<K, V>>,
+    log: Journal<E, Fixed<K, V>>,
 
     metrics: Metrics<E>,
 }
@@ -93,7 +93,7 @@ where
         config.validate()?;
 
         // Initialize the operations journal
-        let log = Journal::<E, Operation<K, V>>::init_sync(
+        let log = Journal::<E, Fixed<K, V>>::init_sync(
             config.context.clone().with_label("log"),
             JConfig {
                 partition: config.db_config.log_journal_partition.clone(),
@@ -393,10 +393,7 @@ where
     }
 
     /// Apply a batch of operations to the log (helper method)
-    async fn apply_operations_batch(
-        &mut self,
-        operations: Vec<Operation<K, V>>,
-    ) -> Result<(), Error> {
+    async fn apply_operations_batch(&mut self, operations: Vec<Fixed<K, V>>) -> Result<(), Error> {
         let _timer = self.metrics.apply_duration.timer();
         for op in operations.into_iter() {
             self.log
@@ -624,7 +621,7 @@ impl<E: Clock + MetricsTrait> Metrics<E> {
 fn find_next_gap_to_fetch<K: Array, V: Array>(
     lower_bound: u64,
     upper_bound: u64,
-    verified_batches: &BTreeMap<u64, Vec<Operation<K, V>>>,
+    verified_batches: &BTreeMap<u64, Vec<Fixed<K, V>>>,
     outstanding_requests: &BTreeSet<u64>,
     fetch_batch_size: u64,
 ) -> Option<(u64, u64)> {
@@ -750,12 +747,12 @@ fn validate_target_update<H: Hasher>(
 
 /// Reinitialize the log for a target update
 async fn reinitialize_log_for_target_update<E, K, V, T>(
-    mut log: Journal<E, Operation<K, V>>,
+    mut log: Journal<E, Fixed<K, V>>,
     context: E,
     db_config: &adb::any::Config<T>,
     lower_bound_ops: u64,
     upper_bound_ops: u64,
-) -> Result<Journal<E, Operation<K, V>>, Error>
+) -> Result<Journal<E, Fixed<K, V>>, Error>
 where
     E: Storage + Clock + MetricsTrait,
     K: Array,
@@ -771,7 +768,7 @@ where
         log.close()
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-        log = Journal::<E, Operation<K, V>>::init_sync(
+        log = Journal::<E, Fixed<K, V>>::init_sync(
             context.clone().with_label("log"),
             JConfig {
                 partition: db_config.log_journal_partition.clone(),
@@ -798,7 +795,7 @@ where
 /// Build the final database once sync is complete
 async fn build_database<E, K, V, H, T, R>(
     config: Config<E, K, V, H, T, R>,
-    log: Journal<E, Operation<K, V>>,
+    log: Journal<E, Fixed<K, V>>,
     pinned_nodes: Option<Vec<H::Digest>>,
     metrics: &Metrics<E>,
 ) -> Result<adb::any::Any<E, K, V, H, T>, Error>
@@ -962,13 +959,13 @@ pub(crate) mod tests {
             let mut deleted_keys = HashSet::new();
             for op in &target_db_ops {
                 match op {
-                    Operation::Update(key, _) => {
+                    Fixed::Update(key, _) => {
                         if let Some((value, loc)) = target_db.get_with_loc(key).await.unwrap() {
                             expected_kvs.insert(*key, (value, loc));
                             deleted_keys.remove(key);
                         }
                     }
-                    Operation::Deleted(key) => {
+                    Fixed::Deleted(key) => {
                         expected_kvs.remove(key);
                         deleted_keys.insert(*key);
                     }
@@ -1027,7 +1024,7 @@ pub(crate) mod tests {
             for _ in 0..expected_kvs.len() {
                 let key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                new_ops.push(Operation::Update(key, value));
+                new_ops.push(Fixed::Update(key, value));
                 new_kvs.insert(key, value);
             }
             apply_ops(&mut got_db, new_ops.clone()).await;
@@ -1529,11 +1526,8 @@ pub(crate) mod tests {
 
     #[test]
     fn test_find_next_gap_to_fetch() {
-        use crate::adb::operation::Operation;
-        use commonware_cryptography::sha256::Digest;
-
         // Test case 1: Empty state - should return the full range
-        let verified_batches: BTreeMap<u64, Vec<Operation<Digest, Digest>>> = BTreeMap::new();
+        let verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
         let outstanding_requests = BTreeSet::new();
         let result = find_next_gap_to_fetch::<Digest, Digest>(
             0,
@@ -1548,25 +1542,16 @@ pub(crate) mod tests {
         let mut verified_batches = BTreeMap::new();
         verified_batches.insert(
             0,
-            vec![Operation::Update(
-                Digest::from([1; 32]),
-                Digest::from([2; 32]),
-            )],
+            vec![Fixed::Update(Digest::from([1; 32]), Digest::from([2; 32]))],
         );
         verified_batches.insert(
             1,
-            vec![Operation::Update(
-                Digest::from([3; 32]),
-                Digest::from([4; 32]),
-            )],
+            vec![Fixed::Update(Digest::from([3; 32]), Digest::from([4; 32]))],
         );
         // Gap at positions 2, 3
         verified_batches.insert(
             5,
-            vec![Operation::Update(
-                Digest::from([5; 32]),
-                Digest::from([6; 32]),
-            )],
+            vec![Fixed::Update(Digest::from([5; 32]), Digest::from([6; 32]))],
         );
 
         let outstanding_requests = BTreeSet::new();
@@ -1597,7 +1582,7 @@ pub(crate) mod tests {
         for i in 0..=10 {
             verified_batches.insert(
                 i,
-                vec![Operation::Update(
+                vec![Fixed::Update(
                     Digest::from([i as u8; 32]),
                     Digest::from([i as u8 + 1; 32]),
                 )],
@@ -1618,7 +1603,7 @@ pub(crate) mod tests {
         for i in 0..=7 {
             verified_batches.insert(
                 i,
-                vec![Operation::Update(
+                vec![Fixed::Update(
                     Digest::from([i as u8; 32]),
                     Digest::from([i as u8 + 1; 32]),
                 )],
@@ -1639,9 +1624,9 @@ pub(crate) mod tests {
         verified_batches.insert(
             0,
             vec![
-                Operation::Update(Digest::from([1; 32]), Digest::from([2; 32])),
-                Operation::Update(Digest::from([3; 32]), Digest::from([4; 32])),
-                Operation::Update(Digest::from([5; 32]), Digest::from([6; 32])),
+                Fixed::Update(Digest::from([1; 32]), Digest::from([2; 32])),
+                Fixed::Update(Digest::from([3; 32]), Digest::from([4; 32])),
+                Fixed::Update(Digest::from([5; 32]), Digest::from([6; 32])),
             ],
         ); // Covers positions 0, 1, 2
 
@@ -1656,7 +1641,7 @@ pub(crate) mod tests {
         assert_eq!(result, Some((3, 10))); // Gap starts at position 3
 
         // Test case 7: Invalid bounds
-        let verified_batches: BTreeMap<u64, Vec<Operation<Digest, Digest>>> = BTreeMap::new();
+        let verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
         let outstanding_requests = BTreeSet::new();
         let result = find_next_gap_to_fetch::<Digest, Digest>(
             10,
@@ -1672,9 +1657,9 @@ pub(crate) mod tests {
         verified_batches.insert(
             0,
             vec![
-                Operation::Update(Digest::from([1; 32]), Digest::from([2; 32])),
-                Operation::Update(Digest::from([3; 32]), Digest::from([4; 32])),
-                Operation::Update(Digest::from([5; 32]), Digest::from([6; 32])),
+                Fixed::Update(Digest::from([1; 32]), Digest::from([2; 32])),
+                Fixed::Update(Digest::from([3; 32]), Digest::from([4; 32])),
+                Fixed::Update(Digest::from([5; 32]), Digest::from([6; 32])),
             ],
         ); // Covers positions 0, 1, 2
 
@@ -1694,17 +1679,11 @@ pub(crate) mod tests {
         let mut verified_batches = BTreeMap::new();
         verified_batches.insert(
             0,
-            vec![Operation::Update(
-                Digest::from([1; 32]),
-                Digest::from([2; 32]),
-            )],
+            vec![Fixed::Update(Digest::from([1; 32]), Digest::from([2; 32]))],
         ); // Covers position 0
         verified_batches.insert(
             1,
-            vec![Operation::Update(
-                Digest::from([3; 32]),
-                Digest::from([4; 32]),
-            )],
+            vec![Fixed::Update(Digest::from([3; 32]), Digest::from([4; 32]))],
         ); // Covers position 1 (adjacent to position 0)
 
         let outstanding_requests = BTreeSet::new();
@@ -1718,7 +1697,7 @@ pub(crate) mod tests {
         assert_eq!(result, Some((2, 10))); // Gap should start at 2
 
         // Test case 10: Overlapping outstanding requests
-        let verified_batches: BTreeMap<u64, Vec<Operation<Digest, Digest>>> = BTreeMap::new();
+        let verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
         let mut outstanding_requests = BTreeSet::new();
         outstanding_requests.insert(0); // Covers 0-4 (batch_size=5)
         outstanding_requests.insert(3); // Covers 3-7 (overlaps with first)
@@ -1734,7 +1713,7 @@ pub(crate) mod tests {
         assert_eq!(result, None); // No gaps - everything covered by overlapping requests
 
         // Test case 11: Outstanding request goes beyond upper_bound (should be capped)
-        let verified_batches: BTreeMap<u64, Vec<Operation<Digest, Digest>>> = BTreeMap::new();
+        let verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
         let mut outstanding_requests = BTreeSet::new();
         outstanding_requests.insert(8); // Would cover 8-12, but upper_bound is 10
 
@@ -1748,7 +1727,7 @@ pub(crate) mod tests {
         assert_eq!(result, Some((0, 7))); // Gap from 0-7, then 8-10 is covered
 
         // Test case 12: Zero-length range (lower_bound == upper_bound)
-        let verified_batches: BTreeMap<u64, Vec<Operation<Digest, Digest>>> = BTreeMap::new();
+        let verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
         let outstanding_requests = BTreeSet::new();
         let result = find_next_gap_to_fetch::<Digest, Digest>(
             5,
@@ -1760,7 +1739,7 @@ pub(crate) mod tests {
         assert_eq!(result, Some((5, 5))); // Single position gap
 
         // Test case 13: Outstanding requests only (no verified batches)
-        let verified_batches: BTreeMap<u64, Vec<Operation<Digest, Digest>>> = BTreeMap::new();
+        let verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
         let mut outstanding_requests = BTreeSet::new();
         outstanding_requests.insert(0); // Covers 0-4
         outstanding_requests.insert(7); // Covers 7-10
@@ -1779,10 +1758,7 @@ pub(crate) mod tests {
         verified_batches.insert(0, vec![]); // Empty batch should be ignored
         verified_batches.insert(
             2,
-            vec![Operation::Update(
-                Digest::from([1; 32]),
-                Digest::from([2; 32]),
-            )],
+            vec![Fixed::Update(Digest::from([1; 32]), Digest::from([2; 32]))],
         );
 
         let outstanding_requests = BTreeSet::new();
@@ -1796,7 +1772,7 @@ pub(crate) mod tests {
         assert_eq!(result, Some((0, 1))); // Gap at 0-1, empty batch ignored
 
         // Test case 15: Outstanding request before lower_bound (edge case)
-        let verified_batches: BTreeMap<u64, Vec<Operation<Digest, Digest>>> = BTreeMap::new();
+        let verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
         let mut outstanding_requests = BTreeSet::new();
         outstanding_requests.insert(0); // This covers 0-4, but lower_bound is 3
 
