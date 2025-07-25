@@ -1,8 +1,8 @@
 // -*- mode: Bluespec; -*-
 
-// pure definitions
+// Pure definitions
 module defs {
-    // the maximum of two integers
+    // The maximum of two integers
     pure def max(x: int, y: int): int = {
         if (x > y) x else y
     }

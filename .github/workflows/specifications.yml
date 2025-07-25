@@ -1,26 +1,27 @@
-name: Specification
+name: Quint
 
 on:
+  push:
+    branches: [ "main" ]
   pull_request:
     paths:
-      - "pipeline/minimmit/spec"
+      - "pipeline/minimmit/quint"
+
+env:
+  QUINT_VERSION: "0.26.0"
 
 jobs:
   test:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout the repository
         uses: actions/checkout@v4
-
       - name: Install node
         uses: actions/setup-node@v4
         with:
           node-version: 20
           check-latest: true
-
       - name: Install quint
-        run: npm i @informalsystems/quint@0.26.0 -g
-
+        run: npm i @informalsystems/quint@${{ env.QUINT_VERSION }} -g
       - name: Run test
-        run: cd pipeline/minimmit/spec && make typecheck && make test
+        run: cd pipeline/minimmit/quint && make typecheck && make test

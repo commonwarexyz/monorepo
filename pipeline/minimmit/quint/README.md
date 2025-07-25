@@ -1,10 +1,10 @@
 # Minimmit Formal Specification
 
-This repository contains the Quint formal specification for the [Minimmit](https://github.com/commonwarexyz/monorepo/blob/main/pipeline/minimmit.md) Byzantine Fault Tolerant consensus protocol.
+This repository contains the Quint formal specification for the [Minimmit](../minimmit.md) Byzantine Fault-Tolerant consensus protocol.
 
 ## Getting Started
 
-It is supposed that you have `node/npm` installed. Then to install `quint` run the following:
+This assumes you have `node/npm` installed. Then, to install `quint`, run the following:
 
 ```
 npm i @informalsystems/quint -g
@@ -39,13 +39,12 @@ The specification validates the following safety properties:
 
 ## Running the Specification
 
-You can choose any canfiguration stored in the `main_` files.
-
-### Running execution examples:**
+You can choose any specification instance stored in the `main_` files:
 
 ```bash
 quint run --invariant=block_example ./main_n6f1b0.qnt
 quint run --invariant=two_chained_blocks_example ./main_n6f1b0.qnt
+````
 
 ## Checking State Invariants
 
@@ -65,13 +64,10 @@ Symbolic execution uses the symbolic model checker to find executions, with acti
 quint verify --invariant=safe --max-steps=20 --random-transitions=true ./main_n6f1b1.qnt
 ```
 
-### Bounded Model Cheking
+### Bounded Model Checking
 
 The bounded model checker verifies an invariant across all possible executions within a specified depth limit:
 
 ```bash
 quint verify --invariant=safe --max-steps=20 ./main_n6f1b1.qnt
 ```
-
-
-
