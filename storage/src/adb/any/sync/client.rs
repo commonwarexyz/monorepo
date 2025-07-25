@@ -116,7 +116,7 @@ where
         };
 
         // Initialize parallel fetching
-        fill_fetch_queue(&mut client.config, &mut client.state).await?;
+        client.fill_fetch_queue().await?;
 
         // Note: We don't check for immediate completion here - let the first step() call handle it.
         // This keeps the initialization logic simple and consistent.
@@ -161,38 +161,286 @@ where
                 }
             } => {
                 if let Some(new_target) = target_update {
-                    self.log = handle_target_update(
-                        new_target,
-                        &mut self.config,
-                        &mut self.state,
-                        self.log,
-                        &self.metrics
-                    ).await?;
+                    self = self.handle_target_update(new_target).await?;
                 }
             },
             batch_result = self.state.pending_fetches.next() => {
                 if let Some((start_pos, result)) = batch_result {
-                    handle_batch_completion(
-                        start_pos,
-                        result,
-                        &mut self.config,
-                        &mut self.state,
-                        &self.metrics
-                    ).await?;
+                    self.handle_batch_completion(start_pos, result).await?;
                 }
             },
         }
 
         // Apply operations that are now contiguous with the current log size
-        self.log = apply_contiguous_batches(
+        self.apply_contiguous_batches().await?;
+
+        Ok(SyncStepResult::Continue(self))
+    }
+
+    /// Queue batches of operations to be fetched from the resolver
+    async fn fill_fetch_queue(&mut self) -> Result<(), Error> {
+        let target_size = self.config.target.upper_bound_ops + 1;
+
+        // Special case: If we don't have pinned nodes, we need to extract them
+        // from the first operation we actually need to fetch, not always from lower_bound_ops
+        if !self.state.has_pinned_nodes() {
+            // Find the first gap we need to fetch - this is where we'll extract pinned nodes
+            let search_start = std::cmp::max(
+                self.config.target.lower_bound_ops,
+                self.state.next_apply_pos,
+            );
+            if let Some((gap_start, gap_end)) = find_next_gap_to_fetch::<K, V>(
+                search_start,
+                self.config.target.upper_bound_ops,
+                &self.state.verified_batches,
+                &self.state.outstanding_requests,
+                self.config.fetch_batch_size.get(),
+            ) {
+                // Request from the first gap to extract pinned nodes
+                let gap_size = gap_end - gap_start + 1;
+                let batch_size = std::cmp::min(self.config.fetch_batch_size.get(), gap_size);
+                if let Some(batch_size) = NonZeroU64::new(batch_size) {
+                    self.state.add_outstanding_request(gap_start);
+
+                    let resolver = self.config.resolver.clone();
+                    let start_pos = gap_start;
+
+                    self.state.pending_fetches.push(Box::pin(async move {
+                        let result = resolver
+                            .get_operations(target_size, start_pos, batch_size)
+                            .await;
+                        (start_pos, result)
+                    }));
+                }
+            }
+            return Ok(()); // Don't make additional requests until we have pinned nodes
+        }
+
+        // Normal case: Fill the fetch queue with multiple concurrent requests
+        // Use gap detection to find what actually needs to be fetched
+        let requests_to_make = self
+            .config
+            .max_outstanding_requests
+            .saturating_sub(self.state.outstanding_requests.len());
+
+        for _ in 0..requests_to_make {
+            // Find the next gap that needs to be fetched
+            // For existing databases, start from next_apply_pos instead of lower_bound_ops
+            let search_start = std::cmp::max(
+                self.config.target.lower_bound_ops,
+                self.state.next_apply_pos,
+            );
+            let Some((gap_start, gap_end)) = find_next_gap_to_fetch::<K, V>(
+                search_start,
+                self.config.target.upper_bound_ops,
+                &self.state.verified_batches,
+                &self.state.outstanding_requests,
+                self.config.fetch_batch_size.get(),
+            ) else {
+                break; // No more gaps to fill
+            };
+
+            // Calculate how much of this gap to request in this batch
+            let gap_size = gap_end - gap_start + 1; // gap_end is inclusive
+            let batch_size = std::cmp::min(self.config.fetch_batch_size.get(), gap_size);
+            let batch_size =
+                NonZeroU64::new(batch_size).expect("batch_size should be > 0 since gap exists");
+
+            self.state.add_outstanding_request(gap_start);
+
+            let resolver = self.config.resolver.clone();
+            let start_pos = gap_start;
+
+            self.state.pending_fetches.push(Box::pin(async move {
+                let result = resolver
+                    .get_operations(target_size, start_pos, batch_size)
+                    .await;
+                (start_pos, result)
+            }));
+        }
+
+        Ok(())
+    }
+
+    /// Handle completion of a batch fetch
+    async fn handle_batch_completion(
+        &mut self,
+        start_pos: u64,
+        result: Result<GetOperationsResult<H::Digest, K, V>, Error>,
+    ) -> Result<(), Error> {
+        // Remove from outstanding requests
+        self.state.remove_outstanding_request(start_pos);
+
+        match result {
+            Ok(GetOperationsResult {
+                proof,
+                operations,
+                success_tx,
+            }) => {
+                let operations_len = operations.len() as u64;
+
+                // Validate batch size
+                if operations_len > self.config.fetch_batch_size.get() || operations_len == 0 {
+                    debug!(
+                        operations_len,
+                        batch_size = self.config.fetch_batch_size.get(),
+                        start_pos,
+                        "received invalid batch size from resolver"
+                    );
+                    self.metrics.invalid_batches_received.inc();
+                    let _ = success_tx.send(false);
+
+                    self.fill_fetch_queue().await?;
+                    return Ok(());
+                }
+
+                // Verify the proof
+                let proof_valid = {
+                    let _timer = self.metrics.proof_verification_duration.timer();
+                    adb::any::Any::<E, K, V, H, T>::verify_proof(
+                        &mut self.config.hasher,
+                        &proof,
+                        start_pos,
+                        &operations,
+                        &self.config.target.root,
+                    )
+                };
+                let _ = success_tx.send(proof_valid);
+
+                if !proof_valid {
+                    debug!(start_pos, "proof verification failed, retrying");
+                    self.metrics.invalid_batches_received.inc();
+
+                    self.fill_fetch_queue().await?;
+                    return Ok(());
+                }
+
+                // Install pinned nodes on first successful batch (can be from any position)
+                if !self.state.has_pinned_nodes() {
+                    let start_pos_mmr = leaf_num_to_pos(start_pos);
+                    let end_pos_mmr = leaf_num_to_pos(start_pos + operations_len - 1);
+                    match proof.extract_pinned_nodes(start_pos_mmr, end_pos_mmr) {
+                        Ok(nodes) => {
+                            self.state.set_pinned_nodes(nodes);
+                        }
+                        Err(_) => {
+                            warn!(start_pos, "failed to extract pinned nodes, retrying");
+                            self.metrics.invalid_batches_received.inc();
+
+                            self.fill_fetch_queue().await?;
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // Store verified batch
+                self.state.store_batch(start_pos, operations);
+                self.metrics.valid_batches_received.inc();
+                self.metrics.operations_fetched.inc_by(operations_len);
+
+                // Update highest_received_pos if this batch extends our contiguous coverage
+                self.state.update_next_apply_pos(start_pos, operations_len);
+
+                // Fill queue to maintain parallelism
+                self.fill_fetch_queue().await?;
+            }
+            Err(e) => {
+                warn!(start_pos, error = ?e, "batch fetch failed, retrying");
+                self.fill_fetch_queue().await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Apply contiguous verified batches to the log
+    async fn apply_contiguous_batches(&mut self) -> Result<(), Error> {
+        let log_size = self
+            .log
+            .size()
+            .await
+            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+        let mut operations_to_apply = Vec::new();
+        let mut current_pos = log_size;
+
+        // Collect contiguous operations starting from current log size
+        while let Some(operations) = self.state.take_batch(current_pos) {
+            let operations_len = operations.len() as u64;
+            operations_to_apply.extend(operations);
+            current_pos += operations_len;
+
+            // Apply in batches to avoid memory issues
+            if operations_to_apply.len() >= self.config.apply_batch_size {
+                self.apply_operations_batch(operations_to_apply).await?;
+                operations_to_apply = Vec::new();
+            }
+        }
+
+        // Apply remaining operations
+        if !operations_to_apply.is_empty() {
+            self.apply_operations_batch(operations_to_apply).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Apply a batch of operations to the log (helper method)
+    async fn apply_operations_batch(
+        &mut self,
+        operations: Vec<Operation<K, V>>,
+    ) -> Result<(), Error> {
+        let _timer = self.metrics.apply_duration.timer();
+        for op in operations.into_iter() {
+            self.log
+                .append(op)
+                .await
+                .map_err(adb::Error::JournalError)
+                .map_err(Error::Adb)?;
+            // No need to sync here -- the log will periodically sync its storage
+            // and we will also sync when we're done.
+        }
+        Ok(())
+    }
+
+    /// Handle a target update by validating it and reinitializing state
+    async fn handle_target_update(
+        mut self,
+        new_target: SyncTarget<H::Digest>,
+    ) -> Result<Self, Error> {
+        validate_target_update::<H>(&self.config.target, &new_target)?;
+
+        info!(
+            old_target = ?self.config.target,
+            new_target = ?new_target,
+            "applying target update"
+        );
+
+        // Update config target
+        self.config.target = new_target;
+
+        // Reinitialize log if needed
+        self.log = reinitialize_log_for_target_update(
             self.log,
-            &mut self.state,
-            &self.metrics,
-            self.config.apply_batch_size,
+            self.config.context.clone(),
+            &self.config.db_config,
+            self.config.target.lower_bound_ops,
+            self.config.target.upper_bound_ops,
         )
         .await?;
 
-        Ok(SyncStepResult::Continue(self))
+        // Reset sync state to the new log size
+        let new_log_size = self
+            .log
+            .size()
+            .await
+            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+        self.state.reset(new_log_size);
+
+        // Reinitialize parallel fetching
+        self.fill_fetch_queue().await?;
+
+        Ok(self)
     }
 }
 
@@ -589,263 +837,6 @@ fn validate_target_update<H: Hasher>(
     Ok(())
 }
 
-/// Queue batches of operations to be fetched from the resolver
-async fn fill_fetch_queue<E, K, V, H, T, R>(
-    config: &mut Config<E, K, V, H, T, R>,
-    state: &mut SyncState<E, K, V, H>,
-) -> Result<(), Error>
-where
-    E: Storage + Clock + MetricsTrait,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
-{
-    let target_size = config.target.upper_bound_ops + 1;
-
-    // Special case: If we don't have pinned nodes, we need to extract them
-    // from the first operation we actually need to fetch, not always from lower_bound_ops
-    if !state.has_pinned_nodes() {
-        // Find the first gap we need to fetch - this is where we'll extract pinned nodes
-        let search_start = std::cmp::max(config.target.lower_bound_ops, state.next_apply_pos);
-        if let Some((gap_start, gap_end)) = find_next_gap_to_fetch::<K, V>(
-            search_start,
-            config.target.upper_bound_ops,
-            &state.verified_batches,
-            &state.outstanding_requests,
-            config.fetch_batch_size.get(),
-        ) {
-            // Request from the first gap to extract pinned nodes
-            let gap_size = gap_end - gap_start + 1;
-            let batch_size = std::cmp::min(config.fetch_batch_size.get(), gap_size);
-            if let Some(batch_size) = NonZeroU64::new(batch_size) {
-                state.add_outstanding_request(gap_start);
-
-                let resolver = config.resolver.clone();
-                let start_pos = gap_start;
-
-                state.pending_fetches.push(Box::pin(async move {
-                    let result = resolver
-                        .get_operations(target_size, start_pos, batch_size)
-                        .await;
-                    (start_pos, result)
-                }));
-            }
-        }
-        return Ok(()); // Don't make additional requests until we have pinned nodes
-    }
-
-    // Normal case: Fill the fetch queue with multiple concurrent requests
-    // Use gap detection to find what actually needs to be fetched
-    let requests_to_make = config
-        .max_outstanding_requests
-        .saturating_sub(state.outstanding_requests.len());
-
-    for _ in 0..requests_to_make {
-        // Find the next gap that needs to be fetched
-        // For existing databases, start from next_apply_pos instead of lower_bound_ops
-        let search_start = std::cmp::max(config.target.lower_bound_ops, state.next_apply_pos);
-        let Some((gap_start, gap_end)) = find_next_gap_to_fetch::<K, V>(
-            search_start,
-            config.target.upper_bound_ops,
-            &state.verified_batches,
-            &state.outstanding_requests,
-            config.fetch_batch_size.get(),
-        ) else {
-            break; // No more gaps to fill
-        };
-
-        // Calculate how much of this gap to request in this batch
-        let gap_size = gap_end - gap_start + 1; // gap_end is inclusive
-        let batch_size = std::cmp::min(config.fetch_batch_size.get(), gap_size);
-        let batch_size =
-            NonZeroU64::new(batch_size).expect("batch_size should be > 0 since gap exists");
-
-        state.add_outstanding_request(gap_start);
-
-        let resolver = config.resolver.clone();
-        let start_pos = gap_start;
-
-        state.pending_fetches.push(Box::pin(async move {
-            let result = resolver
-                .get_operations(target_size, start_pos, batch_size)
-                .await;
-            (start_pos, result)
-        }));
-    }
-
-    Ok(())
-}
-
-/// Handle completion of a batch fetch
-async fn handle_batch_completion<E, K, V, H, T, R>(
-    start_pos: u64,
-    result: Result<GetOperationsResult<H::Digest, K, V>, Error>,
-    config: &mut Config<E, K, V, H, T, R>,
-    state: &mut SyncState<E, K, V, H>,
-    metrics: &Metrics<E>,
-) -> Result<(), Error>
-where
-    E: Storage + Clock + MetricsTrait,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
-{
-    // Remove from outstanding requests
-    state.remove_outstanding_request(start_pos);
-
-    match result {
-        Ok(GetOperationsResult {
-            proof,
-            operations,
-            success_tx,
-        }) => {
-            let operations_len = operations.len() as u64;
-
-            // Validate batch size
-            if operations_len > config.fetch_batch_size.get() || operations_len == 0 {
-                debug!(
-                    operations_len,
-                    batch_size = config.fetch_batch_size.get(),
-                    start_pos,
-                    "received invalid batch size from resolver"
-                );
-                metrics.invalid_batches_received.inc();
-                let _ = success_tx.send(false);
-
-                fill_fetch_queue(config, state).await?;
-                return Ok(());
-            }
-
-            // Verify the proof
-            let proof_valid = {
-                let _timer = metrics.proof_verification_duration.timer();
-                adb::any::Any::<E, K, V, H, T>::verify_proof(
-                    &mut config.hasher,
-                    &proof,
-                    start_pos,
-                    &operations,
-                    &config.target.root,
-                )
-            };
-            let _ = success_tx.send(proof_valid);
-
-            if !proof_valid {
-                debug!(start_pos, "proof verification failed, retrying");
-                metrics.invalid_batches_received.inc();
-
-                fill_fetch_queue(config, state).await?;
-                return Ok(());
-            }
-
-            // Install pinned nodes on first successful batch (can be from any position)
-            if !state.has_pinned_nodes() {
-                let start_pos_mmr = leaf_num_to_pos(start_pos);
-                let end_pos_mmr = leaf_num_to_pos(start_pos + operations_len - 1);
-                match proof.extract_pinned_nodes(start_pos_mmr, end_pos_mmr) {
-                    Ok(nodes) => {
-                        state.set_pinned_nodes(nodes);
-                    }
-                    Err(_) => {
-                        warn!(start_pos, "failed to extract pinned nodes, retrying");
-                        metrics.invalid_batches_received.inc();
-
-                        fill_fetch_queue(config, state).await?;
-                        return Ok(());
-                    }
-                }
-            }
-
-            // Store verified batch
-            state.store_batch(start_pos, operations);
-            metrics.valid_batches_received.inc();
-            metrics.operations_fetched.inc_by(operations_len);
-
-            // Update highest_received_pos if this batch extends our contiguous coverage
-            state.update_next_apply_pos(start_pos, operations_len);
-
-            // Fill queue to maintain parallelism
-            fill_fetch_queue(config, state).await?;
-        }
-        Err(e) => {
-            warn!(start_pos, error = ?e, "batch fetch failed, retrying");
-            fill_fetch_queue(config, state).await?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Apply contiguous verified batches to the log
-async fn apply_contiguous_batches<E, K, V>(
-    mut log: Journal<E, Operation<K, V>>,
-    state: &mut SyncState<E, K, V, impl Hasher>,
-    metrics: &Metrics<E>,
-    apply_batch_size: usize,
-) -> Result<Journal<E, Operation<K, V>>, Error>
-where
-    E: Storage + Clock + MetricsTrait,
-    K: Array,
-    V: Array,
-{
-    let log_size = log
-        .size()
-        .await
-        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-
-    let mut operations_to_apply = Vec::new();
-    let mut current_pos = log_size;
-
-    // Collect contiguous operations starting from current log size
-    while let Some(operations) = state.take_batch(current_pos) {
-        let operations_len = operations.len() as u64;
-        operations_to_apply.extend(operations);
-        current_pos += operations_len;
-
-        // Apply in batches to avoid memory issues
-        if operations_to_apply.len() >= apply_batch_size {
-            log = apply_operations_to_log(log, operations_to_apply, metrics).await?;
-            operations_to_apply = Vec::new();
-        }
-    }
-
-    // Apply remaining operations
-    if !operations_to_apply.is_empty() {
-        log = apply_operations_to_log(log, operations_to_apply, metrics).await?;
-    }
-
-    Ok(log)
-}
-
-/// Apply a batch of operations to the log
-async fn apply_operations_to_log<E, K, V>(
-    mut log: Journal<E, Operation<K, V>>,
-    operations: Vec<Operation<K, V>>,
-    metrics: &Metrics<E>,
-) -> Result<Journal<E, Operation<K, V>>, Error>
-where
-    E: Storage + Clock + MetricsTrait,
-    K: Array,
-    V: Array,
-{
-    // Apply operations to the log
-    {
-        let _timer = metrics.apply_duration.timer();
-        for op in operations.into_iter() {
-            log.append(op)
-                .await
-                .map_err(adb::Error::JournalError)
-                .map_err(Error::Adb)?;
-            // No need to sync here -- the log will periodically sync its storage
-            // and we will also sync when we're done.
-        }
-    }
-    Ok(log)
-}
-
 /// Reinitialize the log for a target update
 async fn reinitialize_log_for_target_update<E, K, V, T>(
     mut log: Journal<E, Operation<K, V>>,
@@ -981,56 +972,6 @@ where
             SyncStepResult::Complete(database) => return Ok(database),
         }
     }
-}
-
-/// Handle a target update by validating it and reinitializing state
-async fn handle_target_update<E, K, V, H, T, R>(
-    new_target: SyncTarget<H::Digest>,
-    config: &mut Config<E, K, V, H, T, R>,
-    state: &mut SyncState<E, K, V, H>,
-    log: Journal<E, Operation<K, V>>,
-    _metrics: &Metrics<E>,
-) -> Result<Journal<E, Operation<K, V>>, Error>
-where
-    E: Storage + Clock + MetricsTrait,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
-{
-    validate_target_update::<H>(&config.target, &new_target)?;
-
-    info!(
-        old_target = ?config.target,
-        new_target = ?new_target,
-        "applying target update"
-    );
-
-    // Update config target
-    config.target = new_target;
-
-    // Reinitialize log if needed
-    let log = reinitialize_log_for_target_update(
-        log,
-        config.context.clone(),
-        &config.db_config,
-        config.target.lower_bound_ops,
-        config.target.upper_bound_ops,
-    )
-    .await?;
-
-    // Reset sync state to the new log size
-    let new_log_size = log
-        .size()
-        .await
-        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-    state.reset(new_log_size);
-
-    // Reinitialize parallel fetching
-    fill_fetch_queue(config, state).await?;
-
-    Ok(log)
 }
 
 #[cfg(test)]
