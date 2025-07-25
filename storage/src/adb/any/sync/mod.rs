@@ -1,9 +1,6 @@
 use crate::{
     adb::any::{
-        sync::{
-            client::{Client, StepResult},
-            resolver::Resolver,
-        },
+        sync::{client::Client, resolver::Resolver},
         Any,
     },
     translator::Translator,
@@ -134,13 +131,6 @@ where
     info!("starting sync");
 
     // Create client and initialize all state
-    let mut client = Client::new(config).await?;
-
-    // Run sync to completion using step-based API
-    loop {
-        match client.step().await? {
-            StepResult::Continue(new_client) => client = new_client,
-            StepResult::Complete(database) => return Ok(database),
-        }
-    }
+    let client = Client::new(config).await?;
+    client.sync().await
 }
