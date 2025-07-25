@@ -56,9 +56,9 @@ async fn test_sync(
     test_name: &str,
 ) -> bool {
     let mut config = base_config();
-    config.mmr_journal_partition = format!("{}_mmr", test_name);
-    config.mmr_metadata_partition = format!("{}_meta", test_name);
-    config.log_journal_partition = format!("{}_log", test_name);
+    config.mmr_journal_partition = format!("{test_name}_mmr");
+    config.mmr_metadata_partition = format!("{test_name}_meta");
+    config.log_journal_partition = format!("{test_name}_log");
 
     let expected_root = target.root;
 
@@ -73,7 +73,7 @@ async fn test_sync(
         apply_batch_size: 100,
     };
 
-    if let Ok(mut synced) = sync::sync(sync_config).await {
+    if let Ok(synced) = sync::sync(sync_config).await {
         let mut hasher = Standard::<Sha256>::new();
         let actual_root = synced.root(&mut hasher);
         assert_eq!(
@@ -141,7 +141,7 @@ fuzz_target!(|input: FuzzInput| {
                         &src,
                         target,
                         *batch_size,
-                        &format!("full_{}", sync_id),
+                        &format!("full_{sync_id}"),
                     )
                     .await;
                     sync_id += 1;
