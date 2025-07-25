@@ -215,7 +215,7 @@ where
 
         for _ in 0..requests_to_make {
             // Find the next gap that needs to be fetched
-            let Some((gap_start, gap_end)) = find_next_gap_to_fetch::<K, V>(
+            let Some((gap_start, gap_end)) = find_next_gap::<K, V>(
                 search_start,
                 self.config.target.upper_bound_ops,
                 &self.fetched_operations,
@@ -584,7 +584,7 @@ impl<E: Clock + MetricsTrait> Metrics<E> {
 
 /// Find the next gap in operations that needs to be fetched
 /// Returns (start, end) inclusive range, or None if no gaps
-fn find_next_gap_to_fetch<K: Array, V: Array>(
+fn find_next_gap<K: Array, V: Array>(
     lower_bound: u64,
     upper_bound: u64,
     verified_batches: &BTreeMap<u64, Vec<Fixed<K, V>>>,
@@ -1493,265 +1493,204 @@ pub(crate) mod tests {
         });
     }
 
-    #[test]
-    fn test_find_next_gap_to_fetch() {
-        // Test case 1: Empty state - should return the full range
-        let verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
-        let outstanding_requests = BTreeSet::new();
-        let result = find_next_gap_to_fetch::<Digest, Digest>(
-            0,
-            10,
-            &verified_batches,
-            &outstanding_requests,
-            5,
-        );
-        assert_eq!(result, Some((0, 10)));
+    /// Test case structure for find_next_gap tests
+    #[derive(Debug)]
+    struct FindNextGapTestCase {
+        lower_bound: u64,
+        upper_bound: u64,
+        verified_batches: Vec<(u64, usize)>, // (position, num_operations)
+        outstanding_requests: Vec<u64>,
+        fetch_batch_size: u64,
+        expected: Option<(u64, u64)>,
+    }
 
-        // Test case 2: Some verified batches with gaps
-        let mut verified_batches = BTreeMap::new();
-        verified_batches.insert(
-            0,
-            vec![Fixed::Update(Digest::from([1; 32]), Digest::from([2; 32]))],
-        );
-        verified_batches.insert(
-            1,
-            vec![Fixed::Update(Digest::from([3; 32]), Digest::from([4; 32]))],
-        );
-        // Gap at positions 2, 3
-        verified_batches.insert(
-            5,
-            vec![Fixed::Update(Digest::from([5; 32]), Digest::from([6; 32]))],
-        );
-
-        let outstanding_requests = BTreeSet::new();
-        let result = find_next_gap_to_fetch::<Digest, Digest>(
-            0,
-            10,
-            &verified_batches,
-            &outstanding_requests,
-            5,
-        );
-        assert_eq!(result, Some((2, 4))); // First gap is positions 2-4
-
-        // Test case 3: Outstanding request covers part of the gap
-        let mut outstanding_requests = BTreeSet::new();
-        outstanding_requests.insert(2); // Outstanding request starting at 2, covers 2-6 (batch_size=5)
-
-        let result = find_next_gap_to_fetch::<Digest, Digest>(
-            0,
-            10,
-            &verified_batches,
-            &outstanding_requests,
-            5,
-        );
-        assert_eq!(result, Some((7, 10))); // Next gap is 7-10
-
-        // Test case 4: No gaps - everything covered
-        let mut verified_batches = BTreeMap::new();
-        for i in 0..=10 {
-            verified_batches.insert(
-                i,
-                vec![Fixed::Update(
-                    Digest::from([i as u8; 32]),
-                    Digest::from([i as u8 + 1; 32]),
-                )],
-            );
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((0, 10)),
+    }; "empty_state_full_range")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 10,
+        upper_bound: 5,
+        verified_batches: vec![],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: None,
+    }; "invalid_bounds")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 5,
+        upper_bound: 5,
+        verified_batches: vec![],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((5, 5)),
+    }; "zero_length_range")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![],
+        outstanding_requests: vec![0, 3, 8],
+        fetch_batch_size: 5,
+        expected: None,
+    }; "overlapping_outstanding_requests")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![],
+        outstanding_requests: vec![8],
+        fetch_batch_size: 5,
+        expected: Some((0, 7)),
+    }; "outstanding_request_beyond_upper_bound")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![],
+        outstanding_requests: vec![0, 7],
+        fetch_batch_size: 4,
+        expected: Some((4, 6)),
+    }; "outstanding_requests_only")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 3,
+        upper_bound: 10,
+        verified_batches: vec![],
+        outstanding_requests: vec![0],
+        fetch_batch_size: 5,
+        expected: Some((5, 10)),
+    }; "outstanding_request_before_lower_bound")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![(0, 1), (2, 1), (4, 1)],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((1, 1)),
+    }; "single_ops_with_gaps")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![(0, 3)],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((3, 10)),
+    }; "multi_op_batch_gap_after")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![(0, 1), (1, 1)],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((2, 10)),
+    }; "adjacent_single_ops")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 5,
+        verified_batches: vec![(0, 0), (2, 1)],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((0, 1)),
+    }; "empty_batch_ignored")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![(0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1), (8, 1), (9, 1), (10, 1)],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: None,
+    }; "no_gaps_all_covered")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![],
+        outstanding_requests: vec![2, 5, 8],
+        fetch_batch_size: 1,
+        expected: Some((0, 1)),
+    }; "fetch_batch_size_one")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 5,
+        upper_bound: 10,
+        verified_batches: vec![(0, 8)],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((8, 10)),
+    }; "verified_batch_starts_before_lower_bound")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 6,
+        verified_batches: vec![(4, 5)],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((0, 3)),
+    }; "verified_batch_extends_beyond_upper_bound")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 5,
+        verified_batches: vec![],
+        outstanding_requests: vec![2],
+        fetch_batch_size: 100,
+        expected: Some((0, 1)),
+    }; "fetch_batch_size_larger_than_range")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![(0, 5), (8, 3)],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((5, 7)),
+    }; "coverage_exactly_reaches_upper_bound")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 15,
+        verified_batches: vec![(2, 3), (10, 2)],
+        outstanding_requests: vec![6, 13],
+        fetch_batch_size: 3,
+        expected: Some((0, 1)),
+    }; "mixed_coverage_gap_at_start")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 15,
+        verified_batches: vec![(0, 2), (8, 2)],
+        outstanding_requests: vec![3, 12],
+        fetch_batch_size: 4,
+        expected: Some((2, 2)),
+    }; "mixed_coverage_gap_in_middle")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![(1, 2), (6, 2)],
+        outstanding_requests: vec![3, 8],
+        fetch_batch_size: 2,
+        expected: Some((0, 0)),
+    }; "mixed_coverage_interleaved_ranges")]
+    fn test_find_next_gap(test_case: FindNextGapTestCase) {
+        // Create verified batches from input
+        let mut verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
+        for (pos, num_ops) in &test_case.verified_batches {
+            let ops = (0..*num_ops)
+                .map(|i| {
+                    Fixed::Update(
+                        Digest::from([i as u8; 32]),
+                        Digest::from([(i + 1) as u8; 32]),
+                    )
+                })
+                .collect();
+            verified_batches.insert(*pos, ops);
         }
-        let outstanding_requests = BTreeSet::new();
-        let result = find_next_gap_to_fetch::<Digest, Digest>(
-            0,
-            10,
+
+        // Create outstanding requests from input
+        let outstanding_requests: BTreeSet<u64> =
+            test_case.outstanding_requests.into_iter().collect();
+
+        let result = find_next_gap::<Digest, Digest>(
+            test_case.lower_bound,
+            test_case.upper_bound,
             &verified_batches,
             &outstanding_requests,
-            5,
-        );
-        assert_eq!(result, None);
-
-        // Test case 5: Gap at the end
-        let mut verified_batches = BTreeMap::new();
-        for i in 0..=7 {
-            verified_batches.insert(
-                i,
-                vec![Fixed::Update(
-                    Digest::from([i as u8; 32]),
-                    Digest::from([i as u8 + 1; 32]),
-                )],
-            );
-        }
-        let outstanding_requests = BTreeSet::new();
-        let result = find_next_gap_to_fetch::<Digest, Digest>(
-            0,
-            10,
-            &verified_batches,
-            &outstanding_requests,
-            5,
-        );
-        assert_eq!(result, Some((8, 10)));
-
-        // Test case 6: Multi-operation batches
-        let mut verified_batches = BTreeMap::new();
-        verified_batches.insert(
-            0,
-            vec![
-                Fixed::Update(Digest::from([1; 32]), Digest::from([2; 32])),
-                Fixed::Update(Digest::from([3; 32]), Digest::from([4; 32])),
-                Fixed::Update(Digest::from([5; 32]), Digest::from([6; 32])),
-            ],
-        ); // Covers positions 0, 1, 2
-
-        let outstanding_requests = BTreeSet::new();
-        let result = find_next_gap_to_fetch::<Digest, Digest>(
-            0,
-            10,
-            &verified_batches,
-            &outstanding_requests,
-            5,
-        );
-        assert_eq!(result, Some((3, 10))); // Gap starts at position 3
-
-        // Test case 7: Invalid bounds
-        let verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
-        let outstanding_requests = BTreeSet::new();
-        let result = find_next_gap_to_fetch::<Digest, Digest>(
-            10,
-            5,
-            &verified_batches,
-            &outstanding_requests,
-            5,
-        );
-        assert_eq!(result, None);
-
-        // Test case 8: User's example - lower_bound=0, upper_bound=10, outstanding at 5, batch 0-2 completed
-        let mut verified_batches = BTreeMap::new();
-        verified_batches.insert(
-            0,
-            vec![
-                Fixed::Update(Digest::from([1; 32]), Digest::from([2; 32])),
-                Fixed::Update(Digest::from([3; 32]), Digest::from([4; 32])),
-                Fixed::Update(Digest::from([5; 32]), Digest::from([6; 32])),
-            ],
-        ); // Covers positions 0, 1, 2
-
-        let mut outstanding_requests = BTreeSet::new();
-        outstanding_requests.insert(5); // Outstanding request at 5
-
-        let result = find_next_gap_to_fetch::<Digest, Digest>(
-            0,
-            10,
-            &verified_batches,
-            &outstanding_requests,
-            5,
-        );
-        assert_eq!(result, Some((3, 4))); // Should request gap 3-4
-
-        // Test case 9: Adjacent ranges should merge
-        let mut verified_batches = BTreeMap::new();
-        verified_batches.insert(
-            0,
-            vec![Fixed::Update(Digest::from([1; 32]), Digest::from([2; 32]))],
-        ); // Covers position 0
-        verified_batches.insert(
-            1,
-            vec![Fixed::Update(Digest::from([3; 32]), Digest::from([4; 32]))],
-        ); // Covers position 1 (adjacent to position 0)
-
-        let outstanding_requests = BTreeSet::new();
-        let result = find_next_gap_to_fetch::<Digest, Digest>(
-            0,
-            10,
-            &verified_batches,
-            &outstanding_requests,
-            5,
-        );
-        assert_eq!(result, Some((2, 10))); // Gap should start at 2
-
-        // Test case 10: Overlapping outstanding requests
-        let verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
-        let mut outstanding_requests = BTreeSet::new();
-        outstanding_requests.insert(0); // Covers 0-4 (batch_size=5)
-        outstanding_requests.insert(3); // Covers 3-7 (overlaps with first)
-        outstanding_requests.insert(8); // Covers 8-10 (gap at positions 5-7 should be covered by second request)
-
-        let result = find_next_gap_to_fetch::<Digest, Digest>(
-            0,
-            10,
-            &verified_batches,
-            &outstanding_requests,
-            5,
-        );
-        assert_eq!(result, None); // No gaps - everything covered by overlapping requests
-
-        // Test case 11: Outstanding request goes beyond upper_bound (should be capped)
-        let verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
-        let mut outstanding_requests = BTreeSet::new();
-        outstanding_requests.insert(8); // Would cover 8-12, but upper_bound is 10
-
-        let result = find_next_gap_to_fetch::<Digest, Digest>(
-            0,
-            10,
-            &verified_batches,
-            &outstanding_requests,
-            5,
-        );
-        assert_eq!(result, Some((0, 7))); // Gap from 0-7, then 8-10 is covered
-
-        // Test case 12: Zero-length range (lower_bound == upper_bound)
-        let verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
-        let outstanding_requests = BTreeSet::new();
-        let result = find_next_gap_to_fetch::<Digest, Digest>(
-            5,
-            5,
-            &verified_batches,
-            &outstanding_requests,
-            5,
-        );
-        assert_eq!(result, Some((5, 5))); // Single position gap
-
-        // Test case 13: Outstanding requests only (no verified batches)
-        let verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
-        let mut outstanding_requests = BTreeSet::new();
-        outstanding_requests.insert(0); // Covers 0-4
-        outstanding_requests.insert(7); // Covers 7-10
-
-        let result = find_next_gap_to_fetch::<Digest, Digest>(
-            0,
-            10,
-            &verified_batches,
-            &outstanding_requests,
-            4,
-        );
-        assert_eq!(result, Some((4, 6))); // Gap between the two outstanding requests
-
-        // Test case 14: Empty verified batches should be ignored
-        let mut verified_batches = BTreeMap::new();
-        verified_batches.insert(0, vec![]); // Empty batch should be ignored
-        verified_batches.insert(
-            2,
-            vec![Fixed::Update(Digest::from([1; 32]), Digest::from([2; 32]))],
+            test_case.fetch_batch_size,
         );
 
-        let outstanding_requests = BTreeSet::new();
-        let result = find_next_gap_to_fetch::<Digest, Digest>(
-            0,
-            5,
-            &verified_batches,
-            &outstanding_requests,
-            5,
-        );
-        assert_eq!(result, Some((0, 1))); // Gap at 0-1, empty batch ignored
-
-        // Test case 15: Outstanding request before lower_bound (edge case)
-        let verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
-        let mut outstanding_requests = BTreeSet::new();
-        outstanding_requests.insert(0); // This covers 0-4, but lower_bound is 3
-
-        let result = find_next_gap_to_fetch::<Digest, Digest>(
-            3,
-            10,
-            &verified_batches,
-            &outstanding_requests,
-            5,
-        );
-        assert_eq!(result, Some((5, 10))); // Gap after the outstanding request coverage
+        assert_eq!(result, test_case.expected);
     }
 }
