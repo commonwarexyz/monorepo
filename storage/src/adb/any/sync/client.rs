@@ -37,6 +37,69 @@ pub enum StepResult<C, D> {
 // (start_pos, result) where start_pos is the position of the first operation in the batch.
 type PendingOperationBatch<D, K, V> = (u64, Result<GetOperationsResult<D, K, V>, Error>);
 
+/// Configuration for the sync client
+pub struct Config<E, K, V, H, T, R>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
+    /// Context for the database.
+    pub context: E,
+
+    /// Channel for receiving target updates.
+    pub update_receiver: Option<SyncTargetUpdateReceiver<H::Digest>>,
+
+    /// Database configuration.
+    pub db_config: crate::adb::any::Config<T>,
+
+    /// Maximum operations to fetch per batch.
+    pub fetch_batch_size: NonZeroU64,
+
+    /// Synchronization target (root digest and operation bounds).
+    pub target: SyncTarget<H::Digest>,
+
+    /// Resolves requests for proofs and operations.
+    pub resolver: Arc<R>,
+
+    /// Hasher for root digests.
+    pub hasher: mmr::hasher::Standard<H>,
+
+    /// The maximum number of operations to keep in memory
+    /// before committing the database while applying operations.
+    /// Higher value will cause more memory usage during sync.
+    pub apply_batch_size: usize,
+
+    /// Maximum number of outstanding requests for operation batches.
+    /// Higher values increase parallelism but also memory usage.
+    pub max_outstanding_requests: usize,
+}
+
+impl<E, K, V, H, T, R> Config<E, K, V, H, T, R>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
+    /// Validate the configuration parameters
+    pub fn validate(&self) -> Result<(), Error> {
+        // Validate bounds (inclusive)
+        if self.target.lower_bound_ops > self.target.upper_bound_ops {
+            return Err(Error::InvalidTarget {
+                lower_bound_pos: self.target.lower_bound_ops,
+                upper_bound_pos: self.target.upper_bound_ops,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Client that syncs an [adb::any::Any] database.
 pub(super) struct Client<E, K, V, H, T, R>
 where
@@ -460,69 +523,6 @@ where
         }
 
         Ok(false)
-    }
-}
-
-/// Configuration for the sync client
-pub struct Config<E, K, V, H, T, R>
-where
-    E: Storage + Clock + MetricsTrait,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
-{
-    /// Context for the database.
-    pub context: E,
-
-    /// Channel for receiving target updates.
-    pub update_receiver: Option<SyncTargetUpdateReceiver<H::Digest>>,
-
-    /// Database configuration.
-    pub db_config: crate::adb::any::Config<T>,
-
-    /// Maximum operations to fetch per batch.
-    pub fetch_batch_size: NonZeroU64,
-
-    /// Synchronization target (root digest and operation bounds).
-    pub target: SyncTarget<H::Digest>,
-
-    /// Resolves requests for proofs and operations.
-    pub resolver: Arc<R>,
-
-    /// Hasher for root digests.
-    pub hasher: mmr::hasher::Standard<H>,
-
-    /// The maximum number of operations to keep in memory
-    /// before committing the database while applying operations.
-    /// Higher value will cause more memory usage during sync.
-    pub apply_batch_size: usize,
-
-    /// Maximum number of outstanding requests for operation batches.
-    /// Higher values increase parallelism but also memory usage.
-    pub max_outstanding_requests: usize,
-}
-
-impl<E, K, V, H, T, R> Config<E, K, V, H, T, R>
-where
-    E: Storage + Clock + MetricsTrait,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
-{
-    /// Validate the configuration parameters
-    pub fn validate(&self) -> Result<(), Error> {
-        // Validate bounds (inclusive)
-        if self.target.lower_bound_ops > self.target.upper_bound_ops {
-            return Err(Error::InvalidTarget {
-                lower_bound_pos: self.target.lower_bound_ops,
-                upper_bound_pos: self.target.upper_bound_ops,
-            });
-        }
-        Ok(())
     }
 }
 
