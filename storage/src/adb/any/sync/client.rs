@@ -116,6 +116,7 @@ where
     fetched_operations: BTreeMap<u64, Vec<Fixed<K, V>>>,
 
     /// Start positions of batches that we've requested from the resolver
+    /// Each element corresponds to an element in [outstanding_request_futures]
     outstanding_request_locations: BTreeSet<u64>,
 
     /// Each element is a future that will resolve to a batch of operations
