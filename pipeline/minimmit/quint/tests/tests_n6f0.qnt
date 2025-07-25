@@ -6,8 +6,6 @@ module tests {
         CORRECT = Set("n0", "n1", "n2", "n3", "n4", "n5"),
         FAULTY = Set(),
         WEIGHTS = Map("n0"->1, "n1"->1, "n2"->1, "n3"->1, "n4"->1, "n5"->1),
-        N = 6,
-        F = 1,
         VIEWS = 0.to(5),
         VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
         INVALID_BLOCKS = Set("inv_b3")
@@ -33,8 +31,8 @@ module tests {
                 assert(leader.get(1) == "n0"),
                 unchanged_all
             })}
-    
-    
+
+
     // Minimal test without init
     run minimalProposalTest = {
         // Manual state setup
@@ -48,7 +46,7 @@ module tests {
 
     // Three nodes happy path - based on reference test structure
     run happyPathTest = {
-        val proposal = { 
+        val proposal = {
             block: "val_b0",
             view: 0,
             view_parent: GENESIS_VIEW,
@@ -91,7 +89,7 @@ module tests {
                 unchanged_all
             })
             .expect(all_invariants)
-            
+
             // All replicas collect votes and notarize the block
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n0"))
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n1"))
@@ -99,7 +97,7 @@ module tests {
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n3"))
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n4"))
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n5"))
-            
+
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n0"))
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n1"))
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n2"))
@@ -133,7 +131,7 @@ module tests {
             .then(replica_receives_notarize_vote("n5", "val_b0", 0, "n2"))
             .then(replica_receives_notarize_vote("n5", "val_b0", 0, "n3"))
             .then(replica_receives_notarize_vote("n5", "val_b0", 0, "n4"))
-            .then(replica_receives_notarize_vote("n5", "val_b0", 0, "n5"))            
+            .then(replica_receives_notarize_vote("n5", "val_b0", 0, "n5"))
 
             .expect(select_votes(0, NotarizeKind, store_vote.get("n0")).size()==6)
             .expect(select_votes(0, NotarizeKind, store_vote.get("n1")).size()==6)
@@ -141,7 +139,7 @@ module tests {
             .expect(select_votes(0, NotarizeKind, store_vote.get("n3")).size()==6)
             .expect(select_votes(0, NotarizeKind, store_vote.get("n4")).size()==6)
             .expect(select_votes(0, NotarizeKind, store_vote.get("n5")).size()==6)
-            
+
             .expect(is_view_finalized(0, store_vote.get("n0"), "val_b0"))
             .expect(is_view_finalized(0, store_vote.get("n0"), "val_b0"))
             .expect(is_view_finalized(0, store_vote.get("n1"), "val_b0"))
@@ -164,7 +162,7 @@ module tests {
             .expect(is_view_notarized(0, store_certificate.get("n4")))
             .expect(is_view_notarized(0, store_certificate.get("n5")))
             .expect(all_invariants)
-            
+
             .then(all {
                 assert(replica_state.get("n0").last_finalized == 0),
                 assert(replica_state.get("n1").last_finalized == 0),
@@ -194,12 +192,12 @@ module tests {
                 assert(ghost_committed_blocks.get("n5") == ["val_b0"]),
                 unchanged_all,
             })
-            
+
     }
 
     // Two blocks happy path test - commits blocks in views 1 and 2
     run twoBlocksTest = {
-        val proposal1 = { 
+        val proposal1 = {
             block: "val_b0",
             view: 0,
             view_parent: GENESIS_VIEW,
@@ -207,7 +205,7 @@ module tests {
             sig: sig_of("n0")
         }
 
-        val proposal2 = { 
+        val proposal2 = {
             block: "val_b1",
             view: 1,
             view_parent: 0,
@@ -216,12 +214,12 @@ module tests {
         }
 
         initWithLeader(Map(0 -> "n0", 1 -> "n1", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n4"))
-            
+
             // === FIRST BLOCK (VIEW 1) ===
             // Leader n0 proposes in view 1
             .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW))
             .expect(all_invariants)
-            
+
             // All replicas process the proposal and vote for it (n0 did it already)
             .then(on_proposal("n1", proposal1))
             .then(on_proposal("n2", proposal1))
@@ -229,7 +227,7 @@ module tests {
             .then(on_proposal("n4", proposal1))
             .then(on_proposal("n5", proposal1))
             .expect(all_invariants)
-            
+
             // All replicas collect votes for block 1
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n0"))
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n1"))
@@ -237,7 +235,7 @@ module tests {
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n3"))
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n4"))
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n5"))
-            
+
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n0"))
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n1"))
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n2"))
@@ -287,7 +285,7 @@ module tests {
             .expect(is_view_notarized(0, store_certificate.get("n3")))
             .expect(is_view_notarized(0, store_certificate.get("n4")))
             .expect(is_view_notarized(0, store_certificate.get("n5")))
-            
+
             // Check first block is committed and replicas advance to view 1
             .then(all {
                 assert(replica_state.get("n0").last_finalized == 0),
@@ -310,15 +308,15 @@ module tests {
                 assert(ghost_committed_blocks.get("n3") == ["val_b0"]),
                 assert(ghost_committed_blocks.get("n4") == ["val_b0"]),
                 assert(ghost_committed_blocks.get("n5") == ["val_b0"]),
-                
+
                 unchanged_all,
             })
-            
+
             // === SECOND BLOCK (VIEW 1) ===
             // Leader n1 proposes in view 1
             .then(proposer_step("n1", "val_b1", "val_b0", 0))
             .expect(all_invariants)
-            
+
             // All replicas process the second proposal and vote for it (n1 already did!)
             .then(on_proposal("n0", proposal2))
             //.then(on_proposal("n1", proposal2))
@@ -335,7 +333,7 @@ module tests {
             .then(replica_receives_notarize_vote("n0", "val_b1", 1, "n3"))
             .then(replica_receives_notarize_vote("n0", "val_b1", 1, "n4"))
             .then(replica_receives_notarize_vote("n0", "val_b1", 1, "n5"))
-            
+
             .then(replica_receives_notarize_vote("n1", "val_b1", 1, "n0"))
             .then(replica_receives_notarize_vote("n1", "val_b1", 1, "n1"))
             .then(replica_receives_notarize_vote("n1", "val_b1", 1, "n2"))
@@ -394,7 +392,7 @@ module tests {
                 assert(replica_state.get("n3").last_finalized == 1),
                 assert(replica_state.get("n4").last_finalized == 1),
                 assert(replica_state.get("n5").last_finalized == 1),
-                
+
                 assert(replica_state.get("n0").view == 2),
                 assert(replica_state.get("n1").view == 2),
                 assert(replica_state.get("n2").view == 2),
@@ -409,7 +407,7 @@ module tests {
                 assert(ghost_committed_blocks.get("n3") == ["val_b0", "val_b1"]),
                 assert(ghost_committed_blocks.get("n4") == ["val_b0", "val_b1"]),
                 assert(ghost_committed_blocks.get("n5") == ["val_b0", "val_b1"]),
-                
+
                 unchanged_all,
             })
             .expect(all_invariants)
@@ -417,7 +415,7 @@ module tests {
 
     // Two blocks happy path test - but notarization and finalizations are processed in different views
     run twoBlocksDifferentViewsTest = {
-        val proposal1 = { 
+        val proposal1 = {
             block: "val_b0",
             view: 0,
             view_parent: GENESIS_VIEW,
@@ -425,7 +423,7 @@ module tests {
             sig: sig_of("n0")
         }
 
-        val proposal2 = { 
+        val proposal2 = {
             block: "val_b1",
             view: 1,
             view_parent: 0,
@@ -434,12 +432,12 @@ module tests {
         }
 
         initWithLeader(Map(0 -> "n0", 1 -> "n1", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n4"))
-            
+
             // === FIRST BLOCK (VIEW 1) ===
             // Leader n0 proposes in view 1
             .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW))
             .expect(all_invariants)
-            
+
             // All replicas process the proposal and vote for it (n0 did it already)
             .then(on_proposal("n1", proposal1))
             .then(on_proposal("n2", proposal1))
@@ -452,7 +450,7 @@ module tests {
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n0"))
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n1"))
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n2"))
-        
+
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n3"))
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n4"))
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n5"))
@@ -494,7 +492,7 @@ module tests {
                 assert(replica_state.get("n3").last_finalized == GENESIS_VIEW),
                 assert(replica_state.get("n4").last_finalized == GENESIS_VIEW),
                 assert(replica_state.get("n5").last_finalized == GENESIS_VIEW),
-                
+
                 assert(replica_state.get("n0").view == 1),
                 assert(replica_state.get("n1").view == 1),
                 assert(replica_state.get("n2").view == 1),
@@ -508,14 +506,14 @@ module tests {
                 assert(ghost_committed_blocks.get("n3") == []),
                 assert(ghost_committed_blocks.get("n4") == []),
                 assert(ghost_committed_blocks.get("n5") == []),
-                
+
                 unchanged_all,
             })
 
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n3"))
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n4"))
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n5"))
-            
+
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n0"))
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n1"))
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n2"))
@@ -559,7 +557,7 @@ module tests {
                 assert(replica_state.get("n3").last_finalized == 0),
                 assert(replica_state.get("n4").last_finalized == 0),
                 assert(replica_state.get("n5").last_finalized == 0),
-                
+
                 assert(replica_state.get("n0").view == 1),
                 assert(replica_state.get("n1").view == 1),
                 assert(replica_state.get("n2").view == 1),
@@ -573,7 +571,7 @@ module tests {
                 assert(ghost_committed_blocks.get("n3") == ["val_b0"]),
                 assert(ghost_committed_blocks.get("n4") == ["val_b0"]),
                 assert(ghost_committed_blocks.get("n5") == ["val_b0"]),
-                
+
                 unchanged_all,
             })
 
@@ -581,7 +579,7 @@ module tests {
             // Leader n1 proposes in view 1
             .then(proposer_step("n1", "val_b1", "val_b0", 0))
             .expect(all_invariants)
-            
+
             // All replicas process the second proposal and vote for it (n1 already did!)
             .then(on_proposal("n0", proposal2))
             .then(on_proposal("n2", proposal2))
@@ -589,7 +587,7 @@ module tests {
             .then(on_proposal("n4", proposal2))
             .then(on_proposal("n5", proposal2))
             .expect(all_invariants)
-            
+
             // All replicas collect votes for block 2
             .then(replica_receives_notarize_vote("n0", "val_b1", 1, "n0"))
             .then(replica_receives_notarize_vote("n0", "val_b1", 1, "n1"))
@@ -597,7 +595,7 @@ module tests {
             .then(replica_receives_notarize_vote("n0", "val_b1", 1, "n3"))
             .then(replica_receives_notarize_vote("n0", "val_b1", 1, "n4"))
             .then(replica_receives_notarize_vote("n0", "val_b1", 1, "n5"))
-            
+
             .then(replica_receives_notarize_vote("n1", "val_b1", 1, "n0"))
             .then(replica_receives_notarize_vote("n1", "val_b1", 1, "n1"))
             .then(replica_receives_notarize_vote("n1", "val_b1", 1, "n2"))
@@ -632,7 +630,7 @@ module tests {
             .then(replica_receives_notarize_vote("n5", "val_b1", 1, "n3"))
             .then(replica_receives_notarize_vote("n5", "val_b1", 1, "n4"))
             .then(replica_receives_notarize_vote("n5", "val_b1", 1, "n5"))
-            
+
             // Verify second block is finalized and committed
             .expect(is_view_finalized(1, store_vote.get("n0"), "val_b1"))
             .expect(is_view_finalized(1, store_vote.get("n1"), "val_b1"))
@@ -648,7 +646,7 @@ module tests {
             .expect(is_view_notarized(1, store_certificate.get("n4")))
             .expect(is_view_notarized(1, store_certificate.get("n5")))
 
-            
+
             // Check both blocks are committed and replicas advance to view 3
             .then(all {
                 assert(replica_state.get("n0").last_finalized == 1),
@@ -657,7 +655,7 @@ module tests {
                 assert(replica_state.get("n3").last_finalized == 1),
                 assert(replica_state.get("n4").last_finalized == 1),
                 assert(replica_state.get("n5").last_finalized == 1),
-                
+
                 assert(replica_state.get("n0").view == 2),
                 assert(replica_state.get("n1").view == 2),
                 assert(replica_state.get("n2").view == 2),
@@ -681,7 +679,7 @@ module tests {
 
     run timeoutTest = {
         // ----- first block (view 1) -----
-        val proposal1 = { 
+        val proposal1 = {
             block: "val_b0",
             block_parent: GENESIS_BLOCK,
             view: 0,
@@ -755,7 +753,7 @@ module tests {
     }
 
     run contradictionTest = {
-        pure val proposal0 = { 
+        pure val proposal0 = {
             block: "val_b0",
             view: 0,
             view_parent: GENESIS_VIEW,
@@ -768,7 +766,7 @@ module tests {
         .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW))
         .then(on_proposal("n1", proposal0))
         .then(on_proposal("n2", proposal0))
-        
+
         .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n0"))
         .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n1"))
 
@@ -790,12 +788,12 @@ module tests {
             assert(replica_state.get("n5").view == 0),
             unchanged_all,
         })
-    
+
         .expect(all_invariants)
 
         .then(replica_receives_nullify_vote("n0", 0, "n3"))
         .then(replica_receives_nullify_vote("n0", 0, "n4"))
-        
+
         .then(all {
             assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block_hash != "val_b0").size() == 0),
             assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NullifyKind).size() == 2),
@@ -804,9 +802,9 @@ module tests {
             assert(is_contradicted(replica_state.get("n0"), 0, store_vote.get("n0")) == false),
             unchanged_all,
         })
-        
+
         // no contradiction, no nullification will be sent.
-        
+
         .then(all {
             assert(store_vote.get("n0").filter(v=>v.view==0).size() == 4),
             assert(replica_state.get("n0").nullified == false),
@@ -828,14 +826,14 @@ module tests {
             assert(replica_state.get("n1").view == 1),
             unchanged_all,
         })
-        
-        
-    }
-    
-    action replica_receives_notarize_vote(id: ReplicaId, block_hash: BlockHash, view: ViewNumber, src: ReplicaId): bool = 
-        on_vote_notarize(id, view, block_hash,  Set(notarize(view, src, block_hash)))  
 
-    action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: str): bool = 
+
+    }
+
+    action replica_receives_notarize_vote(id: ReplicaId, block_hash: BlockHash, view: ViewNumber, src: ReplicaId): bool =
+        on_vote_notarize(id, view, block_hash,  Set(notarize(view, src, block_hash)))
+
+    action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: str): bool =
         on_vote_nullify(id, view, Set(nullify(view, src)))
 
     action unchanged_all = all {
@@ -849,5 +847,5 @@ module tests {
         leader' = leader,
         replica_state' = replica_state,
     }
-    
+
 }

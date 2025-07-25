@@ -6,29 +6,27 @@ module tests {
         CORRECT = Set("n0", "n1", "n2", "n3", "n4"),
         FAULTY = Set("n5"),
         WEIGHTS = Map("n0"->1, "n1"->1, "n2"->1, "n3"->1, "n4"->1, "n5"->1),
-        N = 6,
-        F = 1,
         VIEWS = 0.to(8),
         VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
         INVALID_BLOCKS = Set("inv_b3")
     ).* from "../replica"
 
     run contradictionTest = {
-        pure val proposal_from_n0 = { 
+        pure val proposal_from_n0 = {
             block: "val_b0",
             view: 0,
             view_parent: GENESIS_VIEW,
             block_parent: GENESIS_BLOCK,
             sig: sig_of("n0")
         }
-        pure val proposal_from_n5_1 = { 
+        pure val proposal_from_n5_1 = {
             block: "val_b1",
             view: 1,
             view_parent: 0,
             block_parent: "val_b0",
             sig: sig_of("n5")
         }
-        pure val proposal_from_n5_2 = { 
+        pure val proposal_from_n5_2 = {
             block: "val_b2",
             view: 1,
             view_parent: 0,
@@ -71,7 +69,7 @@ module tests {
             assert(replica_state.get("n4").view == 1),
             unchanged_all,
         })
-        
+
         // === view 1 ===
         // n5 proposes two blocks
         .then(inject_proposal(proposal_from_n5_1))
@@ -86,7 +84,7 @@ module tests {
         .then(on_proposal("n3", proposal_from_n5_2))
         .then(on_proposal("n4", proposal_from_n5_2))
         .then(inject_vote({ view: proposal_from_n5_2.view, sig: sig_of("n5"), kind: NotarizeKind, block_hash: proposal_from_n5_2.block }))
-        
+
         .expect(all_invariants)
 
         // n0-n2 recieve 2 votes each for b0
@@ -113,20 +111,20 @@ module tests {
             assert(is_contradicted(replica_state.get("n0"), 1, store_vote.get("n0")) == true),
             unchanged_all,
         })
-       
+
         .then(on_nullify_by_contradiction("n0", 1))
         .expect(all_invariants)
-       
+
         .then(all {
             assert(store_vote.get("n0").filter(v=>v.view==1).size() == 5),
             assert(replica_state.get("n0").nullified == true),
             unchanged_all,
         })
-        .expect(all_invariants)        
+        .expect(all_invariants)
     }
 
     action inject_proposal(proposal: Proposal): bool = all {
-        sent_proposal' = sent_proposal.union(Set(proposal)), 
+        sent_proposal' = sent_proposal.union(Set(proposal)),
         sent_vote' = sent_vote,
         sent_certificate' = sent_certificate,
         store_vote' = store_vote,
@@ -149,11 +147,11 @@ module tests {
         replica_state' = replica_state,
     }
 
-     action replica_receives_notarize_vote(id: ReplicaId, block_hash: BlockHash, view: ViewNumber, src: ReplicaId): bool = 
-        on_vote_notarize(id, view, block_hash,  Set(notarize(view, src, block_hash)))  
+     action replica_receives_notarize_vote(id: ReplicaId, block_hash: BlockHash, view: ViewNumber, src: ReplicaId): bool =
+        on_vote_notarize(id, view, block_hash,  Set(notarize(view, src, block_hash)))
 
-    action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: str): bool = 
-        on_vote_nullify(id, view, Set(nullify(view, src)))    
+    action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: str): bool =
+        on_vote_nullify(id, view, Set(nullify(view, src)))
 
     action unchanged_all = all {
         sent_proposal' = sent_proposal,

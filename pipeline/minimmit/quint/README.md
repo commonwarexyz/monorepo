@@ -1,24 +1,25 @@
 # Minimmit Formal Specification
 
-This repository contains the Quint formal specification for the [Minimmit](../minimmit.md) Byzantine Fault-Tolerant consensus protocol.
+This repository contains the formal specification for the [Minimmit](../minimmit.md) Byzantine Fault-Tolerant consensus protocol (in [Quint](https://github.com/informalsystems/quint)).
 
-## Getting Started
+## Setup
 
-This assumes you have `node/npm` installed. Then, to install `quint`, run the following:
+Once you've installed `node/npm`, run the following to install `quint`:
 
 ```
 npm i @informalsystems/quint -g
 ```
 
+_To run the model checker, you must install the Java Development Kit (JDK) 17 or higher. Both [Eclipse Temurin](https://adoptium.net/) and [Zulu](https://www.azul.com/downloads/?version=java-17-lts&package=jdk#download-openjdk) work great!_
 
 ## Protocol Configurations
 
 The specification supports various configurations for testing:
 
-- **N=6, F=1, B=0**: 6 replicas, fault tolerance of 1, no Byzantine replicas
-- **N=7, F=1, B=0**: 7 replicas, fault tolerance of 1, no Byzantine replicas
-- **N=6, F=1, B=1**: 6 replicas, fault tolerance of 1, 1 Byzantine replica
-- **N=6, F=1, B=2**: 6 replicas, fault tolerance of 1, 2 Byzantine replicas (safety violations expected)
+- **N=6, F=0**: 6 replicas, no Byzantine replicas
+- **N=7, F=0**: 7 replicas, no Byzantine replicas
+- **N=6, F=1**: 6 replicas, 1 Byzantine replica
+- **N=6, F=2**: 6 replicas, 2 Byzantine replicas (safety violations expected)
 
 ## Safety Invariants
 
@@ -42,9 +43,9 @@ The specification validates the following safety properties:
 You can choose any specification instance stored in the `main_` files:
 
 ```bash
-quint run --invariant=block_example ./main_n6f1b0.qnt
-quint run --invariant=two_chained_blocks_example ./main_n6f1b0.qnt
-````
+quint run --invariant=block_example ./main_n6f0.qnt
+quint run --invariant=two_chained_blocks_example ./main_n6f0.qnt
+```
 
 ## Checking State Invariants
 
@@ -53,7 +54,7 @@ quint run --invariant=two_chained_blocks_example ./main_n6f1b0.qnt
 The simulator converts non-deterministic constructs in the specification like `any` and `oneOf` into random selections:
 
 ```bash
-quint verify --invariant=safe --max-steps=20 --random-transitions ./main_n6f1b1.qnt
+quint verify --invariant=safe --max-steps=20 --random-transitions ./main_n6f0.qnt
 ```
 
 ### Randomized Symbolic Execution
@@ -61,7 +62,7 @@ quint verify --invariant=safe --max-steps=20 --random-transitions ./main_n6f1b1.
 Symbolic execution uses the symbolic model checker to find executions, with actions chosen randomly at each step:
 
 ```bash
-quint verify --invariant=safe --max-steps=20 --random-transitions=true ./main_n6f1b1.qnt
+quint verify --invariant=safe --max-steps=20 --random-transitions=true ./main_n6f1.qnt
 ```
 
 ### Bounded Model Checking
@@ -69,5 +70,5 @@ quint verify --invariant=safe --max-steps=20 --random-transitions=true ./main_n6
 The bounded model checker verifies an invariant across all possible executions within a specified depth limit:
 
 ```bash
-quint verify --invariant=safe --max-steps=20 ./main_n6f1b1.qnt
+quint verify --invariant=safe --max-steps=20 ./main_n6f1.qnt
 ```

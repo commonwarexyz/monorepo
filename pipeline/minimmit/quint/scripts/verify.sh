@@ -106,30 +106,30 @@ all() {
 # Check for violations in output files
 check() {
     local search_dir=${1:-$QUINT_LOGS}
-    
+
     echo "Checking for violations in output files..."
     echo "Search directory: $search_dir (recursive)"
-    
+
     if [ ! -d "$search_dir" ]; then
         echo "Directory '$search_dir' not found. Run the verification first or specify a valid directory."
         exit 1
     fi
-    
+
     # Find all stdout files recursively
     echo "Searching for stdout files recursively..."
     all_stdout_files=$(find "$search_dir" -name "stdout" -type f)
-    
+
     if [ -z "$all_stdout_files" ]; then
         echo "No stdout files found in $search_dir"
         exit 0
     fi
-    
+
     total_files=$(echo "$all_stdout_files" | wc -l)
     echo "Found $total_files stdout files to check"
-    
+
     # Check each stdout file for violations
     violation_files=$(find "$search_dir" -name "stdout" -type f -exec grep -l "\[violation\] Found an issue" {} \;)
-    
+
     if [ -n "$violation_files" ]; then
         echo ""
         echo "Violations found in the following files:"
@@ -165,7 +165,7 @@ case "$1" in
     "all")
         shift
         all "$@"
-        ;;    
+        ;;
     "check")
         shift
         check "$@"

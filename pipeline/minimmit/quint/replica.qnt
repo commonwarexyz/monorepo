@@ -5,10 +5,6 @@ module replica {
 
     // Weights of all replicas.
     const WEIGHTS: ReplicaId -> Weight
-    // The number of all replicas.
-    const N: int
-    // Byzantine replica number threshold, F ≤ ⌊(N‑1)/5⌋
-    const F: int
     // Identities of the correct replicas.
     const CORRECT: Set[ReplicaId]
     // Identities of the faulty replicas.
@@ -52,7 +48,7 @@ module replica {
     var store_vote: ReplicaId -> Set[Vote]
     // notarization and nullification certificates received or assembled by the correct replicas
     var store_certificate: ReplicaId -> Set[Certificate]
-    
+
     // history of received proposals
     var ghost_proposal: ReplicaId -> Set[Proposal]
     // sequences of blocks committed by every correct replica
@@ -92,7 +88,7 @@ module replica {
             .size() >= QuorumWeight
     }
 
-    // Does a set of certificates contain nullification certificates for this view? 
+    // Does a set of certificates contain nullification certificates for this view?
     pure def is_view_nullified(view: ViewNumber, certificates: Set[Certificate]): bool = or {
         view == GENESIS_VIEW,
         certificates.exists(v => v.kind == NullificationKind and v.view == view)
@@ -109,7 +105,7 @@ module replica {
         is_view_notarized(view_parent, certificates) and
             are_views_nullified(view_parent + 1, view - 1, certificates)
     }
-    
+
     // Create a nullify certificate from a set of votes.
     def create_nullification(id: ReplicaId, view: ViewNumber, votes: Set[Vote]): Option[Certificate] = {
         val similar_votes: Set[Vote] = votes.filter(v => and {
@@ -165,11 +161,11 @@ module replica {
     def is_contradicted(self: ReplicaState, view: ViewNumber, votes: Set[Vote]): bool = {
         val c = self.notarized.get(view)
         if (c != EMPTY_BLOCK) {
-            is_block_in_view_cannot_be_notarized(c, view, votes) 
+            is_block_in_view_cannot_be_notarized(c, view, votes)
         } else {
             false
         }
-    }          
+    }
 
     // Replica did not vote for dummy block (in other words, the replica did not complain or did not timeout)
     def replica_did_not_send_nullify(id: ReplicaId, view: ViewNumber): bool = {
@@ -180,7 +176,7 @@ module replica {
     def has_replica_sent_nullify(id: ReplicaId, view: ViewNumber): bool = {
         { view: view, kind: NullifyKind, block_hash: DUMMY_BLOCK_HASH, sig: id }.in(sent_vote)
     }
-   
+
     // Enter a new view, unless it is older than the current view.
     pure def enter_new_view(self: ReplicaState, cert_view: ViewNumber, notarized: bool): ReplicaState = {
         val new_view = cert_view + 1
@@ -191,11 +187,11 @@ module replica {
                 ...self,
                 propose_sent: false,
                 nullified: false,
-                // TODO: diff: in the spec r.timer = 2Δ; 
+                // TODO: diff: in the spec r.timer = 2Δ;
                 timer_cancelled: false,
                 view: new_view,
                 ghost_last_seen_notarization:
-                    if (notarized) cert_view else self.ghost_last_seen_notarization 
+                    if (notarized) cert_view else self.ghost_last_seen_notarization
             }
         }
     }
@@ -222,7 +218,7 @@ module replica {
             }
         }
     }
- 
+
     // Initialize all replicas with genesis.
     action init = {
         // Non‑deterministically choose any total leader function (View → ReplicaId)
@@ -370,14 +366,14 @@ module replica {
 
             // "If !verify(c, c'), return."
             VALID_BLOCKS.contains(proposal.block),
-            
+
             // the proposer is the leader of this view
             proposal.sig == sig_of(leader.get(proposal.view)),
             proposal.view_parent < proposal.view,
             proposal.view_parent >= self.last_finalized,
 
             valid_parent(proposal.view, proposal.view_parent, certificates),
-            
+
             // Send the notarize vote to all replicas (including ourselves).
             sent_vote' = sent_vote.union(Set(notarize_vote)),
             // Store proposal
@@ -417,7 +413,7 @@ module replica {
                 nullified: true,
                 ghost_sent_votes: self.ghost_sent_votes.setBy(view, old => old.append(DUMMY_BLOCK_HASH))
             }),
-        
+
             store_vote' = store_vote,
             ghost_committed_blocks' = ghost_committed_blocks,
             sent_certificate' = sent_certificate,
@@ -425,7 +421,7 @@ module replica {
             sent_proposal' = sent_proposal,
             leader' = leader,
             ghost_proposal' = ghost_proposal
-            
+
         }
     }
 
@@ -434,7 +430,7 @@ module replica {
                             block_hash: BlockHash, votes: Set[Vote]): bool = all {
         val self = replica_state.get(id)
         val store = store_vote.get(id)
-        
+
         all {
             votes != Set(),
             votes.forall(v => and {
@@ -545,7 +541,7 @@ module replica {
     action on_certificate(id: ReplicaId, cert: Certificate): bool = all {
         val self = replica_state.get(id)
         val certificates = store_certificate.get(id)
-            
+
         all {
             // verify view
             cert.view >= self.view, // not in spec
@@ -567,10 +563,10 @@ module replica {
         val self = replica_state.get(id)
         all {
             not(cert.in(store_certificate.get(id))),
-            
+
             if (not(
                 (cert.kind == NotarizationKind and is_view_notarized(cert.view, certificates))
-                or 
+                or
                 (cert.kind == NullificationKind and is_view_nullified(cert.view, certificates))
             )) {
                 all {
@@ -589,7 +585,7 @@ module replica {
             },
             ghost_committed_blocks' = ghost_committed_blocks,
             sent_vote' = sent_vote
-        } 
+        }
     }
 
     // -------------------------------------------------
@@ -613,7 +609,7 @@ module replica {
                 timer_cancelled: true,
                 ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(DUMMY_BLOCK_HASH))
             }),
-        
+
             // unchanged
             sent_proposal'  = sent_proposal,
             store_vote'  = store_vote,
@@ -640,7 +636,7 @@ module replica {
             nondet sig = oneOf(FAULTY)
             nondet k = oneOf(Set(NotarizeKind, NullifyKind))
             val votes = senders.map(s => {
-                view: view, 
+                view: view,
                 block_hash: block_hash,
                 sig: sig,
                 kind: k
@@ -663,7 +659,7 @@ module replica {
             nondet agg_sig = votes.map(v => v.sig).union(FAULTY).powerset().oneOf()
             val cert = {
                 view: view,
-                block_hash: block_hash, 
+                block_hash: block_hash,
                 signatures: agg_sig,
                 ghost_sender: sender,
                 kind: kind
@@ -684,7 +680,7 @@ module replica {
                 view_parent: view_parent,
                 sig: sig
             }
-            sent_proposal' = sent_proposal.union(Set(proposal)), 
+            sent_proposal' = sent_proposal.union(Set(proposal)),
         }
     }
 
@@ -713,7 +709,7 @@ module replica {
     })
 
     def votes_seq_correct(votes: List[BlockHash]): bool = {
-        (length(votes) == 2 and votes[0]!=DUMMY_BLOCK_HASH and votes[1] == DUMMY_BLOCK_HASH) or 
+        (length(votes) == 2 and votes[0]!=DUMMY_BLOCK_HASH and votes[1] == DUMMY_BLOCK_HASH) or
         length(votes) <= 1
     }
 
@@ -813,10 +809,10 @@ module replica {
         no_notarization_in_finalized_view,
         no_nullification_in_finalized_view
     }
-    
+
     val all_invariants = all {
         no_proposal_equivocation,
-        agreement,       
+        agreement,
         no_vote_equivocation_inv,
         no_nullification_and_finalization_in_the_same_view,
         validity,
@@ -871,7 +867,7 @@ module replica {
     val votes_subquorum_example = CORRECT.forall(id => {
         store_vote.get(id).size() <= SubquorumWeight
     })
-    
+
     // Check this invariant to see an example of having a quorum of votes.
     val votes_quorum_example = CORRECT.forall(id => {
         store_vote.get(id).size() <= QuorumWeight
