@@ -87,7 +87,7 @@ async fn test_sync(
     }
 }
 
-fuzz_target!(|input: FuzzInput| {
+fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
@@ -151,4 +151,8 @@ fuzz_target!(|input: FuzzInput| {
 
         src.destroy().await.expect("Destroy should not fail");
     });
+}
+
+fuzz_target!(|input: FuzzInput| {
+    fuzz(input);
 });
