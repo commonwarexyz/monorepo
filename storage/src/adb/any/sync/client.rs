@@ -1,3 +1,7 @@
+use super::{
+    resolver::{GetOperationsResult, Resolver},
+    Error, SyncTarget, SyncTargetUpdateReceiver,
+};
 use crate::{
     adb::{self, any::SyncConfig, operation::Operation},
     journal::fixed::{Config as JConfig, Journal},
@@ -21,11 +25,6 @@ use std::{
     sync::Arc,
 };
 use tracing::{debug, info, warn};
-
-use super::{
-    resolver::{GetOperationsResult, Resolver},
-    Error, SyncTarget, SyncTargetUpdateReceiver,
-};
 
 /// Result of executing one sync step
 ///
@@ -61,6 +60,7 @@ where
     next_apply_pos: u64,
 
     /// Pending fetch futures
+    #[allow(clippy::type_complexity)] // TODO: Make simpler type
     pending_fetches: FuturesUnordered<
         Pin<
             Box<
@@ -931,7 +931,10 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         adb::any::{
-            sync::{resolver::tests::FailResolver, resolver::AnyResolver, sync},
+            sync::{
+                resolver::{tests::FailResolver, AnyResolver},
+                sync,
+            },
             test::{apply_ops, create_test_db, create_test_ops},
         },
         translator,
@@ -940,7 +943,6 @@ pub(crate) mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
     use commonware_utils::NZU64;
-
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
     use std::collections::{HashMap, HashSet};
     use test_case::test_case;
@@ -1028,7 +1030,7 @@ pub(crate) mod tests {
                     upper_bound_ops: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
                 },
                 context: context.clone(),
-                resolver: AnyResolver::new_from_arc(target_db_arc.clone()),
+                resolver: AnyResolver::from(target_db_arc.clone()),
                 hasher,
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -1155,7 +1157,7 @@ pub(crate) mod tests {
                     upper_bound_ops: 30,
                 },
                 context,
-                resolver: AnyResolver::new(target_db),
+                resolver: AnyResolver::from(target_db),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -1208,7 +1210,7 @@ pub(crate) mod tests {
                     upper_bound_ops,
                 },
                 context,
-                resolver: AnyResolver::new(target_db),
+                resolver: AnyResolver::from(target_db),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -1285,7 +1287,7 @@ pub(crate) mod tests {
                     upper_bound_ops,
                 },
                 context: context.clone(),
-                resolver: AnyResolver::new_from_arc(target_db.clone()),
+                resolver: AnyResolver::from(target_db.clone()),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -1457,7 +1459,7 @@ pub(crate) mod tests {
                     upper_bound_ops: upper_bound,
                 },
                 context,
-                resolver: AnyResolver::new_from_arc(target_db.clone()),
+                resolver: AnyResolver::from(target_db.clone()),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -1536,7 +1538,7 @@ pub(crate) mod tests {
                     upper_bound_ops,
                 },
                 context: context.clone(),
-                resolver: AnyResolver::new(target_db),
+                resolver: AnyResolver::from(target_db),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,

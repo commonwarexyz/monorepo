@@ -55,10 +55,11 @@ where
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
 {
+    #[allow(clippy::type_complexity)]
     inner: Arc<RwLock<Any<E, K, V, H, T>>>,
 }
 
-impl<E, K, V, H, T> AnyResolver<E, K, V, H, T>
+impl<E, K, V, H, T> From<Arc<RwLock<Any<E, K, V, H, T>>>> for AnyResolver<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -67,21 +68,24 @@ where
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
 {
-    /// Create a new AnyResolver wrapping the given database
-    pub fn new(db: Any<E, K, V, H, T>) -> Self {
+    fn from(arc: Arc<RwLock<Any<E, K, V, H, T>>>) -> Self {
+        Self { inner: arc }
+    }
+}
+
+impl<E, K, V, H, T> From<Any<E, K, V, H, T>> for AnyResolver<E, K, V, H, T>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator + Send + Sync + 'static,
+    T::Key: Send + Sync,
+{
+    fn from(db: Any<E, K, V, H, T>) -> Self {
         Self {
             inner: Arc::new(RwLock::new(db)),
         }
-    }
-
-    /// Create a new AnyResolver from an existing Arc<RwLock<Any>>
-    pub fn new_from_arc(arc: Arc<RwLock<Any<E, K, V, H, T>>>) -> Self {
-        Self { inner: arc }
-    }
-
-    /// Extract the inner Arc<RwLock<Any>> from this resolver
-    pub fn into_inner(self) -> Arc<RwLock<Any<E, K, V, H, T>>> {
-        self.inner
     }
 }
 
