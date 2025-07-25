@@ -16,6 +16,7 @@ use std::fmt;
 use tracing::info;
 
 pub mod client;
+mod metrics;
 pub mod resolver;
 
 pub use client::Config;
