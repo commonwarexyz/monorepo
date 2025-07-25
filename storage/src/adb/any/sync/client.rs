@@ -15,7 +15,7 @@ use commonware_runtime::{
     Clock, Metrics as MetricsTrait, Storage,
 };
 use commonware_utils::Array;
-use futures::{future, stream::FuturesUnordered, StreamExt};
+use futures::{stream::FuturesUnordered, StreamExt};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -159,24 +159,30 @@ where
             return Ok(SyncStepResult::Complete(database));
         }
 
-        // Wait for a target update or a batch completion
-        select! {
-            target_update = async {
-                if let Some(ref mut receiver) = self.config.update_receiver {
-                    receiver.next().await
-                } else {
-                    future::pending().await // Never resolves when no receiver
-                }
-            } => {
-                if let Some(new_target) = target_update {
-                    self = self.handle_target_update(new_target).await?;
-                }
-            },
-            batch_result = self.pending_fetches.next() => {
-                if let Some((start_pos, result)) = batch_result {
-                    self.handle_batch_completion(start_pos, result).await?;
-                }
-            },
+        // Wait to receive a batch of operations or a target update (if enabled).
+        if let Some(ref mut receiver) = self.config.update_receiver {
+            select! {
+                new_target = receiver.next() => {
+                    if let Some(new_target) = new_target {
+                        self = self.handle_target_update(new_target).await?;
+                    }
+                },
+                batch_result = self.pending_fetches.next() => {
+                    if let Some((start_pos, result)) = batch_result {
+                        self.handle_batch_completion(start_pos, result).await?;
+                    } else {
+                        // We should always have at least one pending fetch.
+                        return Err(Error::SyncStalled);
+                    }
+                },
+            }
+        } else {
+            // No update receiver - only wait for batch completions
+            if let Some((start_pos, result)) = self.pending_fetches.next().await {
+                self.handle_batch_completion(start_pos, result).await?;
+            } else {
+                return Err(Error::SyncStalled);
+            }
         }
 
         // Apply operations that are now contiguous with the current log size
@@ -361,31 +367,28 @@ where
 
     /// Apply contiguous verified batches to the log
     async fn apply_contiguous_batches(&mut self) -> Result<(), Error> {
-        let log_size = self
+        let mut next_pos = self
             .log
             .size()
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
-        let mut operations_to_apply = Vec::new();
-        let mut current_pos = log_size;
-
-        // Collect contiguous operations starting from current log size
-        while let Some(operations) = self.verified_batches.remove(&current_pos) {
+        let mut ops = Vec::new();
+        while let Some(operations) = self.verified_batches.remove(&next_pos) {
             let operations_len = operations.len() as u64;
-            operations_to_apply.extend(operations);
-            current_pos += operations_len;
+            ops.extend(operations);
+            next_pos += operations_len;
 
             // Apply in batches to avoid memory issues
-            if operations_to_apply.len() >= self.config.apply_batch_size {
-                self.apply_operations_batch(operations_to_apply).await?;
-                operations_to_apply = Vec::new();
+            if ops.len() >= self.config.apply_batch_size {
+                self.apply_operations_batch(ops).await?;
+                ops = Vec::new();
             }
         }
 
         // Apply remaining operations
-        if !operations_to_apply.is_empty() {
-            self.apply_operations_batch(operations_to_apply).await?;
+        if !ops.is_empty() {
+            self.apply_operations_batch(ops).await?;
         }
 
         Ok(())
