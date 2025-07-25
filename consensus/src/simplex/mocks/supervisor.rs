@@ -1,9 +1,9 @@
 use crate::{
     simplex::types::{
         Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization, Finalize,
-        Notarization, Notarize, Nullification, Nullify, NullifyFinalize, View, Viewable,
+        Notarization, Notarize, Nullification, Nullify, NullifyFinalize, View,
     },
-    Monitor, Reporter, Supervisor as Su,
+    Monitor, Reporter, Supervisor as Su, Viewable,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{Digest, PublicKey};

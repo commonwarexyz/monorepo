@@ -35,6 +35,7 @@ pub type Counter = Family<Label, DefaultCounter>;
 pub trait CounterExt {
     fn guard(&self, status: Status) -> CounterGuard;
     fn inc(&self, status: Status);
+    fn inc_by(&self, status: Status, n: u64);
 }
 
 impl CounterExt for Counter {
@@ -49,6 +50,11 @@ impl CounterExt for Counter {
     /// Increment the metric with a given status.
     fn inc(&self, status: Status) {
         self.get_or_create(&Label { status }).inc();
+    }
+
+    /// Increment the metric with a given status.
+    fn inc_by(&self, status: Status, n: u64) {
+        self.get_or_create(&Label { status }).inc_by(n);
     }
 }
 

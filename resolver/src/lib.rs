@@ -38,4 +38,13 @@ pub trait Resolver: Clone + Send + 'static {
 
     /// Cancel a fetch request.
     fn cancel(&mut self, key: Self::Key) -> impl Future<Output = ()> + Send;
+
+    /// Cancel all fetch requests.
+    fn clear(&mut self) -> impl Future<Output = ()> + Send;
+
+    /// Retain only the fetch requests that satisfy the predicate.
+    fn retain(
+        &mut self,
+        predicate: impl Fn(&Self::Key) -> bool + Send + 'static,
+    ) -> impl Future<Output = ()> + Send;
 }

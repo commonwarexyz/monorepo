@@ -149,7 +149,7 @@ pub trait Digestible: Clone + Sized + Send + Sync + 'static {
 }
 
 /// An object that can produce a commitment of itself.
-pub trait Committable: Digestible + Clone + Sized + Send + Sync + 'static {
+pub trait Committable: Clone + Sized + Send + Sync + 'static {
     /// The type of commitment produced by this object.
     type Commitment: Digest;
 

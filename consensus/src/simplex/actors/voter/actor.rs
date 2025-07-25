@@ -6,10 +6,10 @@ use crate::{
         types::{
             threshold, Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Context,
             Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            NullifyFinalize, Proposal, View, Viewable, Voter,
+            NullifyFinalize, Proposal, View, Voter,
         },
     },
-    Automaton, Relay, Reporter, Supervisor, LATENCY,
+    Automaton, Relay, Reporter, Supervisor, Viewable, LATENCY,
 };
 use commonware_cryptography::{Digest, PublicKey, Signer};
 use commonware_macros::select;

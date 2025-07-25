@@ -1,8 +1,8 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
 use crate::{
-    threshold_simplex::types::{Finalize, Nullify, View, Viewable, Voter},
-    ThresholdSupervisor,
+    threshold_simplex::types::{Finalize, Nullify, View, Voter},
+    ThresholdSupervisor, Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{

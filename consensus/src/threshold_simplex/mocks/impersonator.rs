@@ -1,8 +1,8 @@
 //! Byzantine participant that sends impersonated (and invalid) notarize/finalize messages.
 
 use crate::{
-    threshold_simplex::types::{Finalize, Notarize, View, Viewable, Voter},
-    ThresholdSupervisor,
+    threshold_simplex::types::{Finalize, Notarize, View, Voter},
+    ThresholdSupervisor, Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
