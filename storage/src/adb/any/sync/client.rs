@@ -27,11 +27,7 @@ use std::{
 use tracing::{debug, info, warn};
 
 /// Result of executing one sync step
-///
-/// Generic parameters:
-/// - `C`: The client type (for continuation)
-/// - `D`: The database type (for completion)
-pub enum SyncStepResult<C, D> {
+pub enum StepResult<C, D> {
     /// Sync should continue with the updated client
     Continue(C),
     /// Sync is complete with the final database
@@ -41,8 +37,8 @@ pub enum SyncStepResult<C, D> {
 // (start_pos, result) where start_pos is the position of the first operation in the batch.
 type PendingOperationBatch<D, K, V> = (u64, Result<GetOperationsResult<D, K, V>, Error>);
 
-/// TODO: Comment
-pub struct Client<E, K, V, H, T, R>
+/// Client that syncs an [adb::any::Any] database.
+pub(super) struct Client<E, K, V, H, T, R>
 where
     E: Storage + Clock + MetricsTrait,
     K: Array,
@@ -54,9 +50,9 @@ where
     config: Config<E, K, V, H, T, R>,
 
     /// Verified batches waiting to be applied, indexed by start position
-    verified_batches: BTreeMap<u64, Vec<Fixed<K, V>>>,
+    fetched_operations: BTreeMap<u64, Vec<Fixed<K, V>>>,
 
-    /// Set of batch start positions that have outstanding requests
+    /// Start positions of batches that we've requested from the resolver
     outstanding_requests: BTreeSet<u64>,
 
     /// The next position to apply to the log
@@ -71,8 +67,8 @@ where
     /// Pinned nodes extracted from the first batch
     pinned_nodes: Option<Vec<H::Digest>>,
 
-    /// Journal of operations that sync fills.
-    /// When it's completed, we use it to build the database.
+    /// Journal of operations that the sync algorithm fills
+    /// When it's completed, we use it to build the database
     log: Journal<E, Fixed<K, V>>,
 
     metrics: Metrics<E>,
@@ -123,7 +119,7 @@ where
         // Create client
         let mut client = Self {
             config,
-            verified_batches: BTreeMap::new(),
+            fetched_operations: BTreeMap::new(),
             outstanding_requests: BTreeSet::new(),
             next_apply_pos: log_size,
             pending_fetches: FuturesUnordered::new(),
@@ -142,9 +138,7 @@ where
 
     /// Execute one step of the sync process
     /// Returns either a new client to continue with, or the final database if complete.
-    pub async fn step(
-        mut self,
-    ) -> Result<SyncStepResult<Self, adb::any::Any<E, K, V, H, T>>, Error> {
+    pub async fn step(mut self) -> Result<StepResult<Self, adb::any::Any<E, K, V, H, T>>, Error> {
         // Check if sync is complete
         if self.is_complete().await? {
             let database = build_database(
@@ -154,7 +148,7 @@ where
                 &self.metrics,
             )
             .await?;
-            return Ok(SyncStepResult::Complete(database));
+            return Ok(StepResult::Complete(database));
         }
 
         // Wait to receive a batch of operations or a target update (if enabled).
@@ -186,7 +180,7 @@ where
         // Apply operations that are now contiguous with the current log size
         self.apply_contiguous_batches().await?;
 
-        Ok(SyncStepResult::Continue(self))
+        Ok(StepResult::Continue(self))
     }
 
     /// Queue batches of operations to be fetched from the resolver
@@ -202,7 +196,7 @@ where
             if let Some((gap_start, gap_end)) = find_next_gap_to_fetch::<K, V>(
                 search_start,
                 self.config.target.upper_bound_ops,
-                &self.verified_batches,
+                &self.fetched_operations,
                 &self.outstanding_requests,
                 self.config.fetch_batch_size.get(),
             ) {
@@ -241,7 +235,7 @@ where
             let Some((gap_start, gap_end)) = find_next_gap_to_fetch::<K, V>(
                 search_start,
                 self.config.target.upper_bound_ops,
-                &self.verified_batches,
+                &self.fetched_operations,
                 &self.outstanding_requests,
                 self.config.fetch_batch_size.get(),
             ) else {
@@ -342,7 +336,7 @@ where
                 }
 
                 // Store verified batch
-                self.verified_batches.insert(start_pos, operations);
+                self.fetched_operations.insert(start_pos, operations);
                 self.metrics.valid_batches_received.inc();
                 self.metrics.operations_fetched.inc_by(operations_len);
 
@@ -372,7 +366,7 @@ where
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
         let mut ops = Vec::new();
-        while let Some(operations) = self.verified_batches.remove(&next_pos) {
+        while let Some(operations) = self.fetched_operations.remove(&next_pos) {
             let operations_len = operations.len() as u64;
             ops.extend(operations);
             next_pos += operations_len;
@@ -441,7 +435,7 @@ where
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
         // Reset state for the target update
-        self.verified_batches.clear();
+        self.fetched_operations.clear();
         self.outstanding_requests.clear();
         self.pending_fetches.clear();
         self.pinned_nodes = None;
@@ -876,8 +870,8 @@ where
     // Run sync to completion using step-based API
     loop {
         match client.step().await? {
-            SyncStepResult::Continue(new_client) => client = new_client,
-            SyncStepResult::Complete(database) => return Ok(database),
+            StepResult::Continue(new_client) => client = new_client,
+            StepResult::Complete(database) => return Ok(database),
         }
     }
 }
@@ -1508,13 +1502,13 @@ pub(crate) mod tests {
             let mut step_count = 0;
             let final_db = loop {
                 match client.step().await.unwrap() {
-                    SyncStepResult::Continue(new_client) => {
+                    StepResult::Continue(new_client) => {
                         client = new_client;
                         step_count += 1;
                         // Can inspect client state between steps
                         assert!(step_count < 100, "Too many steps, likely infinite loop");
                     }
-                    SyncStepResult::Complete(database) => {
+                    StepResult::Complete(database) => {
                         break database;
                     }
                 }
