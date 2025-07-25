@@ -130,7 +130,7 @@ where
     /// Pinned nodes extracted from the first batch
     pinned_nodes: Option<Vec<H::Digest>>,
 
-    /// Journal of operations that the sync algorithm fills
+    /// Journal of operations that the sync protocol fills
     /// When it's completed, we use it to build the database
     log: Journal<E, Fixed<K, V>>,
 
@@ -147,7 +147,7 @@ where
     R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
     /// Create a new sync client.
-    pub async fn new(config: Config<E, K, V, H, T, R>) -> Result<Self, Error> {
+    pub(super) async fn new(config: Config<E, K, V, H, T, R>) -> Result<Self, Error> {
         // Validate configuration
         config.validate()?;
 
@@ -167,13 +167,10 @@ where
         .map_err(adb::Error::JournalError)
         .map_err(Error::Adb)?;
 
-        // Get current log size to initialize sync state
         let log_size = log
             .size()
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-
-        // Assert invariant from Journal::init_sync
         assert!(log_size <= config.target.upper_bound_ops + 1);
 
         // Initialize metrics
@@ -190,16 +187,14 @@ where
             metrics,
         };
 
-        // Initialize parallel fetching
+        // Request operations in the sync range.
         client.fill_fetch_queue().await?;
 
-        // We don't check for immediate completion here - let the first step() call handle it.
-        // This keeps the initialization logic simple and consistent.
         Ok(client)
     }
 
     /// Run sync to completion.
-    pub async fn sync(mut self) -> Result<adb::any::Any<E, K, V, H, T>, Error> {
+    pub(super) async fn sync(mut self) -> Result<adb::any::Any<E, K, V, H, T>, Error> {
         loop {
             match self.step().await? {
                 StepResult::Continue(new_client) => self = new_client,
@@ -210,7 +205,7 @@ where
 
     /// Execute one step of the sync process
     /// Returns either a new client to continue with, or the final database if complete.
-    pub async fn step(mut self) -> Result<StepResult<Self, adb::any::Any<E, K, V, H, T>>, Error> {
+    async fn step(mut self) -> Result<StepResult<Self, adb::any::Any<E, K, V, H, T>>, Error> {
         // Check if sync is complete
         if self.is_complete().await? {
             let database = build_database(
@@ -445,7 +440,7 @@ where
         Ok(())
     }
 
-    /// Apply a batch of operations to the log (helper method)
+    /// Apply a batch of operations to the log
     async fn apply_operations_batch(&mut self, operations: Vec<Fixed<K, V>>) -> Result<(), Error> {
         let _timer = self.metrics.apply_duration.timer();
         for op in operations.into_iter() {
@@ -455,7 +450,7 @@ where
                 .map_err(adb::Error::JournalError)
                 .map_err(Error::Adb)?;
             // No need to sync here -- the log will periodically sync its storage
-            // and we will also sync when we're done.
+            // and we will also sync when we're done applying all operations.
         }
         Ok(())
     }
