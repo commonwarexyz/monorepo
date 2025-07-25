@@ -29,6 +29,9 @@ pub enum Error {
     #[error("journal error: {0}")]
     JournalError(#[from] crate::journal::Error),
 
+    #[error("operation pruned: {0}")]
+    OperationPruned(u64),
+
     /// The requested key was not found in the snapshot.
     #[error("key not found")]
     KeyNotFound,
