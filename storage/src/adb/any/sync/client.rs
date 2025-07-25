@@ -63,9 +63,6 @@ where
         Pin<Box<dyn Future<Output = PendingOperationBatch<H::Digest, K, V>> + Send>>,
     >,
 
-    /// The next position to apply to the log
-    next_apply_pos: u64,
-
     /// Pinned nodes extracted from the first batch
     pinned_nodes: Option<Vec<H::Digest>>,
 
@@ -123,7 +120,6 @@ where
             config,
             fetched_operations: BTreeMap::new(),
             outstanding_request_locations: BTreeSet::new(),
-            next_apply_pos: log_size,
             outstanding_request_futures: FuturesUnordered::new(),
             pinned_nodes: None,
             log,
@@ -210,8 +206,12 @@ where
             .max_outstanding_requests
             .saturating_sub(self.outstanding_request_locations.len());
 
-        let mut search_start =
-            std::cmp::max(self.config.target.lower_bound_ops, self.next_apply_pos);
+        let log_size = self
+            .log
+            .size()
+            .await
+            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+        let mut search_start = std::cmp::max(self.config.target.lower_bound_ops, log_size);
 
         for _ in 0..requests_to_make {
             // Find the next gap that needs to be fetched
@@ -325,11 +325,6 @@ where
                 self.metrics.valid_batches_received.inc();
                 self.metrics.operations_fetched.inc_by(operations_len);
 
-                // Update next_apply_pos if this batch extends our contiguous coverage
-                if start_pos == self.next_apply_pos {
-                    self.next_apply_pos = start_pos + operations_len;
-                }
-
                 // Fill queue to maintain parallelism
                 self.fill_fetch_queue().await?;
             }
@@ -412,19 +407,11 @@ where
         )
         .await?;
 
-        // Reset sync state to the new log size
-        let new_log_size = self
-            .log
-            .size()
-            .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-
         // Reset state for the target update
         self.fetched_operations.clear();
         self.outstanding_request_locations.clear();
         self.outstanding_request_futures.clear();
         self.pinned_nodes = None;
-        self.next_apply_pos = new_log_size;
 
         // Reinitialize parallel fetching
         self.fill_fetch_queue().await?;
