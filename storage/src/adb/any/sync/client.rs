@@ -210,11 +210,11 @@ where
             .max_outstanding_requests
             .saturating_sub(self.outstanding_request_locations.len());
 
+        let mut search_start =
+            std::cmp::max(self.config.target.lower_bound_ops, self.next_apply_pos);
+
         for _ in 0..requests_to_make {
             // Find the next gap that needs to be fetched
-            // For existing databases, start from next_apply_pos instead of lower_bound_ops
-            let search_start =
-                std::cmp::max(self.config.target.lower_bound_ops, self.next_apply_pos);
             let Some((gap_start, gap_end)) = find_next_gap_to_fetch::<K, V>(
                 search_start,
                 self.config.target.upper_bound_ops,
@@ -242,6 +242,8 @@ where
                     .await;
                 (start_pos, result)
             }));
+
+            search_start = gap_start + batch_size.get();
         }
 
         Ok(())
@@ -323,7 +325,7 @@ where
                 self.metrics.valid_batches_received.inc();
                 self.metrics.operations_fetched.inc_by(operations_len);
 
-                // Update highest_received_pos if this batch extends our contiguous coverage
+                // Update next_apply_pos if this batch extends our contiguous coverage
                 if start_pos == self.next_apply_pos {
                     self.next_apply_pos = start_pos + operations_len;
                 }
@@ -652,13 +654,16 @@ fn find_next_gap_to_fetch<K: Array, V: Array>(
                 // First range - check if there's a gap before it
                 if lower_bound < range_start {
                     let gap_end = (range_start - 1).min(upper_bound);
-                    return Some((lower_bound, gap_end));
+                    // Only return gaps that start at or after lower_bound
+                    if lower_bound <= gap_end {
+                        return Some((lower_bound, gap_end));
+                    }
                 }
             }
             Some(covered_end) => {
                 // Check if there's a gap between current coverage and this range
                 if covered_end + 1 < range_start {
-                    let gap_start = covered_end + 1;
+                    let gap_start = std::cmp::max(covered_end + 1, lower_bound);
                     let gap_end = (range_start - 1).min(upper_bound);
                     if gap_start <= gap_end {
                         return Some((gap_start, gap_end));
@@ -687,7 +692,7 @@ fn find_next_gap_to_fetch<K: Array, V: Array>(
         }
         Some(covered_end) => {
             // Check if there's a gap after the last covered position
-            let gap_start = covered_end + 1;
+            let gap_start = std::cmp::max(covered_end + 1, lower_bound);
             if gap_start <= upper_bound {
                 Some((gap_start, upper_bound))
             } else {
