@@ -165,6 +165,9 @@ where
                 new_target = receiver.next() => {
                     if let Some(new_target) = new_target {
                         self = self.handle_target_update(new_target).await?;
+                    } else {
+                        // Receiver closed - disable it to avoid spinning
+                        self.config.update_receiver = None;
                     }
                 },
                 batch_result = self.outstanding_request_futures.next() => {
