@@ -38,6 +38,9 @@ pub enum SyncStepResult<C, D> {
     Complete(D),
 }
 
+// (start_pos, result) where start_pos is the position of the first operation in the batch.
+type PendingOperationBatch<D, K, V> = (u64, Result<GetOperationsResult<D, K, V>, Error>);
+
 /// TODO: Comment
 pub struct Client<E, K, V, H, T, R>
 where
@@ -62,12 +65,7 @@ where
     /// Pending fetch futures
     #[allow(clippy::type_complexity)] // TODO: Make simpler type
     pending_fetches: FuturesUnordered<
-        Pin<
-            Box<
-                dyn Future<Output = (u64, Result<GetOperationsResult<H::Digest, K, V>, Error>)>
-                    + Send,
-            >,
-        >,
+        Pin<Box<dyn Future<Output = PendingOperationBatch<H::Digest, K, V>> + Send>>,
     >,
 
     /// Pinned nodes extracted from the first batch
