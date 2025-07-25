@@ -16,7 +16,6 @@ use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
-    marker::PhantomData,
     num::NonZeroU64,
     pin::Pin,
     sync::Arc,
@@ -40,11 +39,8 @@ pub enum SyncStepResult<C, D> {
     Complete(D),
 }
 
-/// A stateful sync client that encapsulates all sync state and configuration
-///
-/// This client uses a functional ownership pattern: each step consumes the client
-/// and returns either a new client (to continue) or the final database (when complete).
-pub struct SyncClient<E, K, V, H, T, R>
+/// TODO: Comment
+pub struct Client<E, K, V, H, T, R>
 where
     E: Storage + Clock + MetricsTrait,
     K: Array,
@@ -54,12 +50,37 @@ where
     R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
     config: Config<E, K, V, H, T, R>,
-    state: SyncState<E, K, V, H>,
+
+    /// Verified batches waiting to be applied, indexed by start position
+    verified_batches: BTreeMap<u64, Vec<Operation<K, V>>>,
+
+    /// Set of batch start positions that have outstanding requests
+    outstanding_requests: BTreeSet<u64>,
+
+    /// The next position to apply to the log
+    next_apply_pos: u64,
+
+    /// Pending fetch futures
+    pending_fetches: FuturesUnordered<
+        Pin<
+            Box<
+                dyn Future<Output = (u64, Result<GetOperationsResult<H::Digest, K, V>, Error>)>
+                    + Send,
+            >,
+        >,
+    >,
+
+    /// Pinned nodes extracted from the first batch
+    pinned_nodes: Option<Vec<H::Digest>>,
+
+    /// Journal of operations that sync fills.
+    /// When it's completed, we use it to build the database.
     log: Journal<E, Operation<K, V>>,
+
     metrics: Metrics<E>,
 }
 
-impl<E, K, V, H, T, R> SyncClient<E, K, V, H, T, R>
+impl<E, K, V, H, T, R> Client<E, K, V, H, T, R>
 where
     E: Storage + Clock + MetricsTrait,
     K: Array,
@@ -68,10 +89,7 @@ where
     T: Translator,
     R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
-    /// Create a new sync client and perform initialization
-    ///
-    /// This performs the same initialization as the old `initialize_sync` function,
-    /// but encapsulates all state within the client.
+    /// Create a new sync client.
     pub async fn new(config: Config<E, K, V, H, T, R>) -> Result<Self, Error> {
         // Validate configuration
         config.validate()?;
@@ -101,16 +119,17 @@ where
         // Assert invariant from Journal::init_sync
         assert!(log_size <= config.target.upper_bound_ops + 1);
 
-        // Initialize sync state
-        let state = SyncState::new(log_size);
-
         // Initialize metrics
         let metrics = Metrics::new(config.context.clone());
 
         // Create client
         let mut client = Self {
             config,
-            state,
+            verified_batches: BTreeMap::new(),
+            outstanding_requests: BTreeSet::new(),
+            next_apply_pos: log_size,
+            pending_fetches: FuturesUnordered::new(),
+            pinned_nodes: None,
             log,
             metrics,
         };
@@ -120,31 +139,23 @@ where
 
         // Note: We don't check for immediate completion here - let the first step() call handle it.
         // This keeps the initialization logic simple and consistent.
-
         Ok(client)
     }
 
     /// Execute one step of the sync process
-    ///
-    /// This performs one iteration of the main sync loop:
-    /// 1. Check if sync is complete  
-    /// 2. Wait for and handle the next event (target update or batch completion)
-    /// 3. Apply any operations that are now contiguous
-    ///
     /// Returns either a new client to continue with, or the final database if complete.
     pub async fn step(
         mut self,
     ) -> Result<SyncStepResult<Self, adb::any::Any<E, K, V, H, T>>, Error> {
         // Check if sync is complete
         if self
-            .state
             .is_sync_complete(&self.log, self.config.target.upper_bound_ops)
             .await?
         {
             let database = build_database(
                 self.config,
                 self.log,
-                self.state.pinned_nodes.clone(),
+                self.pinned_nodes.clone(),
                 &self.metrics,
             )
             .await?;
@@ -164,7 +175,7 @@ where
                     self = self.handle_target_update(new_target).await?;
                 }
             },
-            batch_result = self.state.pending_fetches.next() => {
+            batch_result = self.pending_fetches.next() => {
                 if let Some((start_pos, result)) = batch_result {
                     self.handle_batch_completion(start_pos, result).await?;
                 }
@@ -183,29 +194,27 @@ where
 
         // Special case: If we don't have pinned nodes, we need to extract them
         // from the first operation we actually need to fetch, not always from lower_bound_ops
-        if !self.state.has_pinned_nodes() {
+        if !self.has_pinned_nodes() {
             // Find the first gap we need to fetch - this is where we'll extract pinned nodes
-            let search_start = std::cmp::max(
-                self.config.target.lower_bound_ops,
-                self.state.next_apply_pos,
-            );
+            let search_start =
+                std::cmp::max(self.config.target.lower_bound_ops, self.next_apply_pos);
             if let Some((gap_start, gap_end)) = find_next_gap_to_fetch::<K, V>(
                 search_start,
                 self.config.target.upper_bound_ops,
-                &self.state.verified_batches,
-                &self.state.outstanding_requests,
+                &self.verified_batches,
+                &self.outstanding_requests,
                 self.config.fetch_batch_size.get(),
             ) {
                 // Request from the first gap to extract pinned nodes
                 let gap_size = gap_end - gap_start + 1;
                 let batch_size = std::cmp::min(self.config.fetch_batch_size.get(), gap_size);
                 if let Some(batch_size) = NonZeroU64::new(batch_size) {
-                    self.state.add_outstanding_request(gap_start);
+                    self.add_outstanding_request(gap_start);
 
                     let resolver = self.config.resolver.clone();
                     let start_pos = gap_start;
 
-                    self.state.pending_fetches.push(Box::pin(async move {
+                    self.pending_fetches.push(Box::pin(async move {
                         let result = resolver
                             .get_operations(target_size, start_pos, batch_size)
                             .await;
@@ -221,20 +230,18 @@ where
         let requests_to_make = self
             .config
             .max_outstanding_requests
-            .saturating_sub(self.state.outstanding_requests.len());
+            .saturating_sub(self.outstanding_requests.len());
 
         for _ in 0..requests_to_make {
             // Find the next gap that needs to be fetched
             // For existing databases, start from next_apply_pos instead of lower_bound_ops
-            let search_start = std::cmp::max(
-                self.config.target.lower_bound_ops,
-                self.state.next_apply_pos,
-            );
+            let search_start =
+                std::cmp::max(self.config.target.lower_bound_ops, self.next_apply_pos);
             let Some((gap_start, gap_end)) = find_next_gap_to_fetch::<K, V>(
                 search_start,
                 self.config.target.upper_bound_ops,
-                &self.state.verified_batches,
-                &self.state.outstanding_requests,
+                &self.verified_batches,
+                &self.outstanding_requests,
                 self.config.fetch_batch_size.get(),
             ) else {
                 break; // No more gaps to fill
@@ -246,12 +253,12 @@ where
             let batch_size =
                 NonZeroU64::new(batch_size).expect("batch_size should be > 0 since gap exists");
 
-            self.state.add_outstanding_request(gap_start);
+            self.add_outstanding_request(gap_start);
 
             let resolver = self.config.resolver.clone();
             let start_pos = gap_start;
 
-            self.state.pending_fetches.push(Box::pin(async move {
+            self.pending_fetches.push(Box::pin(async move {
                 let result = resolver
                     .get_operations(target_size, start_pos, batch_size)
                     .await;
@@ -269,7 +276,7 @@ where
         result: Result<GetOperationsResult<H::Digest, K, V>, Error>,
     ) -> Result<(), Error> {
         // Remove from outstanding requests
-        self.state.remove_outstanding_request(start_pos);
+        self.remove_outstanding_request(start_pos);
 
         match result {
             Ok(GetOperationsResult {
@@ -316,12 +323,12 @@ where
                 }
 
                 // Install pinned nodes on first successful batch (can be from any position)
-                if !self.state.has_pinned_nodes() {
+                if !self.has_pinned_nodes() {
                     let start_pos_mmr = leaf_num_to_pos(start_pos);
                     let end_pos_mmr = leaf_num_to_pos(start_pos + operations_len - 1);
                     match proof.extract_pinned_nodes(start_pos_mmr, end_pos_mmr) {
                         Ok(nodes) => {
-                            self.state.set_pinned_nodes(nodes);
+                            self.set_pinned_nodes(nodes);
                         }
                         Err(_) => {
                             warn!(start_pos, "failed to extract pinned nodes, retrying");
@@ -334,12 +341,12 @@ where
                 }
 
                 // Store verified batch
-                self.state.store_batch(start_pos, operations);
+                self.store_batch(start_pos, operations);
                 self.metrics.valid_batches_received.inc();
                 self.metrics.operations_fetched.inc_by(operations_len);
 
                 // Update highest_received_pos if this batch extends our contiguous coverage
-                self.state.update_next_apply_pos(start_pos, operations_len);
+                self.update_next_apply_pos(start_pos, operations_len);
 
                 // Fill queue to maintain parallelism
                 self.fill_fetch_queue().await?;
@@ -365,7 +372,7 @@ where
         let mut current_pos = log_size;
 
         // Collect contiguous operations starting from current log size
-        while let Some(operations) = self.state.take_batch(current_pos) {
+        while let Some(operations) = self.take_batch(current_pos) {
             let operations_len = operations.len() as u64;
             operations_to_apply.extend(operations);
             current_pos += operations_len;
@@ -435,12 +442,87 @@ where
             .size()
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-        self.state.reset(new_log_size);
+        self.reset(new_log_size);
 
         // Reinitialize parallel fetching
         self.fill_fetch_queue().await?;
 
         Ok(self)
+    }
+
+    /// Reset state for a target update
+    fn reset(&mut self, new_log_size: u64) {
+        self.verified_batches.clear();
+        self.outstanding_requests.clear();
+        self.pending_fetches.clear();
+        self.pinned_nodes = None;
+        self.next_apply_pos = new_log_size;
+    }
+
+    /// Check if sync is complete based on the current log size and target
+    async fn is_sync_complete(
+        &self,
+        log: &Journal<E, Operation<K, V>>,
+        target_upper_bound: u64,
+    ) -> Result<bool, Error> {
+        let log_size = log
+            .size()
+            .await
+            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+        // Calculate the target log size (upper bound is inclusive)
+        let target_log_size = target_upper_bound
+            .checked_add(1)
+            .ok_or(Error::InvalidState)?;
+
+        // Check if we've completed sync
+        if log_size >= target_log_size {
+            if log_size > target_log_size {
+                warn!(log_size, target_log_size, "log size exceeded sync target");
+                return Err(Error::InvalidState);
+            }
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    /// Update the next position to apply to the log
+    /// TODO remove extra arg?
+    fn update_next_apply_pos(&mut self, start_pos: u64, operations_len: u64) {
+        if start_pos == self.next_apply_pos {
+            self.next_apply_pos = start_pos + operations_len;
+        }
+    }
+
+    /// Store a verified batch of operations
+    fn store_batch(&mut self, start_pos: u64, operations: Vec<Operation<K, V>>) {
+        self.verified_batches.insert(start_pos, operations);
+    }
+
+    /// Remove and return the batch of operations starting at the given position
+    fn take_batch(&mut self, start_pos: u64) -> Option<Vec<Operation<K, V>>> {
+        self.verified_batches.remove(&start_pos)
+    }
+
+    /// Add an outstanding request
+    fn add_outstanding_request(&mut self, start_pos: u64) {
+        self.outstanding_requests.insert(start_pos);
+    }
+
+    /// Remove an outstanding request
+    fn remove_outstanding_request(&mut self, start_pos: u64) {
+        self.outstanding_requests.remove(&start_pos);
+    }
+
+    /// Set pinned nodes
+    fn set_pinned_nodes(&mut self, nodes: Vec<H::Digest>) {
+        self.pinned_nodes = Some(nodes);
+    }
+
+    /// Check if we have pinned nodes
+    fn has_pinned_nodes(&self) -> bool {
+        self.pinned_nodes.is_some()
     }
 }
 
@@ -516,7 +598,7 @@ pub struct Metrics<E: Clock> {
     /// Total number of operations fetched during sync.
     operations_fetched: Counter<u64>,
     /// Total time spent fetching operations from resolver (seconds).
-    fetch_duration: Timed<E>,
+    _fetch_duration: Timed<E>,
     /// Total time spent verifying proofs (seconds).
     proof_verification_duration: Timed<E>,
     /// Total time spent applying operations to the log (seconds).
@@ -534,7 +616,7 @@ impl<E: Clock + MetricsTrait> Metrics<E> {
             valid_batches_received: Counter::default(),
             invalid_batches_received: Counter::default(),
             operations_fetched: Counter::default(),
-            fetch_duration: Timed::new(fetch_histogram.clone(), Arc::new(context.clone())),
+            _fetch_duration: Timed::new(fetch_histogram.clone(), Arc::new(context.clone())),
             proof_verification_duration: Timed::new(
                 proof_verification_histogram.clone(),
                 Arc::new(context.clone()),
@@ -679,136 +761,6 @@ fn find_next_gap_to_fetch<K: Array, V: Array>(
                 None
             }
         }
-    }
-}
-
-/// Manages the state of the sync process
-pub struct SyncState<E, K, V, H>
-where
-    E: Storage + Clock + MetricsTrait,
-    K: Array,
-    V: Array,
-    H: Hasher,
-{
-    /// Verified batches waiting to be applied, indexed by start position
-    pub verified_batches: BTreeMap<u64, Vec<Operation<K, V>>>,
-
-    /// Set of batch start positions that have outstanding requests
-    pub outstanding_requests: BTreeSet<u64>,
-
-    /// The next position to apply to the log
-    pub next_apply_pos: u64,
-
-    /// Pending fetch futures
-    pub pending_fetches: FuturesUnordered<
-        Pin<
-            Box<
-                dyn Future<Output = (u64, Result<GetOperationsResult<H::Digest, K, V>, Error>)>
-                    + Send,
-            >,
-        >,
-    >,
-
-    /// Pinned nodes extracted from the first batch
-    pub pinned_nodes: Option<Vec<H::Digest>>,
-
-    /// Phantom marker for the E type parameter
-    _phantom: PhantomData<E>,
-}
-
-impl<E, K, V, H> SyncState<E, K, V, H>
-where
-    E: Storage + Clock + MetricsTrait,
-    K: Array,
-    V: Array,
-    H: Hasher,
-{
-    /// Create a new sync state
-    fn new(initial_log_size: u64) -> Self {
-        Self {
-            verified_batches: BTreeMap::new(),
-            outstanding_requests: BTreeSet::new(),
-            next_apply_pos: initial_log_size,
-
-            pending_fetches: FuturesUnordered::new(),
-            pinned_nodes: None,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Reset state for a target update
-    fn reset(&mut self, new_log_size: u64) {
-        self.verified_batches.clear();
-        self.outstanding_requests.clear();
-        self.pending_fetches.clear();
-        self.pinned_nodes = None;
-        self.next_apply_pos = new_log_size;
-    }
-
-    /// Check if sync is complete based on the current log size and target
-    async fn is_sync_complete(
-        &self,
-        log: &Journal<E, Operation<K, V>>,
-        target_upper_bound: u64,
-    ) -> Result<bool, Error> {
-        let log_size = log
-            .size()
-            .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-
-        // Calculate the target log size (upper bound is inclusive)
-        let target_log_size = target_upper_bound
-            .checked_add(1)
-            .ok_or(Error::InvalidState)?;
-
-        // Check if we've completed sync
-        if log_size >= target_log_size {
-            if log_size > target_log_size {
-                warn!(log_size, target_log_size, "log size exceeded sync target");
-                return Err(Error::InvalidState);
-            }
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
-
-    /// Update the next position to apply to the log
-    /// TODO remove extra arg?
-    fn update_next_apply_pos(&mut self, start_pos: u64, operations_len: u64) {
-        if start_pos == self.next_apply_pos {
-            self.next_apply_pos = start_pos + operations_len;
-        }
-    }
-
-    /// Store a verified batch of operations
-    fn store_batch(&mut self, start_pos: u64, operations: Vec<Operation<K, V>>) {
-        self.verified_batches.insert(start_pos, operations);
-    }
-
-    /// Remove and return the batch of operations starting at the given position
-    fn take_batch(&mut self, start_pos: u64) -> Option<Vec<Operation<K, V>>> {
-        self.verified_batches.remove(&start_pos)
-    }
-
-    /// Add an outstanding request
-    fn add_outstanding_request(&mut self, start_pos: u64) {
-        self.outstanding_requests.insert(start_pos);
-    }
-
-    /// Remove an outstanding request
-    fn remove_outstanding_request(&mut self, start_pos: u64) {
-        self.outstanding_requests.remove(&start_pos);
-    }
-
-    /// Set pinned nodes
-    fn set_pinned_nodes(&mut self, nodes: Vec<H::Digest>) {
-        self.pinned_nodes = Some(nodes);
-    }
-
-    /// Check if we have pinned nodes
-    fn has_pinned_nodes(&self) -> bool {
-        self.pinned_nodes.is_some()
     }
 }
 
@@ -963,7 +915,7 @@ where
     info!("starting sync");
 
     // Create client and initialize all state
-    let mut client = SyncClient::new(config).await?;
+    let mut client = Client::new(config).await?;
 
     // Run sync to completion using step-based API
     loop {
@@ -1592,7 +1544,7 @@ pub(crate) mod tests {
             };
 
             // Create sync client
-            let mut client = SyncClient::new(config).await.unwrap();
+            let mut client = Client::new(config).await.unwrap();
 
             // Use client.step() to control sync progression
             let mut step_count = 0;
