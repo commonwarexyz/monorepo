@@ -14,7 +14,7 @@ use commonware_runtime::{
     telemetry::metrics::histogram::{Buckets, Timed},
     Clock, Metrics as MetricsTrait, Storage,
 };
-use commonware_utils::Array;
+use commonware_utils::{Array, NZU64};
 use futures::{stream::FuturesUnordered, StreamExt};
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
 use std::{
@@ -190,36 +190,17 @@ where
         let target_size = self.config.target.upper_bound_ops + 1;
 
         // Special case: If we don't have pinned nodes, we need to extract them
-        // from the first operation we actually need to fetch, not always from lower_bound_ops
+        // from a proof for the lower sync bound.
         if self.pinned_nodes.is_none() {
-            // Find the first gap we need to fetch - this is where we'll extract pinned nodes
-            let search_start =
-                std::cmp::max(self.config.target.lower_bound_ops, self.next_apply_pos);
-            if let Some((gap_start, gap_end)) = find_next_gap_to_fetch::<K, V>(
-                search_start,
-                self.config.target.upper_bound_ops,
-                &self.fetched_operations,
-                &self.outstanding_request_locations,
-                self.config.fetch_batch_size.get(),
-            ) {
-                // Request from the first gap to extract pinned nodes
-                let gap_size = gap_end - gap_start + 1;
-                let batch_size = std::cmp::min(self.config.fetch_batch_size.get(), gap_size);
-                if let Some(batch_size) = NonZeroU64::new(batch_size) {
-                    self.outstanding_request_locations.insert(gap_start);
-
-                    let resolver = self.config.resolver.clone();
-                    let start_pos = gap_start;
-
-                    self.outstanding_request_futures.push(Box::pin(async move {
-                        let result = resolver
-                            .get_operations(target_size, start_pos, batch_size)
-                            .await;
-                        (start_pos, result)
-                    }));
-                }
-            }
-            return Ok(()); // Don't make additional requests until we have pinned nodes
+            let start_pos = self.config.target.lower_bound_ops;
+            let resolver = self.config.resolver.clone();
+            self.outstanding_request_locations.insert(start_pos);
+            self.outstanding_request_futures.push(Box::pin(async move {
+                let result = resolver
+                    .get_operations(target_size, start_pos, NZU64!(1))
+                    .await;
+                (start_pos, result)
+            }));
         }
 
         // Normal case: Fill the fetch queue with multiple concurrent requests
@@ -319,8 +300,8 @@ where
                     return Ok(());
                 }
 
-                // Install pinned nodes on first successful batch (can be from any position)
-                if self.pinned_nodes.is_none() {
+                // Install pinned nodes on first successful batch starting from lower_bound_ops
+                if self.pinned_nodes.is_none() && start_pos == self.config.target.lower_bound_ops {
                     let start_pos_mmr = leaf_num_to_pos(start_pos);
                     let end_pos_mmr = leaf_num_to_pos(start_pos + operations_len - 1);
                     match proof.extract_pinned_nodes(start_pos_mmr, end_pos_mmr) {
