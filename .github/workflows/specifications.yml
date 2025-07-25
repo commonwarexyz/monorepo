@@ -4,8 +4,6 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
-    paths:
-      - "pipeline/minimmit/quint"
 
 env:
   QUINT_VERSION: "0.26.0"
