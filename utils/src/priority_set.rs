@@ -108,6 +108,12 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
         }
     }
 
+    /// Retains only the items where the key satisfies the predicate.
+    pub fn retain(&mut self, predicate: impl Fn(&I) -> bool) {
+        self.entries.retain(|entry| predicate(&entry.item));
+        self.keys.retain(|key, _| predicate(key));
+    }
+
     /// Returns `true` if the set contains the item.
     pub fn contains(&self, item: &I) -> bool {
         self.keys.contains_key(item)
@@ -127,6 +133,12 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
             self.keys.remove(&entry.item);
             (entry.item, entry.priority)
         })
+    }
+
+    /// Remove all items from the set.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.keys.clear();
     }
 
     /// Returns an iterator over all items in the set in priority-ascending order.

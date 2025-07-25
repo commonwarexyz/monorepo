@@ -143,6 +143,12 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Array, NetS: Sender<P
         }
     }
 
+    /// Retains only the fetches with keys greater than the given key.
+    pub fn retain(&mut self, predicate: impl Fn(&Key) -> bool) {
+        self.active.retain(|_, k| predicate(k));
+        self.pending.retain(predicate);
+    }
+
     /// Cancels a fetch request.
     ///
     /// Returns `true` if the fetch was canceled.
@@ -158,6 +164,12 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Array, NetS: Sender<P
         // Do not remove the requester entry.
         // It is useful for measuring performance if the peer ever responds.
         // If the peer never responds, the requester entry will be removed by timeout.
+    }
+
+    /// Cancel all fetches.
+    pub fn clear(&mut self) {
+        self.pending.clear();
+        self.active.clear();
     }
 
     /// Adds a key to the pending queue.
@@ -235,6 +247,11 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Array, NetS: Sender<P
     /// Blocks a peer from being used to fetch data.
     pub fn block(&mut self, peer: P) {
         self.requester.block(peer);
+    }
+
+    /// Returns the number of fetches.
+    pub fn len(&self) -> usize {
+        self.pending.len() + self.active.len()
     }
 
     /// Returns the number of pending fetches.

@@ -96,13 +96,17 @@ where
                 self.orchestrator
                     .processed(height, block.commitment())
                     .await;
+
+                // Loop again without waiting for a notification (there may be more to process)
                 continue;
             }
 
-            // Try to connect to our latest handled block (may not exist finalizations for some heights)
+            // We've reached a height at which we have no (finalized) block.
+            // Notify the orchestrator that we're trying to access this block.
+            // It may be the case that the block is not finalized yet, or that there is a gap.
             self.orchestrator.repair(height).await;
 
-            // If nothing to do, wait for some message from someone that the finalized store was updated
+            // Wait for a notification that the orchestrator has updated the finalized blocks.
             debug!(height, "waiting to index finalized block");
             let _ = self.notifier_rx.next().await;
         }
