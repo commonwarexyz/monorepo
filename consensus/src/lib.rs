@@ -10,6 +10,15 @@ pub mod ordered_broadcast;
 pub mod simplex;
 pub mod threshold_simplex;
 
+/// Viewable is a trait that provides access to the view (round) number.
+/// Any consensus message or object that is associated with a specific view should implement this.
+pub trait Viewable {
+    type View;
+
+    /// Returns the view associated with this object.
+    fn view(&self) -> Self::View;
+}
+
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         use commonware_codec::Codec;
@@ -184,15 +193,6 @@ cfg_if::cfg_if! {
 
             /// Get the parent block's digest.
             fn parent(&self) -> Self::Commitment;
-        }
-
-        /// Viewable is a trait that provides access to the view (round) number.
-        /// Any consensus message or object that is associated with a specific view should implement this.
-        pub trait Viewable {
-            type View;
-
-            /// Returns the view associated with this object.
-            fn view(&self) -> Self::View;
         }
     }
 }
