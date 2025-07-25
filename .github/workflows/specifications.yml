@@ -10,6 +10,9 @@ on:
 env:
   QUINT_VERSION: "0.26.0"
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
