@@ -3,6 +3,7 @@ use crate::{
         sync::{client::Client, resolver::Resolver},
         Any,
     },
+    mmr,
     translator::Translator,
 };
 use bytes::{Buf, BufMut};
@@ -76,6 +77,9 @@ pub enum Error {
     /// Sync stalled
     #[error("sync stalled - no pending fetches")]
     SyncStalled,
+    /// Error extracting pinned nodes
+    #[error("error extracting pinned nodes: {0}")]
+    PinnedNodes(mmr::Error),
 }
 
 impl<D: Digest> Write for SyncTarget<D> {

@@ -5,7 +5,7 @@ use super::{
 use crate::{
     adb::{self, any::SyncConfig, operation::Fixed},
     journal::fixed::{Config as JConfig, Journal},
-    mmr::{self, iterator::leaf_num_to_pos},
+    mmr::{self, iterator::leaf_num_to_pos, verification::Proof},
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
@@ -164,7 +164,6 @@ where
         {
             select! {
                 new_target = update_rx.next() => {
-                    // Update target
                     if let Some(new_target) = new_target {
                         self = self.handle_target_update(new_target).await?;
                     } else {
@@ -173,10 +172,8 @@ where
                     }
                     return Ok(StepResult::Continue(self));
                 },
-                batch_result = self.outstanding_request_futures.next() => {
-                    // We should always have at least one outstanding request.
-                    // If we don't, we should be done, but we're not.
-                    batch_result.ok_or(Error::SyncStalled)?
+                fetch_result = self.outstanding_request_futures.next() => {
+                    fetch_result.ok_or(Error::SyncStalled)?
                 },
             }
         } else {
@@ -187,8 +184,7 @@ where
                 .ok_or(Error::SyncStalled)?
         };
 
-        self.handle_batch_completion(start_pos, fetch_result)
-            .await?;
+        self.process_batch_result(start_pos, fetch_result).await?;
 
         // Apply operations that are now contiguous with the current log size
         self.apply_operations().await?;
@@ -263,8 +259,8 @@ where
         Ok(())
     }
 
-    /// Handle completion of a batch fetch
-    async fn handle_batch_completion(
+    /// Process the result of a batch fetch operation
+    async fn process_batch_result(
         &mut self,
         start_pos: u64,
         result: Result<GetOperationsResult<H::Digest, K, V>, Error>,
@@ -273,85 +269,102 @@ where
         self.outstanding_request_locations.remove(&start_pos);
 
         match result {
-            Ok(GetOperationsResult {
-                proof,
-                operations,
-                success_tx,
-            }) => {
-                let operations_len = operations.len() as u64;
-
-                // Validate batch size
-                if operations_len > self.config.fetch_batch_size.get() || operations_len == 0 {
-                    debug!(
-                        operations_len,
-                        batch_size = self.config.fetch_batch_size.get(),
-                        start_pos,
-                        "received invalid batch size from resolver"
-                    );
-                    self.metrics.invalid_batches_received.inc();
-                    let _ = success_tx.send(false);
-
-                    self.fill_fetch_queue().await?;
-                    return Ok(());
+            Ok(batch_result) => {
+                if let Some(operations) = self
+                    .process_successful_batch(start_pos, batch_result)
+                    .await?
+                {
+                    self.store_operations(start_pos, operations);
                 }
-
-                // Verify the proof
-                let proof_valid = {
-                    let _timer = self.metrics.proof_verification_duration.timer();
-                    adb::any::Any::<E, K, V, H, T>::verify_proof(
-                        &mut self.config.hasher,
-                        &proof,
-                        start_pos,
-                        &operations,
-                        &self.config.target.root,
-                    )
-                };
-                let _ = success_tx.send(proof_valid);
-
-                if !proof_valid {
-                    debug!(start_pos, "proof verification failed, retrying");
-                    self.metrics.invalid_batches_received.inc();
-
-                    self.fill_fetch_queue().await?;
-                    return Ok(());
-                }
-
-                // Install pinned nodes on first successful batch starting from lower_bound_ops
-                if self.pinned_nodes.is_none() && start_pos == self.config.target.lower_bound_ops {
-                    let start_pos_mmr = leaf_num_to_pos(start_pos);
-                    let end_pos_mmr = leaf_num_to_pos(start_pos + operations_len - 1);
-                    match proof.extract_pinned_nodes(start_pos_mmr, end_pos_mmr) {
-                        Ok(nodes) => {
-                            self.pinned_nodes = Some(nodes);
-                        }
-                        Err(_) => {
-                            warn!(start_pos, "failed to extract pinned nodes, retrying");
-                            self.metrics.invalid_batches_received.inc();
-
-                            self.fill_fetch_queue().await?;
-                            return Ok(());
-                        }
-                    }
-                }
-
-                // Store verified batch
-                self.fetched_operations.insert(start_pos, operations);
-                self.metrics.valid_batches_received.inc();
-                self.metrics.operations_fetched.inc_by(operations_len);
-
-                // Fill queue to maintain parallelism
-                self.fill_fetch_queue().await?;
             }
             Err(e) => {
                 warn!(start_pos, error = ?e, "batch fetch failed, retrying");
-                self.fill_fetch_queue().await?;
             }
         }
 
+        // Maintain parallelism by filling the fetch queue
+        self.fill_fetch_queue().await?;
         Ok(())
     }
 
-    /// Apply contiguous verified batches to the log
+    /// Process a successful batch result, returning the operations if verification passes
+    async fn process_successful_batch(
+        &mut self,
+        start_pos: u64,
+        GetOperationsResult {
+            proof,
+            operations,
+            success_tx,
+        }: GetOperationsResult<H::Digest, K, V>,
+    ) -> Result<Option<Vec<Fixed<K, V>>>, Error> {
+        let operations_len = operations.len() as u64;
+
+        // Validate batch size
+        if operations_len == 0 || operations_len > self.config.fetch_batch_size.get() {
+            debug!(
+                operations_len,
+                batch_size = self.config.fetch_batch_size.get(),
+                start_pos,
+                "received invalid batch size from resolver"
+            );
+            self.metrics.invalid_batches_received.inc();
+            let _ = success_tx.send(false);
+            return Ok(None);
+        }
+
+        // Verify the proof
+        let proof_valid = {
+            let _timer = self.metrics.proof_verification_duration.timer();
+            adb::any::Any::<E, K, V, H, T>::verify_proof(
+                &mut self.config.hasher,
+                &proof,
+                start_pos,
+                &operations,
+                &self.config.target.root,
+            )
+        };
+        let _ = success_tx.send(proof_valid);
+        if !proof_valid {
+            debug!(start_pos, "proof verification failed, retrying");
+            self.metrics.invalid_batches_received.inc();
+            return Ok(None);
+        }
+
+        // Extract pinned nodes if needed
+        self.set_pinned_nodes(&proof, start_pos, operations_len)?;
+
+        Ok(Some(operations))
+    }
+
+    /// If `start_pos` is the lower sync bound, extract pinned nodes from the proof
+    /// and set them in the `self`. Otherwise, do nothing.
+    fn set_pinned_nodes(
+        &mut self,
+        proof: &Proof<H::Digest>,
+        start_pos: u64,
+        operations_len: u64,
+    ) -> Result<(), Error> {
+        if self.pinned_nodes.is_none() && start_pos == self.config.target.lower_bound_ops {
+            let start_pos_mmr = leaf_num_to_pos(start_pos);
+            let end_pos_mmr = leaf_num_to_pos(start_pos + operations_len - 1);
+            match proof.extract_pinned_nodes(start_pos_mmr, end_pos_mmr) {
+                Ok(nodes) => self.pinned_nodes = Some(nodes),
+                Err(e) => return Err(Error::PinnedNodes(e)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Store a verified batch of operations to be applied later
+    fn store_operations(&mut self, start_pos: u64, operations: Vec<Fixed<K, V>>) {
+        self.metrics
+            .operations_fetched
+            .inc_by(operations.len() as u64);
+        self.metrics.valid_batches_received.inc();
+        self.fetched_operations.insert(start_pos, operations);
+    }
+
+    /// Apply fetched operations to the tip of the log if we have them.
     async fn apply_operations(&mut self) -> Result<(), Error> {
         let mut next_pos = self
             .log
@@ -359,22 +372,10 @@ where
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
-        let mut ops = Vec::new();
+        // Stop when we don't have the operations starting from the next position.
         while let Some(operations) = self.fetched_operations.remove(&next_pos) {
-            let operations_len = operations.len() as u64;
-            ops.extend(operations);
-            next_pos += operations_len;
-
-            // Apply in batches to avoid memory issues
-            if ops.len() >= self.config.apply_batch_size {
-                self.apply_operations_batch(ops).await?;
-                ops = Vec::new();
-            }
-        }
-
-        // Apply remaining operations
-        if !ops.is_empty() {
-            self.apply_operations_batch(ops).await?;
+            next_pos += operations.len() as u64;
+            self.apply_operations_batch(operations).await?;
         }
 
         Ok(())
