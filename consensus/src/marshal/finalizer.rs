@@ -3,8 +3,6 @@ use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::array::{FixedBytes, U64};
 use futures::{channel::mpsc, StreamExt};
-use prometheus_client::metrics::gauge::Gauge;
-use std::marker::PhantomData;
 use tracing::{debug, error, info};
 
 pub struct Finalizer<B, R>
@@ -20,12 +18,6 @@ where
 
     // Notifier to indicate that the finalized blocks have been updated and should be re-queried.
     notifier_rx: mpsc::Receiver<()>,
-
-    // ---------- Metrics ----------
-    contiguous_height: Gauge,
-
-    // ---------- Phantom data ----------
-    _digest: PhantomData<B::Digest>,
 }
 
 impl<B, R> Finalizer<B, R>
@@ -51,20 +43,10 @@ where
         .await
         .expect("Failed to initialize metadata");
 
-        // Initialize metrics
-        let contiguous_height = Gauge::default();
-        context.register(
-            "contiguous_height",
-            "Contiguous height of application",
-            contiguous_height.clone(),
-        );
-
         Self {
             metadata,
-            contiguous_height,
             orchestrator,
             notifier_rx,
-            _digest: PhantomData,
         }
     }
 
@@ -108,7 +90,6 @@ where
                 }
 
                 // Update the latest indexed
-                self.contiguous_height.set(height as i64);
                 info!(height, "indexed finalized block");
 
                 // Update last view processed (if we have a finalization for this block)

@@ -3,6 +3,7 @@ use super::{
     finalizer::Finalizer,
     handler::{self, Handler},
     ingress::{Mailbox, Message, Orchestration, Orchestrator},
+    resolver,
 };
 use crate::{
     threshold_simplex::types::{Finalization, Notarization},
@@ -28,7 +29,6 @@ use governor::{clock::Clock as GClock, Quota};
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 use std::{
-    collections::BTreeSet,
     marker::PhantomData,
     time::{Duration, Instant},
 };
@@ -80,6 +80,10 @@ pub struct Actor<
     // Partition prefix
     partition_prefix: String,
 
+    // ---------- State ----------
+    // Last view processed
+    last_view_processed: u64,
+
     // ---------- Storage ----------
     // Blocks verified stored by view<>digest
     verified: prunable::Archive<TwoCap, R, B::Commitment, B>,
@@ -98,6 +102,8 @@ pub struct Actor<
     // ---------- Metrics ----------
     // Latest height metric
     finalized_height: Gauge,
+    // Latest processed height
+    processed_height: Gauge,
 
     // ---------- Phantom data ----------
     _variant: PhantomData<V>,
@@ -216,29 +222,42 @@ impl<
             "Finalized height of application",
             finalized_height.clone(),
         );
+        let processed_height = Gauge::default();
+        context.register(
+            "processed_height",
+            "Processed height of application",
+            processed_height.clone(),
+        );
 
         // Initialize mailbox
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
                 context,
-                public_key: config.public_key,
-                identity: config.identity,
+
                 coordinator: config.coordinator,
                 mailbox,
+
+                public_key: config.public_key,
+                identity: config.identity,
                 mailbox_size: config.mailbox_size,
                 backfill_quota: config.backfill_quota,
                 namespace: config.namespace.clone(),
+                activity_timeout: config.activity_timeout,
+                max_repair: config.max_repair,
+                codec_config: config.codec_config.clone(),
+                partition_prefix: config.partition_prefix,
+
+                last_view_processed: 0,
+
                 verified,
                 notarized,
                 finalized,
                 blocks,
 
                 finalized_height,
-                activity_timeout: config.activity_timeout,
-                codec_config: config.codec_config,
-                partition_prefix: config.partition_prefix,
-                max_repair: config.max_repair,
+                processed_height,
+
                 _variant: PhantomData,
             },
             Mailbox::new(sender),
@@ -269,35 +288,15 @@ impl<
         backfill_by_height: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         backfill_by_view: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        // Initialize resolver by digest
-        let (mut by_digest_receiver, mut resolver_by_digest) = Self::init_resolver(
-            &self.context,
-            self.coordinator.clone(),
-            self.mailbox_size,
-            self.public_key.clone(),
-            self.backfill_quota,
-            backfill_by_digest,
-        );
-
-        // Initialize resolver by height
-        let (mut by_height_receiver, mut resolver_by_height) = Self::init_resolver(
-            &self.context,
-            self.coordinator.clone(),
-            self.mailbox_size,
-            self.public_key.clone(),
-            self.backfill_quota,
-            backfill_by_height,
-        );
-
-        // Initialize resolver by view
-        let (mut by_view_receiver, mut resolver_by_view) = Self::init_resolver(
-            &self.context,
-            self.coordinator.clone(),
-            self.mailbox_size,
-            self.public_key.clone(),
-            self.backfill_quota,
-            backfill_by_view,
-        );
+        // Initialize resolvers
+        let (mut resolver_by_digest_rx, mut resolver_by_digest) =
+            self.init_resolver::<B::Commitment>(backfill_by_digest);
+        let (mut resolver_by_height_rx, resolver_by_height) =
+            self.init_resolver::<U64>(backfill_by_height);
+        let mut resolver_by_height = resolver::Tracked::new(resolver_by_height);
+        let (mut resolver_by_view_rx, resolver_by_view) =
+            self.init_resolver::<U64>(backfill_by_view);
+        let mut resolver_by_view = resolver::Tracked::new(resolver_by_view);
 
         // Process all finalized blocks in order (fetching any that are missing)
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
@@ -315,20 +314,7 @@ impl<
             .spawn(|_| finalizer.run());
 
         // Handle messages
-        let mut latest_view = 0;
-        let mut requested_blocks = BTreeSet::new();
-        let mut last_view_processed: u64 = 0;
-        let mut outstanding_notarize: BTreeSet<u64> = BTreeSet::new();
         loop {
-            // Cancel useless requests
-            let (to_cancel, still_outstanding): (BTreeSet<_>, BTreeSet<_>) = outstanding_notarize
-                .into_iter()
-                .partition(|&view| view < latest_view);
-            outstanding_notarize = still_outstanding;
-            for view in to_cancel {
-                resolver_by_view.cancel(U64::new(view)).await;
-            }
-
             // Select messages
             select! {
                 // Handle consensus before finalizer or backfiller
@@ -360,8 +346,7 @@ impl<
                             // We don't worry about retaining the proof because any peer must provide
                             // it to us when serving the notarization.
                             debug!(view, "notarized block missing");
-                            outstanding_notarize.insert(view);
-                            resolver_by_view.fetch(U64::new(view)).await;
+                            resolver_by_view.fetch(view.into()).await;
                         }
                         Message::Finalization { finalization } => {
                             let view = finalization.proposal.view;
@@ -376,7 +361,7 @@ impl<
                                 debug!(view, height, "finalized block stored");
 
                                 // Prune blocks
-                                let min_view = last_view_processed.saturating_sub(self.activity_timeout);
+                                let min_view = self.last_view_processed.saturating_sub(self.activity_timeout);
                                 let verified = self.verified.prune(min_view);
                                 let notarized = self.notarized.prune(min_view);
                                 if let Err(e) = try_join!(verified, notarized) {
@@ -384,8 +369,8 @@ impl<
                                 };
                                 debug!(min_view, "pruned verified and notarized archives");
 
-                                // Update latest
-                                latest_view = view;
+                                // Cancel useless requests
+                                resolver_by_view.prune(view.into()).await;
 
                                 // Update metrics
                                 self.finalized_height.set(height as i64);
@@ -397,16 +382,16 @@ impl<
                             resolver_by_digest.fetch(commitment).await;
                         }
                         Message::Get { view, payload, response } => {
-                            // Check if in buffer
+                            // Check for block locally
                             if let Some(block) = self.search_for_block(&mut buffer, payload, SearchDepth::Finalized).await {
                                 let _ = response.send(block);
                                 continue;
                             }
 
-                            // Fetch from network if notarized (view is non-nil)
+                            // Fetch from network
                             if let Some(view) = view {
                                 debug!(view, ?payload, "required block missing");
-                                resolver_by_view.fetch(U64::new(view)).await;
+                                resolver_by_view.fetch(view.into()).await;
                             }
 
                             // Register waiter
@@ -428,17 +413,17 @@ impl<
                             result.send(block).unwrap_or_else(|_| warn!(?height, "Failed to send block to orchestrator"));
                         }
                         Orchestration::Processed { height, digest } => {
+                            // Update metrics
+                            self.processed_height.set(height as i64);
+
                             // Cancel any outstanding requests (by height and by digest)
-                            resolver_by_height.cancel(U64::new(height)).await;
                             resolver_by_digest.cancel(digest).await;
+                            resolver_by_height.prune(height.into()).await;
 
                             // If finalization exists, mark as last_view_processed
                             if let Some(finalization) = self.get_finalization(Identifier::Index(height)).await {
-                                last_view_processed = finalization.proposal.view;
+                                self.last_view_processed = finalization.proposal.view;
                             }
-
-                            // Drain requested blocks less than next
-                            requested_blocks.retain(|&h| h > height);
                         }
                         Orchestration::Repair { height } => {
                             // Find the end of the "gap" of missing blocks, starting at `height`
@@ -473,17 +458,14 @@ impl<
                             let range = height..std::cmp::min(gap_end, height + self.max_repair);
                             debug!(range.start, range.end, "requesting missing finalized blocks");
                             for height in range {
-                                if !requested_blocks.insert(height) {
-                                    continue; // Already requested
-                                }
-                                resolver_by_height.fetch(U64::new(height)).await;
+                                resolver_by_height.fetch(height.into()).await;
                             }
                         }
                     }
                 },
                 // Handle resolver messages last
-                handler_message = by_digest_receiver.next() => {
-                    let Some(message) = handler_message else {
+                message = resolver_by_digest_rx.next() => {
+                    let Some(message) = message else {
                         info!("Handler closed, shutting down");
                         return;
                     };
@@ -503,21 +485,22 @@ impl<
                                 continue;
                             };
 
-                            // Ensure the received payload is for the correct digest
+                            // Validation
                             if block.commitment() != commitment {
                                 let _ = response.send(false);
                                 continue;
                             }
 
-                            // Persist the block
-                            debug!(?commitment, height = block.height(), "received block");
+                            // Valid block received
+                            let height = block.height();
+                            debug!(?commitment, height, "received block");
                             let _ = response.send(true);
-                            self.put_block(block.height(), commitment, block, &mut notifier_tx).await;
+                            self.put_block(height, commitment, block, &mut notifier_tx).await;
                         }
                     }
                 },
-                handler_message = by_height_receiver.next() => {
-                    let Some(message) = handler_message else {
+                message = resolver_by_height_rx.next() => {
+                    let Some(message) = message else {
                         info!("Handler closed, shutting down");
                         return;
                     };
@@ -548,30 +531,23 @@ impl<
                             };
 
                             // Validation
-                            if block.height() != height {
-                                let _ = response.send(false);
-                                continue;
-                            }
-                            if finalization.proposal.payload != block.commitment() {
-                                let _ = response.send(false);
-                                continue;
-                            }
-                            if !finalization.verify(&self.namespace, &self.identity) {
+                            if block.height() != height
+                                || finalization.proposal.payload != block.commitment()
+                                || !finalization.verify(&self.namespace, &self.identity)
+                            {
                                 let _ = response.send(false);
                                 continue;
                             }
 
-                            // Indicate the finalization was valid
+                            // Valid finalization received
                             debug!(height, "received finalization");
                             let _ = response.send(true);
-
-                            // Persist the finalization and block
                             self.put_finalization(height, block.commitment(), finalization, block, &mut notifier_tx).await;
                         },
                     }
                 },
-                handler_message = by_view_receiver.next() => {
-                    let Some(message) = handler_message else {
+                message = resolver_by_view_rx.next() => {
+                    let Some(message) = message else {
                         info!("Handler closed, shutting down");
                         return;
                     };
@@ -593,23 +569,18 @@ impl<
                             };
 
                             // Validation
-                            if notarization.proposal.view != view {
-                                let _ = response.send(false);
-                                continue;
-                            }
-                            if notarization.proposal.payload != block.commitment() {
-                                let _ = response.send(false);
-                                continue;
-                            }
-                            if !notarization.verify(&self.namespace, &self.identity) {
+                            if notarization.proposal.view != view
+                                || notarization.proposal.payload != block.commitment()
+                                || !notarization.verify(&self.namespace, &self.identity)
+                            {
                                 let _ = response.send(false);
                                 continue;
                             }
 
-                            // Persist the notarization
+                            // Valid notarization received
+                            debug!(view, "received notarization");
                             let _ = response.send(true);
-                            let commitment = block.commitment();
-                            self.put_notarization(view, commitment, notarization, block).await;
+                            self.put_notarization(view, block.commitment(), notarization, block).await;
                         },
                     }
                 },
@@ -621,25 +592,21 @@ impl<
 
     /// Helper to initialize a resolver.
     fn init_resolver<K: Array>(
-        context: &R,
-        coordinator: Z,
-        mailbox_size: usize,
-        public_key: P,
-        backfill_quota: Quota,
+        &self,
         backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> (mpsc::Receiver<handler::Message<K>>, p2p::Mailbox<K>) {
-        let (handler, receiver) = mpsc::channel(mailbox_size);
+        let (handler, receiver) = mpsc::channel(self.mailbox_size);
         let handler = Handler::new(handler);
         let (resolver_engine, resolver) = p2p::Engine::new(
-            context.with_label("resolver"),
+            self.context.with_label("resolver"),
             p2p::Config {
-                coordinator,
+                coordinator: self.coordinator.clone(),
                 consumer: handler.clone(),
                 producer: handler,
-                mailbox_size,
+                mailbox_size: self.mailbox_size,
                 requester_config: requester::Config {
-                    public_key,
-                    rate_limit: backfill_quota,
+                    public_key: self.public_key.clone(),
+                    rate_limit: self.backfill_quota,
                     initial: Duration::from_secs(1),
                     timeout: Duration::from_secs(2),
                 },

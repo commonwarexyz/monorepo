@@ -12,6 +12,7 @@ pub mod config;
 pub mod finalizer;
 pub mod handler;
 pub mod ingress;
+pub mod resolver;
 
 #[cfg(test)]
 pub mod mocks;
