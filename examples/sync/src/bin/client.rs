@@ -17,6 +17,7 @@ use rand::Rng;
 use std::{
     net::{Ipv4Addr, SocketAddr},
     num::NonZeroU64,
+    sync::Arc,
     time::Duration,
 };
 use tracing::{debug, error, info, warn};
@@ -112,7 +113,7 @@ where
         + Clone,
 {
     // Get initial sync target
-    let resolver = Resolver::new(context.clone(), config.server);
+    let resolver = Arc::new(Resolver::new(context.clone(), config.server));
     let initial_target = resolver.get_sync_target().await?;
     info!(
         sync_iteration,
@@ -133,7 +134,7 @@ where
     // Start target update task
     let target_update_interval = config.target_update_interval;
     let initial_target_clone = initial_target.clone();
-    let resolver_clone = resolver.clone();
+    let resolver_clone = (*resolver).clone();
     let target_update_handle = context.with_label("target-update").spawn(move |context| {
         target_update_task(
             context,

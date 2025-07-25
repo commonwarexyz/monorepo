@@ -25,7 +25,7 @@ pub struct GetOperationsResult<D: Digest, K: Array, V: Array> {
 }
 
 /// Trait for network communication with the sync server
-pub trait Resolver: Clone + Send + 'static {
+pub trait Resolver: Send + Sync + 'static {
     type Digest: Digest;
     type Key: Array;
     type Value: Array;

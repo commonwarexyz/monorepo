@@ -484,7 +484,7 @@ where
     pub target: SyncTarget<H::Digest>,
 
     /// Resolves requests for proofs and operations.
-    pub resolver: R,
+    pub resolver: Arc<R>,
 
     /// Hasher for root digests.
     pub hasher: mmr::hasher::Standard<H>,
@@ -936,7 +936,7 @@ pub(crate) mod tests {
                     upper_bound_ops: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
                 },
                 context: context.clone(),
-                resolver: AnyResolver::from(target_db_arc.clone()),
+                resolver: Arc::new(AnyResolver::from(target_db_arc.clone())),
                 hasher,
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -1063,7 +1063,7 @@ pub(crate) mod tests {
                     upper_bound_ops: 30,
                 },
                 context,
-                resolver: AnyResolver::from(target_db),
+                resolver: Arc::new(AnyResolver::from(target_db)),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -1116,7 +1116,7 @@ pub(crate) mod tests {
                     upper_bound_ops,
                 },
                 context,
-                resolver: AnyResolver::from(target_db),
+                resolver: Arc::new(AnyResolver::from(target_db)),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -1193,7 +1193,7 @@ pub(crate) mod tests {
                     upper_bound_ops,
                 },
                 context: context.clone(),
-                resolver: AnyResolver::from(target_db.clone()),
+                resolver: Arc::new(AnyResolver::from(target_db.clone())),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -1297,7 +1297,7 @@ pub(crate) mod tests {
                     upper_bound_ops,
                 },
                 context: context.clone(),
-                resolver,
+                resolver: Arc::new(resolver),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -1365,7 +1365,7 @@ pub(crate) mod tests {
                     upper_bound_ops: upper_bound,
                 },
                 context,
-                resolver: AnyResolver::from(target_db.clone()),
+                resolver: Arc::new(AnyResolver::from(target_db.clone())),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -1648,7 +1648,7 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                resolver: AnyResolver::from(target_db),
+                resolver: Arc::new(AnyResolver::from(target_db)),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
@@ -1690,7 +1690,7 @@ pub(crate) mod tests {
 
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
-            let resolver = AnyResolver::from(target_db);
+            let resolver = Arc::new(AnyResolver::from(target_db));
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
@@ -1744,7 +1744,7 @@ pub(crate) mod tests {
             // Create client with placeholder initial target (stale compared to final target)
             let (mut update_sender, update_receiver) = mpsc::channel(1);
 
-            let resolver = AnyResolver::from(target_db);
+            let resolver = Arc::new(AnyResolver::from(target_db));
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
@@ -1814,7 +1814,7 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                resolver: AnyResolver::from(target_db),
+                resolver: Arc::new(AnyResolver::from(target_db)),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
@@ -1866,7 +1866,7 @@ pub(crate) mod tests {
                     lower_bound_ops: lower_bound,
                     upper_bound_ops: upper_bound,
                 },
-                resolver: AnyResolver::from(target_db),
+                resolver: Arc::new(AnyResolver::from(target_db)),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
@@ -1943,7 +1943,7 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                resolver: AnyResolver::from(target_db.clone()),
+                resolver: Arc::new(AnyResolver::from(target_db.clone())),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
@@ -2051,7 +2051,7 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                resolver: AnyResolver::from(target_db.clone()),
+                resolver: Arc::new(AnyResolver::from(target_db.clone())),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,

@@ -109,8 +109,8 @@ where
     type Key = crate::Key;
     type Value = crate::Value;
 
-    async fn get_operations<'a>(
-        &'a self,
+    async fn get_operations(
+        &self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
