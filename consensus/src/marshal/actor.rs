@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     threshold_simplex::types::{Finalization, Notarization},
-    Block,
+    Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
@@ -265,12 +265,14 @@ impl<
     /// Start the actor.
     pub fn start(
         mut self,
+        application: impl Reporter<Activity = B>,
         buffer: buffered::Mailbox<P, B>,
         backfill_by_digest: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         backfill_by_height: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         backfill_by_view: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
         self.context.spawn_ref()(self.run(
+            application,
             buffer,
             backfill_by_digest,
             backfill_by_height,
@@ -281,6 +283,7 @@ impl<
     /// Run the application actor.
     async fn run(
         mut self,
+        application: impl Reporter<Activity = B>,
         mut buffer: buffered::Mailbox<P, B>,
         backfill_by_digest: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         backfill_by_height: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
@@ -301,6 +304,7 @@ impl<
         let finalizer = Finalizer::new(
             self.context.with_label("finalizer"),
             self.partition_prefix.clone(),
+            application,
             orchestrator,
             notifier_rx,
         )

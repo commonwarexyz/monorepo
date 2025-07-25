@@ -1,34 +1,37 @@
-use crate::{marshal::ingress::Orchestrator, Block};
+use crate::{marshal::ingress::Orchestrator, Block, Reporter};
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::array::{FixedBytes, U64};
 use futures::{channel::mpsc, StreamExt};
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
-pub struct Finalizer<B, R>
-where
-    B: Block,
-    R: Spawner + Clock + Metrics + Storage,
-{
-    // Metadata store that stores the last indexed height.
-    metadata: Metadata<R, FixedBytes<1>, U64>,
+/// Requests the finalized blocks (in order) from the orchestrator, sends them to the application,
+/// waits for confirmation that the application has processed the block.
+///
+/// Stores the highest height for which the application has processed. This allows resuming
+/// processing from the last processed height after a restart.
+pub struct Finalizer<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>> {
+    // Application that processes the finalized blocks.
+    application: Z,
 
     // Orchestrator that stores the finalized blocks.
     orchestrator: Orchestrator<B>,
 
     // Notifier to indicate that the finalized blocks have been updated and should be re-queried.
     notifier_rx: mpsc::Receiver<()>,
+
+    // Metadata store that stores the last indexed height.
+    metadata: Metadata<R, FixedBytes<1>, U64>,
 }
 
-impl<B, R> Finalizer<B, R>
-where
-    B: Block,
-    R: Spawner + Clock + Metrics + Storage,
+impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>>
+    Finalizer<B, R, Z>
 {
     /// Initialize the finalizer.
     pub async fn new(
         context: R,
         partition_prefix: String,
+        application: Z,
         orchestrator: Orchestrator<B>,
         notifier_rx: mpsc::Receiver<()>,
     ) -> Self {
@@ -44,9 +47,10 @@ where
         .expect("Failed to initialize metadata");
 
         Self {
-            metadata,
+            application,
             orchestrator,
             notifier_rx,
+            metadata,
         }
     }
 
@@ -67,19 +71,19 @@ where
                 // Sanity-check that the block height matches the expected height.
                 assert!(block.height() == height, "block height mismatch");
 
-                // In an application that maintains state, you would compute the state transition function here.
+                // Send the block to the application.
                 //
-                // After an unclean shutdown (where the finalizer metadata is not synced after some height is processed by the application),
-                // it is possible that the application may be asked to process a block it has already seen (which it can simply ignore).
+                // Once it responds, we can both update the metadata and notify the orchestrator.
+                //
+                // After an unclean shutdown (where the finalizer metadata is not synced after some
+                // height is processed by the application), it is possible that the application may
+                // be asked to process a block it has already seen (which it can simply ignore).
 
-                // Update finalizer metadata.
-                //
-                // If we updated the finalizer metadata before the application applied its state transition function, an unclean
-                // shutdown could put the application in an unrecoverable state where the last indexed height (the height we
-                // start processing at after restart) is ahead of the application's last processed height (requiring the application
-                // to process a non-contiguous log). For the same reason, the application should sync any cached disk changes after processing
-                // its state transition function to ensure that the application can continue processing from the the last synced indexed height
-                // (on restart).
+                // Send the block to the application.
+                let commitment = block.commitment();
+                self.application.report(block).await;
+
+                // Update metadata.
                 if let Err(e) = self
                     .metadata
                     .put_sync(latest_key.clone(), height.into())
@@ -89,13 +93,8 @@ where
                     return;
                 }
 
-                // Update the latest indexed
-                info!(height, "indexed finalized block");
-
                 // Update last view processed (if we have a finalization for this block)
-                self.orchestrator
-                    .processed(height, block.commitment())
-                    .await;
+                self.orchestrator.processed(height, commitment).await;
 
                 // Loop again without waiting for a notification (there may be more to process)
                 continue;
