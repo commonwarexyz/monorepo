@@ -1,10 +1,9 @@
-use std::sync::Arc;
-
 use commonware_runtime::{
     telemetry::metrics::histogram::{Buckets, Timed},
     Clock,
 };
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
+use std::sync::Arc;
 
 /// Prometheus metrics for the sync client.
 pub(super) struct Metrics<E: Clock> {
