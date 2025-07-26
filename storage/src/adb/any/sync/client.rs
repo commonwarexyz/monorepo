@@ -1840,6 +1840,18 @@ pub(crate) mod tests {
                 assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
             }
 
+            // Verify the expected operations are present in the synced database.
+            for i in synced_db.inactivity_floor_loc..synced_db.op_count() {
+                let got = synced_db.log.read(i).await.unwrap();
+                let expected = target_db.log.read(i).await.unwrap();
+                assert_eq!(got, expected);
+            }
+            for i in synced_db.ops.oldest_retained_pos().unwrap()..synced_db.ops.size() {
+                let got = synced_db.ops.get_node(i).await.unwrap();
+                let expected = target_db.ops.get_node(i).await.unwrap();
+                assert_eq!(got, expected);
+            }
+
             synced_db.destroy().await.unwrap();
             target_db.destroy().await.unwrap();
         });
