@@ -1,11 +1,9 @@
 use crate::{
     adb::any::{
-        sync::{
-            client::{Client, Config},
-            resolver::Resolver,
-        },
+        sync::{client::Client, resolver::Resolver},
         Any,
     },
+    mmr,
     translator::Translator,
 };
 use bytes::{Buf, BufMut};
@@ -15,9 +13,13 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use futures::channel::mpsc;
 use std::fmt;
+use tracing::info;
 
 pub mod client;
+mod metrics;
 pub mod resolver;
+
+pub use client::Config;
 
 /// The target state to sync to.
 #[derive(Debug, Clone)]
@@ -73,6 +75,12 @@ pub enum Error {
     /// Resolver error
     #[error("resolver error: {0:?}")]
     Resolver(Box<dyn fmt::Debug + Send + Sync>),
+    /// Sync stalled
+    #[error("sync stalled - no pending fetches")]
+    SyncStalled,
+    /// Error extracting pinned nodes
+    #[error("error extracting pinned nodes: {0}")]
+    PinnedNodes(mmr::Error),
 }
 
 impl<D: Digest> Write for SyncTarget<D> {
@@ -114,8 +122,6 @@ impl<D: Digest> Read for SyncTarget<D> {
 /// 3. Apply operations to reconstruct the database's operation log.
 ///
 /// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
-//
-// TODO(#1214) Parallelize operation fetching: https://github.com/commonwarexyz/monorepo/issues/1214
 pub async fn sync<E, K, V, H, T, R>(
     config: Config<E, K, V, H, T, R>,
 ) -> Result<Any<E, K, V, H, T>, Error>
@@ -127,9 +133,9 @@ where
     T: Translator,
     R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
+    info!("starting sync");
+
+    // Create client and initialize all state
     let client = Client::new(config).await?;
-    match client {
-        Client::Done { db } => Ok(db),
-        _ => client.sync().await,
-    }
+    client.sync().await
 }

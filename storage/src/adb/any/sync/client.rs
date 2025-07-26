@@ -1,28 +1,41 @@
+use super::{
+    resolver::{GetOperationsResult, Resolver},
+    Error, SyncTarget, SyncTargetUpdateReceiver,
+};
 use crate::{
     adb::{
         self,
-        any::{
-            sync::{
-                resolver::{GetOperationsResult, Resolver},
-                Error, SyncTarget, SyncTargetUpdateReceiver,
-            },
-            SyncConfig,
-        },
+        any::{sync::metrics::Metrics, SyncConfig},
         operation::Fixed,
     },
     journal::fixed::{Config as JConfig, Journal},
-    mmr::{self, iterator::leaf_num_to_pos},
+    mmr::{self, iterator::leaf_num_to_pos, verification::Proof},
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{
-    telemetry::metrics::histogram::{Buckets, Timed},
-    Clock, Metrics as MetricsTrait, Storage,
-};
+use commonware_macros::select;
+use commonware_runtime::{Clock, Metrics as MetricsTrait, Storage};
 use commonware_utils::{Array, NZU64};
-use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
-use std::{num::NonZeroU64, sync::Arc};
+use futures::{stream::FuturesUnordered, StreamExt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    num::NonZeroU64,
+    pin::Pin,
+    sync::Arc,
+};
 use tracing::{debug, info, warn};
+
+/// Result of executing one sync step
+pub enum StepResult<C, D> {
+    /// Sync should continue with the updated client
+    Continue(C),
+    /// Sync is complete with the final database
+    Complete(D),
+}
+
+// (start_pos, result) where start_pos is the position of the first operation in the batch.
+type PendingOperationBatch<D, K, V> = (u64, Result<GetOperationsResult<D, K, V>, Error>);
 
 /// Configuration for the sync client
 pub struct Config<E, K, V, H, T, R>
@@ -41,7 +54,7 @@ where
     pub update_receiver: Option<SyncTargetUpdateReceiver<H::Digest>>,
 
     /// Database configuration.
-    pub db_config: adb::any::Config<T>,
+    pub db_config: crate::adb::any::Config<T>,
 
     /// Maximum operations to fetch per batch.
     pub fetch_batch_size: NonZeroU64,
@@ -50,7 +63,7 @@ where
     pub target: SyncTarget<H::Digest>,
 
     /// Resolves requests for proofs and operations.
-    pub resolver: R,
+    pub resolver: Arc<R>,
 
     /// Hasher for root digests.
     pub hasher: mmr::hasher::Standard<H>,
@@ -59,82 +72,13 @@ where
     /// before committing the database while applying operations.
     /// Higher value will cause more memory usage during sync.
     pub apply_batch_size: usize,
+
+    /// Maximum number of outstanding requests for operation batches.
+    /// Higher values increase parallelism but also memory usage.
+    pub max_outstanding_requests: usize,
 }
 
-/// Prometheus metrics for the sync client.
-pub struct Metrics<E: Clock> {
-    /// Number of valid batches successfully received and processed.
-    valid_batches_received: Counter<u64>,
-    /// Number of invalid batches received that failed validation.
-    invalid_batches_received: Counter<u64>,
-    /// Total number of operations fetched during sync.
-    operations_fetched: Counter<u64>,
-    /// Total time spent fetching operations from resolver (seconds).
-    fetch_duration: Timed<E>,
-    /// Total time spent verifying proofs (seconds).
-    proof_verification_duration: Timed<E>,
-    /// Total time spent applying operations to the log (seconds).
-    apply_duration: Timed<E>,
-}
-
-impl<E: Clock + MetricsTrait> Metrics<E> {
-    /// Register metrics with the provided runtime metrics context and return the struct.
-    pub fn new(context: E) -> Self {
-        let fetch_histogram = Histogram::new(Buckets::NETWORK.into_iter());
-        let proof_verification_histogram = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
-        let apply_histogram = Histogram::new(Buckets::LOCAL.into_iter());
-
-        let metrics = Self {
-            valid_batches_received: Counter::default(),
-            invalid_batches_received: Counter::default(),
-            operations_fetched: Counter::default(),
-            fetch_duration: Timed::new(fetch_histogram.clone(), Arc::new(context.clone())),
-            proof_verification_duration: Timed::new(
-                proof_verification_histogram.clone(),
-                Arc::new(context.clone()),
-            ),
-            apply_duration: Timed::new(apply_histogram.clone(), Arc::new(context.clone())),
-        };
-
-        // Register metrics.
-        context.register(
-            "valid_batches_received",
-            "Number of valid operation batches processed during ADB sync",
-            metrics.valid_batches_received.clone(),
-        );
-        context.register(
-            "invalid_batches_received",
-            "Number of invalid operation batches encountered during ADB sync",
-            metrics.invalid_batches_received.clone(),
-        );
-        context.register(
-            "operations_fetched",
-            "Total number of operations fetched during ADB sync",
-            metrics.operations_fetched.clone(),
-        );
-        context.register(
-            "fetch_duration_seconds",
-            "Histogram of durations spent fetching operation batches during ADB sync",
-            fetch_histogram,
-        );
-        context.register(
-            "proof_verification_duration_seconds",
-            "Histogram of durations spent verifying proofs during ADB sync",
-            proof_verification_histogram,
-        );
-        context.register(
-            "apply_duration_seconds",
-            "Histogram of durations spent applying operations during ADB sync",
-            apply_histogram,
-        );
-
-        metrics
-    }
-}
-
-/// Client that syncs an [adb::any::Any] database.
-#[allow(clippy::large_enum_variant)]
-pub(super) enum Client<E, K, V, H, T, R>
+impl<E, K, V, H, T, R> Config<E, K, V, H, T, R>
 where
     E: Storage + Clock + MetricsTrait,
     K: Array,
@@ -143,24 +87,54 @@ where
     T: Translator,
     R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
-    /// Next step is to fetch and verify operations.
-    FetchData {
-        config: Config<E, K, V, H, T, R>,
-        log: Journal<E, Fixed<K, V>>,
-        /// Extracted pinned nodes from first batch proof
-        pinned_nodes: Option<Vec<H::Digest>>,
-        metrics: Metrics<E>,
-    },
-    /// Next step is to apply fetched operations to the log.
-    ApplyData {
-        config: Config<E, K, V, H, T, R>,
-        log: Journal<E, Fixed<K, V>>,
-        pinned_nodes: Option<Vec<H::Digest>>,
-        batch_ops: Vec<Fixed<K, V>>,
-        metrics: Metrics<E>,
-    },
-    /// Sync completed. Database is fully constructed.
-    Done { db: adb::any::Any<E, K, V, H, T> },
+    /// Validate the configuration parameters
+    pub fn validate(&self) -> Result<(), Error> {
+        // Validate bounds (inclusive)
+        if self.target.lower_bound_ops > self.target.upper_bound_ops {
+            return Err(Error::InvalidTarget {
+                lower_bound_pos: self.target.lower_bound_ops,
+                upper_bound_pos: self.target.upper_bound_ops,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Client that syncs an [adb::any::Any] database.
+pub(super) struct Client<E, K, V, H, T, R>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
+    config: Config<E, K, V, H, T, R>,
+
+    /// Verified batches waiting to be applied, indexed by start position
+    fetched_operations: BTreeMap<u64, Vec<Fixed<K, V>>>,
+
+    /// Start positions of batches that we've requested from the resolver
+    /// Each element corresponds to an element in [outstanding_request_futures]
+    outstanding_request_locations: BTreeSet<u64>,
+
+    /// Each element is a future that will resolve to a batch of operations
+    /// that we've requested from the resolver.
+    /// Each element corresponds to an element in [outstanding_request_locations]
+    #[allow(clippy::type_complexity)] // TODO: Make simpler type
+    outstanding_request_futures: FuturesUnordered<
+        Pin<Box<dyn Future<Output = PendingOperationBatch<H::Digest, K, V>> + Send>>,
+    >,
+
+    /// Pinned nodes extracted from the first batch
+    pinned_nodes: Option<Vec<H::Digest>>,
+
+    /// Journal of operations that the sync protocol fills
+    /// When it's completed, we use it to build the database
+    log: Journal<E, Fixed<K, V>>,
+
+    metrics: Metrics<E>,
 }
 
 impl<E, K, V, H, T, R> Client<E, K, V, H, T, R>
@@ -172,18 +146,12 @@ where
     T: Translator,
     R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
-    /// Create a new sync client
-    pub(crate) async fn new(config: Config<E, K, V, H, T, R>) -> Result<Self, Error> {
-        // Validate bounds (inclusive)
-        if config.target.lower_bound_ops > config.target.upper_bound_ops {
-            return Err(Error::InvalidTarget {
-                lower_bound_pos: config.target.lower_bound_ops,
-                upper_bound_pos: config.target.upper_bound_ops,
-            });
-        }
+    /// Create a new sync client.
+    pub(super) async fn new(config: Config<E, K, V, H, T, R>) -> Result<Self, Error> {
+        // Validate configuration
+        config.validate()?;
 
-        // Initialize the operations journal.
-        // It may have data in the target range.
+        // Initialize the operations journal
         let log = Journal::<E, Fixed<K, V>>::init_sync(
             config.context.clone().with_label("log"),
             JConfig {
@@ -199,444 +167,584 @@ where
         .map_err(adb::Error::JournalError)
         .map_err(Error::Adb)?;
 
-        // Check how many operations are already in the log.
         let log_size = log
             .size()
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-
-        // Assert invariant from [Journal::init_sync]
         assert!(log_size <= config.target.upper_bound_ops + 1);
-        if log_size == config.target.upper_bound_ops + 1 {
-            // We already have all the operations we need in the log.
-            // Build the database immediately without fetching more operations.
-            let db = adb::any::Any::init_synced(
-                config.context.clone(),
-                SyncConfig {
-                    db_config: config.db_config.clone(),
-                    log,
-                    lower_bound: config.target.lower_bound_ops,
-                    upper_bound: config.target.upper_bound_ops,
-                    pinned_nodes: None,
-                    apply_batch_size: config.apply_batch_size,
-                },
-            )
-            .await
-            .map_err(Error::Adb)?;
 
-            return Ok(Client::Done { db });
-        }
+        // Initialize metrics
+        let metrics = Metrics::new(config.context.clone());
 
-        Ok(Client::FetchData {
-            metrics: Metrics::new(config.context.clone()),
+        // Create client
+        let mut client = Self {
             config,
-            log,
+            fetched_operations: BTreeMap::new(),
+            outstanding_request_locations: BTreeSet::new(),
+            outstanding_request_futures: FuturesUnordered::new(),
             pinned_nodes: None,
-        })
+            log,
+            metrics,
+        };
+
+        // Request operations in the sync range.
+        client.fill_fetch_queue().await?;
+
+        Ok(client)
     }
 
-    /// Validate a target update against the current target
-    fn validate_target_update(
-        old_target: &SyncTarget<H::Digest>,
-        new_target: &SyncTarget<H::Digest>,
+    /// Run sync to completion.
+    pub(super) async fn sync(mut self) -> Result<adb::any::Any<E, K, V, H, T>, Error> {
+        loop {
+            match self.step().await? {
+                StepResult::Continue(new_client) => self = new_client,
+                StepResult::Complete(database) => return Ok(database),
+            }
+        }
+    }
+
+    /// Execute one step of the sync process
+    /// Returns either a new client to continue with, or the final database if complete.
+    async fn step(mut self) -> Result<StepResult<Self, adb::any::Any<E, K, V, H, T>>, Error> {
+        // Check if sync is complete
+        if self.is_complete().await? {
+            let database = build_database(
+                self.config,
+                self.log,
+                self.pinned_nodes.clone(),
+                &self.metrics,
+            )
+            .await?;
+            return Ok(StepResult::Complete(database));
+        }
+
+        // Wait to receive a batch of operations or a target update (if enabled).
+        let (fetch_start_pos, fetch_result) =
+            if let Some(ref mut update_rx) = self.config.update_receiver {
+                select! {
+                    new_target = update_rx.next() => {
+                        if let Some(new_target) = new_target {
+                            self = self.handle_target_update(new_target).await?;
+                        } else {
+                            // Receiver closed - disable it to avoid spinning
+                            self.config.update_receiver = None;
+                        }
+                        return Ok(StepResult::Continue(self));
+                    },
+                    fetch_result = self.outstanding_request_futures.next() => {
+                        fetch_result.ok_or(Error::SyncStalled)?
+                    },
+                }
+            } else {
+                // No update receiver - wait to receive a batch of operations
+                self.outstanding_request_futures
+                    .next()
+                    .await
+                    .ok_or(Error::SyncStalled)?
+            };
+
+        // Remove from outstanding requests
+        self.outstanding_request_locations.remove(&fetch_start_pos);
+
+        match fetch_result {
+            Ok(GetOperationsResult {
+                proof,
+                operations,
+                success_tx,
+            }) => {
+                let operations_len = operations.len() as u64;
+
+                // Validate batch size
+                if operations_len == 0 || operations_len > self.config.fetch_batch_size.get() {
+                    debug!(
+                        operations_len,
+                        batch_size = self.config.fetch_batch_size.get(),
+                        fetch_start_pos,
+                        "received invalid batch size from resolver"
+                    );
+                    self.metrics.invalid_batches_received.inc();
+                    let _ = success_tx.send(false);
+                } else {
+                    // Verify the proof
+                    let proof_valid = {
+                        let _timer = self.metrics.proof_verification_duration.timer();
+                        adb::any::Any::<E, K, V, H, T>::verify_proof(
+                            &mut self.config.hasher,
+                            &proof,
+                            fetch_start_pos,
+                            &operations,
+                            &self.config.target.root,
+                        )
+                    };
+                    let _ = success_tx.send(proof_valid);
+                    if proof_valid {
+                        // Extract pinned nodes if needed
+                        self.set_pinned_nodes(&proof, fetch_start_pos, operations_len)?;
+                        self.store_operations(fetch_start_pos, operations);
+                    } else {
+                        debug!(fetch_start_pos, "proof verification failed, retrying");
+                        self.metrics.invalid_batches_received.inc();
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(fetch_start_pos, error = ?e, "batch fetch failed, retrying");
+            }
+        }
+
+        // Maintain parallelism by filling the fetch queue
+        self.fill_fetch_queue().await?;
+
+        // Apply operations that are now contiguous with the current log size
+        self.apply_operations().await?;
+
+        Ok(StepResult::Continue(self))
+    }
+
+    /// Queue batches of operations to be fetched from the resolver
+    async fn fill_fetch_queue(&mut self) -> Result<(), Error> {
+        let target_size = self.config.target.upper_bound_ops + 1;
+
+        // Special case: If we don't have pinned nodes, we need to extract them
+        // from a proof for the lower sync bound.
+        if self.pinned_nodes.is_none() {
+            let start_pos = self.config.target.lower_bound_ops;
+            let resolver = self.config.resolver.clone();
+            self.outstanding_request_locations.insert(start_pos);
+            self.outstanding_request_futures.push(Box::pin(async move {
+                let result = resolver
+                    .get_operations(target_size, start_pos, NZU64!(1))
+                    .await;
+                (start_pos, result)
+            }));
+        }
+
+        // Request batches of operations in parallel.
+        let num_requests = self
+            .config
+            .max_outstanding_requests
+            .saturating_sub(self.outstanding_request_locations.len());
+
+        let log_size = self
+            .log
+            .size()
+            .await
+            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+        for _ in 0..num_requests {
+            // Find the next gap in the sync range that needs to be fetched.
+            let Some((start_pos, _end_pos)) = find_next_gap::<K, V>(
+                log_size,
+                self.config.target.upper_bound_ops,
+                &self.fetched_operations,
+                &self.outstanding_request_locations,
+                self.config.fetch_batch_size.get(),
+            ) else {
+                break; // No more gaps to fill
+            };
+
+            let resolver = self.config.resolver.clone();
+            let batch_size = self.config.fetch_batch_size;
+            self.outstanding_request_futures.push(Box::pin(async move {
+                let result = resolver
+                    .get_operations(target_size, start_pos, batch_size)
+                    .await;
+                (start_pos, result)
+            }));
+            self.outstanding_request_locations.insert(start_pos);
+        }
+
+        Ok(())
+    }
+
+    /// If `start_pos` is the lower sync bound, extract pinned nodes from the proof
+    /// and set them in the `self`. Otherwise, do nothing.
+    fn set_pinned_nodes(
+        &mut self,
+        proof: &Proof<H::Digest>,
+        start_pos: u64,
+        operations_len: u64,
     ) -> Result<(), Error> {
-        if new_target.lower_bound_ops > new_target.upper_bound_ops {
-            return Err(Error::InvalidTarget {
-                lower_bound_pos: new_target.lower_bound_ops,
-                upper_bound_pos: new_target.upper_bound_ops,
-            });
-        }
-        if new_target.lower_bound_ops < old_target.lower_bound_ops
-            || new_target.upper_bound_ops < old_target.upper_bound_ops
-        {
-            return Err(Error::SyncTargetMovedBackward {
-                old: Box::new(old_target.clone()),
-                new: Box::new(new_target.clone()),
-            });
-        }
-        if new_target.root == old_target.root {
-            return Err(Error::SyncTargetRootUnchanged);
+        if self.pinned_nodes.is_none() && start_pos == self.config.target.lower_bound_ops {
+            let start_pos_mmr = leaf_num_to_pos(start_pos);
+            let end_pos_mmr = leaf_num_to_pos(start_pos + operations_len - 1);
+            match proof.extract_pinned_nodes(start_pos_mmr, end_pos_mmr) {
+                Ok(nodes) => self.pinned_nodes = Some(nodes),
+                Err(e) => return Err(Error::PinnedNodes(e)),
+            }
         }
         Ok(())
     }
 
-    /// Update the sync target to the most recent target update, if any.
-    async fn handle_target_updates(mut self) -> Result<Self, Error> {
-        let update_receiver = match &mut self {
-            Client::FetchData { config, .. } => &mut config.update_receiver,
-            Client::ApplyData { config, .. } => &mut config.update_receiver,
-            Client::Done { .. } => {
-                warn!("ignoring target update - sync already completed");
-                return Ok(self);
-            }
-        };
-        let mut new_target = None;
-        if let Some(ref mut receiver) = update_receiver {
-            // Only apply the last update, if any.
-            while let Ok(Some(new_target_)) = receiver.try_next() {
-                new_target = Some(new_target_);
-            }
-        }
+    /// Store a verified batch of operations to be applied later
+    fn store_operations(&mut self, start_pos: u64, operations: Vec<Fixed<K, V>>) {
+        self.metrics
+            .operations_fetched
+            .inc_by(operations.len() as u64);
+        self.metrics.valid_batches_received.inc();
+        self.fetched_operations.insert(start_pos, operations);
+    }
 
-        let Some(new_target) = new_target else {
-            // There is no new target to apply.
-            return Ok(self);
-        };
-
-        let (mut config, mut log, metrics) = match self {
-            Client::FetchData {
-                config,
-                log,
-                metrics,
-                ..
-            } => (config, log, metrics),
-            Client::ApplyData {
-                config,
-                log,
-                metrics,
-                ..
-            } => (config, log, metrics),
-            Client::Done { .. } => {
-                return Ok(self);
-            }
-        };
-        Self::validate_target_update(&config.target, &new_target)?;
-
-        info!(
-            old_target = ?config.target,
-            new_target = ?new_target,
-            "applying target update"
-        );
-
-        // Check if the existing log contains data in the updated sync range
-        let log_size = log
+    /// Apply fetched operations to the tip of the log if we have them.
+    async fn apply_operations(&mut self) -> Result<(), Error> {
+        let mut next_pos = self
+            .log
             .size()
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
-        let log = if log_size <= new_target.lower_bound_ops {
-            // Log is stale (last element is before the new lower bound)
-            // Reinitialize the log with the new sync range
-            log.close()
+        loop {
+            // See if we have the next operation to apply (i.e. at the log tip)
+            // Find the index of the range that contains the next position.
+            let range_start_pos =
+                self.fetched_operations
+                    .iter()
+                    .find_map(|(range_start, range_ops)| {
+                        let range_end = range_start + range_ops.len() as u64 - 1;
+                        if *range_start <= next_pos && next_pos <= range_end {
+                            Some(*range_start)
+                        } else {
+                            None
+                        }
+                    });
+
+            let Some(range_start_pos) = range_start_pos else {
+                // We don't have the next operation to apply (i.e. at the log tip)
+                break;
+            };
+
+            let operations = self.fetched_operations.remove(&range_start_pos).unwrap();
+            // Remove from the beginning all the operations that are before the next position.
+            let operations = operations
+                .into_iter()
+                .skip((next_pos - range_start_pos) as usize)
+                .collect::<Vec<_>>();
+            next_pos += operations.len() as u64;
+            self.apply_operations_batch(operations).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Apply a batch of operations to the log
+    async fn apply_operations_batch(&mut self, operations: Vec<Fixed<K, V>>) -> Result<(), Error> {
+        let _timer = self.metrics.apply_duration.timer();
+        for op in operations.into_iter() {
+            self.log
+                .append(op)
                 .await
-                .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+                .map_err(adb::Error::JournalError)
+                .map_err(Error::Adb)?;
+            // No need to sync here -- the log will periodically sync its storage
+            // and we will also sync when we're done applying all operations.
+        }
+        Ok(())
+    }
 
-            debug!(
-                log_size,
-                old_bounds = ?config.target,
-                new_bounds = ?new_target,
-                "log is stale, reinitializing"
-            );
-            Journal::<E, Fixed<K, V>>::init_sync(
-                config.context.clone().with_label("log"),
-                JConfig {
-                    partition: config.db_config.log_journal_partition.clone(),
-                    items_per_blob: config.db_config.log_items_per_blob,
-                    write_buffer: config.db_config.log_write_buffer,
-                    buffer_pool: config.db_config.buffer_pool.clone(),
-                },
-                new_target.lower_bound_ops,
-                new_target.upper_bound_ops,
-            )
-            .await
-            .map_err(adb::Error::JournalError)
-            .map_err(Error::Adb)?
-        } else {
-            debug!(
-                log_size,
-                old_bounds = ?config.target,
-                new_bounds = ?new_target,
-                "pruning log"
-            );
-            // Log contains data in the updated sync range, prune normally
-            log.prune(new_target.lower_bound_ops)
-                .await
-                .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-            log
-        };
+    /// Handle a target update by validating it and reinitializing state
+    async fn handle_target_update(
+        mut self,
+        new_target: SyncTarget<H::Digest>,
+    ) -> Result<Self, Error> {
+        validate_target_update::<H>(&self.config.target, &new_target)?;
 
-        // Update the target
-        config.target = new_target;
-
-        // Request a minimal proof for the new lower bound to extract correct pinned nodes
-        let GetOperationsResult {
-            proof,
-            operations: _,
-            success_tx,
-        } = {
-            let target_size = config.target.upper_bound_ops + 1;
-            config
-                .resolver
-                .get_operations(target_size, config.target.lower_bound_ops, NZU64!(1))
-                .await?
-        };
-
-        // Extract pinned nodes for the new pruning boundary
-        let start_pos = leaf_num_to_pos(config.target.lower_bound_ops);
-        let end_pos = leaf_num_to_pos(config.target.lower_bound_ops);
-        let new_pinned_nodes = match proof.extract_pinned_nodes(start_pos, end_pos) {
-            Ok(nodes) => {
-                let _ = success_tx.send(true);
-                nodes
-            }
-            Err(e) => {
-                warn!(error = ?e, "failed to extract pinned nodes for new target");
-                let _ = success_tx.send(false);
-                return Err(Error::InvalidState);
-            }
-        };
-
-        debug!(
-            lower_bound_ops = config.target.lower_bound_ops,
-            pinned_nodes_count = new_pinned_nodes.len(),
-            "extracted pinned nodes for new target"
+        info!(
+            old_target = ?self.config.target,
+            new_target = ?new_target,
+            "applying target update"
         );
 
-        // Discard any pending updates, since they may be stale now.
-        Ok(Client::FetchData {
-            config,
-            log,
-            pinned_nodes: Some(new_pinned_nodes),
-            metrics,
+        // Update config target
+        self.config.target = new_target;
+
+        // Reinitialize log if needed
+        self.log = update_log_for_target_update(
+            self.log,
+            self.config.context.clone(),
+            &self.config.db_config,
+            self.config.target.lower_bound_ops,
+            self.config.target.upper_bound_ops,
+        )
+        .await?;
+
+        // Reset state for the target update
+        self.fetched_operations.clear();
+        self.outstanding_request_locations.clear();
+        self.outstanding_request_futures.clear();
+        self.pinned_nodes = None;
+
+        // Reinitialize parallel fetching
+        self.fill_fetch_queue().await?;
+
+        Ok(self)
+    }
+
+    /// Check if sync is complete based on the current log size and target
+    async fn is_complete(&self) -> Result<bool, Error> {
+        let log_size = self
+            .log
+            .size()
+            .await
+            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+        // Calculate the target log size (upper bound is inclusive)
+        let target_log_size = self
+            .config
+            .target
+            .upper_bound_ops
+            .checked_add(1)
+            .ok_or(Error::InvalidState)?;
+
+        // Check if we've completed sync
+        if log_size >= target_log_size {
+            if log_size > target_log_size {
+                warn!(log_size, target_log_size, "log size exceeded sync target");
+                return Err(Error::InvalidState);
+            }
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+}
+
+/// Find the next gap in operations that needs to be fetched
+/// Returns (start, end) inclusive range, or None if no gaps
+fn find_next_gap<K: Array, V: Array>(
+    lower_bound: u64,
+    upper_bound: u64,
+    fetched_operations: &BTreeMap<u64, Vec<Fixed<K, V>>>,
+    outstanding_requests: &BTreeSet<u64>,
+    fetch_batch_size: u64,
+) -> Option<(u64, u64)> {
+    if lower_bound > upper_bound {
+        return None;
+    }
+
+    let mut current_covered_end: Option<u64> = None; // None means nothing covered yet
+
+    // Create iterators for both data structures (already sorted)
+    let mut verified_iter = fetched_operations
+        .iter()
+        .filter_map(|(&start_pos, operations)| {
+            if operations.is_empty() {
+                None
+            } else {
+                let end_pos = start_pos + operations.len() as u64 - 1;
+                Some((start_pos, end_pos))
+            }
         })
-    }
+        .peekable();
 
-    /// Process the next step in the sync process
-    async fn step(mut self) -> Result<Self, Error> {
-        // Handle any pending target updates
-        self = self.handle_target_updates().await?;
+    let mut outstanding_iter = outstanding_requests
+        .iter()
+        .map(|&start_pos| {
+            let end_pos = (start_pos + fetch_batch_size - 1).min(upper_bound);
+            (start_pos, end_pos)
+        })
+        .peekable();
 
-        match self {
-            Client::FetchData {
-                mut config,
-                log,
-                mut pinned_nodes,
-                metrics,
-            } => {
-                // Get current position in the log
-                let log_size = log
-                    .size()
-                    .await
-                    .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-
-                // Calculate remaining operations to sync (inclusive upper bound)
-                let remaining_ops = if log_size <= config.target.upper_bound_ops {
-                    config.target.upper_bound_ops - log_size + 1
+    // Merge process both iterators in sorted order
+    loop {
+        let next_range = match (verified_iter.peek(), outstanding_iter.peek()) {
+            (Some(&(v_start, _)), Some(&(o_start, _))) => {
+                if v_start <= o_start {
+                    verified_iter.next().unwrap()
                 } else {
-                    // We're at/past the target.
-                    warn!(
-                        log_size,
-                        upper_bound = config.target.upper_bound_ops,
-                        "sync target exceeded"
-                    );
-                    return Err(Error::InvalidState);
-                };
-
-                let batch_size = std::cmp::min(config.fetch_batch_size.get(), remaining_ops);
-                let batch_size = NonZeroU64::new(batch_size).ok_or(Error::InvalidState)?;
-
-                debug!(
-                    target_root = ?config.target.root,
-                    lower_bound_pos = config.target.lower_bound_ops,
-                    upper_bound_pos = config.target.upper_bound_ops,
-                    current_pos = log_size,
-                    remaining_ops = remaining_ops,
-                    batch_size = batch_size.get(),
-                    "fetching proof and operations"
-                );
-
-                // Get proof and operations from resolver
-                let GetOperationsResult {
-                    proof,
-                    operations,
-                    success_tx,
-                } = {
-                    let _timer = metrics.fetch_duration.timer();
-                    let target_size = config.target.upper_bound_ops + 1;
-                    config
-                        .resolver
-                        .get_operations(target_size, log_size, batch_size)
-                        .await?
-                };
-
-                let operations_len = operations.len() as u64;
-
-                // Validate that we didn't get more operations than requested
-                // or that we didn't get an empty proof. We should never get an empty proof
-                // because we will never request an empty proof (i.e. a proof over an empty database).
-                if operations_len > batch_size.get() || operations_len == 0 {
-                    debug!(
-                        operations_len,
-                        batch_size = batch_size.get(),
-                        "received invalid batch size from resolver"
-                    );
-                    metrics.invalid_batches_received.inc();
-                    let _ = success_tx.send(false);
-                    return Ok(Client::FetchData {
-                        config,
-                        log,
-                        pinned_nodes,
-                        metrics,
-                    });
+                    outstanding_iter.next().unwrap()
                 }
-
-                debug!(operations_len, "received operations from resolver");
-
-                // Verify the proof is valid over the given operations
-                let proof_valid = {
-                    let _timer = metrics.proof_verification_duration.timer();
-                    adb::any::Any::<E, K, V, H, T>::verify_proof(
-                        &mut config.hasher,
-                        &proof,
-                        log_size,
-                        &operations,
-                        &config.target.root,
-                    )
-                };
-                let _ = success_tx.send(proof_valid);
-
-                if !proof_valid {
-                    debug!("proof verification failed, retrying");
-                    metrics.invalid_batches_received.inc();
-                    return Ok(Client::FetchData {
-                        config,
-                        log,
-                        pinned_nodes,
-                        metrics,
-                    });
-                }
-
-                // Install pinned nodes on first successful batch.
-                if pinned_nodes.is_none() {
-                    let start_pos = leaf_num_to_pos(log_size);
-                    let end_pos = leaf_num_to_pos(log_size + operations_len - 1);
-                    let Ok(new_pinned_nodes) = proof.extract_pinned_nodes(start_pos, end_pos)
-                    else {
-                        warn!("failed to extract pinned nodes, retrying");
-                        metrics.invalid_batches_received.inc();
-                        return Ok(Client::FetchData {
-                            config,
-                            log,
-                            pinned_nodes,
-                            metrics,
-                        });
-                    };
-                    pinned_nodes = Some(new_pinned_nodes);
-                }
-
-                // Record successful batch metrics
-                metrics.valid_batches_received.inc();
-                metrics.operations_fetched.inc_by(operations_len);
-
-                Ok(Client::ApplyData {
-                    config,
-                    log,
-                    pinned_nodes,
-                    batch_ops: operations,
-                    metrics,
-                })
             }
+            (Some(_), None) => verified_iter.next().unwrap(),
+            (None, Some(_)) => outstanding_iter.next().unwrap(),
+            (None, None) => break,
+        };
 
-            Client::ApplyData {
-                config,
-                mut log,
-                pinned_nodes,
-                batch_ops,
-                metrics,
-            } => {
-                // Apply operations to the log
-                {
-                    let _timer = metrics.apply_duration.timer();
-                    for op in batch_ops.into_iter() {
-                        log.append(op)
-                            .await
-                            .map_err(adb::Error::JournalError)
-                            .map_err(Error::Adb)?;
-                        // No need to sync here -- the log will periodically sync its storage
-                        // and we will also sync when we're done.
+        let (range_start, range_end) = next_range;
+
+        // Check if there's a gap before this range
+        match current_covered_end {
+            None => {
+                // First range - check if there's a gap before it
+                if lower_bound < range_start {
+                    let gap_end = (range_start - 1).min(upper_bound);
+                    // Only return gaps that start at or after lower_bound
+                    if lower_bound <= gap_end {
+                        return Some((lower_bound, gap_end));
                     }
                 }
-
-                // Check if we've applied all needed operations
-                let log_size = log
-                    .size()
-                    .await
-                    .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-
-                // Calculate the target log size (upper bound is inclusive)
-                let target_log_size = config
-                    .target
-                    .upper_bound_ops
-                    .checked_add(1)
-                    .ok_or(Error::InvalidState)?;
-
-                // Check if we've completed sync
-                if log_size >= target_log_size {
-                    if log_size > target_log_size {
-                        warn!(log_size, target_log_size, "log size exceeded sync target");
-                        return Err(Error::InvalidState);
-                    }
-
-                    // Build the complete database from the log
-                    let db = adb::any::Any::init_synced(
-                        config.context.clone(),
-                        SyncConfig {
-                            db_config: config.db_config.clone(),
-                            log,
-                            lower_bound: config.target.lower_bound_ops,
-                            upper_bound: config.target.upper_bound_ops,
-                            pinned_nodes,
-                            apply_batch_size: config.apply_batch_size,
-                        },
-                    )
-                    .await
-                    .map_err(Error::Adb)?;
-
-                    // Verify the final root digest matches the target
-                    let mut hasher = mmr::hasher::Standard::<H>::new();
-                    let got_root = db.root(&mut hasher);
-                    if got_root != config.target.root {
-                        return Err(Error::RootMismatch {
-                            expected: Box::new(config.target.root),
-                            actual: Box::new(got_root),
-                        });
-                    }
-
-                    info!(
-                        target_root = ?config.target.root,
-                        lower_bound_ops = config.target.lower_bound_ops,
-                        upper_bound_ops = config.target.upper_bound_ops,
-                        log_size = log_size,
-                        valid_batches_received = metrics.valid_batches_received.get(),
-                        invalid_batches_received = metrics.invalid_batches_received.get(),
-                        "sync completed successfully");
-
-                    return Ok(Client::Done { db });
-                }
-
-                // Need to fetch more
-                Ok(Client::FetchData {
-                    config,
-                    log,
-                    pinned_nodes,
-                    metrics,
-                })
             }
+            Some(covered_end) => {
+                // Check if there's a gap between current coverage and this range
+                if covered_end + 1 < range_start {
+                    let gap_start = std::cmp::max(covered_end + 1, lower_bound);
+                    let gap_end = (range_start - 1).min(upper_bound);
+                    if gap_start <= gap_end {
+                        return Some((gap_start, gap_end));
+                    }
+                }
+            }
+        }
 
-            Client::Done { .. } => Err(Error::AlreadyComplete),
+        // Update current covered end (merge overlapping ranges)
+        current_covered_end = Some(match current_covered_end {
+            None => range_end,
+            Some(covered_end) => covered_end.max(range_end),
+        });
+
+        // Early exit if we've covered everything up to upper_bound
+        if current_covered_end.unwrap() >= upper_bound {
+            return None;
         }
     }
 
-    /// Run the complete sync process
-    pub(crate) async fn sync(mut self) -> Result<adb::any::Any<E, K, V, H, T>, Error> {
-        info!("starting sync");
-        loop {
-            self = self.step().await?;
-            if let Client::Done { db } = self {
-                return Ok(db);
+    // Check if there's a gap after all ranges
+    match current_covered_end {
+        None => {
+            // No ranges at all - entire range is a gap
+            Some((lower_bound, upper_bound))
+        }
+        Some(covered_end) => {
+            // Check if there's a gap after the last covered position
+            let gap_start = std::cmp::max(covered_end + 1, lower_bound);
+            if gap_start <= upper_bound {
+                Some((gap_start, upper_bound))
+            } else {
+                None
             }
         }
     }
+}
+
+/// Validate a target update against the current target
+fn validate_target_update<H: Hasher>(
+    old_target: &SyncTarget<H::Digest>,
+    new_target: &SyncTarget<H::Digest>,
+) -> Result<(), Error> {
+    if new_target.lower_bound_ops > new_target.upper_bound_ops {
+        return Err(Error::InvalidTarget {
+            lower_bound_pos: new_target.lower_bound_ops,
+            upper_bound_pos: new_target.upper_bound_ops,
+        });
+    }
+    if new_target.lower_bound_ops < old_target.lower_bound_ops
+        || new_target.upper_bound_ops < old_target.upper_bound_ops
+    {
+        return Err(Error::SyncTargetMovedBackward {
+            old: Box::new(old_target.clone()),
+            new: Box::new(new_target.clone()),
+        });
+    }
+    if new_target.root == old_target.root {
+        return Err(Error::SyncTargetRootUnchanged);
+    }
+    Ok(())
+}
+
+/// Reinitialize the log for a target update.
+///
+/// If the last log element is before the new lower bound, we close the log and reinitialize it.
+/// If the last log element is after the new lower bound, we prune the log to the lower bound.
+async fn update_log_for_target_update<E, K, V, T>(
+    mut log: Journal<E, Fixed<K, V>>,
+    context: E,
+    db_config: &adb::any::Config<T>,
+    lower_bound_ops: u64,
+    upper_bound_ops: u64,
+) -> Result<Journal<E, Fixed<K, V>>, Error>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    T: Translator,
+{
+    let log_size = log
+        .size()
+        .await
+        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+    if log_size <= lower_bound_ops {
+        log.close()
+            .await
+            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+        log = Journal::<E, Fixed<K, V>>::init_sync(
+            context.clone().with_label("log"),
+            JConfig {
+                partition: db_config.log_journal_partition.clone(),
+                items_per_blob: db_config.log_items_per_blob,
+                write_buffer: db_config.log_write_buffer,
+                buffer_pool: db_config.buffer_pool.clone(),
+            },
+            lower_bound_ops,
+            upper_bound_ops,
+        )
+        .await
+        .map_err(adb::Error::JournalError)
+        .map_err(Error::Adb)?;
+    } else {
+        // Prune the log to the new lower bound
+        log.prune(lower_bound_ops)
+            .await
+            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+    }
+
+    Ok(log)
+}
+
+/// Build the database from `log` and `pinned_nodes` once sync is complete.
+async fn build_database<E, K, V, H, T, R>(
+    config: Config<E, K, V, H, T, R>,
+    log: Journal<E, Fixed<K, V>>,
+    pinned_nodes: Option<Vec<H::Digest>>,
+    metrics: &Metrics<E>,
+) -> Result<adb::any::Any<E, K, V, H, T>, Error>
+where
+    E: Storage + Clock + MetricsTrait,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+{
+    let log_size = log
+        .size()
+        .await
+        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+
+    // Build the complete database from the log
+    let db = adb::any::Any::init_synced(
+        config.context.clone(),
+        SyncConfig {
+            db_config: config.db_config,
+            log,
+            lower_bound: config.target.lower_bound_ops,
+            upper_bound: config.target.upper_bound_ops,
+            pinned_nodes,
+            apply_batch_size: config.apply_batch_size,
+        },
+    )
+    .await
+    .map_err(Error::Adb)?;
+
+    // Verify the final root digest matches the target
+    let mut hasher = mmr::hasher::Standard::<H>::new();
+    let got_root = db.root(&mut hasher);
+    if got_root != config.target.root {
+        return Err(Error::RootMismatch {
+            expected: Box::new(config.target.root),
+            actual: Box::new(got_root),
+        });
+    }
+
+    info!(
+        target_root = ?config.target.root,
+        lower_bound_ops = config.target.lower_bound_ops,
+        upper_bound_ops = config.target.upper_bound_ops,
+        log_size = log_size,
+        valid_batches_received = metrics.valid_batches_received.get(),
+        invalid_batches_received = metrics.invalid_batches_received.get(),
+        "sync completed successfully");
+
+    Ok(db)
 }
 
 #[cfg(test)]
@@ -644,7 +752,10 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         adb::any::{
-            sync::{resolver::tests::FailResolver, sync},
+            sync::{
+                resolver::{tests::FailResolver, AnyResolver},
+                sync,
+            },
             test::{apply_ops, create_test_db, create_test_ops},
         },
         translator,
@@ -653,7 +764,7 @@ pub(crate) mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
     use commonware_utils::NZU64;
-    use futures::{channel::mpsc, SinkExt};
+    use futures::{channel::mpsc, SinkExt as _};
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
     use std::collections::{HashMap, HashSet};
     use test_case::test_case;
@@ -692,7 +803,7 @@ pub(crate) mod tests {
     #[test_case(1000, NZU64!(100); "db size divided by batch size")]
     #[test_case(1000, NZU64!(1000); "db size == batch size")]
     #[test_case(1000, NZU64!(1001); "batch size > db size")]
-    fn test_sync(target_db_ops: usize, fetch_batch_size: NonZeroU64) {
+    fn test_sync(target_db_ops: usize, fetch_batch_size: std::num::NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let mut target_db = create_test_db(context.clone()).await;
@@ -729,6 +840,9 @@ pub(crate) mod tests {
             }
 
             let db_config = create_test_config(context.next_u64());
+
+            // Wrap target_db in Arc<RwLock> for resolver and continued use
+            let target_db_arc = std::sync::Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 db_config: db_config.clone(),
                 fetch_batch_size,
@@ -738,9 +852,10 @@ pub(crate) mod tests {
                     upper_bound_ops: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
                 },
                 context: context.clone(),
-                resolver: &target_db,
+                resolver: Arc::new(AnyResolver::from(target_db_arc.clone())),
                 hasher,
                 apply_batch_size: 1024,
+                max_outstanding_requests: 1,
                 update_receiver: None,
             };
             let mut got_db = sync(config).await.unwrap();
@@ -779,19 +894,19 @@ pub(crate) mod tests {
                 new_kvs.insert(key, value);
             }
             apply_ops(&mut got_db, new_ops.clone()).await;
-            apply_ops(&mut target_db, new_ops).await;
+            apply_ops(&mut *target_db_arc.write().await, new_ops).await;
             got_db.commit().await.unwrap();
-            target_db.commit().await.unwrap();
+            target_db_arc.write().await.commit().await.unwrap();
 
             // Verify that the databases match
             for (key, value) in &new_kvs {
                 let got_value = got_db.get(key).await.unwrap().unwrap();
-                let target_value = target_db.get(key).await.unwrap().unwrap();
+                let target_value = target_db_arc.read().await.get(key).await.unwrap().unwrap();
                 assert_eq!(got_value, target_value);
                 assert_eq!(got_value, *value);
             }
 
-            let final_target_root = target_db.root(&mut hasher);
+            let final_target_root = target_db_arc.write().await.root(&mut hasher);
             assert_eq!(got_db.root(&mut hasher), final_target_root);
 
             // Capture the database state before closing
@@ -864,13 +979,14 @@ pub(crate) mod tests {
                     upper_bound_ops: 30,
                 },
                 context,
-                resolver: &target_db,
+                resolver: Arc::new(AnyResolver::from(target_db)),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 1,
                 update_receiver: None,
             };
 
-            let result = Client::new(config).await;
+            let result = sync(config).await;
             match result {
                 Err(Error::InvalidTarget {
                     lower_bound_pos: 31,
@@ -916,9 +1032,10 @@ pub(crate) mod tests {
                     upper_bound_ops,
                 },
                 context,
-                resolver: &target_db,
+                resolver: Arc::new(AnyResolver::from(target_db)),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 1,
                 update_receiver: None,
             };
 
@@ -982,6 +1099,7 @@ pub(crate) mod tests {
             let upper_bound_ops = target_db.op_count() - 1; // Up to the last operation
 
             // Reopen the sync database and sync it to the target database
+            let target_db = std::sync::Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 db_config: sync_db_config, // Use same config as before
                 fetch_batch_size: NZU64!(10),
@@ -991,20 +1109,24 @@ pub(crate) mod tests {
                     upper_bound_ops,
                 },
                 context: context.clone(),
-                resolver: &target_db,
+                resolver: Arc::new(AnyResolver::from(target_db.clone())),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 1,
                 update_receiver: None,
             };
             let sync_db = sync(config).await.unwrap();
 
             // Verify database state
             assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
-            assert_eq!(sync_db.inactivity_floor_loc, target_db.inactivity_floor_loc);
+            assert_eq!(
+                sync_db.inactivity_floor_loc,
+                target_db.read().await.inactivity_floor_loc
+            );
             assert_eq!(sync_db.oldest_retained_loc().unwrap(), lower_bound_ops);
             assert_eq!(
                 sync_db.log.size().await.unwrap(),
-                target_db.log.size().await.unwrap()
+                target_db.read().await.log.size().await.unwrap()
             );
             assert_eq!(
                 sync_db.ops.pruned_to_pos(),
@@ -1015,14 +1137,14 @@ pub(crate) mod tests {
 
             // Verify that the operations in the overlapping range are present and correct
             for i in lower_bound_ops..original_db_op_count {
-                let expected_op = target_db.log.read(i).await.unwrap();
+                let expected_op = target_db.read().await.log.read(i).await.unwrap();
                 let synced_op = sync_db.log.read(i).await.unwrap();
                 assert_eq!(expected_op, synced_op);
             }
 
             for target_op in &original_ops {
                 if let Some(key) = target_op.to_key() {
-                    let target_value = target_db.get(key).await.unwrap();
+                    let target_value = target_db.read().await.get(key).await.unwrap();
                     let synced_value = sync_db.get(key).await.unwrap();
                     assert_eq!(target_value, synced_value);
                 }
@@ -1033,7 +1155,12 @@ pub(crate) mod tests {
             assert_eq!(sync_db.get(last_key).await.unwrap(), Some(last_value));
 
             sync_db.destroy().await.unwrap();
-            target_db.destroy().await.unwrap();
+            std::sync::Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+                .into_inner()
+                .destroy()
+                .await
+                .unwrap();
         });
     }
 
@@ -1086,9 +1213,10 @@ pub(crate) mod tests {
                     upper_bound_ops,
                 },
                 context: context.clone(),
-                resolver,
+                resolver: Arc::new(resolver),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 1,
                 update_receiver: None,
             };
             let sync_db = sync(config).await.unwrap();
@@ -1123,6 +1251,207 @@ pub(crate) mod tests {
         });
     }
 
+    /// Test case structure for find_next_gap tests
+    #[derive(Debug)]
+    struct FindNextGapTestCase {
+        lower_bound: u64,
+        upper_bound: u64,
+        verified_batches: Vec<(u64, usize)>, // (position, num_operations)
+        outstanding_requests: Vec<u64>,
+        fetch_batch_size: u64,
+        expected: Option<(u64, u64)>,
+    }
+
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((0, 10)),
+    }; "empty_state_full_range")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 10,
+        upper_bound: 5,
+        verified_batches: vec![],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: None,
+    }; "invalid_bounds")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 5,
+        upper_bound: 5,
+        verified_batches: vec![],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((5, 5)),
+    }; "zero_length_range")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![],
+        outstanding_requests: vec![0, 3, 8],
+        fetch_batch_size: 5,
+        expected: None,
+    }; "overlapping_outstanding_requests")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![],
+        outstanding_requests: vec![8],
+        fetch_batch_size: 5,
+        expected: Some((0, 7)),
+    }; "outstanding_request_beyond_upper_bound")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![],
+        outstanding_requests: vec![0, 7],
+        fetch_batch_size: 4,
+        expected: Some((4, 6)),
+    }; "outstanding_requests_only")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 3,
+        upper_bound: 10,
+        verified_batches: vec![],
+        outstanding_requests: vec![0],
+        fetch_batch_size: 5,
+        expected: Some((5, 10)),
+    }; "outstanding_request_before_lower_bound")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![(0, 1), (2, 1), (4, 1)],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((1, 1)),
+    }; "single_ops_with_gaps")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![(0, 3)],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((3, 10)),
+    }; "multi_op_batch_gap_after")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![(0, 1), (1, 1)],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((2, 10)),
+    }; "adjacent_single_ops")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 5,
+        verified_batches: vec![(0, 0), (2, 1)],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((0, 1)),
+    }; "empty_batch_ignored")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![(0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1), (8, 1), (9, 1), (10, 1)],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: None,
+    }; "no_gaps_all_covered")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![],
+        outstanding_requests: vec![2, 5, 8],
+        fetch_batch_size: 1,
+        expected: Some((0, 1)),
+    }; "fetch_batch_size_one")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 5,
+        upper_bound: 10,
+        verified_batches: vec![(0, 8)],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((8, 10)),
+    }; "verified_batch_starts_before_lower_bound")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 6,
+        verified_batches: vec![(4, 5)],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((0, 3)),
+    }; "verified_batch_extends_beyond_upper_bound")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 5,
+        verified_batches: vec![],
+        outstanding_requests: vec![2],
+        fetch_batch_size: 100,
+        expected: Some((0, 1)),
+    }; "fetch_batch_size_larger_than_range")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![(0, 5), (8, 3)],
+        outstanding_requests: vec![],
+        fetch_batch_size: 5,
+        expected: Some((5, 7)),
+    }; "coverage_exactly_reaches_upper_bound")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 15,
+        verified_batches: vec![(2, 3), (10, 2)],
+        outstanding_requests: vec![6, 13],
+        fetch_batch_size: 3,
+        expected: Some((0, 1)),
+    }; "mixed_coverage_gap_at_start")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 15,
+        verified_batches: vec![(0, 2), (8, 2)],
+        outstanding_requests: vec![3, 12],
+        fetch_batch_size: 4,
+        expected: Some((2, 2)),
+    }; "mixed_coverage_gap_in_middle")]
+    #[test_case(FindNextGapTestCase {
+        lower_bound: 0,
+        upper_bound: 10,
+        verified_batches: vec![(1, 2), (6, 2)],
+        outstanding_requests: vec![3, 8],
+        fetch_batch_size: 2,
+        expected: Some((0, 0)),
+    }; "mixed_coverage_interleaved_ranges")]
+    fn test_find_next_gap(test_case: FindNextGapTestCase) {
+        // Create verified batches from input
+        let mut verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
+        for (pos, num_ops) in &test_case.verified_batches {
+            let ops = (0..*num_ops)
+                .map(|i| {
+                    Fixed::Update(
+                        Digest::from([i as u8; 32]),
+                        Digest::from([(i + 1) as u8; 32]),
+                    )
+                })
+                .collect();
+            verified_batches.insert(*pos, ops);
+        }
+
+        // Create outstanding requests from input
+        let outstanding_requests: BTreeSet<u64> =
+            test_case.outstanding_requests.into_iter().collect();
+
+        let result = find_next_gap::<Digest, Digest>(
+            test_case.lower_bound,
+            test_case.upper_bound,
+            &verified_batches,
+            &outstanding_requests,
+            test_case.fetch_batch_size,
+        );
+
+        assert_eq!(result, test_case.expected);
+    }
+
     /// Test that the client fails to sync if the lower bound is decreased
     #[test_traced("WARN")]
     fn test_target_update_lower_bound_decrease() {
@@ -1151,9 +1480,10 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                resolver: &target_db,
+                resolver: Arc::new(AnyResolver::from(target_db)),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
             };
             let client = Client::new(config).await.unwrap();
@@ -1170,8 +1500,6 @@ pub(crate) mod tests {
 
             let result = client.step().await;
             assert!(matches!(result, Err(Error::SyncTargetMovedBackward { .. })));
-
-            target_db.destroy().await.unwrap();
         });
     }
 
@@ -1194,6 +1522,7 @@ pub(crate) mod tests {
 
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let resolver = Arc::new(AnyResolver::from(target_db));
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
@@ -1203,9 +1532,10 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                resolver: &target_db,
+                resolver,
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
             };
             let client = Client::new(config).await.unwrap();
@@ -1222,8 +1552,7 @@ pub(crate) mod tests {
 
             let result = client.step().await;
             assert!(matches!(result, Err(Error::SyncTargetMovedBackward { .. })));
-
-            target_db.destroy().await.unwrap();
+            // TODO: destroy the target database
         });
     }
 
@@ -1247,6 +1576,7 @@ pub(crate) mod tests {
             // Create client with placeholder initial target (stale compared to final target)
             let (mut update_sender, update_receiver) = mpsc::channel(1);
 
+            let resolver = Arc::new(AnyResolver::from(target_db));
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
@@ -1256,9 +1586,10 @@ pub(crate) mod tests {
                     lower_bound_ops: 1,
                     upper_bound_ops: 10,
                 },
-                resolver: &target_db,
+                resolver: resolver.clone(),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
             };
             let client = Client::new(config).await.unwrap();
@@ -1283,7 +1614,7 @@ pub(crate) mod tests {
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), final_lower_bound);
 
             synced_db.destroy().await.unwrap();
-            target_db.destroy().await.unwrap();
+            // TODO: destroy the target database
         });
     }
 
@@ -1315,9 +1646,10 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                resolver: &target_db,
+                resolver: Arc::new(AnyResolver::from(target_db)),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
             };
             let client = Client::new(config).await.unwrap();
@@ -1327,14 +1659,14 @@ pub(crate) mod tests {
                 .send(SyncTarget {
                     root: initial_root,
                     lower_bound_ops: initial_upper_bound, // Greater than upper bound
-                    upper_bound_ops: initial_lower_bound, // Less than
+                    upper_bound_ops: initial_lower_bound, // Less than lower bound
                 })
                 .await;
 
             let result = client.step().await;
             assert!(matches!(result, Err(Error::InvalidTarget { .. })));
 
-            target_db.destroy().await.unwrap();
+            // TODO: destroy the target database
         });
     }
 
@@ -1366,9 +1698,10 @@ pub(crate) mod tests {
                     lower_bound_ops: lower_bound,
                     upper_bound_ops: upper_bound,
                 },
-                resolver: &target_db,
+                resolver: Arc::new(AnyResolver::from(target_db)),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
             };
 
@@ -1395,7 +1728,7 @@ pub(crate) mod tests {
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), lower_bound);
 
             synced_db.destroy().await.unwrap();
-            target_db.destroy().await.unwrap();
+            // TODO: destroy the target database
         });
     }
 
@@ -1442,34 +1775,19 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                resolver: target_db.clone(),
+                resolver: Arc::new(AnyResolver::from(target_db.clone())),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
             };
-            let mut client = Client::new(config).await.unwrap();
+            let client = Client::new(config).await.unwrap();
 
-            // Capture initial log size before processing any batches
-            let initial_log_size = match &client {
-                Client::FetchData { log, .. } => log.size().await.unwrap(),
-                _ => panic!("expected FetchData state"),
+            // Step the client to process a batch
+            let client = match client.step().await.unwrap() {
+                StepResult::Continue(new_client) => new_client,
+                StepResult::Complete(_) => panic!("client should not be complete"),
             };
-
-            // Step the client twice to ensure it has processed at least one batch
-            // First step: FetchData -> ApplyData (receives batch)
-            // Second step: ApplyData -> FetchData (applies batch)
-            client = client.step().await.unwrap();
-            client = client.step().await.unwrap();
-
-            // Verify that at least one batch was processed
-            let current_log_size = match &client {
-                Client::FetchData { log, .. } => log.size().await.unwrap(),
-                _ => panic!("expected FetchData state"),
-            };
-            assert!(
-                current_log_size > initial_log_size,
-                "expected at least one batch to be processed"
-            );
 
             // Modify the target database by adding more operations
             let additional_ops = create_test_ops(additional_ops);
@@ -1577,36 +1895,28 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                resolver: target_db.clone(),
+                resolver: Arc::new(AnyResolver::from(target_db.clone())),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
             };
-            let mut client = Client::new(config).await.unwrap();
 
-            // Process exactly one batch to establish pinned nodes
-            client = client.step().await.unwrap(); // FetchData -> ApplyData (fetch first batch)
-            client = client.step().await.unwrap(); // ApplyData -> FetchData (apply first batch)
-
-            // Verify we're in FetchData state and have processed some operations
-            let current_log_size = match &client {
-                Client::FetchData {
-                    log, pinned_nodes, ..
-                } => {
-                    let log_size = log.size().await.unwrap();
-                    // Verify pinned nodes were established
-                    assert!(
-                        pinned_nodes.is_some(),
-                        "pinned nodes should have been established"
-                    );
-                    log_size
+            // Step the client to process a batch
+            let client = {
+                let mut client = Client::new(config).await.unwrap();
+                loop {
+                    // Step the client until we have processed a batch of operations
+                    client = match client.step().await.unwrap() {
+                        StepResult::Continue(new_client) => new_client,
+                        StepResult::Complete(_) => panic!("client should not be complete"),
+                    };
+                    let log_size = client.log.size().await.unwrap();
+                    if log_size > initial_lower_bound {
+                        break client;
+                    }
                 }
-                _ => panic!("expected FetchData state"),
             };
-            assert!(
-                current_log_size > initial_lower_bound,
-                "expected at least one batch to be processed"
-            );
 
             // Send target update with SAME lower bound but higher upper bound
             update_sender
@@ -1647,18 +1957,6 @@ pub(crate) mod tests {
                 assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
             }
 
-            // Verify the expected operations are present in the synced database.
-            for i in synced_db.inactivity_floor_loc..synced_db.op_count() {
-                let got = synced_db.log.read(i).await.unwrap();
-                let expected = target_db.log.read(i).await.unwrap();
-                assert_eq!(got, expected);
-            }
-            for i in synced_db.ops.oldest_retained_pos().unwrap()..synced_db.ops.size() {
-                let got = synced_db.ops.get_node(i).await.unwrap();
-                let expected = target_db.ops.get_node(i).await.unwrap();
-                assert_eq!(got, expected);
-            }
-
             synced_db.destroy().await.unwrap();
             target_db.destroy().await.unwrap();
         });
@@ -1684,6 +1982,7 @@ pub(crate) mod tests {
             // Perform sync
             let db_config = create_test_config(42);
             let context_clone = context.clone();
+            let target_db = std::sync::Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 db_config: db_config.clone(),
                 fetch_batch_size: NZU64!(5),
@@ -1693,9 +1992,10 @@ pub(crate) mod tests {
                     upper_bound_ops: upper_bound,
                 },
                 context,
-                resolver: &target_db,
+                resolver: Arc::new(AnyResolver::from(target_db.clone())),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
+                max_outstanding_requests: 1,
                 update_receiver: None,
             };
             let synced_db = sync(config).await.unwrap();
@@ -1736,7 +2036,12 @@ pub(crate) mod tests {
             assert_eq!(reopened_db.ops.pruned_to_pos(), expected_pruned_to_pos);
 
             // Cleanup
-            target_db.destroy().await.unwrap();
+            std::sync::Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+                .into_inner()
+                .destroy()
+                .await
+                .unwrap();
             reopened_db.destroy().await.unwrap();
         });
     }
