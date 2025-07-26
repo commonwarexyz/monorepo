@@ -188,7 +188,7 @@ where
         };
 
         // Request operations in the sync range.
-        client.send_requests().await?;
+        client.fill_fetch_queue().await?;
 
         Ok(client)
     }
@@ -293,7 +293,7 @@ where
         }
 
         // Maintain parallelism by filling the fetch queue
-        self.send_requests().await?;
+        self.fill_fetch_queue().await?;
 
         // Apply operations that are now contiguous with the current log size
         self.apply_operations().await?;
@@ -302,7 +302,7 @@ where
     }
 
     /// Queue batches of operations to be fetched from the resolver
-    async fn send_requests(&mut self) -> Result<(), Error> {
+    async fn fill_fetch_queue(&mut self) -> Result<(), Error> {
         let target_size = self.config.target.upper_bound_ops + 1;
 
         // Special case: If we don't have pinned nodes, we need to extract them
@@ -474,7 +474,7 @@ where
         self.pinned_nodes = None;
 
         // Reinitialize parallel fetching
-        self.send_requests().await?;
+        self.fill_fetch_queue().await?;
 
         Ok(self)
     }
@@ -1251,90 +1251,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// Test demonstrating that a synced database can be reopened and retain its state.
-    #[test_traced("WARN")]
-    fn test_sync_database_persistence() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Create and populate a simple target database
-            let mut target_db = create_test_db(context.clone()).await;
-            let target_ops = create_test_ops(10);
-            apply_ops(&mut target_db, target_ops.clone()).await;
-            target_db.commit().await.unwrap();
-
-            // Capture target state
-            let mut hasher = create_test_hasher();
-            let target_root = target_db.root(&mut hasher);
-            let lower_bound = target_db.inactivity_floor_loc;
-            let upper_bound = target_db.op_count() - 1;
-
-            // Perform sync
-            let db_config = create_test_config(42);
-            let context_clone = context.clone();
-            let target_db = std::sync::Arc::new(commonware_runtime::RwLock::new(target_db));
-            let config = Config {
-                db_config: db_config.clone(),
-                fetch_batch_size: NZU64!(5),
-                target: SyncTarget {
-                    root: target_root,
-                    lower_bound_ops: lower_bound,
-                    upper_bound_ops: upper_bound,
-                },
-                context,
-                resolver: Arc::new(AnyResolver::from(target_db.clone())),
-                hasher: create_test_hasher(),
-                apply_batch_size: 1024,
-                max_outstanding_requests: 1,
-                update_receiver: None,
-            };
-            let synced_db = sync(config).await.unwrap();
-
-            // Verify initial sync worked
-            let mut hasher = create_test_hasher();
-            assert_eq!(synced_db.root(&mut hasher), target_root);
-
-            // Save state before closing
-            let expected_root = synced_db.root(&mut hasher);
-            let expected_op_count = synced_db.op_count();
-            let expected_inactivity_floor_loc = synced_db.inactivity_floor_loc;
-            let expected_oldest_retained_loc = synced_db.oldest_retained_loc();
-            let expected_pruned_to_pos = synced_db.ops.pruned_to_pos();
-
-            // Close the database
-            synced_db.close().await.unwrap();
-
-            // Re-open the database
-            let reopened_db = adb::any::Any::<_, Digest, Digest, TestDigest, TestTranslator>::init(
-                context_clone,
-                db_config,
-            )
-            .await
-            .unwrap();
-
-            // Verify the state is unchanged
-            assert_eq!(reopened_db.root(&mut hasher), expected_root);
-            assert_eq!(reopened_db.op_count(), expected_op_count);
-            assert_eq!(
-                reopened_db.inactivity_floor_loc,
-                expected_inactivity_floor_loc
-            );
-            assert_eq!(
-                reopened_db.oldest_retained_loc(),
-                expected_oldest_retained_loc
-            );
-            assert_eq!(reopened_db.ops.pruned_to_pos(), expected_pruned_to_pos);
-
-            // Cleanup
-            std::sync::Arc::try_unwrap(target_db)
-                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
-                .into_inner()
-                .destroy()
-                .await
-                .unwrap();
-            reopened_db.destroy().await.unwrap();
-        });
-    }
-
     /// Test case structure for find_next_gap tests
     #[derive(Debug)]
     struct FindNextGapTestCase {
@@ -2022,6 +1938,90 @@ pub(crate) mod tests {
 
             synced_db.destroy().await.unwrap();
             target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test demonstrating that a synced database can be reopened and retain its state.
+    #[test_traced("WARN")]
+    fn test_sync_database_persistence() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create and populate a simple target database
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(10);
+            apply_ops(&mut target_db, target_ops.clone()).await;
+            target_db.commit().await.unwrap();
+
+            // Capture target state
+            let mut hasher = create_test_hasher();
+            let target_root = target_db.root(&mut hasher);
+            let lower_bound = target_db.inactivity_floor_loc;
+            let upper_bound = target_db.op_count() - 1;
+
+            // Perform sync
+            let db_config = create_test_config(42);
+            let context_clone = context.clone();
+            let target_db = std::sync::Arc::new(commonware_runtime::RwLock::new(target_db));
+            let config = Config {
+                db_config: db_config.clone(),
+                fetch_batch_size: NZU64!(5),
+                target: SyncTarget {
+                    root: target_root,
+                    lower_bound_ops: lower_bound,
+                    upper_bound_ops: upper_bound,
+                },
+                context,
+                resolver: Arc::new(AnyResolver::from(target_db.clone())),
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 1,
+                update_receiver: None,
+            };
+            let synced_db = sync(config).await.unwrap();
+
+            // Verify initial sync worked
+            let mut hasher = create_test_hasher();
+            assert_eq!(synced_db.root(&mut hasher), target_root);
+
+            // Save state before closing
+            let expected_root = synced_db.root(&mut hasher);
+            let expected_op_count = synced_db.op_count();
+            let expected_inactivity_floor_loc = synced_db.inactivity_floor_loc;
+            let expected_oldest_retained_loc = synced_db.oldest_retained_loc();
+            let expected_pruned_to_pos = synced_db.ops.pruned_to_pos();
+
+            // Close the database
+            synced_db.close().await.unwrap();
+
+            // Re-open the database
+            let reopened_db = adb::any::Any::<_, Digest, Digest, TestDigest, TestTranslator>::init(
+                context_clone,
+                db_config,
+            )
+            .await
+            .unwrap();
+
+            // Verify the state is unchanged
+            assert_eq!(reopened_db.root(&mut hasher), expected_root);
+            assert_eq!(reopened_db.op_count(), expected_op_count);
+            assert_eq!(
+                reopened_db.inactivity_floor_loc,
+                expected_inactivity_floor_loc
+            );
+            assert_eq!(
+                reopened_db.oldest_retained_loc(),
+                expected_oldest_retained_loc
+            );
+            assert_eq!(reopened_db.ops.pruned_to_pos(), expected_pruned_to_pos);
+
+            // Cleanup
+            std::sync::Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+                .into_inner()
+                .destroy()
+                .await
+                .unwrap();
+            reopened_db.destroy().await.unwrap();
         });
     }
 }
