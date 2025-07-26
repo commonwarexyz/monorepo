@@ -13,7 +13,7 @@ use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::channel::oneshot;
 use std::{net::SocketAddr, num::NonZeroU64, sync::Arc};
 use thiserror::Error;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 /// Connection state for persistent networking.
 struct Connection<E>
@@ -61,6 +61,7 @@ where
                     ResolverError::ConnectionError(format!("Failed to connect: {e}"))
                 })?;
             *connection_guard = Some(Connection { sink, stream });
+            info!(server_addr = %self.server_addr, "connected");
         }
 
         // Ensure we have a connection while holding the lock
