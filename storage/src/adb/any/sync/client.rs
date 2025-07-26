@@ -1556,7 +1556,7 @@ pub(crate) mod tests {
         });
     }
 
-    /// Test that the client can handle target updates with increased bounds
+    /// Test that the client succeeds when bounds are updated to a stale range
     #[test_traced("WARN")]
     fn test_target_update_bounds_increase() {
         let executor = deterministic::Runner::default();
