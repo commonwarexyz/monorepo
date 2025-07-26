@@ -1901,12 +1901,21 @@ pub(crate) mod tests {
                 max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
             };
-            let client = Client::new(config).await.unwrap();
 
             // Step the client to process a batch
-            let client = match client.step().await.unwrap() {
-                StepResult::Continue(new_client) => new_client,
-                StepResult::Complete(_) => panic!("client should not be complete"),
+            let client = {
+                let mut client = Client::new(config).await.unwrap();
+                loop {
+                    // Step the client until we have processed a batch of operations
+                    client = match client.step().await.unwrap() {
+                        StepResult::Continue(new_client) => new_client,
+                        StepResult::Complete(_) => panic!("client should not be complete"),
+                    };
+                    let log_size = client.log.size().await.unwrap();
+                    if log_size > initial_lower_bound {
+                        break client;
+                    }
+                }
             };
 
             // Send target update with SAME lower bound but higher upper bound
