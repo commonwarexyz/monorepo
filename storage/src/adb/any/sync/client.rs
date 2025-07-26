@@ -409,30 +409,30 @@ where
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
         loop {
-            // See if we have the operations starting from the next position.
+            // See if we have the next operation to apply (i.e. at the log tip)
             // Find the index of the range that contains the next position.
-            let index = self
-                .fetched_operations
-                .iter()
-                .find_map(|(range_start, range_ops)| {
-                    if *range_start <= next_pos
-                        && next_pos <= range_start + range_ops.len() as u64 - 1
-                    {
-                        Some(*range_start)
-                    } else {
-                        None
-                    }
-                });
+            let range_start_pos =
+                self.fetched_operations
+                    .iter()
+                    .find_map(|(range_start, range_ops)| {
+                        let range_end = range_start + range_ops.len() as u64 - 1;
+                        if *range_start <= next_pos && next_pos <= range_end {
+                            Some(*range_start)
+                        } else {
+                            None
+                        }
+                    });
 
-            let Some(index) = index else {
+            let Some(range_start_pos) = range_start_pos else {
+                // We don't have the next operation to apply (i.e. at the log tip)
                 break;
             };
 
-            let operations = self.fetched_operations.remove(&index).unwrap();
+            let operations = self.fetched_operations.remove(&range_start_pos).unwrap();
             // Remove from the beginning all the operations that are before the next position.
             let operations = operations
                 .into_iter()
-                .skip((next_pos - index) as usize)
+                .skip((next_pos - range_start_pos) as usize)
                 .collect::<Vec<_>>();
             next_pos += operations.len() as u64;
             self.apply_operations_batch(operations).await?;
