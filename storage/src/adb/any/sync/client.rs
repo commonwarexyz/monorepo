@@ -219,42 +219,76 @@ where
         }
 
         // Wait to receive a batch of operations or a target update (if enabled).
-        let (start_pos, fetch_result) = if let Some(ref mut update_rx) = self.config.update_receiver
-        {
-            select! {
-                new_target = update_rx.next() => {
-                    if let Some(new_target) = new_target {
-                        self = self.handle_target_update(new_target).await?;
-                    } else {
-                        // Receiver closed - disable it to avoid spinning
-                        self.config.update_receiver = None;
-                    }
-                    return Ok(StepResult::Continue(self));
-                },
-                fetch_result = self.outstanding_request_futures.next() => {
-                    fetch_result.ok_or(Error::SyncStalled)?
-                },
-            }
-        } else {
-            // No update receiver - wait to receive a batch of operations
-            self.outstanding_request_futures
-                .next()
-                .await
-                .ok_or(Error::SyncStalled)?
-        };
+        let (fetch_start_pos, fetch_result) =
+            if let Some(ref mut update_rx) = self.config.update_receiver {
+                select! {
+                    new_target = update_rx.next() => {
+                        if let Some(new_target) = new_target {
+                            self = self.handle_target_update(new_target).await?;
+                        } else {
+                            // Receiver closed - disable it to avoid spinning
+                            self.config.update_receiver = None;
+                        }
+                        return Ok(StepResult::Continue(self));
+                    },
+                    fetch_result = self.outstanding_request_futures.next() => {
+                        fetch_result.ok_or(Error::SyncStalled)?
+                    },
+                }
+            } else {
+                // No update receiver - wait to receive a batch of operations
+                self.outstanding_request_futures
+                    .next()
+                    .await
+                    .ok_or(Error::SyncStalled)?
+            };
 
         // Remove from outstanding requests
-        self.outstanding_request_locations.remove(&start_pos);
+        self.outstanding_request_locations.remove(&fetch_start_pos);
 
         match fetch_result {
-            Ok(batch_result) => {
-                if let Some(operations) = self.process_fetch_result(start_pos, batch_result).await?
-                {
-                    self.store_operations(start_pos, operations);
+            Ok(GetOperationsResult {
+                proof,
+                operations,
+                success_tx,
+            }) => {
+                let operations_len = operations.len() as u64;
+
+                // Validate batch size
+                if operations_len == 0 || operations_len > self.config.fetch_batch_size.get() {
+                    debug!(
+                        operations_len,
+                        batch_size = self.config.fetch_batch_size.get(),
+                        fetch_start_pos,
+                        "received invalid batch size from resolver"
+                    );
+                    self.metrics.invalid_batches_received.inc();
+                    let _ = success_tx.send(false);
+                } else {
+                    // Verify the proof
+                    let proof_valid = {
+                        let _timer = self.metrics.proof_verification_duration.timer();
+                        adb::any::Any::<E, K, V, H, T>::verify_proof(
+                            &mut self.config.hasher,
+                            &proof,
+                            fetch_start_pos,
+                            &operations,
+                            &self.config.target.root,
+                        )
+                    };
+                    let _ = success_tx.send(proof_valid);
+                    if proof_valid {
+                        // Extract pinned nodes if needed
+                        self.set_pinned_nodes(&proof, fetch_start_pos, operations_len)?;
+                        self.store_operations(fetch_start_pos, operations);
+                    } else {
+                        debug!(fetch_start_pos, "proof verification failed, retrying");
+                        self.metrics.invalid_batches_received.inc();
+                    }
                 }
             }
             Err(e) => {
-                warn!(start_pos, error = ?e, "batch fetch failed, retrying");
+                warn!(fetch_start_pos, error = ?e, "batch fetch failed, retrying");
             }
         }
 
@@ -321,55 +355,6 @@ where
         }
 
         Ok(())
-    }
-
-    /// Process a fetch result, returning the operations if verification passes
-    async fn process_fetch_result(
-        &mut self,
-        start_pos: u64,
-        GetOperationsResult {
-            proof,
-            operations,
-            success_tx,
-        }: GetOperationsResult<H::Digest, K, V>,
-    ) -> Result<Option<Vec<Fixed<K, V>>>, Error> {
-        let operations_len = operations.len() as u64;
-
-        // Validate batch size
-        if operations_len == 0 || operations_len > self.config.fetch_batch_size.get() {
-            debug!(
-                operations_len,
-                batch_size = self.config.fetch_batch_size.get(),
-                start_pos,
-                "received invalid batch size from resolver"
-            );
-            self.metrics.invalid_batches_received.inc();
-            let _ = success_tx.send(false);
-            return Ok(None);
-        }
-
-        // Verify the proof
-        let proof_valid = {
-            let _timer = self.metrics.proof_verification_duration.timer();
-            adb::any::Any::<E, K, V, H, T>::verify_proof(
-                &mut self.config.hasher,
-                &proof,
-                start_pos,
-                &operations,
-                &self.config.target.root,
-            )
-        };
-        let _ = success_tx.send(proof_valid);
-        if !proof_valid {
-            debug!(start_pos, "proof verification failed, retrying");
-            self.metrics.invalid_batches_received.inc();
-            return Ok(None);
-        }
-
-        // Extract pinned nodes if needed
-        self.set_pinned_nodes(&proof, start_pos, operations_len)?;
-
-        Ok(Some(operations))
     }
 
     /// If `start_pos` is the lower sync bound, extract pinned nodes from the proof
