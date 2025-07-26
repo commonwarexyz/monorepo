@@ -243,7 +243,23 @@ where
                 .ok_or(Error::SyncStalled)?
         };
 
-        self.process_batch_result(start_pos, fetch_result).await?;
+        // Remove from outstanding requests
+        self.outstanding_request_locations.remove(&start_pos);
+
+        match fetch_result {
+            Ok(batch_result) => {
+                if let Some(operations) = self.process_fetch_result(start_pos, batch_result).await?
+                {
+                    self.store_operations(start_pos, operations);
+                }
+            }
+            Err(e) => {
+                warn!(start_pos, error = ?e, "batch fetch failed, retrying");
+            }
+        }
+
+        // Maintain parallelism by filling the fetch queue
+        self.fill_fetch_queue().await?;
 
         // Apply operations that are now contiguous with the current log size
         self.apply_operations().await?;
@@ -269,8 +285,8 @@ where
             }));
         }
 
-        // Normal case: Fill the fetch queue with multiple concurrent requests
-        let requests_to_make = self
+        // Request batches of operations in parallel.
+        let num_requests = self
             .config
             .max_outstanding_requests
             .saturating_sub(self.outstanding_request_locations.len());
@@ -280,12 +296,11 @@ where
             .size()
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-        let mut search_start = std::cmp::max(self.config.target.lower_bound_ops, log_size);
 
-        for _ in 0..requests_to_make {
-            // Find the next gap that needs to be fetched
-            let Some((gap_start, gap_end)) = find_next_gap::<K, V>(
-                search_start,
+        for _ in 0..num_requests {
+            // Find the next gap in the sync range that needs to be fetched.
+            let Some((start_pos, _end_pos)) = find_next_gap::<K, V>(
+                log_size,
                 self.config.target.upper_bound_ops,
                 &self.fetched_operations,
                 &self.outstanding_request_locations,
@@ -294,60 +309,22 @@ where
                 break; // No more gaps to fill
             };
 
-            // Calculate how much of this gap to request in this batch
-            let gap_size = gap_end - gap_start + 1; // gap_end is inclusive
-            let batch_size = std::cmp::min(self.config.fetch_batch_size.get(), gap_size);
-            let batch_size =
-                NonZeroU64::new(batch_size).expect("batch_size should be > 0 since gap exists");
-
-            self.outstanding_request_locations.insert(gap_start);
-
             let resolver = self.config.resolver.clone();
-            let start_pos = gap_start;
-
+            let batch_size = self.config.fetch_batch_size;
             self.outstanding_request_futures.push(Box::pin(async move {
                 let result = resolver
                     .get_operations(target_size, start_pos, batch_size)
                     .await;
                 (start_pos, result)
             }));
-
-            search_start = gap_start + batch_size.get();
+            self.outstanding_request_locations.insert(start_pos);
         }
 
         Ok(())
     }
 
-    /// Process the result of a batch fetch operation
-    async fn process_batch_result(
-        &mut self,
-        start_pos: u64,
-        result: Result<GetOperationsResult<H::Digest, K, V>, Error>,
-    ) -> Result<(), Error> {
-        // Remove from outstanding requests
-        self.outstanding_request_locations.remove(&start_pos);
-
-        match result {
-            Ok(batch_result) => {
-                if let Some(operations) = self
-                    .process_successful_batch(start_pos, batch_result)
-                    .await?
-                {
-                    self.store_operations(start_pos, operations);
-                }
-            }
-            Err(e) => {
-                warn!(start_pos, error = ?e, "batch fetch failed, retrying");
-            }
-        }
-
-        // Maintain parallelism by filling the fetch queue
-        self.fill_fetch_queue().await?;
-        Ok(())
-    }
-
-    /// Process a successful batch result, returning the operations if verification passes
-    async fn process_successful_batch(
+    /// Process a fetch result, returning the operations if verification passes
+    async fn process_fetch_result(
         &mut self,
         start_pos: u64,
         GetOperationsResult {
@@ -431,8 +408,32 @@ where
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
-        // Stop when we don't have the operations starting from the next position.
-        while let Some(operations) = self.fetched_operations.remove(&next_pos) {
+        loop {
+            // See if we have the operations starting from the next position.
+            // Find the index of the range that contains the next position.
+            let index = self
+                .fetched_operations
+                .iter()
+                .find_map(|(range_start, range_ops)| {
+                    if *range_start <= next_pos
+                        && next_pos <= range_start + range_ops.len() as u64 - 1
+                    {
+                        Some(*range_start)
+                    } else {
+                        None
+                    }
+                });
+
+            let Some(index) = index else {
+                break;
+            };
+
+            let operations = self.fetched_operations.remove(&index).unwrap();
+            // Remove from the beginning all the operations that are before the next position.
+            let operations = operations
+                .into_iter()
+                .skip((next_pos - index) as usize)
+                .collect::<Vec<_>>();
             next_pos += operations.len() as u64;
             self.apply_operations_batch(operations).await?;
         }
@@ -527,7 +528,7 @@ where
 fn find_next_gap<K: Array, V: Array>(
     lower_bound: u64,
     upper_bound: u64,
-    verified_batches: &BTreeMap<u64, Vec<Fixed<K, V>>>,
+    fetched_operations: &BTreeMap<u64, Vec<Fixed<K, V>>>,
     outstanding_requests: &BTreeSet<u64>,
     fetch_batch_size: u64,
 ) -> Option<(u64, u64)> {
@@ -538,7 +539,7 @@ fn find_next_gap<K: Array, V: Array>(
     let mut current_covered_end: Option<u64> = None; // None means nothing covered yet
 
     // Create iterators for both data structures (already sorted)
-    let mut verified_iter = verified_batches
+    let mut verified_iter = fetched_operations
         .iter()
         .filter_map(|(&start_pos, operations)| {
             if operations.is_empty() {
