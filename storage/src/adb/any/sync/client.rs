@@ -188,7 +188,7 @@ where
         };
 
         // Request operations in the sync range.
-        client.fill_fetch_queue().await?;
+        client.send_requests().await?;
 
         Ok(client)
     }
@@ -293,7 +293,7 @@ where
         }
 
         // Maintain parallelism by filling the fetch queue
-        self.fill_fetch_queue().await?;
+        self.send_requests().await?;
 
         // Apply operations that are now contiguous with the current log size
         self.apply_operations().await?;
@@ -302,7 +302,7 @@ where
     }
 
     /// Queue batches of operations to be fetched from the resolver
-    async fn fill_fetch_queue(&mut self) -> Result<(), Error> {
+    async fn send_requests(&mut self) -> Result<(), Error> {
         let target_size = self.config.target.upper_bound_ops + 1;
 
         // Special case: If we don't have pinned nodes, we need to extract them
@@ -474,7 +474,7 @@ where
         self.pinned_nodes = None;
 
         // Reinitialize parallel fetching
-        self.fill_fetch_queue().await?;
+        self.send_requests().await?;
 
         Ok(self)
     }
