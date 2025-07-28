@@ -53,21 +53,19 @@ where
 
     /// Send a request and receive a response using the persistent connection.
     async fn send_request(&self, request: Message) -> Result<Message, ResolverError> {
-        // Ensure we have a connection
+        // Get or create a connection
         let mut connection_guard = self.connection.write().await;
-        if connection_guard.is_none() {
-            let (sink, stream) =
-                self.context.dial(self.server_addr).await.map_err(|e| {
+        let connection = match connection_guard.as_mut() {
+            Some(conn) => conn,
+            None => {
+                let (sink, stream) = self.context.dial(self.server_addr).await.map_err(|e| {
                     ResolverError::ConnectionError(format!("Failed to connect: {e}"))
                 })?;
-            *connection_guard = Some(Connection { sink, stream });
-            info!(server_addr = %self.server_addr, "connected");
-        }
-
-        // Ensure we have a connection while holding the lock
-        let connection = connection_guard
-            .as_mut()
-            .ok_or_else(|| ResolverError::ConnectionError("No connection available".to_string()))?;
+                *connection_guard = Some(Connection { sink, stream });
+                info!(server_addr = %self.server_addr, "connected");
+                connection_guard.as_mut().unwrap()
+            }
+        };
 
         // Serialize and send the request
         let request_data = request.encode().to_vec();
