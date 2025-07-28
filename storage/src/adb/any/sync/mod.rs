@@ -13,7 +13,6 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use futures::channel::mpsc;
 use std::fmt;
-use tracing::info;
 
 pub mod client;
 mod metrics;
