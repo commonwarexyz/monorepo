@@ -231,20 +231,20 @@ where
                         return Ok(StepResult::Continue(self));
                     },
                     fetch_result = self.outstanding_request_futures.next() => {
+                        // Wait to receive a batch of operations.
+                        // There should always be at least one outstanding request.
+                        // If there's not, we should be done, but we're not.
                         fetch_result.ok_or(Error::SyncStalled)?
                     },
                 }
             } else {
-                // Wait to receive a batch of operations.
-                // There should always be at least one outstanding request.
-                // If there's not, we should be done, but we're not.
                 self.outstanding_request_futures
                     .next()
                     .await
                     .ok_or(Error::SyncStalled)?
             };
 
-        // Remove from outstanding requests
+        // Mark request as complete
         self.outstanding_request_locations.remove(&fetch_start_loc);
 
         match fetch_result {
@@ -276,10 +276,12 @@ where
                             &self.config.target.root,
                         )
                     };
+                    // Report success or failure to the resolver
                     let _ = success_tx.send(proof_valid);
                     if proof_valid {
                         // Extract pinned nodes if needed
                         self.set_pinned_nodes(&proof, fetch_start_loc, operations_len)?;
+                        // Store operations for later application
                         self.store_operations(fetch_start_loc, operations);
                     } else {
                         debug!(fetch_start_loc, "proof verification failed, retrying");
@@ -319,7 +321,7 @@ where
             }));
         }
 
-        // Request batches of operations in parallel.
+        // Calculate the number of requests to make
         let num_requests = self
             .config
             .max_outstanding_requests
@@ -343,15 +345,16 @@ where
                 break; // No more gaps to fill
             };
 
+            // Kick off a request for the batch of operations
             let resolver = self.config.resolver.clone();
             let batch_size = self.config.fetch_batch_size;
+            self.outstanding_request_locations.insert(start_loc);
             self.outstanding_request_futures.push(Box::pin(async move {
                 let result = resolver
                     .get_operations(target_size, start_loc, batch_size)
                     .await;
                 (start_loc, result)
             }));
-            self.outstanding_request_locations.insert(start_loc);
         }
 
         Ok(())
@@ -393,9 +396,16 @@ where
             .await
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
+        // Remove any batches of operations with stale data.
+        // That is, those whose last operation is before `next_loc`.
+        self.fetched_operations.retain(|&start_loc, operations| {
+            let end_loc = start_loc + operations.len() as u64 - 1;
+            end_loc >= next_loc
+        });
+
         loop {
-            // See if we have the next operation to apply (i.e. at the log tip)
-            // Find the index of the range that contains the next position.
+            // See if we have the next operation to apply (i.e. at the log tip).
+            // Find the index of the range that contains the next location.
             let range_start_loc =
                 self.fetched_operations
                     .iter()
@@ -418,7 +428,7 @@ where
             let operations = operations
                 .into_iter()
                 .skip((next_loc - range_start_loc) as usize)
-                .collect::<Vec<_>>();
+                .collect::<Vec<_>>(); // TODO use vec deque to avoid copying
             next_loc += operations.len() as u64;
             self.apply_operations_batch(operations).await?;
         }
@@ -488,12 +498,7 @@ where
             .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
 
         // Calculate the target log size (upper bound is inclusive)
-        let target_log_size = self
-            .config
-            .target
-            .upper_bound_ops
-            .checked_add(1)
-            .ok_or(Error::InvalidState)?;
+        let target_log_size = self.config.target.upper_bound_ops + 1;
 
         // Check if we've completed sync
         if log_size >= target_log_size {
@@ -508,8 +513,15 @@ where
     }
 }
 
-/// Find the next gap in operations that needs to be fetched
-/// Returns (start, end) inclusive range, or None if no gaps
+/// Find the next gap in operations that needs to be fetched.
+/// Returns [start, end] inclusive range, or None if no gaps.
+/// We assume that all outstanding requests will return `fetch_batch_size` operations,
+/// but the resolver may return fewer. In that case, we'll fetch the remaining operations
+/// in a subsequent request.
+/// Invariants:
+/// - All batches in `fetched_operations` are non-empty.
+/// - All start locations in `fetched_operations` are in [lower_bound, upper_bound].
+/// - All start locations in `outstanding_requests` are in [lower_bound, upper_bound].
 fn find_next_gap<K: Array, V: Array>(
     lower_bound: u64,
     upper_bound: u64,
@@ -521,66 +533,57 @@ fn find_next_gap<K: Array, V: Array>(
         return None;
     }
 
-    let mut current_covered_end: Option<u64> = None; // None means nothing covered yet
+    let mut current_covered_end: Option<u64> = None; // Nothing covered yet
 
     // Create iterators for both data structures (already sorted)
-    let mut verified_iter = fetched_operations
+    let mut fetched_ops_iter = fetched_operations
         .iter()
-        .filter_map(|(&start_loc, operations)| {
-            if operations.is_empty() {
-                None
-            } else {
-                let end_loc = start_loc + operations.len() as u64 - 1;
-                Some((start_loc, end_loc))
-            }
+        .map(|(&start_loc, operations)| {
+            let end_loc = start_loc + operations.len() as u64 - 1;
+            (start_loc, end_loc)
         })
         .peekable();
 
-    let mut outstanding_iter = outstanding_requests
+    let mut outstanding_reqs_iter = outstanding_requests
         .iter()
         .map(|&start_loc| {
-            let end_loc = (start_loc + fetch_batch_size - 1).min(upper_bound);
+            let end_loc = start_loc + fetch_batch_size - 1;
             (start_loc, end_loc)
         })
         .peekable();
 
     // Merge process both iterators in sorted order
     loop {
-        let next_range = match (verified_iter.peek(), outstanding_iter.peek()) {
-            (Some(&(v_start, _)), Some(&(o_start, _))) => {
-                if v_start <= o_start {
-                    verified_iter.next().unwrap()
+        let (range_start, range_end) = match (fetched_ops_iter.peek(), outstanding_reqs_iter.peek())
+        {
+            (Some(&(f_start, _)), Some(&(o_start, _))) => {
+                if f_start <= o_start {
+                    fetched_ops_iter.next().unwrap()
                 } else {
-                    outstanding_iter.next().unwrap()
+                    outstanding_reqs_iter.next().unwrap()
                 }
             }
-            (Some(_), None) => verified_iter.next().unwrap(),
-            (None, Some(_)) => outstanding_iter.next().unwrap(),
+            (Some(_), None) => fetched_ops_iter.next().unwrap(),
+            (None, Some(_)) => outstanding_reqs_iter.next().unwrap(),
             (None, None) => break,
         };
-
-        let (range_start, range_end) = next_range;
 
         // Check if there's a gap before this range
         match current_covered_end {
             None => {
-                // First range - check if there's a gap before it
+                // This is the first range.
                 if lower_bound < range_start {
-                    let gap_end = (range_start - 1).min(upper_bound);
-                    // Only return gaps that start at or after lower_bound
-                    if lower_bound <= gap_end {
-                        return Some((lower_bound, gap_end));
-                    }
+                    // There's a gap between the lower bound and the start of the first range.
+                    let gap_end = range_start - 1;
+                    return Some((lower_bound, gap_end));
                 }
             }
             Some(covered_end) => {
                 // Check if there's a gap between current coverage and this range
                 if covered_end + 1 < range_start {
-                    let gap_start = std::cmp::max(covered_end + 1, lower_bound);
-                    let gap_end = (range_start - 1).min(upper_bound);
-                    if gap_start <= gap_end {
-                        return Some((gap_start, gap_end));
-                    }
+                    let gap_start = covered_end + 1;
+                    let gap_end = range_start - 1;
+                    return Some((gap_start, gap_end));
                 }
             }
         }
@@ -605,17 +608,13 @@ fn find_next_gap<K: Array, V: Array>(
         }
         Some(covered_end) => {
             // Check if there's a gap after the last covered location
-            let gap_start = std::cmp::max(covered_end + 1, lower_bound);
-            if gap_start <= upper_bound {
-                Some((gap_start, upper_bound))
-            } else {
-                None
-            }
+            let gap_start = covered_end + 1;
+            Some((gap_start, upper_bound))
         }
     }
 }
 
-/// Validate a target update against the current target
+/// Validate a target update against the current target.
 fn validate_target_update<H: Hasher>(
     old_target: &SyncTarget<H::Digest>,
     new_target: &SyncTarget<H::Digest>,
@@ -1256,8 +1255,8 @@ pub(crate) mod tests {
     struct FindNextGapTestCase {
         lower_bound: u64,
         upper_bound: u64,
-        verified_batches: Vec<(u64, usize)>, // (position, num_operations)
-        outstanding_requests: Vec<u64>,
+        fetched_ops: Vec<(u64, usize)>, // (start location, num_operations)
+        requested_ops: Vec<u64>,
         fetch_batch_size: u64,
         expected: Option<(u64, u64)>,
     }
@@ -1265,167 +1264,151 @@ pub(crate) mod tests {
     #[test_case(FindNextGapTestCase {
         lower_bound: 0,
         upper_bound: 10,
-        verified_batches: vec![],
-        outstanding_requests: vec![],
+        fetched_ops: vec![],
+        requested_ops: vec![],
         fetch_batch_size: 5,
         expected: Some((0, 10)),
     }; "empty_state_full_range")]
     #[test_case(FindNextGapTestCase {
         lower_bound: 10,
         upper_bound: 5,
-        verified_batches: vec![],
-        outstanding_requests: vec![],
+        fetched_ops: vec![],
+        requested_ops: vec![],
         fetch_batch_size: 5,
         expected: None,
     }; "invalid_bounds")]
     #[test_case(FindNextGapTestCase {
         lower_bound: 5,
         upper_bound: 5,
-        verified_batches: vec![],
-        outstanding_requests: vec![],
+        fetched_ops: vec![],
+        requested_ops: vec![],
         fetch_batch_size: 5,
         expected: Some((5, 5)),
     }; "zero_length_range")]
     #[test_case(FindNextGapTestCase {
         lower_bound: 0,
         upper_bound: 10,
-        verified_batches: vec![],
-        outstanding_requests: vec![0, 3, 8],
+        fetched_ops: vec![],
+        requested_ops: vec![0, 3, 8],
         fetch_batch_size: 5,
         expected: None,
     }; "overlapping_outstanding_requests")]
     #[test_case(FindNextGapTestCase {
         lower_bound: 0,
         upper_bound: 10,
-        verified_batches: vec![],
-        outstanding_requests: vec![8],
+        fetched_ops: vec![],
+        requested_ops: vec![8],
         fetch_batch_size: 5,
         expected: Some((0, 7)),
     }; "outstanding_request_beyond_upper_bound")]
     #[test_case(FindNextGapTestCase {
         lower_bound: 0,
         upper_bound: 10,
-        verified_batches: vec![],
-        outstanding_requests: vec![0, 7],
+        fetched_ops: vec![],
+        requested_ops: vec![0, 7],
         fetch_batch_size: 4,
         expected: Some((4, 6)),
     }; "outstanding_requests_only")]
     #[test_case(FindNextGapTestCase {
-        lower_bound: 3,
-        upper_bound: 10,
-        verified_batches: vec![],
-        outstanding_requests: vec![0],
-        fetch_batch_size: 5,
-        expected: Some((5, 10)),
-    }; "outstanding_request_before_lower_bound")]
-    #[test_case(FindNextGapTestCase {
         lower_bound: 0,
         upper_bound: 10,
-        verified_batches: vec![(0, 1), (2, 1), (4, 1)],
-        outstanding_requests: vec![],
+        fetched_ops: vec![(0, 1), (2, 1), (4, 1)],
+        requested_ops: vec![],
         fetch_batch_size: 5,
         expected: Some((1, 1)),
     }; "single_ops_with_gaps")]
     #[test_case(FindNextGapTestCase {
         lower_bound: 0,
         upper_bound: 10,
-        verified_batches: vec![(0, 3)],
-        outstanding_requests: vec![],
+        fetched_ops: vec![(0, 3)],
+        requested_ops: vec![],
         fetch_batch_size: 5,
         expected: Some((3, 10)),
     }; "multi_op_batch_gap_after")]
     #[test_case(FindNextGapTestCase {
         lower_bound: 0,
         upper_bound: 10,
-        verified_batches: vec![(0, 1), (1, 1)],
-        outstanding_requests: vec![],
+        fetched_ops: vec![(0, 1), (1, 1)],
+        requested_ops: vec![],
         fetch_batch_size: 5,
         expected: Some((2, 10)),
     }; "adjacent_single_ops")]
     #[test_case(FindNextGapTestCase {
         lower_bound: 0,
-        upper_bound: 5,
-        verified_batches: vec![(0, 0), (2, 1)],
-        outstanding_requests: vec![],
-        fetch_batch_size: 5,
-        expected: Some((0, 1)),
-    }; "empty_batch_ignored")]
-    #[test_case(FindNextGapTestCase {
-        lower_bound: 0,
         upper_bound: 10,
-        verified_batches: vec![(0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1), (8, 1), (9, 1), (10, 1)],
-        outstanding_requests: vec![],
+        fetched_ops: vec![(0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1), (8, 1), (9, 1), (10, 1)],
+        requested_ops: vec![],
         fetch_batch_size: 5,
         expected: None,
-    }; "no_gaps_all_covered")]
+    }; "no_gaps_all_covered_by_fetched_ops")]
     #[test_case(FindNextGapTestCase {
         lower_bound: 0,
         upper_bound: 10,
-        verified_batches: vec![],
-        outstanding_requests: vec![2, 5, 8],
+        fetched_ops: vec![],
+        requested_ops: vec![2, 5, 8],
         fetch_batch_size: 1,
         expected: Some((0, 1)),
     }; "fetch_batch_size_one")]
     #[test_case(FindNextGapTestCase {
         lower_bound: 5,
         upper_bound: 10,
-        verified_batches: vec![(0, 8)],
-        outstanding_requests: vec![],
+        fetched_ops: vec![(0, 8)],
+        requested_ops: vec![],
         fetch_batch_size: 5,
         expected: Some((8, 10)),
-    }; "verified_batch_starts_before_lower_bound")]
+    }; "fetched_ops_starts_before_lower_bound")]
     #[test_case(FindNextGapTestCase {
         lower_bound: 0,
         upper_bound: 6,
-        verified_batches: vec![(4, 5)],
-        outstanding_requests: vec![],
+        fetched_ops: vec![(4, 5)],
+        requested_ops: vec![],
         fetch_batch_size: 5,
         expected: Some((0, 3)),
-    }; "verified_batch_extends_beyond_upper_bound")]
+    }; "fetched_ops_extends_beyond_upper_bound")]
     #[test_case(FindNextGapTestCase {
         lower_bound: 0,
         upper_bound: 5,
-        verified_batches: vec![],
-        outstanding_requests: vec![2],
+        fetched_ops: vec![],
+        requested_ops: vec![2],
         fetch_batch_size: 100,
         expected: Some((0, 1)),
     }; "fetch_batch_size_larger_than_range")]
     #[test_case(FindNextGapTestCase {
         lower_bound: 0,
         upper_bound: 10,
-        verified_batches: vec![(0, 5), (8, 3)],
-        outstanding_requests: vec![],
+        fetched_ops: vec![(0, 5), (8, 3)],
+        requested_ops: vec![],
         fetch_batch_size: 5,
         expected: Some((5, 7)),
     }; "coverage_exactly_reaches_upper_bound")]
     #[test_case(FindNextGapTestCase {
         lower_bound: 0,
         upper_bound: 15,
-        verified_batches: vec![(2, 3), (10, 2)],
-        outstanding_requests: vec![6, 13],
+        fetched_ops: vec![(2, 3), (10, 2)],
+        requested_ops: vec![6, 13],
         fetch_batch_size: 3,
         expected: Some((0, 1)),
     }; "mixed_coverage_gap_at_start")]
     #[test_case(FindNextGapTestCase {
         lower_bound: 0,
         upper_bound: 15,
-        verified_batches: vec![(0, 2), (8, 2)],
-        outstanding_requests: vec![3, 12],
+        fetched_ops: vec![(0, 2), (8, 2)],
+        requested_ops: vec![3, 12],
         fetch_batch_size: 4,
         expected: Some((2, 2)),
     }; "mixed_coverage_gap_in_middle")]
     #[test_case(FindNextGapTestCase {
         lower_bound: 0,
         upper_bound: 10,
-        verified_batches: vec![(1, 2), (6, 2)],
-        outstanding_requests: vec![3, 8],
+        fetched_ops: vec![(1, 2), (6, 2)],
+        requested_ops: vec![3, 8],
         fetch_batch_size: 2,
         expected: Some((0, 0)),
     }; "mixed_coverage_interleaved_ranges")]
     fn test_find_next_gap(test_case: FindNextGapTestCase) {
         // Create verified batches from input
         let mut verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
-        for (loc, num_ops) in &test_case.verified_batches {
+        for (loc, num_ops) in &test_case.fetched_ops {
             let ops = (0..*num_ops)
                 .map(|i| {
                     Fixed::Update(
@@ -1438,8 +1421,7 @@ pub(crate) mod tests {
         }
 
         // Create outstanding requests from input
-        let outstanding_requests: BTreeSet<u64> =
-            test_case.outstanding_requests.into_iter().collect();
+        let outstanding_requests: BTreeSet<u64> = test_case.requested_ops.into_iter().collect();
 
         let result = find_next_gap::<Digest, Digest>(
             test_case.lower_bound,
