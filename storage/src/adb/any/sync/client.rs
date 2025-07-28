@@ -1452,6 +1452,7 @@ pub(crate) mod tests {
 
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
@@ -1461,7 +1462,7 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                resolver: Arc::new(AnyResolver::from(target_db)),
+                resolver: Arc::new(AnyResolver::from(target_db.clone())),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
@@ -1481,6 +1482,13 @@ pub(crate) mod tests {
 
             let result = client.step().await;
             assert!(matches!(result, Err(Error::SyncTargetMovedBackward { .. })));
+
+            Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+                .into_inner()
+                .destroy()
+                .await
+                .unwrap();
         });
     }
 
