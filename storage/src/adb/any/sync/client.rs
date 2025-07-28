@@ -27,7 +27,7 @@ use std::{
 use tracing::{debug, info, warn};
 
 /// Result of executing one sync step
-pub enum StepResult<C, D> {
+enum StepResult<C, D> {
     /// Sync should continue with the updated client
     Continue(C),
     /// Sync is complete with the final database
