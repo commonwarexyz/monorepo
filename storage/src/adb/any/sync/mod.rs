@@ -1,6 +1,9 @@
 use crate::{
     adb::any::{
-        sync::{client::Client, resolver::Resolver},
+        sync::{
+            client::{Client, Config},
+            resolver::Resolver,
+        },
         Any,
     },
     mmr,
@@ -17,8 +20,6 @@ use std::fmt;
 pub mod client;
 mod metrics;
 pub mod resolver;
-
-pub use client::Config;
 
 /// The target state to sync to.
 #[derive(Debug, Clone)]
