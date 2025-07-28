@@ -45,9 +45,9 @@ pub trait Resolver: Send + Sync + 'static {
            + 'a;
 }
 
-/// Cloneable wrapper for Any database that can be used as a Resolver
+/// Resolver that works by querying an [Any] database.
 #[derive(Clone)]
-pub struct AnyResolver<E, K, V, H, T>
+pub(super) struct AnyResolver<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
