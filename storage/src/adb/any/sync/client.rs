@@ -44,18 +44,22 @@ where
     /// A target update was received
     TargetUpdate(SyncTarget<H>),
     /// A batch of operations was received
-    BatchReceived {
-        /// The location of the first operation in the batch
-        start_loc: u64,
-        /// The result of the fetch operation
-        result: Result<GetOperationsResult<H, K, V>, Error>,
-    },
+    BatchReceived(IndexedFetchResult<H, K, V>),
     /// The target update channel was closed
     UpdateChannelClosed,
 }
 
-// (start_loc, result) where start_loc is the location of the first operation in the batch.
-type PendingOperationBatch<D, K, V> = (u64, Result<GetOperationsResult<D, K, V>, Error>);
+struct IndexedFetchResult<D, K, V>
+where
+    D: Digest,
+    K: Array,
+    V: Array,
+{
+    /// The location of the first operation in the batch
+    start_loc: u64,
+    /// The result of the fetch operation
+    result: Result<GetOperationsResult<D, K, V>, Error>,
+}
 
 /// Manages outstanding fetch requests.
 struct OutstandingRequests<D, K, V>
@@ -66,7 +70,7 @@ where
 {
     /// Futures that will resolve to batches of operations.
     #[allow(clippy::type_complexity)]
-    futures: FuturesUnordered<Pin<Box<dyn Future<Output = PendingOperationBatch<D, K, V>> + Send>>>,
+    futures: FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<D, K, V>> + Send>>>,
     /// Start locations of outstanding requests.
     /// Each element corresponds to an element in `futures` and vice versa.
     locations: BTreeSet<u64>,
@@ -89,7 +93,7 @@ where
     fn add(
         &mut self,
         start_loc: u64,
-        future: Pin<Box<dyn Future<Output = PendingOperationBatch<D, K, V>> + Send>>,
+        future: Pin<Box<dyn Future<Output = IndexedFetchResult<D, K, V>> + Send>>,
     ) {
         self.locations.insert(start_loc);
         self.futures.push(future);
@@ -99,7 +103,7 @@ where
     #[allow(clippy::type_complexity)]
     fn futures_mut(
         &mut self,
-    ) -> &mut FuturesUnordered<Pin<Box<dyn Future<Output = PendingOperationBatch<D, K, V>> + Send>>>
+    ) -> &mut FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<D, K, V>> + Send>>>
     {
         &mut self.futures
     }
@@ -282,13 +286,16 @@ where
         }
     }
 
-    /// Handle the result of a batch fetch operation.
-    fn handle_batch_result(
+    /// Handle the result of a fetch operation.
+    fn handle_fetch_result(
         &mut self,
-        start_loc: u64,
-        result: Result<GetOperationsResult<H::Digest, K, V>, Error>,
+        fetch_result: IndexedFetchResult<H::Digest, K, V>,
     ) -> Result<(), Error> {
-        match result {
+        // Mark request as complete
+        self.outstanding_requests.remove(fetch_result.start_loc);
+
+        let start_loc = fetch_result.start_loc;
+        match fetch_result.result {
             Ok(GetOperationsResult {
                 proof,
                 operations,
@@ -348,18 +355,18 @@ where
                     }
                 },
                 result = self.outstanding_requests.futures_mut().next() => {
-                    let (start_loc, result) = result.ok_or(Error::SyncStalled)?;
-                    Ok(SyncEvent::BatchReceived { start_loc, result })
+                    let fetch_result = result.ok_or(Error::SyncStalled)?;
+                    Ok(SyncEvent::BatchReceived(fetch_result))
                 },
             }
         } else {
-            let (start_loc, result) = self
+            let fetch_result = self
                 .outstanding_requests
                 .futures_mut()
                 .next()
                 .await
                 .ok_or(Error::SyncStalled)?;
-            Ok(SyncEvent::BatchReceived { start_loc, result })
+            Ok(SyncEvent::BatchReceived(fetch_result))
         }
     }
 
@@ -391,12 +398,9 @@ where
                 self.config.update_receiver = None;
                 Ok(StepResult::Continue(self))
             }
-            SyncEvent::BatchReceived { start_loc, result } => {
-                // Mark request as complete
-                self.outstanding_requests.remove(start_loc);
-
-                // Process the batch result
-                self.handle_batch_result(start_loc, result)?;
+            SyncEvent::BatchReceived(fetch_result) => {
+                // Process the fetch result
+                self.handle_fetch_result(fetch_result)?;
 
                 // Request operations in the sync range
                 self.request_operations().await?;
@@ -424,7 +428,7 @@ where
                     let result = resolver
                         .get_operations(target_size, start_loc, NZU64!(1))
                         .await;
-                    (start_loc, result)
+                    IndexedFetchResult { start_loc, result }
                 }),
             );
         }
@@ -462,7 +466,7 @@ where
                     let result = resolver
                         .get_operations(target_size, start_loc, batch_size)
                         .await;
-                    (start_loc, result)
+                    IndexedFetchResult { start_loc, result }
                 }),
             );
         }
