@@ -13,8 +13,6 @@ pub(super) struct Metrics<E: Clock> {
     pub(super) invalid_batches_received: Counter<u64>,
     /// Total number of operations fetched during sync.
     pub(super) operations_fetched: Counter<u64>,
-    /// Total time spent fetching operations from resolver (seconds).
-    pub(super) _fetch_duration: Timed<E>,
     /// Total time spent verifying proofs (seconds).
     pub(super) proof_verification_duration: Timed<E>,
     /// Total time spent applying operations to the log (seconds).
@@ -24,7 +22,6 @@ pub(super) struct Metrics<E: Clock> {
 impl<E: Clock + commonware_runtime::Metrics> Metrics<E> {
     /// Create and register metrics.
     pub(super) fn new(context: E) -> Self {
-        let fetch_histogram = Histogram::new(Buckets::NETWORK.into_iter());
         let proof_verification_histogram = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
         let apply_histogram = Histogram::new(Buckets::LOCAL.into_iter());
 
@@ -32,7 +29,6 @@ impl<E: Clock + commonware_runtime::Metrics> Metrics<E> {
             valid_batches_received: Counter::default(),
             invalid_batches_received: Counter::default(),
             operations_fetched: Counter::default(),
-            _fetch_duration: Timed::new(fetch_histogram.clone(), Arc::new(context.clone())),
             proof_verification_duration: Timed::new(
                 proof_verification_histogram.clone(),
                 Arc::new(context.clone()),
@@ -55,11 +51,6 @@ impl<E: Clock + commonware_runtime::Metrics> Metrics<E> {
             "operations_fetched",
             "Total number of operations fetched during ADB sync",
             metrics.operations_fetched.clone(),
-        );
-        context.register(
-            "fetch_duration_seconds",
-            "Histogram of durations spent fetching operation batches during ADB sync",
-            fetch_histogram,
         );
         context.register(
             "proof_verification_duration_seconds",
