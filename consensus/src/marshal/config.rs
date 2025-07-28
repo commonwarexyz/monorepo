@@ -24,13 +24,10 @@ pub struct Config<V: Variant, P: PublicKey, Z: Coordinator<PublicKey = P>, B: Bl
     /// Backfill rate limit.
     pub backfill_quota: Quota,
 
-    /// Minimum grace period for retaining activity after the application has processed the block.
-    ///
-    /// For notarizations, this is in number of views.
-    /// For blocks and finalizations, this is in number of blocks.
+    /// Minimum number of views to retain temporary data after the application processes a block.
     ///
     /// Useful for keeping around information that peers may desire to have.
-    pub grace_period: u64,
+    pub view_retention_timeout: u64,
 
     /// Namespace for proofs.
     pub namespace: Vec<u8>,

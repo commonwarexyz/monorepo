@@ -72,8 +72,8 @@ pub struct Actor<
     backfill_quota: Quota,
     // Unique application namespace
     namespace: Vec<u8>,
-    /// Minimum grace period for retaining activity after the application has processed the block
-    grace_period: u64,
+    /// Minimum number of views to retain temporary data after the application processes a block
+    view_retention_timeout: u64,
     // Maximum number of blocks to repair at once
     max_repair: u64,
     // Codec configuration
@@ -265,7 +265,7 @@ impl<
                 mailbox_size: config.mailbox_size,
                 backfill_quota: config.backfill_quota,
                 namespace: config.namespace.clone(),
-                grace_period: config.grace_period,
+                view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
                 codec_config: config.codec_config.clone(),
                 partition_prefix: config.partition_prefix,
@@ -436,8 +436,8 @@ impl<
 
                             // If finalization exists, prune the archives
                             if let Some(finalization) = self.get_finalization(Identifier::Index(height)).await {
-                                // Trail the previous processed finalized block by the grace period
-                                let min_view = self.last_processed_view.saturating_sub(self.grace_period);
+                                // Trail the previous processed finalized block by the timeout
+                                let min_view = self.last_processed_view.saturating_sub(self.view_retention_timeout);
 
                                 // Prune archives
                                 match try_join!(
