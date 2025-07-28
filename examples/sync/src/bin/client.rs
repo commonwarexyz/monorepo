@@ -49,13 +49,13 @@ struct Config {
 /// on `update_sender`.
 async fn target_update_task<E>(
     context: E,
-    resolver: Resolver<E>,
+    resolver: Arc<Resolver<E>>,
     update_sender: mpsc::Sender<SyncTarget<Digest>>,
     interval_duration: Duration,
     initial_target: SyncTarget<Digest>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
-    E: commonware_runtime::Network + commonware_runtime::Clock + Clone,
+    E: commonware_runtime::Network + commonware_runtime::Clock,
 {
     let mut current_target = initial_target;
 
@@ -134,7 +134,7 @@ where
     // Start target update task
     let target_update_interval = config.target_update_interval;
     let initial_target_clone = initial_target.clone();
-    let resolver_clone = (*resolver).clone();
+    let resolver_clone = resolver.clone();
     let target_update_handle = context.with_label("target-update").spawn(move |context| {
         target_update_task(
             context,
