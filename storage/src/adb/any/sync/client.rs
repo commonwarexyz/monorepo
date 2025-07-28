@@ -534,22 +534,24 @@ where
             };
 
             let operations = self.fetched_operations.remove(&range_start_loc).unwrap();
-            // Remove from the beginning all the operations that are before the next location.
-            let operations = operations
-                .into_iter()
-                .skip((next_loc - range_start_loc) as usize)
-                .collect::<Vec<_>>(); // TODO use vec deque to avoid copying
-            next_loc += operations.len() as u64;
-            self.apply_operations_batch(operations).await?;
+            // Skip operations that are before the next location.
+            let skip_count = (next_loc - range_start_loc) as usize;
+            let operations_count = operations.len() - skip_count;
+            let remaining_operations = operations.into_iter().skip(skip_count);
+            next_loc += operations_count as u64;
+            self.apply_operations_batch(remaining_operations).await?;
         }
 
         Ok(())
     }
 
     /// Apply a batch of operations to the log
-    async fn apply_operations_batch(&mut self, operations: Vec<Fixed<K, V>>) -> Result<(), Error> {
+    async fn apply_operations_batch<I>(&mut self, operations: I) -> Result<(), Error>
+    where
+        I: IntoIterator<Item = Fixed<K, V>>,
+    {
         let _timer = self.metrics.apply_duration.timer();
-        for op in operations.into_iter() {
+        for op in operations {
             self.log
                 .append(op)
                 .await
