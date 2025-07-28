@@ -34,6 +34,26 @@ enum StepResult<C, D> {
     Complete(D),
 }
 
+/// Events that can occur during synchronization
+enum SyncEvent<H, K, V>
+where
+    H: Digest,
+    K: Array,
+    V: Array,
+{
+    /// A target update was received
+    TargetUpdate(SyncTarget<H>),
+    /// A batch of operations was received
+    BatchReceived {
+        /// The location of the first operation in the batch
+        start_loc: u64,
+        /// The result of the fetch operation
+        result: Result<GetOperationsResult<H, K, V>, Error>,
+    },
+    /// The target update channel was closed
+    UpdateChannelClosed,
+}
+
 // (start_loc, result) where start_loc is the location of the first operation in the batch.
 type PendingOperationBatch<D, K, V> = (u64, Result<GetOperationsResult<D, K, V>, Error>);
 
@@ -262,6 +282,87 @@ where
         }
     }
 
+    /// Handle the result of a batch fetch operation.
+    fn handle_batch_result(
+        &mut self,
+        start_loc: u64,
+        result: Result<GetOperationsResult<H::Digest, K, V>, Error>,
+    ) -> Result<(), Error> {
+        match result {
+            Ok(GetOperationsResult {
+                proof,
+                operations,
+                success_tx,
+            }) => {
+                // Validate batch size
+                let operations_len = operations.len() as u64;
+                if operations_len == 0 || operations_len > self.config.fetch_batch_size.get() {
+                    debug!(
+                        operations_len,
+                        batch_size = self.config.fetch_batch_size.get(),
+                        start_loc,
+                        "received invalid batch size from resolver"
+                    );
+                    self.metrics.invalid_batches_received.inc();
+                    let _ = success_tx.send(false);
+                } else {
+                    // Verify the proof
+                    let proof_valid = {
+                        let _timer = self.metrics.proof_verification_duration.timer();
+                        adb::any::Any::<E, K, V, H, T>::verify_proof(
+                            &mut self.config.hasher,
+                            &proof,
+                            start_loc,
+                            &operations,
+                            &self.config.target.root,
+                        )
+                    };
+                    // Report success or failure to the resolver
+                    let _ = success_tx.send(proof_valid);
+                    if proof_valid {
+                        // Extract pinned nodes if needed
+                        self.set_pinned_nodes(&proof, start_loc, operations_len)?;
+                        // Store operations for later application
+                        self.store_operations(start_loc, operations);
+                    } else {
+                        debug!(start_loc, "proof verification failed, retrying");
+                        self.metrics.invalid_batches_received.inc();
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(start_loc, error = ?e, "batch fetch failed, retrying");
+            }
+        }
+        Ok(())
+    }
+
+    /// Wait for the next synchronization event.
+    async fn wait_for_event(&mut self) -> Result<SyncEvent<H::Digest, K, V>, Error> {
+        if let Some(ref mut update_rx) = self.config.update_receiver {
+            select! {
+                update = update_rx.next() => {
+                    match update {
+                        Some(target) => Ok(SyncEvent::TargetUpdate(target)),
+                        None => Ok(SyncEvent::UpdateChannelClosed),
+                    }
+                },
+                result = self.outstanding_requests.futures_mut().next() => {
+                    let (start_loc, result) = result.ok_or(Error::SyncStalled)?;
+                    Ok(SyncEvent::BatchReceived { start_loc, result })
+                },
+            }
+        } else {
+            let (start_loc, result) = self
+                .outstanding_requests
+                .futures_mut()
+                .next()
+                .await
+                .ok_or(Error::SyncStalled)?;
+            Ok(SyncEvent::BatchReceived { start_loc, result })
+        }
+    }
+
     /// Execute one step of the sync process.
     /// Returns either a new client to continue with, or the final database if complete.
     async fn step(mut self) -> Result<StepResult<Self, adb::any::Any<E, K, V, H, T>>, Error> {
@@ -280,91 +381,32 @@ where
             return Ok(StepResult::Complete(database));
         }
 
-        // Wait to receive a batch of operations (or a target update if enabled).
-        let (fetch_start_loc, fetch_result) =
-            if let Some(ref mut update_rx) = self.config.update_receiver {
-                select! {
-                    new_target = update_rx.next() => {
-                        if let Some(new_target) = new_target {
-                            self = self.handle_target_update(new_target).await?;
-                        } else {
-                            // Receiver closed. Don't wait for target updates in subsequent steps.
-                            self.config.update_receiver = None;
-                        }
-                        return Ok(StepResult::Continue(self));
-                    },
-                    fetch_result = self.outstanding_requests.futures_mut().next() => {
-                        // Wait to receive a batch of operations.
-                        // There should always be at least one outstanding request.
-                        // If there's not, we should be done, but we're not.
-                        fetch_result.ok_or(Error::SyncStalled)?
-                    },
-                }
-            } else {
-                self.outstanding_requests
-                    .futures_mut()
-                    .next()
-                    .await
-                    .ok_or(Error::SyncStalled)?
-            };
-
-        // Mark request as complete
-        self.outstanding_requests.remove(fetch_start_loc);
-
-        match fetch_result {
-            Ok(GetOperationsResult {
-                proof,
-                operations,
-                success_tx,
-            }) => {
-                // Validate batch size
-                let operations_len = operations.len() as u64;
-                if operations_len == 0 || operations_len > self.config.fetch_batch_size.get() {
-                    debug!(
-                        operations_len,
-                        batch_size = self.config.fetch_batch_size.get(),
-                        fetch_start_loc,
-                        "received invalid batch size from resolver"
-                    );
-                    self.metrics.invalid_batches_received.inc();
-                    let _ = success_tx.send(false);
-                } else {
-                    // Verify the proof
-                    let proof_valid = {
-                        let _timer = self.metrics.proof_verification_duration.timer();
-                        adb::any::Any::<E, K, V, H, T>::verify_proof(
-                            &mut self.config.hasher,
-                            &proof,
-                            fetch_start_loc,
-                            &operations,
-                            &self.config.target.root,
-                        )
-                    };
-                    // Report success or failure to the resolver
-                    let _ = success_tx.send(proof_valid);
-                    if proof_valid {
-                        // Extract pinned nodes if needed
-                        self.set_pinned_nodes(&proof, fetch_start_loc, operations_len)?;
-                        // Store operations for later application
-                        self.store_operations(fetch_start_loc, operations);
-                    } else {
-                        debug!(fetch_start_loc, "proof verification failed, retrying");
-                        self.metrics.invalid_batches_received.inc();
-                    }
-                }
+        // Wait for the next synchronization event
+        match self.wait_for_event().await? {
+            SyncEvent::TargetUpdate(new_target) => {
+                self = self.handle_target_update(new_target).await?;
+                Ok(StepResult::Continue(self))
             }
-            Err(e) => {
-                warn!(fetch_start_loc, error = ?e, "batch fetch failed, retrying");
+            SyncEvent::UpdateChannelClosed => {
+                self.config.update_receiver = None;
+                Ok(StepResult::Continue(self))
+            }
+            SyncEvent::BatchReceived { start_loc, result } => {
+                // Mark request as complete
+                self.outstanding_requests.remove(start_loc);
+
+                // Process the batch result
+                self.handle_batch_result(start_loc, result)?;
+
+                // Request operations in the sync range
+                self.request_operations().await?;
+
+                // Apply operations that are now contiguous with the current log size
+                self.apply_operations().await?;
+
+                Ok(StepResult::Continue(self))
             }
         }
-
-        // Request operations in the sync range
-        self.request_operations().await?;
-
-        // Apply operations that are now contiguous with the current log size
-        self.apply_operations().await?;
-
-        Ok(StepResult::Continue(self))
     }
 
     /// Request batches of operations from the resolver.
