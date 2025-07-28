@@ -5,6 +5,9 @@
 //! `commonware-consensus` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
+use commonware_codec::Codec;
+use commonware_cryptography::{Committable, Digestible};
+
 pub mod aggregation;
 pub mod ordered_broadcast;
 pub mod simplex;
@@ -32,8 +35,7 @@ pub trait Block: Codec + Digestible + Committable + Send + Sync + 'static {
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
-        use commonware_codec::Codec;
-        use commonware_cryptography::{Digest, Digestible, Committable, PublicKey};
+        use commonware_cryptography::{Digest, PublicKey};
         use futures::channel::{oneshot, mpsc};
         use std::future::Future;
 
