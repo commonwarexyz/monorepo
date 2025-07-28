@@ -37,9 +37,10 @@ pub struct Config<T: Translator> {
 /// A simple append-only key-value store backed by a log of operations.
 ///
 /// The [`Store`] provides persistent key-value storage with transactional semantics and automatic
-/// recovery. Unlike [`crate::adb::any`], this store does not maintain an MMR (Merkle Mountain Range)
-/// for cryptographic authentication, making it significantly more efficient for local storage
+/// recovery. This store does not provide cryptographic authentication, making efficient for local storage
 /// scenarios where proof generation is not required.
+///
+/// If data authentication is required for your use case, consider using [`crate::adb`] instead.
 ///
 /// # Lifecycle
 ///
@@ -52,19 +53,39 @@ pub struct Config<T: Translator> {
 /// # Example
 ///
 /// ```rust,ignore
-/// let mut store = Store::init(context, config).await?;
+/// use commonware_storage::store::base::{Store, Config};
+/// use commonware_storage::translator::TwoCap;
+/// use commonware_cryptography::Sha256;
+/// use commonware_runtime::{
+///     buffer::PoolRef,
+///     deterministic::{self},
+///     Runner as _,
+/// };
 ///
-/// // Perform operations (not yet committed)
-/// store.update(key1, value1).await?;
-/// store.update(key2, value2).await?;
-/// store.delete(key1).await?;
+/// const PAGE_SIZE: usize = 77;
+/// const PAGE_CACHE_SIZE: usize = 9;
 ///
-/// // Query current state
-/// assert_eq!(store.get(&key1).await?, None);
-/// assert_eq!(store.get(&key2).await?, Some(value2));
+/// // Initialize store configuration
+/// let config = Config {
+///     log_journal_partition: "my_store_log".to_string(),
+///     log_items_per_blob: 1000,
+///     log_write_buffer: 64 * 1024,
+///     translator: TwoCap,
+///     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+/// };
 ///
-/// // Commit to make changes persistent
-/// store.commit().await?;
+/// // Create and use the store
+/// let executor = deterministic::Runner::default();
+/// executor.start(|context| async move {
+///     let mut store = Store::init(context, config).await.unwrap();
+///     let key = Sha256::fill(1u8);
+///     let value = Sha256::fill(2u8);
+///     store.update(key, value).await.unwrap();
+///     let retrieved_value = store.get(&key).await.unwrap();
+///     store.commit().await.unwrap(); // Persist changes
+///
+///     store.destroy().await.unwrap(); // Clean up resources
+/// });
 /// ```
 pub struct Store<E, K, V, T>
 where

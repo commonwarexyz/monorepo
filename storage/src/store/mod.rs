@@ -1,8 +1,8 @@
 //! A simple append-only key-value store backed by a log of state-change operations.
 //!
-//! This store provides append-only functionality without requiring MMR (Merkle Mountain Range) for
-//! authentication. It's designed for efficient local storage scenarios where cryptographic proofs
-//! are not required, making it more performant than [`crate::adb::Any`] for non-authenticated use cases.
+//! This store provides append-only functionality authentication. It's designed for efficient local storage scenarios
+//! where cryptographic proofs are not required. If you need to authenticate data within the store, consider using
+//! [`crate::adb`] instead.
 //!
 //! # Terminology
 //!
@@ -17,6 +17,9 @@
 //! 2. It is an update operation
 //! 3. It is the most recent operation for that key
 //!
+//! Data inserted into the database is not durable until it is _committed_. Until then, changes are only stored
+//! in-memory, and the store can be rolled back to its last committed state if it is closed prior to committing.
+//!
 //! # Architecture
 //!
 //! The store maintains two main components:
@@ -26,30 +29,6 @@
 //!
 //! The store also tracks an "inactivity floor" - a location before which all operations are considered
 //! inactive (superseded by more recent operations on the same keys).
-//!
-//! # Usage
-//!
-//! ```rust,ignore
-//! use commonware_storage::store::{Store, Config};
-//! use commonware_storage::translator::TwoCap;
-//!
-//! // Initialize store configuration
-//! let config = Config {
-//!     log_journal_partition: "my_store_log".to_string(),
-//!     log_items_per_blob: 1000,
-//!     log_write_buffer: 64 * 1024,
-//!     translator: TwoCap,
-//!     buffer_pool: pool_ref,
-//! };
-//!
-//! // Create and use the store
-//! let mut store = Store::init(context, config).await?;
-//! store.update(key, value).await?;
-//! let retrieved_value = store.get(&key).await?;
-//! store.commit().await?; // Persist changes
-//! ```
-
-use thiserror::Error;
 
 pub mod base;
 pub mod operation;
@@ -65,7 +44,7 @@ pub enum UpdateResult {
 }
 
 /// Errors that can occur when interacting with a store.
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("metadata error: {0}")]
     MetadataError(#[from] crate::metadata::Error),
