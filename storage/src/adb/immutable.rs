@@ -101,6 +101,9 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
     /// section of the log. (The section number is derived from location.)
     locations: FJournal<E, U32>,
 
+    /// The location of the oldest retained operation, or 0 if no operations have been added.
+    oldest_retained_loc: u64,
+
     /// A map from each active key to the location of the operation that set its value.
     ///
     /// # Invariant
@@ -161,7 +164,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         let mut snapshot: Index<T, u64> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
-        let log_size = Self::build_snapshot_from_log(
+        let (log_size, oldest_retained_loc) = Self::build_snapshot_from_log(
             &mut hasher,
             cfg.log_items_per_section,
             &mut mmr,
@@ -175,6 +178,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             mmr,
             log,
             log_size,
+            oldest_retained_loc,
             locations,
             log_items_per_section: cfg.log_items_per_section,
             snapshot,
@@ -190,7 +194,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///   - removing any elements from the MMR & location map that don't remain in the log after
     ///     trimming.
     ///
-    /// Returns the number of operations in the log.
+    /// Returns the number of operations in the log and the oldest retained location.
     ///
     /// # Post-condition
     ///
@@ -203,7 +207,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         log: &mut VJournal<E, Variable<K, V>>,
         locations: &mut FJournal<E, U32>,
         snapshot: &mut Index<T, u64>,
-    ) -> Result<u64, Error> {
+    ) -> Result<(u64, u64), Error> {
         // Align the mmr with the location map. Any elements we remove here that are still in the
         // log will be re-added later.
         let mut mmr_leaves = leaf_pos_to_num(mmr.size()).unwrap();
@@ -229,6 +233,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let mut end_offset = 0;
         // A list of uncommitted operations that must be rolled back, in order of their locations.
         let mut uncommitted_ops = Vec::new();
+        let mut oldest_retained_loc = None;
 
         // Replay the log from inception to build the snapshot, keeping track of any uncommitted
         // operations that must be rolled back, and any log operations that need to be re-added to
@@ -242,6 +247,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                         return Err(Error::JournalError(e));
                     }
                     Ok((section, offset, _, op)) => {
+                        if oldest_retained_loc.is_none() {
+                            log_size = section * log_items_per_section;
+                            oldest_retained_loc = Some(log_size);
+                        }
                         let loc = log_size; // location of the current operation.
                         log_size += 1;
 
@@ -302,12 +311,43 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         assert_eq!(log_size, leaf_pos_to_num(mmr.size()).unwrap());
         assert_eq!(log_size, locations.size().await?);
 
-        Ok(log_size)
+        Ok((log_size, oldest_retained_loc.unwrap_or(0)))
     }
 
     /// Returns the section of the log where we are currently writing new items.
     pub fn current_section(&self) -> u64 {
         self.log_size / self.log_items_per_section
+    }
+
+    /// Return the oldest location that remains retrievable.
+    pub fn oldest_retained_loc(&self) -> Option<u64> {
+        if self.log_size == 0 {
+            None
+        } else {
+            Some(self.oldest_retained_loc)
+        }
+    }
+
+    /// Prunes the db of up to all operations that have location less than `loc`. The actual number
+    /// pruned may be fewer than requested due to blob boundaries.
+    pub async fn prune(&mut self, loc: u64) -> Result<(), Error> {
+        assert!(loc <= self.log_size);
+
+        // Prune the log up to the section containing the requested pruning location. We always
+        // prune the log first, and then prune the MMR+locations structures based on the log's
+        // actual pruning boundary. This procedure ensures all log operations always have
+        // corresponding MMR & location entries, even in the event of failures, with no need for
+        // special recovery.
+        let section = loc / self.log_items_per_section;
+        self.log.prune(section).await?;
+        self.oldest_retained_loc = section * self.log_items_per_section;
+
+        // Prune the MMR & locations map up to the oldest retained item in the log after pruning.
+        self.locations.prune(self.oldest_retained_loc).await?;
+        self.mmr
+            .prune_to_pos(&mut self.hasher, leaf_num_to_pos(self.oldest_retained_loc))
+            .await
+            .map_err(Error::MmrError)
     }
 
     /// Set the index of `key` in the snapshot. Assumes the key has not already been previously set
@@ -325,10 +365,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Get the value of `key` in the db, or None if it has no value.
+    /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
+    /// has been pruned.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         let iter = self.snapshot.get(key);
         for &loc in iter {
+            if loc < self.oldest_retained_loc {
+                continue;
+            }
             if let Some(v) = self.get_from_loc(key, loc).await? {
                 return Ok(Some(v));
             }
@@ -337,9 +381,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(None)
     }
 
-    /// Get the value of the operation with location `loc` in the db if it matches `key`. The
-    /// location is assumed valid and this function panics otherwise.
+    /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
+    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
+    /// otherwise assumed valid.
     pub async fn get_from_loc(&self, key: &K, loc: u64) -> Result<Option<V>, Error> {
+        if loc < self.oldest_retained_loc {
+            return Err(Error::OperationPruned(loc));
+        }
+
         match self.locations.read(loc).await {
             Ok(offset) => {
                 return self.get_from_offset(key, loc, offset.to_u32()).await;
@@ -349,8 +398,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Get the value of the operation with location `loc` and offset `offset` in the log if it
-    /// matches `key`. The location is assumed valid and this function panics otherwise.
+    /// matches `key`, or return [Error::OperationPruned] if the location precedes the oldest
+    /// retained.
     async fn get_from_offset(&self, key: &K, loc: u64, offset: u32) -> Result<Option<V>, Error> {
+        if loc < self.oldest_retained_loc {
+            return Err(Error::OperationPruned(loc));
+        }
+
         let section = loc / self.log_items_per_section;
         let Some(Variable::Set(k, v)) = self.log.get(section, offset).await? else {
             panic!("didn't find Set operation at location {loc} and offset {offset}");
@@ -367,13 +421,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// yet committed.
     pub fn op_count(&self) -> u64 {
         self.log_size
-    }
-
-    /// Return the oldest location that remains readable & provable.
-    pub fn oldest_retained_loc(&self) -> Option<u64> {
-        self.mmr
-            .oldest_retained_pos()
-            .map(|pos| leaf_pos_to_num(pos).unwrap())
     }
 
     /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
@@ -439,6 +486,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         start_index: u64,
         max_ops: u64,
     ) -> Result<(Proof<H::Digest>, Vec<Variable<K, V>>), Error> {
+        if start_index < self.oldest_retained_loc {
+            return Err(Error::OperationPruned(start_index));
+        }
+
         let start_pos = leaf_num_to_pos(start_index);
         let end_index = std::cmp::min(size - 1, start_index + max_ops - 1);
         let end_pos = leaf_num_to_pos(end_index);
@@ -586,6 +637,7 @@ pub(super) mod test {
 
     const PAGE_SIZE: usize = 77;
     const PAGE_CACHE_SIZE: usize = 9;
+    const ITEMS_PER_SECTION: u64 = 5;
 
     fn db_config(suffix: &str) -> Config<TwoCap, (commonware_codec::RangeCfg, ())> {
         Config {
@@ -594,7 +646,7 @@ pub(super) mod test {
             mmr_items_per_blob: 11,
             mmr_write_buffer: 1024,
             log_journal_partition: format!("log_journal_{suffix}"),
-            log_items_per_section: 5,
+            log_items_per_section: ITEMS_PER_SECTION,
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             log_write_buffer: 1024,
@@ -875,6 +927,85 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 2);
             let root = db.root(&mut hasher);
             assert_eq!(root, first_commit_root);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    pub fn test_immutable_db_pruning() {
+        let executor = deterministic::Runner::default();
+        // Build a db with `ELEMENTS` key/value pairs and prove ranges over them.
+        const ELEMENTS: u64 = 2_000;
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
+
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![i as u8; 100];
+                db.set(k, v).await.unwrap();
+            }
+
+            assert_eq!(db.op_count(), ELEMENTS);
+
+            db.commit().await.unwrap();
+            assert_eq!(db.op_count(), ELEMENTS + 1);
+
+            // Prune the db to the first half of the operations.
+            db.prune(ELEMENTS / 2).await.unwrap();
+            assert_eq!(db.op_count(), ELEMENTS + 1);
+
+            // items_per_section is 5, so half should be exactly at a blob boundary, in which case
+            // the actual pruning location should match the requested.
+            let oldest_retained_loc = db.oldest_retained_loc().unwrap();
+            assert_eq!(oldest_retained_loc, ELEMENTS / 2);
+
+            // Try to fetch a pruned key.
+            let pruned_loc = oldest_retained_loc - 1;
+            let pruned_key = hash(&pruned_loc.to_be_bytes());
+            assert!(db.get(&pruned_key).await.unwrap().is_none());
+
+            // Try to fetch unpruned key.
+            let unpruned_key = hash(&oldest_retained_loc.to_be_bytes());
+            assert!(db.get(&unpruned_key).await.unwrap().is_some());
+
+            // Close & reopen the db, making sure the re-opened db has exactly the same state.
+            let root = db.root(&mut hasher);
+            db.close().await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+            assert_eq!(db.op_count(), ELEMENTS + 1);
+            let oldest_retained_loc = db.oldest_retained_loc().unwrap();
+            assert_eq!(oldest_retained_loc, ELEMENTS / 2);
+
+            // Prune to a non-blob boundary.
+            db.prune(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1))
+                .await
+                .unwrap();
+            // Actual boundary should be a multiple of 5.
+            let oldest_retained_loc = db.oldest_retained_loc().unwrap();
+            assert_eq!(oldest_retained_loc, ELEMENTS / 2 + ITEMS_PER_SECTION);
+
+            // Confirm boundary persists across restart.
+            db.close().await.unwrap();
+            let db = open_db(context.clone()).await;
+            let oldest_retained_loc = db.oldest_retained_loc().unwrap();
+            assert_eq!(oldest_retained_loc, ELEMENTS / 2 + ITEMS_PER_SECTION);
+
+            // Try to fetch a pruned key.
+            let pruned_loc = oldest_retained_loc - 3;
+            let pruned_key = hash(&pruned_loc.to_be_bytes());
+            assert!(db.get(&pruned_key).await.unwrap().is_none());
+
+            // Try to fetch unpruned key.
+            let unpruned_key = hash(&oldest_retained_loc.to_be_bytes());
+            assert!(db.get(&unpruned_key).await.unwrap().is_some());
+
+            // Confirm behavior of trying to create a proof of pruned items is as expected.
+            let pruned_pos = ELEMENTS / 2;
+            let proof_result = db.proof(pruned_pos, pruned_pos + 100).await;
+            assert!(matches!(proof_result, Err(Error::OperationPruned(pos)) if pos == pruned_pos));
 
             db.destroy().await.unwrap();
         });
