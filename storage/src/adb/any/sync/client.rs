@@ -34,7 +34,7 @@ enum StepResult<C, D> {
     Complete(D),
 }
 
-// (start_pos, result) where start_pos is the position of the first operation in the batch.
+// (start_loc, result) where start_loc is the location of the first operation in the batch.
 type PendingOperationBatch<D, K, V> = (u64, Result<GetOperationsResult<D, K, V>, Error>);
 
 /// Configuration for the sync client
@@ -308,14 +308,14 @@ where
         // Special case: If we don't have pinned nodes, we need to extract them from a proof
         // for the lower sync bound.
         if self.pinned_nodes.is_none() {
-            let start_pos = self.config.target.lower_bound_ops;
+            let start_loc = self.config.target.lower_bound_ops;
             let resolver = self.config.resolver.clone();
-            self.outstanding_request_locations.insert(start_pos);
+            self.outstanding_request_locations.insert(start_loc);
             self.outstanding_request_futures.push(Box::pin(async move {
                 let result = resolver
-                    .get_operations(target_size, start_pos, NZU64!(1))
+                    .get_operations(target_size, start_loc, NZU64!(1))
                     .await;
-                (start_pos, result)
+                (start_loc, result)
             }));
         }
 
@@ -333,7 +333,7 @@ where
 
         for _ in 0..num_requests {
             // Find the next gap in the sync range that needs to be fetched.
-            let Some((start_pos, _end_pos)) = find_next_gap::<K, V>(
+            let Some((start_loc, _end_loc)) = find_next_gap::<K, V>(
                 log_size,
                 self.config.target.upper_bound_ops,
                 &self.fetched_operations,
@@ -347,27 +347,27 @@ where
             let batch_size = self.config.fetch_batch_size;
             self.outstanding_request_futures.push(Box::pin(async move {
                 let result = resolver
-                    .get_operations(target_size, start_pos, batch_size)
+                    .get_operations(target_size, start_loc, batch_size)
                     .await;
-                (start_pos, result)
+                (start_loc, result)
             }));
-            self.outstanding_request_locations.insert(start_pos);
+            self.outstanding_request_locations.insert(start_loc);
         }
 
         Ok(())
     }
 
-    /// If `start_pos` is the lower sync bound, extract pinned nodes from the proof
+    /// If `start_loc` is the lower sync bound, extract pinned nodes from the proof
     /// and set them in the `self`. Otherwise, do nothing.
     fn set_pinned_nodes(
         &mut self,
         proof: &Proof<H::Digest>,
-        start_pos: u64,
+        start_loc: u64,
         operations_len: u64,
     ) -> Result<(), Error> {
-        if self.pinned_nodes.is_none() && start_pos == self.config.target.lower_bound_ops {
-            let start_pos_mmr = leaf_num_to_pos(start_pos);
-            let end_pos_mmr = leaf_num_to_pos(start_pos + operations_len - 1);
+        if self.pinned_nodes.is_none() && start_loc == self.config.target.lower_bound_ops {
+            let start_pos_mmr = leaf_num_to_pos(start_loc);
+            let end_pos_mmr = leaf_num_to_pos(start_loc + operations_len - 1);
             match proof.extract_pinned_nodes(start_pos_mmr, end_pos_mmr) {
                 Ok(nodes) => self.pinned_nodes = Some(nodes),
                 Err(e) => return Err(Error::PinnedNodes(e)),
@@ -377,17 +377,17 @@ where
     }
 
     /// Store a verified batch of operations to be applied later
-    fn store_operations(&mut self, start_pos: u64, operations: Vec<Fixed<K, V>>) {
+    fn store_operations(&mut self, start_loc: u64, operations: Vec<Fixed<K, V>>) {
         self.metrics
             .operations_fetched
             .inc_by(operations.len() as u64);
         self.metrics.valid_batches_received.inc();
-        self.fetched_operations.insert(start_pos, operations);
+        self.fetched_operations.insert(start_loc, operations);
     }
 
     /// Apply fetched operations to the tip of the log if we have them.
     async fn apply_operations(&mut self) -> Result<(), Error> {
-        let mut next_pos = self
+        let mut next_loc = self
             .log
             .size()
             .await
@@ -396,30 +396,30 @@ where
         loop {
             // See if we have the next operation to apply (i.e. at the log tip)
             // Find the index of the range that contains the next position.
-            let range_start_pos =
+            let range_start_loc =
                 self.fetched_operations
                     .iter()
                     .find_map(|(range_start, range_ops)| {
                         let range_end = range_start + range_ops.len() as u64 - 1;
-                        if *range_start <= next_pos && next_pos <= range_end {
+                        if *range_start <= next_loc && next_loc <= range_end {
                             Some(*range_start)
                         } else {
                             None
                         }
                     });
 
-            let Some(range_start_pos) = range_start_pos else {
+            let Some(range_start_loc) = range_start_loc else {
                 // We don't have the next operation to apply (i.e. at the log tip)
                 break;
             };
 
-            let operations = self.fetched_operations.remove(&range_start_pos).unwrap();
-            // Remove from the beginning all the operations that are before the next position.
+            let operations = self.fetched_operations.remove(&range_start_loc).unwrap();
+            // Remove from the beginning all the operations that are before the next location.
             let operations = operations
                 .into_iter()
-                .skip((next_pos - range_start_pos) as usize)
+                .skip((next_loc - range_start_loc) as usize)
                 .collect::<Vec<_>>();
-            next_pos += operations.len() as u64;
+            next_loc += operations.len() as u64;
             self.apply_operations_batch(operations).await?;
         }
 
@@ -526,21 +526,21 @@ fn find_next_gap<K: Array, V: Array>(
     // Create iterators for both data structures (already sorted)
     let mut verified_iter = fetched_operations
         .iter()
-        .filter_map(|(&start_pos, operations)| {
+        .filter_map(|(&start_loc, operations)| {
             if operations.is_empty() {
                 None
             } else {
-                let end_pos = start_pos + operations.len() as u64 - 1;
-                Some((start_pos, end_pos))
+                let end_loc = start_loc + operations.len() as u64 - 1;
+                Some((start_loc, end_loc))
             }
         })
         .peekable();
 
     let mut outstanding_iter = outstanding_requests
         .iter()
-        .map(|&start_pos| {
-            let end_pos = (start_pos + fetch_batch_size - 1).min(upper_bound);
-            (start_pos, end_pos)
+        .map(|&start_loc| {
+            let end_loc = (start_loc + fetch_batch_size - 1).min(upper_bound);
+            (start_loc, end_loc)
         })
         .peekable();
 
@@ -604,7 +604,7 @@ fn find_next_gap<K: Array, V: Array>(
             Some((lower_bound, upper_bound))
         }
         Some(covered_end) => {
-            // Check if there's a gap after the last covered position
+            // Check if there's a gap after the last covered location
             let gap_start = std::cmp::max(covered_end + 1, lower_bound);
             if gap_start <= upper_bound {
                 Some((gap_start, upper_bound))
@@ -1425,7 +1425,7 @@ pub(crate) mod tests {
     fn test_find_next_gap(test_case: FindNextGapTestCase) {
         // Create verified batches from input
         let mut verified_batches: BTreeMap<u64, Vec<Fixed<Digest, Digest>>> = BTreeMap::new();
-        for (pos, num_ops) in &test_case.verified_batches {
+        for (loc, num_ops) in &test_case.verified_batches {
             let ops = (0..*num_ops)
                 .map(|i| {
                     Fixed::Update(
@@ -1434,7 +1434,7 @@ pub(crate) mod tests {
                     )
                 })
                 .collect();
-            verified_batches.insert(*pos, ops);
+            verified_batches.insert(*loc, ops);
         }
 
         // Create outstanding requests from input

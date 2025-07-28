@@ -22,8 +22,8 @@ pub(super) struct Metrics<E: Clock> {
 }
 
 impl<E: Clock + commonware_runtime::Metrics> Metrics<E> {
-    /// Register metrics with the provided runtime metrics context and return the struct.
-    pub fn new(context: E) -> Self {
+    /// Create and register metrics.
+    pub(super) fn new(context: E) -> Self {
         let fetch_histogram = Histogram::new(Buckets::NETWORK.into_iter());
         let proof_verification_histogram = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
         let apply_histogram = Histogram::new(Buckets::LOCAL.into_iter());
