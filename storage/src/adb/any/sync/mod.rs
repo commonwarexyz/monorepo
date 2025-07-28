@@ -133,9 +133,6 @@ where
     T: Translator,
     R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
-    info!("starting sync");
-
-    // Create client and initialize all state
     let client = Client::new(config).await?;
     client.sync().await
 }
