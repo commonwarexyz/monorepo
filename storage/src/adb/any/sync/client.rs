@@ -1795,12 +1795,21 @@ pub(crate) mod tests {
                 max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
             };
-            let client = Client::new(config).await.unwrap();
 
             // Step the client to process a batch
-            let client = match client.step().await.unwrap() {
-                StepResult::Continue(new_client) => new_client,
-                StepResult::Complete(_) => panic!("client should not be complete"),
+            let client = {
+                let mut client = Client::new(config).await.unwrap();
+                loop {
+                    // Step the client until we have processed a batch of operations
+                    client = match client.step().await.unwrap() {
+                        StepResult::Continue(new_client) => new_client,
+                        StepResult::Complete(_) => panic!("client should not be complete"),
+                    };
+                    let log_size = client.log.size().await.unwrap();
+                    if log_size > initial_lower_bound {
+                        break client;
+                    }
+                }
             };
 
             // Modify the target database by adding more operations
@@ -1954,21 +1963,32 @@ pub(crate) mod tests {
                 Ok(rw_lock) => rw_lock.into_inner(),
                 Err(_) => panic!("Failed to unwrap Arc - still has references"),
             };
-            {
-                assert_eq!(synced_db.op_count(), target_db.op_count());
-                assert_eq!(
-                    synced_db.inactivity_floor_loc,
-                    target_db.inactivity_floor_loc
-                );
-                assert_eq!(
-                    synced_db.oldest_retained_loc(),
-                    target_db.oldest_retained_loc()
-                );
-                assert_eq!(
-                    synced_db.oldest_retained_loc().unwrap(),
-                    initial_lower_bound
-                );
-                assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
+
+            assert_eq!(synced_db.op_count(), target_db.op_count());
+            assert_eq!(
+                synced_db.inactivity_floor_loc,
+                target_db.inactivity_floor_loc
+            );
+            assert_eq!(
+                synced_db.oldest_retained_loc(),
+                target_db.oldest_retained_loc()
+            );
+            assert_eq!(
+                synced_db.oldest_retained_loc().unwrap(),
+                initial_lower_bound
+            );
+            assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
+
+            // Verify the expected operations are present in the synced database.
+            for i in synced_db.inactivity_floor_loc..synced_db.op_count() {
+                let got = synced_db.log.read(i).await.unwrap();
+                let expected = target_db.log.read(i).await.unwrap();
+                assert_eq!(got, expected);
+            }
+            for i in synced_db.ops.oldest_retained_pos().unwrap()..synced_db.ops.size() {
+                let got = synced_db.ops.get_node(i).await.unwrap();
+                let expected = target_db.ops.get_node(i).await.unwrap();
+                assert_eq!(got, expected);
             }
 
             synced_db.destroy().await.unwrap();
