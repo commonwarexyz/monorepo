@@ -116,12 +116,12 @@ where
     fetched_operations: BTreeMap<u64, Vec<Fixed<K, V>>>,
 
     /// Start positions of batches that we've requested from the resolver
-    /// Each element corresponds to an element in [outstanding_request_futures]
+    /// Each element corresponds to an element in outstanding_request_futures
     outstanding_request_locations: BTreeSet<u64>,
 
     /// Each element is a future that will resolve to a batch of operations
     /// that we've requested from the resolver.
-    /// Each element corresponds to an element in [outstanding_request_locations]
+    /// Each element corresponds to an element in outstanding_request_locations
     #[allow(clippy::type_complexity)] // TODO: Make simpler type
     outstanding_request_futures: FuturesUnordered<
         Pin<Box<dyn Future<Output = PendingOperationBatch<H::Digest, K, V>> + Send>>,
