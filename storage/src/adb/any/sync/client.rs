@@ -840,8 +840,7 @@ pub(crate) mod tests {
 
             let db_config = create_test_config(context.next_u64());
 
-            // Wrap target_db in Arc<RwLock> for resolver and continued use
-            let target_db_arc = std::sync::Arc::new(commonware_runtime::RwLock::new(target_db));
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 db_config: db_config.clone(),
                 fetch_batch_size,
@@ -851,7 +850,7 @@ pub(crate) mod tests {
                     upper_bound_ops: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
                 },
                 context: context.clone(),
-                resolver: Arc::new(AnyResolver::from(target_db_arc.clone())),
+                resolver: Arc::new(AnyResolver::from(target_db.clone())),
                 hasher,
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -893,19 +892,19 @@ pub(crate) mod tests {
                 new_kvs.insert(key, value);
             }
             apply_ops(&mut got_db, new_ops.clone()).await;
-            apply_ops(&mut *target_db_arc.write().await, new_ops).await;
+            apply_ops(&mut *target_db.write().await, new_ops).await;
             got_db.commit().await.unwrap();
-            target_db_arc.write().await.commit().await.unwrap();
+            target_db.write().await.commit().await.unwrap();
 
             // Verify that the databases match
             for (key, value) in &new_kvs {
                 let got_value = got_db.get(key).await.unwrap().unwrap();
-                let target_value = target_db_arc.read().await.get(key).await.unwrap().unwrap();
+                let target_value = target_db.read().await.get(key).await.unwrap().unwrap();
                 assert_eq!(got_value, target_value);
                 assert_eq!(got_value, *value);
             }
 
-            let final_target_root = target_db_arc.write().await.root(&mut hasher);
+            let final_target_root = target_db.write().await.root(&mut hasher);
             assert_eq!(got_db.root(&mut hasher), final_target_root);
 
             // Capture the database state before closing
@@ -1098,7 +1097,7 @@ pub(crate) mod tests {
             let upper_bound_ops = target_db.op_count() - 1; // Up to the last operation
 
             // Reopen the sync database and sync it to the target database
-            let target_db = std::sync::Arc::new(commonware_runtime::RwLock::new(target_db));
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 db_config: sync_db_config, // Use same config as before
                 fetch_batch_size: NZU64!(10),
@@ -1154,7 +1153,7 @@ pub(crate) mod tests {
             assert_eq!(sync_db.get(last_key).await.unwrap(), Some(last_value));
 
             sync_db.destroy().await.unwrap();
-            std::sync::Arc::try_unwrap(target_db)
+            Arc::try_unwrap(target_db)
                 .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
                 .into_inner()
                 .destroy()
@@ -1504,7 +1503,7 @@ pub(crate) mod tests {
 
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
-            let resolver = Arc::new(AnyResolver::from(target_db));
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
@@ -1514,7 +1513,7 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                resolver,
+                resolver: Arc::new(AnyResolver::from(target_db.clone())),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
@@ -1534,7 +1533,13 @@ pub(crate) mod tests {
 
             let result = client.step().await;
             assert!(matches!(result, Err(Error::SyncTargetMovedBackward { .. })));
-            // TODO: destroy the target database
+
+            Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+                .into_inner()
+                .destroy()
+                .await
+                .unwrap();
         });
     }
 
@@ -1558,7 +1563,7 @@ pub(crate) mod tests {
             // Create client with placeholder initial target (stale compared to final target)
             let (mut update_sender, update_receiver) = mpsc::channel(1);
 
-            let resolver = Arc::new(AnyResolver::from(target_db));
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
@@ -1568,7 +1573,7 @@ pub(crate) mod tests {
                     lower_bound_ops: 1,
                     upper_bound_ops: 10,
                 },
-                resolver: resolver.clone(),
+                resolver: Arc::new(AnyResolver::from(target_db.clone())),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
@@ -1596,7 +1601,13 @@ pub(crate) mod tests {
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), final_lower_bound);
 
             synced_db.destroy().await.unwrap();
-            // TODO: destroy the target database
+
+            Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+                .into_inner()
+                .destroy()
+                .await
+                .unwrap();
         });
     }
 
@@ -1619,6 +1630,7 @@ pub(crate) mod tests {
 
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
@@ -1628,7 +1640,7 @@ pub(crate) mod tests {
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
                 },
-                resolver: Arc::new(AnyResolver::from(target_db)),
+                resolver: Arc::new(AnyResolver::from(target_db.clone())),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
@@ -1648,7 +1660,12 @@ pub(crate) mod tests {
             let result = client.step().await;
             assert!(matches!(result, Err(Error::InvalidTarget { .. })));
 
-            // TODO: destroy the target database
+            Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+                .into_inner()
+                .destroy()
+                .await
+                .unwrap();
         });
     }
 
@@ -1671,6 +1688,7 @@ pub(crate) mod tests {
 
             // Create client with target that will complete immediately
             let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
@@ -1680,7 +1698,7 @@ pub(crate) mod tests {
                     lower_bound_ops: lower_bound,
                     upper_bound_ops: upper_bound,
                 },
-                resolver: Arc::new(AnyResolver::from(target_db)),
+                resolver: Arc::new(AnyResolver::from(target_db.clone())),
                 hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
@@ -1710,7 +1728,13 @@ pub(crate) mod tests {
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), lower_bound);
 
             synced_db.destroy().await.unwrap();
-            // TODO: destroy the target database
+
+            Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+                .into_inner()
+                .destroy()
+                .await
+                .unwrap();
         });
     }
 
@@ -1964,7 +1988,7 @@ pub(crate) mod tests {
             // Perform sync
             let db_config = create_test_config(42);
             let context_clone = context.clone();
-            let target_db = std::sync::Arc::new(commonware_runtime::RwLock::new(target_db));
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 db_config: db_config.clone(),
                 fetch_batch_size: NZU64!(5),
@@ -2018,7 +2042,7 @@ pub(crate) mod tests {
             assert_eq!(reopened_db.ops.pruned_to_pos(), expected_pruned_to_pos);
 
             // Cleanup
-            std::sync::Arc::try_unwrap(target_db)
+            Arc::try_unwrap(target_db)
                 .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
                 .into_inner()
                 .destroy()
