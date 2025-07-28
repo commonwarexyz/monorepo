@@ -39,7 +39,7 @@ pub struct Handler<K: Array> {
 
 impl<K: Array> Handler<K> {
     /// Creates a new handler.
-    pub(super) fn new(sender: mpsc::Sender<Message<K>>) -> Self {
+    pub fn new(sender: mpsc::Sender<Message<K>>) -> Self {
         Self { sender }
     }
 }

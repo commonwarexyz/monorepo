@@ -1,8 +1,11 @@
 use super::{
     config::Config,
     finalizer::Finalizer,
-    handler::{self, Handler},
-    ingress::{Mailbox, Message, Orchestration, Orchestrator},
+    ingress::{
+        handler::{self, Handler},
+        mailbox::{Mailbox, Message},
+        orchestrator::{Orchestration, Orchestrator},
+    },
 };
 use crate::{
     threshold_simplex::types::{Finalization, Notarization},
@@ -19,7 +22,7 @@ use commonware_resolver::{
 };
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::{
-    archive::{self, prunable, Archive as _, Identifier},
+    archive::{self, immutable, prunable, Archive as _, Identifier},
     translator::TwoCap,
 };
 use commonware_utils::{array::U64, Array};
@@ -81,8 +84,6 @@ pub struct Actor<
     // ---------- State ----------
     // Last view processed
     last_processed_view: u64,
-    // Last height processed
-    last_processed_height: u64,
 
     // ---------- Storage ----------
     // Blocks verified stored by view<>digest
@@ -92,12 +93,15 @@ pub struct Actor<
     // We also store the blocks here since they may not match the block in `verified`
     #[allow(clippy::type_complexity)]
     notarized: prunable::Archive<TwoCap, R, B::Commitment, (Notarization<V, B::Commitment>, B)>,
+    // Finalizations stored by view, stored temporarily
+    finalization_by_view:
+        prunable::Archive<TwoCap, R, B::Commitment, Finalization<V, B::Commitment>>,
     // Finalizations stored by height
-    finalized: prunable::Archive<TwoCap, R, B::Commitment, Finalization<V, B::Commitment>>,
+    finalized: immutable::Archive<R, B::Commitment, Finalization<V, B::Commitment>>,
     // Blocks finalized stored by height
     //
     // We store this separately because we may not have the finalization for a block
-    blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
+    blocks: immutable::Archive<R, B::Commitment, B>,
 
     // ---------- Metrics ----------
     // Latest height metric
@@ -155,15 +159,45 @@ impl<
         .expect("Failed to initialize notarized archive");
         info!(elapsed = ?start.elapsed(), "restored notarized archive");
 
-        // Initialize finalizations
+        // Initialize finalizations by view
         let start = Instant::now();
-        let finalized = prunable::Archive::init(
-            context.with_label("finalized"),
+        let finalization_by_view = prunable::Archive::init(
+            context.with_label("finalization_by_view"),
             prunable::Config {
-                partition: format!("{}-finalized", config.partition_prefix),
+                partition: format!("{}-finalization-by-view", config.partition_prefix),
                 translator: TwoCap,
                 items_per_section: config.prunable_items_per_section,
                 compression: None,
+                codec_config: (),
+                replay_buffer: config.replay_buffer,
+                write_buffer: config.write_buffer,
+            },
+        )
+        .await
+        .expect("Failed to initialize finalization by view archive");
+        info!(elapsed = ?start.elapsed(), "restored finalization by view archive");
+
+        // Initialize finalizations
+        let start = Instant::now();
+        let finalized = immutable::Archive::init(
+            context.with_label("finalized"),
+            immutable::Config {
+                metadata_partition: format!("{}-finalized-metadata", config.partition_prefix),
+                freezer_table_partition: format!(
+                    "{}-finalized-freezer-table",
+                    config.partition_prefix
+                ),
+                freezer_table_initial_size: config.finalized_freezer_table_initial_size,
+                freezer_table_resize_frequency: config.freezer_table_resize_frequency,
+                freezer_table_resize_chunk_size: config.freezer_table_resize_chunk_size,
+                freezer_journal_partition: format!(
+                    "{}-finalized-freezer-journal",
+                    config.partition_prefix
+                ),
+                freezer_journal_target_size: config.freezer_journal_target_size,
+                freezer_journal_compression: config.freezer_journal_compression,
+                ordinal_partition: format!("{}-finalized-ordinal", config.partition_prefix),
+                items_per_section: config.immutable_items_per_section,
                 codec_config: (),
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
@@ -175,13 +209,25 @@ impl<
 
         // Initialize blocks
         let start = Instant::now();
-        let blocks = prunable::Archive::init(
+        let blocks = immutable::Archive::init(
             context.with_label("blocks"),
-            prunable::Config {
-                partition: format!("{}-blocks", config.partition_prefix),
-                translator: TwoCap,
-                items_per_section: config.prunable_items_per_section,
-                compression: None,
+            immutable::Config {
+                metadata_partition: format!("{}-blocks-metadata", config.partition_prefix),
+                freezer_table_partition: format!(
+                    "{}-blocks-freezer-table",
+                    config.partition_prefix
+                ),
+                freezer_table_initial_size: config.blocks_freezer_table_initial_size,
+                freezer_table_resize_frequency: config.freezer_table_resize_frequency,
+                freezer_table_resize_chunk_size: config.freezer_table_resize_chunk_size,
+                freezer_journal_partition: format!(
+                    "{}-blocks-freezer-journal",
+                    config.partition_prefix
+                ),
+                freezer_journal_target_size: config.freezer_journal_target_size,
+                freezer_journal_compression: config.freezer_journal_compression,
+                ordinal_partition: format!("{}-blocks-ordinal", config.partition_prefix),
+                items_per_section: config.immutable_items_per_section,
                 codec_config: config.codec_config.clone(),
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
@@ -225,10 +271,10 @@ impl<
                 partition_prefix: config.partition_prefix,
 
                 last_processed_view: 0,
-                last_processed_height: 0,
 
                 verified,
                 notarized,
+                finalization_by_view,
                 finalized,
                 blocks,
 
@@ -278,7 +324,7 @@ impl<
 
         // Process all finalized blocks in order (fetching any that are missing)
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
-        let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(2); // buffer to send processed while moving forward
+        let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(self.mailbox_size);
         let orchestrator = Orchestrator::new(orchestrator_sender);
         let finalizer = Finalizer::new(
             self.context.with_label("finalizer"),
@@ -328,26 +374,26 @@ impl<
                             resolver_by_view.fetch(view.into()).await;
                         }
                         Message::Finalization { finalization } => {
+                            // Store finalization by view
                             let view = finalization.proposal.view;
                             let commitment = finalization.proposal.payload;
+                            self.put_finalization_by_view(view, commitment, finalization.clone()).await;
 
-                            // If found, store finalization
+                            // Search for block locally, otherwise fetch it remotely
                             if let Some(block) = self.search_for_block(&mut buffer, commitment, SearchDepth::Notarized).await {
+                                // If found, persist the finalization and block
                                 let height = block.height();
-
-                                // Persist the finalization and block
-                                self.put_finalization(height, commitment, finalization, block, &mut notifier_tx).await;
+                                self.put_finalized_block(height, commitment, finalization, block, &mut notifier_tx).await;
                                 debug!(view, height, "finalized block stored");
                                 self.finalized_height.set(height as i64);
 
                                 // Cancel useless requests
                                 resolver_by_view.retain(move|k| k > &view.into()).await;
-                                continue;
+                            } else {
+                                // Otherwise, fetch from resolver
+                                warn!(view, ?commitment, "finalized block missing");
+                                resolver_by_digest.fetch(commitment).await;
                             }
-
-                            // Fetch from network
-                            warn!(view, ?commitment, "finalized block missing");
-                            resolver_by_digest.fetch(commitment).await;
                         }
                         Message::Get { view, payload, response } => {
                             // Check for block locally
@@ -369,12 +415,12 @@ impl<
                     }
                 },
                 // Handle finalizer messages next
-                orchestrator_message = orchestrator_receiver.next() => {
-                    let Some(orchestrator_message) = orchestrator_message else {
+                message = orchestrator_receiver.next() => {
+                    let Some(message) = message else {
                         info!("Orchestrator closed, shutting down");
                         return;
                     };
-                    match orchestrator_message {
+                    match message {
                         Orchestration::Get { height, result } => {
                             // Check if in blocks
                             let block = self.get_block(Identifier::Index(height)).await;
@@ -391,15 +437,13 @@ impl<
                             // If finalization exists, prune the archives
                             if let Some(finalization) = self.get_finalization(Identifier::Index(height)).await {
                                 // Trail the previous processed finalized block by the grace period
-                                let min_height = self.last_processed_height.saturating_sub(self.grace_period);
                                 let min_view = self.last_processed_view.saturating_sub(self.grace_period);
 
                                 // Prune archives
                                 match try_join!(
-                                    self.finalized.prune(min_height),
-                                    self.blocks.prune(min_height),
                                     self.verified.prune(min_view),
                                     self.notarized.prune(min_view),
+                                    self.finalization_by_view.prune(min_view),
                                 ) {
                                     Ok(_) => debug!(min_view, "pruned archives"),
                                     Err(e) => panic!("Failed to prune archives: {e}"),
@@ -407,7 +451,6 @@ impl<
 
                                 // Update the last processed height and view
                                 self.last_processed_view = finalization.proposal.view;
-                                self.last_processed_height = height;
                             }
                         }
                         Orchestration::Repair { height } => {
@@ -478,11 +521,15 @@ impl<
                                 continue;
                             }
 
-                            // Valid block received
+                            // Persist the block, also persisting the finalization if we have it
                             let height = block.height();
+                            if let Some(finalization) = self.get_finalization_by_view(Identifier::Key(&commitment)).await {
+                                self.put_finalized_block(height, commitment, finalization, block, &mut notifier_tx).await;
+                            } else {
+                                self.put_block(height, commitment, block, &mut notifier_tx).await;
+                            }
                             debug!(?commitment, height, "received block");
                             let _ = response.send(true);
-                            self.put_block(height, commitment, block, &mut notifier_tx).await;
                         }
                     }
                 },
@@ -529,7 +576,7 @@ impl<
                             // Valid finalization received
                             debug!(height, "received finalization");
                             let _ = response.send(true);
-                            self.put_finalization(height, block.commitment(), finalization, block, &mut notifier_tx).await;
+                            self.put_finalized_block(height, block.commitment(), finalization, block, &mut notifier_tx).await;
                         },
                     }
                 },
@@ -623,6 +670,30 @@ impl<
         }
     }
 
+    /// Add a finalization to the archive by view.
+    async fn put_finalization_by_view(
+        &mut self,
+        view: u64,
+        commitment: B::Commitment,
+        finalization: Finalization<V, B::Commitment>,
+    ) {
+        match self
+            .finalization_by_view
+            .put_sync(view, commitment, finalization)
+            .await
+        {
+            Ok(_) => {
+                debug!(view, "finalization by view stored");
+            }
+            Err(archive::Error::AlreadyPrunedTo(_)) => {
+                debug!(view, "finalization by view already pruned");
+            }
+            Err(e) => {
+                panic!("Failed to insert finalization by view: {e}");
+            }
+        }
+    }
+
     /// Add a notarization (with block) to the archive.
     async fn put_notarization(
         &mut self,
@@ -666,7 +737,7 @@ impl<
     }
 
     /// Add a finalization (with block) to the archive.
-    async fn put_finalization(
+    async fn put_finalized_block(
         &mut self,
         height: u64,
         commitment: B::Commitment,
@@ -739,6 +810,17 @@ impl<
         match self.finalized.get(id).await {
             Ok(finalization) => finalization,
             Err(e) => panic!("Failed to get finalization: {e}"),
+        }
+    }
+
+    /// Get a finalization from the archive by view.
+    async fn get_finalization_by_view<'a>(
+        &'a self,
+        id: Identifier<'a, B::Commitment>,
+    ) -> Option<Finalization<V, B::Commitment>> {
+        match self.finalization_by_view.get(id).await {
+            Ok(finalization) => finalization,
+            Err(e) => panic!("Failed to get finalization by view: {e}"),
         }
     }
 

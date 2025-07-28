@@ -10,7 +10,6 @@
 pub mod actor;
 pub mod config;
 pub mod finalizer;
-pub mod handler;
 pub mod ingress;
 
 #[cfg(test)]
