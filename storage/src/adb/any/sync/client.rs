@@ -202,7 +202,7 @@ where
         }
     }
 
-    /// Execute one step of the sync process
+    /// Execute one step of the sync process.
     /// Returns either a new client to continue with, or the final database if complete.
     async fn step(mut self) -> Result<StepResult<Self, adb::any::Any<E, K, V, H, T>>, Error> {
         // Check if sync is complete
