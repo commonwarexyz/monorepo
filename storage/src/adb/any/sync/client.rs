@@ -207,13 +207,16 @@ where
     async fn step(mut self) -> Result<StepResult<Self, adb::any::Any<E, K, V, H, T>>, Error> {
         // Check if sync is complete
         if self.is_complete().await? {
-            let database = build_database(
-                self.config,
-                self.log,
-                self.pinned_nodes.clone(),
-                &self.metrics,
-            )
-            .await?;
+            let target_root = self.config.target.root;
+            let lower_bound_ops = self.config.target.lower_bound_ops;
+            let upper_bound_ops = self.config.target.upper_bound_ops;
+            let database = build_database(self.config, self.log, self.pinned_nodes.clone()).await?;
+            info!(
+                target_root = ?target_root,
+                lower_bound_ops,
+                upper_bound_ops,
+                "sync completed"
+            );
             return Ok(StepResult::Complete(database));
         }
 
@@ -694,7 +697,6 @@ async fn build_database<E, K, V, H, T, R>(
     config: Config<E, K, V, H, T, R>,
     log: Journal<E, Fixed<K, V>>,
     pinned_nodes: Option<Vec<H::Digest>>,
-    metrics: &Metrics<E>,
 ) -> Result<adb::any::Any<E, K, V, H, T>, Error>
 where
     E: Storage + Clock + MetricsTrait,
@@ -704,11 +706,6 @@ where
     T: Translator,
     R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
-    let log_size = log
-        .size()
-        .await
-        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
-
     // Build the complete database from the log
     let db = adb::any::Any::init_synced(
         config.context.clone(),
@@ -733,16 +730,6 @@ where
             actual: Box::new(got_root),
         });
     }
-
-    info!(
-        target_root = ?config.target.root,
-        lower_bound_ops = config.target.lower_bound_ops,
-        upper_bound_ops = config.target.upper_bound_ops,
-        log_size = log_size,
-        valid_batches_received = metrics.valid_batches_received.get(),
-        invalid_batches_received = metrics.invalid_batches_received.get(),
-        "sync completed successfully");
-
     Ok(db)
 }
 
@@ -802,7 +789,7 @@ pub(crate) mod tests {
     #[test_case(1000, NZU64!(100); "db size divided by batch size")]
     #[test_case(1000, NZU64!(1000); "db size == batch size")]
     #[test_case(1000, NZU64!(1001); "batch size > db size")]
-    fn test_sync(target_db_ops: usize, fetch_batch_size: std::num::NonZeroU64) {
+    fn test_sync(target_db_ops: usize, fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let mut target_db = create_test_db(context.clone()).await;
