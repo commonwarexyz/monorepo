@@ -127,7 +127,6 @@ pub(super) mod tests {
     use super::*;
     use std::marker::PhantomData;
 
-    #[derive(Clone)]
     pub struct FailResolver<D, K, V> {
         _digest: PhantomData<D>,
         _key: PhantomData<K>,
