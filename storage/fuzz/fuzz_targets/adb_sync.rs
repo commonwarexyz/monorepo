@@ -45,7 +45,7 @@ fn test_config(test_name: &str, pruning_delay: u64) -> Config<TwoCap> {
         translator: TwoCap,
         thread_pool: None,
         buffer_pool: PoolRef::new(PAGE_SIZE, 1),
-        pruning_delay: pruning_delay.clamp(1, 1000),
+        pruning_delay: (pruning_delay % 1000) + 1,
     }
 }
 
@@ -64,7 +64,7 @@ async fn test_sync(
         context,
         update_receiver: None,
         db_config: config,
-        fetch_batch_size: NZU64!(fetch_batch_size.clamp(1, 100)),
+        fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
         target,
         resolver: src,
         hasher: Standard::<Sha256>::new(),
