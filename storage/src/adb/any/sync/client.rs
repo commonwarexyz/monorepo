@@ -74,7 +74,7 @@ where
     pub apply_batch_size: usize,
 
     /// Maximum number of outstanding requests for operation batches.
-    /// Higher values increase parallelism but also memory usage.
+    /// Higher values increase parallelism.
     pub max_outstanding_requests: usize,
 }
 
@@ -112,26 +112,25 @@ where
 {
     config: Config<E, K, V, H, T, R>,
 
-    /// Verified batches waiting to be applied, indexed by start position
+    /// Batches of operations waiting to be applied, indexed by location of first operation.
     fetched_operations: BTreeMap<u64, Vec<Fixed<K, V>>>,
 
-    /// Start positions of batches that we've requested from the resolver
-    /// Each element corresponds to an element in outstanding_request_futures
+    /// Start locations of batches that we've requested from the resolver.
+    /// Each element corresponds to an element in outstanding_request_futures.
     outstanding_request_locations: BTreeSet<u64>,
 
-    /// Each element is a future that will resolve to a batch of operations
-    /// that we've requested from the resolver.
-    /// Each element corresponds to an element in outstanding_request_locations
+    /// Futures that will resolve to a batch of operations that we've requested from the resolver.
+    /// Each element corresponds to an element in outstanding_request_locations.
     #[allow(clippy::type_complexity)] // TODO: Make simpler type
     outstanding_request_futures: FuturesUnordered<
         Pin<Box<dyn Future<Output = PendingOperationBatch<H::Digest, K, V>> + Send>>,
     >,
 
-    /// Pinned nodes extracted from the first batch
+    /// Pinned nodes extracted from the batch of operations at the lower sync bound.
     pinned_nodes: Option<Vec<H::Digest>>,
 
-    /// Journal of operations that the sync protocol fills
-    /// When it's completed, we use it to build the database
+    /// Journal of operations that the sync protocol fills.
+    /// When it's completed, we use it to build the database.
     log: Journal<E, Fixed<K, V>>,
 
     metrics: Metrics<E>,
@@ -187,8 +186,8 @@ where
             metrics,
         };
 
-        // Request operations in the sync range.
-        client.fill_fetch_queue().await?;
+        // Request operations in the sync range
+        client.request_operations().await?;
 
         Ok(client)
     }
@@ -218,15 +217,15 @@ where
             return Ok(StepResult::Complete(database));
         }
 
-        // Wait to receive a batch of operations or a target update (if enabled).
-        let (fetch_start_pos, fetch_result) =
+        // Wait to receive a batch of operations (or a target update if enabled).
+        let (fetch_start_loc, fetch_result) =
             if let Some(ref mut update_rx) = self.config.update_receiver {
                 select! {
                     new_target = update_rx.next() => {
                         if let Some(new_target) = new_target {
                             self = self.handle_target_update(new_target).await?;
                         } else {
-                            // Receiver closed - disable it to avoid spinning
+                            // Receiver closed. Don't wait for target updates in subsequent steps.
                             self.config.update_receiver = None;
                         }
                         return Ok(StepResult::Continue(self));
@@ -236,7 +235,9 @@ where
                     },
                 }
             } else {
-                // No update receiver - wait to receive a batch of operations
+                // Wait to receive a batch of operations.
+                // There should always be at least one outstanding request.
+                // If there's not, we should be done, but we're not.
                 self.outstanding_request_futures
                     .next()
                     .await
@@ -244,7 +245,7 @@ where
             };
 
         // Remove from outstanding requests
-        self.outstanding_request_locations.remove(&fetch_start_pos);
+        self.outstanding_request_locations.remove(&fetch_start_loc);
 
         match fetch_result {
             Ok(GetOperationsResult {
@@ -252,14 +253,13 @@ where
                 operations,
                 success_tx,
             }) => {
-                let operations_len = operations.len() as u64;
-
                 // Validate batch size
+                let operations_len = operations.len() as u64;
                 if operations_len == 0 || operations_len > self.config.fetch_batch_size.get() {
                     debug!(
                         operations_len,
                         batch_size = self.config.fetch_batch_size.get(),
-                        fetch_start_pos,
+                        fetch_start_loc,
                         "received invalid batch size from resolver"
                     );
                     self.metrics.invalid_batches_received.inc();
@@ -271,7 +271,7 @@ where
                         adb::any::Any::<E, K, V, H, T>::verify_proof(
                             &mut self.config.hasher,
                             &proof,
-                            fetch_start_pos,
+                            fetch_start_loc,
                             &operations,
                             &self.config.target.root,
                         )
@@ -279,21 +279,21 @@ where
                     let _ = success_tx.send(proof_valid);
                     if proof_valid {
                         // Extract pinned nodes if needed
-                        self.set_pinned_nodes(&proof, fetch_start_pos, operations_len)?;
-                        self.store_operations(fetch_start_pos, operations);
+                        self.set_pinned_nodes(&proof, fetch_start_loc, operations_len)?;
+                        self.store_operations(fetch_start_loc, operations);
                     } else {
-                        debug!(fetch_start_pos, "proof verification failed, retrying");
+                        debug!(fetch_start_loc, "proof verification failed, retrying");
                         self.metrics.invalid_batches_received.inc();
                     }
                 }
             }
             Err(e) => {
-                warn!(fetch_start_pos, error = ?e, "batch fetch failed, retrying");
+                warn!(fetch_start_loc, error = ?e, "batch fetch failed, retrying");
             }
         }
 
-        // Maintain parallelism by filling the fetch queue
-        self.fill_fetch_queue().await?;
+        // Request operations in the sync range
+        self.request_operations().await?;
 
         // Apply operations that are now contiguous with the current log size
         self.apply_operations().await?;
@@ -301,12 +301,12 @@ where
         Ok(StepResult::Continue(self))
     }
 
-    /// Queue batches of operations to be fetched from the resolver
-    async fn fill_fetch_queue(&mut self) -> Result<(), Error> {
+    /// Request batches of operations from the resolver.
+    async fn request_operations(&mut self) -> Result<(), Error> {
         let target_size = self.config.target.upper_bound_ops + 1;
 
-        // Special case: If we don't have pinned nodes, we need to extract them
-        // from a proof for the lower sync bound.
+        // Special case: If we don't have pinned nodes, we need to extract them from a proof
+        // for the lower sync bound.
         if self.pinned_nodes.is_none() {
             let start_pos = self.config.target.lower_bound_ops;
             let resolver = self.config.resolver.clone();
@@ -474,7 +474,7 @@ where
         self.pinned_nodes = None;
 
         // Reinitialize parallel fetching
-        self.fill_fetch_queue().await?;
+        self.request_operations().await?;
 
         Ok(self)
     }
