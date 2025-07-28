@@ -22,29 +22,30 @@ enum SyncOp {
     Commit,
 
     // Sync scenarios
-    SyncFull { batch_size: u8 },
+    SyncFull { fetch_batch_size: u64 },
 }
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     ops: Vec<SyncOp>,
+    pruning_delay: u64,
 }
 
 const PAGE_SIZE: usize = 128;
 
-fn base_config() -> Config<TwoCap> {
+fn test_config(test_name: &str, pruning_delay: u64) -> Config<TwoCap> {
     Config {
-        mmr_journal_partition: "".into(),
-        mmr_metadata_partition: "".into(),
+        mmr_journal_partition: format!("{test_name}_mmr"),
+        mmr_metadata_partition: format!("{test_name}_meta"),
         mmr_items_per_blob: 3,
         mmr_write_buffer: 1024,
-        log_journal_partition: "".into(),
+        log_journal_partition: format!("{test_name}_log"),
         log_items_per_blob: 3,
         log_write_buffer: 1024,
         translator: TwoCap,
         thread_pool: None,
         buffer_pool: PoolRef::new(PAGE_SIZE, 1),
-        pruning_delay: 5,
+        pruning_delay: pruning_delay.clamp(1, 1000),
     }
 }
 
@@ -52,21 +53,18 @@ async fn test_sync(
     context: deterministic::Context,
     src: &Any<deterministic::Context, Key, Value, Sha256, TwoCap>,
     target: sync::SyncTarget<commonware_cryptography::sha256::Digest>,
-    batch_size: u8,
+    fetch_batch_size: u64,
     test_name: &str,
+    pruning_delay: u64,
 ) -> bool {
-    let mut config = base_config();
-    config.mmr_journal_partition = format!("{test_name}_mmr");
-    config.mmr_metadata_partition = format!("{test_name}_meta");
-    config.log_journal_partition = format!("{test_name}_log");
-
+    let config = test_config(test_name, pruning_delay);
     let expected_root = target.root;
 
     let sync_config = sync::client::Config {
         context,
         update_receiver: None,
         db_config: config,
-        fetch_batch_size: NZU64!((batch_size as u64).clamp(1, 100)),
+        fetch_batch_size: NZU64!(fetch_batch_size.clamp(1, 100)),
         target,
         resolver: src,
         hasher: Standard::<Sha256>::new(),
@@ -91,13 +89,10 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut src = Any::<_, Key, Value, Sha256, TwoCap>::init(context.clone(), {
-            let mut cfg = base_config();
-            cfg.mmr_journal_partition = "src_mmr".into();
-            cfg.mmr_metadata_partition = "src_meta".into();
-            cfg.log_journal_partition = "src_log".into();
-            cfg
-        })
+        let mut src = Any::<_, Key, Value, Sha256, TwoCap>::init(
+            context.clone(),
+            test_config("src", input.pruning_delay),
+        )
         .await
         .expect("Failed to init source db");
 
@@ -121,7 +116,7 @@ fn fuzz(input: FuzzInput) {
                     src.commit().await.expect("Commit should not fail");
                 }
 
-                SyncOp::SyncFull { batch_size } => {
+                SyncOp::SyncFull { fetch_batch_size } => {
                     if src.op_count() == 0 {
                         continue;
                     }
@@ -136,12 +131,13 @@ fn fuzz(input: FuzzInput) {
                         upper_bound_ops: src.op_count() - 1,
                     };
 
-                    test_sync(
+                    let _result = test_sync(
                         context.clone(),
                         &src,
                         target,
-                        *batch_size,
+                        *fetch_batch_size,
                         &format!("full_{sync_id}"),
+                        input.pruning_delay,
                     )
                     .await;
                     sync_id += 1;
