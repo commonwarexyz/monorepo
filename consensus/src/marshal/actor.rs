@@ -674,14 +674,13 @@ impl<
         block: B,
         notifier: &mut mpsc::Sender<()>,
     ) {
-        if let Err(e) = self
-            .finalized
-            .put_sync(height, commitment, finalization)
-            .await
-        {
+        if let Err(e) = try_join!(
+            self.finalized.put_sync(height, commitment, finalization),
+            self.blocks.put_sync(height, commitment, block),
+        ) {
             panic!("Failed to insert finalization: {e}");
         }
-        self.put_block(height, commitment, block, notifier).await;
+        let _ = notifier.try_send(());
     }
 
     /// Looks for a block in local storage.
