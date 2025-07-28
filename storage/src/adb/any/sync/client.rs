@@ -12,7 +12,7 @@ use crate::{
     mmr::{self, iterator::leaf_num_to_pos, verification::Proof},
     translator::Translator,
 };
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Metrics as MetricsTrait, Storage};
 use commonware_utils::{Array, NZU64};
@@ -36,6 +36,75 @@ enum StepResult<C, D> {
 
 // (start_loc, result) where start_loc is the location of the first operation in the batch.
 type PendingOperationBatch<D, K, V> = (u64, Result<GetOperationsResult<D, K, V>, Error>);
+
+/// Manages outstanding fetch requests.
+struct OutstandingRequests<D, K, V>
+where
+    D: Digest,
+    K: Array,
+    V: Array,
+{
+    /// Futures that will resolve to batches of operations.
+    #[allow(clippy::type_complexity)]
+    futures: FuturesUnordered<Pin<Box<dyn Future<Output = PendingOperationBatch<D, K, V>> + Send>>>,
+    /// Start locations of outstanding requests.
+    /// Each element corresponds to an element in `futures` and vice versa.
+    locations: BTreeSet<u64>,
+}
+
+impl<D, K, V> OutstandingRequests<D, K, V>
+where
+    D: Digest,
+    K: Array,
+    V: Array,
+{
+    fn new() -> Self {
+        Self {
+            futures: FuturesUnordered::new(),
+            locations: BTreeSet::new(),
+        }
+    }
+
+    /// Add a new outstanding request.
+    fn add(
+        &mut self,
+        start_loc: u64,
+        future: Pin<Box<dyn Future<Output = PendingOperationBatch<D, K, V>> + Send>>,
+    ) {
+        self.locations.insert(start_loc);
+        self.futures.push(future);
+    }
+
+    /// Get a mutable reference to the underlying futures.
+    #[allow(clippy::type_complexity)]
+    fn futures_mut(
+        &mut self,
+    ) -> &mut FuturesUnordered<Pin<Box<dyn Future<Output = PendingOperationBatch<D, K, V>> + Send>>>
+    {
+        &mut self.futures
+    }
+
+    /// Remove a request from location tracking.
+    fn remove(&mut self, start_loc: u64) {
+        self.locations.remove(&start_loc);
+    }
+
+    /// Clear all outstanding requests.
+    fn clear(&mut self) {
+        self.futures.clear();
+        self.locations.clear();
+    }
+
+    /// Get the number of outstanding requests.
+    fn len(&self) -> usize {
+        self.locations.len()
+    }
+
+    /// Get a view of the outstanding request locations.
+    fn locations(&self) -> &BTreeSet<u64> {
+        &self.locations
+    }
+}
 
 /// Configuration for the sync client
 pub struct Config<E, K, V, H, T, R>
@@ -115,16 +184,8 @@ where
     /// Batches of operations waiting to be applied, indexed by location of first operation.
     fetched_operations: BTreeMap<u64, Vec<Fixed<K, V>>>,
 
-    /// Start locations of batches that we've requested from the resolver.
-    /// Each element corresponds to an element in outstanding_request_futures.
-    outstanding_request_locations: BTreeSet<u64>,
-
-    /// Futures that will resolve to a batch of operations that we've requested from the resolver.
-    /// Each element corresponds to an element in outstanding_request_locations.
-    #[allow(clippy::type_complexity)] // TODO: Make simpler type
-    outstanding_request_futures: FuturesUnordered<
-        Pin<Box<dyn Future<Output = PendingOperationBatch<H::Digest, K, V>> + Send>>,
-    >,
+    /// Outstanding fetch requests.
+    outstanding_requests: OutstandingRequests<H::Digest, K, V>,
 
     /// Pinned nodes extracted from the batch of operations at the lower sync bound.
     pinned_nodes: Option<Vec<H::Digest>>,
@@ -179,8 +240,7 @@ where
         let mut client = Self {
             config,
             fetched_operations: BTreeMap::new(),
-            outstanding_request_locations: BTreeSet::new(),
-            outstanding_request_futures: FuturesUnordered::new(),
+            outstanding_requests: OutstandingRequests::new(),
             pinned_nodes: None,
             log,
             metrics,
@@ -233,7 +293,7 @@ where
                         }
                         return Ok(StepResult::Continue(self));
                     },
-                    fetch_result = self.outstanding_request_futures.next() => {
+                    fetch_result = self.outstanding_requests.futures_mut().next() => {
                         // Wait to receive a batch of operations.
                         // There should always be at least one outstanding request.
                         // If there's not, we should be done, but we're not.
@@ -241,14 +301,15 @@ where
                     },
                 }
             } else {
-                self.outstanding_request_futures
+                self.outstanding_requests
+                    .futures_mut()
                     .next()
                     .await
                     .ok_or(Error::SyncStalled)?
             };
 
         // Mark request as complete
-        self.outstanding_request_locations.remove(&fetch_start_loc);
+        self.outstanding_requests.remove(fetch_start_loc);
 
         match fetch_result {
             Ok(GetOperationsResult {
@@ -315,20 +376,22 @@ where
         if self.pinned_nodes.is_none() {
             let start_loc = self.config.target.lower_bound_ops;
             let resolver = self.config.resolver.clone();
-            self.outstanding_request_locations.insert(start_loc);
-            self.outstanding_request_futures.push(Box::pin(async move {
-                let result = resolver
-                    .get_operations(target_size, start_loc, NZU64!(1))
-                    .await;
-                (start_loc, result)
-            }));
+            self.outstanding_requests.add(
+                start_loc,
+                Box::pin(async move {
+                    let result = resolver
+                        .get_operations(target_size, start_loc, NZU64!(1))
+                        .await;
+                    (start_loc, result)
+                }),
+            );
         }
 
         // Calculate the number of requests to make
         let num_requests = self
             .config
             .max_outstanding_requests
-            .saturating_sub(self.outstanding_request_locations.len());
+            .saturating_sub(self.outstanding_requests.len());
 
         let log_size = self
             .log
@@ -342,7 +405,7 @@ where
                 log_size,
                 self.config.target.upper_bound_ops,
                 &self.fetched_operations,
-                &self.outstanding_request_locations,
+                self.outstanding_requests.locations(),
                 self.config.fetch_batch_size.get(),
             ) else {
                 break; // No more gaps to fill
@@ -351,13 +414,15 @@ where
             // Kick off a request for the batch of operations
             let resolver = self.config.resolver.clone();
             let batch_size = self.config.fetch_batch_size;
-            self.outstanding_request_locations.insert(start_loc);
-            self.outstanding_request_futures.push(Box::pin(async move {
-                let result = resolver
-                    .get_operations(target_size, start_loc, batch_size)
-                    .await;
-                (start_loc, result)
-            }));
+            self.outstanding_requests.add(
+                start_loc,
+                Box::pin(async move {
+                    let result = resolver
+                        .get_operations(target_size, start_loc, batch_size)
+                        .await;
+                    (start_loc, result)
+                }),
+            );
         }
 
         Ok(())
@@ -482,8 +547,7 @@ where
 
         // Reset state for the target update
         self.fetched_operations.clear();
-        self.outstanding_request_locations.clear();
-        self.outstanding_request_futures.clear();
+        self.outstanding_requests.clear();
         self.pinned_nodes = None;
 
         // Reinitialize parallel fetching
