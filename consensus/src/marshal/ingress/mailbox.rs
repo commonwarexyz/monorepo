@@ -9,7 +9,7 @@ use futures::{
 };
 use tracing::error;
 
-/// Messages sent to the marshal [`Actor`](super::actor::Actor).
+/// Messages sent to the marshal [`Actor`](super::super::actor::Actor).
 ///
 /// These messages are sent from the consensus engine and other parts of the
 /// system to drive the state of the marshal.
@@ -48,7 +48,7 @@ pub enum Message<V: Variant, B: Block> {
     },
 }
 
-/// A mailbox for sending messages to the marshal [`Actor`](super::actor::Actor).
+/// A mailbox for sending messages to the marshal [`Actor`](super::super::actor::Actor).
 #[derive(Clone)]
 pub struct Mailbox<V: Variant, B: Block> {
     sender: mpsc::Sender<Message<V, B>>,

@@ -8,7 +8,7 @@ use futures::{
 use tracing::error;
 
 /// Messages sent from the resolver's [`Consumer`]/[`Producer`] implementation
-/// to the marshal [`Actor`](super::actor::Actor).
+/// to the marshal [`Actor`](super::super::actor::Actor).
 pub enum Message<K: Array> {
     /// A request to deliver a value for a given key.
     Deliver {
