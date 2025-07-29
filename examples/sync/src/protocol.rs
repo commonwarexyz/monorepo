@@ -43,15 +43,7 @@ impl Default for RequestId {
 impl RequestId {
     pub fn new() -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(1);
-
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-
-        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-
-        RequestId((timestamp << 16) | (counter & 0xFFFF))
+        RequestId(COUNTER.fetch_add(1, Ordering::Relaxed))
     }
 
     pub fn value(&self) -> u64 {
@@ -452,6 +444,21 @@ impl GetOperationsRequest {
 mod tests {
     use super::*;
     use commonware_utils::NZU64;
+
+    #[test]
+    fn test_request_id_generation() {
+        let id1 = RequestId::new();
+        let id2 = RequestId::new();
+        let id3 = RequestId::new();
+
+        // Request IDs should be incrementing
+        assert!(id2.value() > id1.value());
+        assert!(id3.value() > id2.value());
+
+        // Should be consecutive
+        assert_eq!(id2.value(), id1.value() + 1);
+        assert_eq!(id3.value(), id2.value() + 1);
+    }
 
     #[test]
     fn test_get_operations_request_validation() {
