@@ -187,11 +187,11 @@ where
             .clone()
             .send(request)
             .await
-            .map_err(|_| Error::IoTaskUnavailable("request channel closed".to_string()))?;
+            .map_err(|_| Error::ResolverError("request channel closed".to_string()))?;
 
         response_receiver
             .await
-            .map_err(|_| Error::IoTaskUnavailable("response channel closed".to_string()))?
+            .map_err(|_| Error::ResolverError("response channel closed".to_string()))?
     }
 }
 

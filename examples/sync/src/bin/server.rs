@@ -261,7 +261,7 @@ fn create_error_response(request_id: RequestId, error: Error) -> Message {
     let error_code = match error {
         Error::InvalidRequest { .. } => commonware_sync::ErrorCode::InvalidRequest,
         Error::DatabaseError(_) => commonware_sync::ErrorCode::DatabaseError,
-        Error::ServerError(_) | Error::IoTaskUnavailable(_) => {
+        Error::ServerError(_) | Error::ResolverError(_) => {
             commonware_sync::ErrorCode::InternalError
         }
         Error::UnexpectedResponse => commonware_sync::ErrorCode::InvalidRequest,
