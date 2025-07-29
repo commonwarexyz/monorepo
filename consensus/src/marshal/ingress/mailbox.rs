@@ -18,7 +18,7 @@ pub enum Message<V: Variant, B: Block> {
     /// A request to retrieve a block by its digest.
     Get {
         /// The digest of the block to retrieve.
-        payload: B::Commitment,
+        commitment: B::Commitment,
         /// A channel to send the retrieved block.
         response: oneshot::Sender<Option<B>>,
     },
@@ -28,21 +28,21 @@ pub enum Message<V: Variant, B: Block> {
         /// to help locate the block.
         view: Option<u64>,
         /// The digest of the block to retrieve.
-        payload: B::Commitment,
+        commitment: B::Commitment,
         /// A channel to send the retrieved block.
         response: oneshot::Sender<B>,
     },
     /// A request to broadcast a block to all peers.
     Broadcast {
         /// The block to broadcast.
-        payload: B,
+        block: B,
     },
     /// A notification that a block has been verified by the application.
     Verified {
         /// The view in which the block was verified.
         view: u64,
         /// The verified block.
-        payload: B,
+        block: B,
     },
 
     // -------------------- Consensus Engine Messages --------------------
@@ -70,14 +70,14 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         Self { sender }
     }
 
-    /// Get is a best-effort attempt to retrieve a given payload from local
-    /// storage. It is not an indication to go fetch the payload from the network.
-    pub async fn get(&mut self, payload: B::Commitment) -> oneshot::Receiver<Option<B>> {
+    /// Get is a best-effort attempt to retrieve a given block from local
+    /// storage. It is not an indication to go fetch the block from the network.
+    pub async fn get(&mut self, commitment: B::Commitment) -> oneshot::Receiver<Option<B>> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
             .send(Message::Get {
-                payload,
+                commitment,
                 response: tx,
             })
             .await
@@ -88,23 +88,26 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         rx
     }
 
-    /// Subscribe is a request to retrieve a block by its digest.
+    /// Subscribe is a request to retrieve a block by its commitment.
     ///
     /// If the block is found available locally, the block will be returned immediately.
     ///
     /// If the block is not available locally, the request will be registered and the caller will
-    /// be notified when the block is available.
+    /// be notified when the block is available. If the block is not finalized, it's possible that
+    /// it may never become available.
+    ///
+    /// The oneshot receiver should be dropped to cancel the subscription.
     pub async fn subscribe(
         &mut self,
         view: Option<u64>,
-        payload: B::Commitment,
+        commitment: B::Commitment,
     ) -> oneshot::Receiver<B> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
             .send(Message::Subscribe {
                 view,
-                payload,
+                commitment,
                 response: tx,
             })
             .await
@@ -115,11 +118,11 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
         rx
     }
 
-    /// Broadcast indicates that a payload should be sent to all peers.
-    pub async fn broadcast(&mut self, payload: B) {
+    /// Broadcast indicates that a block should be sent to all peers.
+    pub async fn broadcast(&mut self, block: B) {
         if self
             .sender
-            .send(Message::Broadcast { payload })
+            .send(Message::Broadcast { block })
             .await
             .is_err()
         {
@@ -128,10 +131,10 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     }
 
     /// Notifies the actor that a block has been verified.
-    pub async fn verified(&mut self, view: u64, payload: B) {
+    pub async fn verified(&mut self, view: u64, block: B) {
         if self
             .sender
-            .send(Message::Verified { view, payload })
+            .send(Message::Verified { view, block })
             .await
             .is_err()
         {
