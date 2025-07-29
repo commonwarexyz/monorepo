@@ -23,32 +23,6 @@ type Message = (Option<Vec<u8>>, Vec<u8>);
 
 #[derive(Debug, Clone)]
 enum FuzzOperation {
-    EncryptDecryptMinPkWithRng {
-        master_secret: Scalar,
-        target: Vec<u8>,
-        message: [u8; 32],
-        rng_seed: u64,
-    },
-    EncryptDecryptMinSigWithRng {
-        master_secret: Scalar,
-        target: Vec<u8>,
-        message: [u8; 32],
-        rng_seed: u64,
-    },
-    EncryptDecryptWithNamespaceMinPkWithRng {
-        master_secret: Scalar,
-        namespace: Vec<u8>,
-        target: Vec<u8>,
-        message: [u8; 32],
-        rng_seed: u64,
-    },
-    EncryptDecryptWithNamespaceMinSigWithRng {
-        master_secret: Scalar,
-        namespace: Vec<u8>,
-        target: Vec<u8>,
-        message: [u8; 32],
-        rng_seed: u64,
-    },
     EncryptDecryptMinPk {
         master_secret: Scalar,
         target: Vec<u8>,
@@ -117,7 +91,7 @@ enum FuzzOperation {
 
 impl<'a> Arbitrary<'a> for FuzzOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
-        let choice = u.int_in_range(0..=13)?;
+        let choice = u.int_in_range(0..=9)?;
 
         match choice {
             0 => Ok(FuzzOperation::EncryptDecryptMinPk {
@@ -183,32 +157,6 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             9 => Ok(FuzzOperation::DecryptArbitraryMinSig {
                 signature: arbitrary_minsig_signature(u)?,
                 ciphertext: arbitrary_ciphertext_minsig(u)?,
-            }),
-            10 => Ok(FuzzOperation::EncryptDecryptMinPkWithRng {
-                master_secret: common::arbitrary_scalar(u)?,
-                target: common::arbitrary_bytes(u, 0, 100)?,
-                message: u.arbitrary()?,
-                rng_seed: u.arbitrary()?,
-            }),
-            11 => Ok(FuzzOperation::EncryptDecryptMinSigWithRng {
-                master_secret: common::arbitrary_scalar(u)?,
-                target: common::arbitrary_bytes(u, 0, 100)?,
-                message: u.arbitrary()?,
-                rng_seed: u.arbitrary()?,
-            }),
-            12 => Ok(FuzzOperation::EncryptDecryptWithNamespaceMinPkWithRng {
-                master_secret: common::arbitrary_scalar(u)?,
-                namespace: common::arbitrary_bytes(u, 0, 50)?,
-                target: common::arbitrary_bytes(u, 0, 100)?,
-                message: u.arbitrary()?,
-                rng_seed: u.arbitrary()?,
-            }),
-            13 => Ok(FuzzOperation::EncryptDecryptWithNamespaceMinSigWithRng {
-                master_secret: common::arbitrary_scalar(u)?,
-                namespace: common::arbitrary_bytes(u, 0, 50)?,
-                target: common::arbitrary_bytes(u, 0, 100)?,
-                message: u.arbitrary()?,
-                rng_seed: u.arbitrary()?,
             }),
             _ => unreachable!(),
         }
@@ -421,108 +369,6 @@ fn fuzz(op: FuzzOperation) {
             ciphertext,
         } => {
             let _ = decrypt::<MinSig>(&signature, &ciphertext);
-        }
-
-        FuzzOperation::EncryptDecryptMinPkWithRng {
-            master_secret,
-            target,
-            message,
-            rng_seed,
-        } => {
-            let master_public = compute_public::<MinPk>(&master_secret);
-            let message_block = Block::new(message);
-
-            let mut rng = StdRng::seed_from_u64(rng_seed);
-            let ciphertext =
-                encrypt::<_, MinPk>(&mut rng, master_public, (None, &target), &message_block);
-
-            let signature = sign_message::<MinPk>(&master_secret, None, &target);
-            let decrypted = decrypt::<MinPk>(&signature, &ciphertext);
-
-            if let Some(decrypted_block) = decrypted {
-                assert_eq!(message_block, decrypted_block);
-            } else {
-                panic!("Decryption failed for valid ciphertext");
-            }
-        }
-
-        FuzzOperation::EncryptDecryptMinSigWithRng {
-            master_secret,
-            target,
-            message,
-            rng_seed,
-        } => {
-            let master_public = compute_public::<MinSig>(&master_secret);
-            let message_block = Block::new(message);
-
-            let mut rng = StdRng::seed_from_u64(rng_seed);
-            let ciphertext =
-                encrypt::<_, MinSig>(&mut rng, master_public, (None, &target), &message_block);
-
-            let signature = sign_message::<MinSig>(&master_secret, None, &target);
-            let decrypted = decrypt::<MinSig>(&signature, &ciphertext);
-
-            if let Some(decrypted_block) = decrypted {
-                assert_eq!(message_block, decrypted_block);
-            } else {
-                panic!("Decryption failed for valid ciphertext");
-            }
-        }
-
-        FuzzOperation::EncryptDecryptWithNamespaceMinPkWithRng {
-            master_secret,
-            namespace,
-            target,
-            message,
-            rng_seed,
-        } => {
-            let master_public = compute_public::<MinPk>(&master_secret);
-            let message_block = Block::new(message);
-
-            let mut rng = StdRng::seed_from_u64(rng_seed);
-            let ciphertext = encrypt::<_, MinPk>(
-                &mut rng,
-                master_public,
-                (Some(&namespace), &target),
-                &message_block,
-            );
-
-            let signature = sign_message::<MinPk>(&master_secret, Some(&namespace), &target);
-            let decrypted = decrypt::<MinPk>(&signature, &ciphertext);
-
-            if let Some(decrypted_block) = decrypted {
-                assert_eq!(message_block, decrypted_block);
-            } else {
-                panic!("Decryption failed for valid ciphertext with namespace");
-            }
-        }
-
-        FuzzOperation::EncryptDecryptWithNamespaceMinSigWithRng {
-            master_secret,
-            namespace,
-            target,
-            message,
-            rng_seed,
-        } => {
-            let master_public = compute_public::<MinSig>(&master_secret);
-            let message_block = Block::new(message);
-
-            let mut rng = StdRng::seed_from_u64(rng_seed);
-            let ciphertext = encrypt::<_, MinSig>(
-                &mut rng,
-                master_public,
-                (Some(&namespace), &target),
-                &message_block,
-            );
-
-            let signature = sign_message::<MinSig>(&master_secret, Some(&namespace), &target);
-            let decrypted = decrypt::<MinSig>(&signature, &ciphertext);
-
-            if let Some(decrypted_block) = decrypted {
-                assert_eq!(message_block, decrypted_block);
-            } else {
-                panic!("Decryption failed for valid ciphertext with namespace");
-            }
         }
     }
 }
