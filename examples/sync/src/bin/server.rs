@@ -256,7 +256,7 @@ where
     })
 }
 
-/// Create an error response message with proper request ID correlation.
+/// Create an error response message
 fn create_error_response(request_id: RequestId, error: ProtocolError) -> Message {
     let error_code = match error {
         ProtocolError::InvalidRequest { .. } => commonware_sync::ErrorCode::InvalidRequest,
