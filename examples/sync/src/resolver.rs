@@ -41,7 +41,10 @@ where
 #[derive(Clone)]
 pub struct Resolver<E>
 where
-    E: commonware_runtime::Network + commonware_runtime::Spawner + Clone,
+    E: commonware_runtime::Network
+        + commonware_runtime::Spawner
+        + commonware_runtime::Clock
+        + Clone,
 {
     command_sender: mpsc::Sender<IoCommand>,
     io_task_handle_receiver: Arc<RwLock<Option<oneshot::Receiver<commonware_runtime::Handle<()>>>>>,
@@ -63,7 +66,7 @@ enum IoCommand {
 /// I/O task that manages connection and request/response correlation.
 struct IoTask<E>
 where
-    E: commonware_runtime::Network + commonware_runtime::Spawner,
+    E: commonware_runtime::Network + commonware_runtime::Spawner + commonware_runtime::Clock,
 {
     server_addr: SocketAddr,
     command_receiver: mpsc::Receiver<IoCommand>,
@@ -75,23 +78,29 @@ where
 
 impl<E> IoTask<E>
 where
-    E: commonware_runtime::Network + commonware_runtime::Spawner,
+    E: commonware_runtime::Network + commonware_runtime::Spawner + commonware_runtime::Clock,
 {
     async fn run(mut self) {
         info!(server_addr = %self.server_addr, "I/O task starting");
-
-        // Establish initial connection
-        if let Err(e) = self.establish_connection().await {
-            error!(error = %e, "failed to establish initial connection");
-            return;
-        }
 
         loop {
             if self.shutdown_flag.load(Ordering::Relaxed) {
                 break;
             }
 
-            let connection = self.connection.as_mut().unwrap();
+            // Ensure we have a valid connection before proceeding
+            if self.connection.is_none() {
+                if let Err(e) = self.establish_connection().await {
+                    error!(error = %e, "failed to establish connection, retrying in 1s...");
+                    // Add a small delay before retrying to avoid tight loop on persistent failures
+                    self.context.sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+            }
+
+            // Take ownership of connection to avoid borrow conflicts
+            let mut connection = self.connection.take().unwrap();
+            let mut connection_failed = false;
 
             select! {
                 // Wait for request to send
@@ -109,9 +118,11 @@ where
                                 if let Some(sender) = self.pending_requests.remove(&request_id) {
                                     let _ = sender.send(Err(ResolverError::NetworkError(e.to_string())));
                                 }
-                                break; // Connection error, exit to reconnect
+                                // Mark connection as failed
+                                connection_failed = true;
+                            } else {
+                                debug!(request_id = request_id.value(), "request sent, awaiting response");
                             }
-                            debug!(request_id = request_id.value(), "request sent, awaiting response");
                         },
                         Some(IoCommand::Shutdown) | None => break,
                     }
@@ -134,16 +145,27 @@ where
                                 },
                                 Err(e) => {
                                     error!(error = %e, "failed to decode response");
-                                    break; // Connection corrupted, exit to reconnect
+                                    // Mark connection as failed
+                                    connection_failed = true;
                                 }
                             }
                         },
                         Err(e) => {
                             error!(error = %e, "connection error, will reconnect");
-                            break; // Connection error, exit to reconnect
+                            // Mark connection as failed
+                            connection_failed = true;
                         }
                     }
                 }
+            }
+
+            // Handle connection state after the select
+            if connection_failed {
+                // Connection failed, don't restore it (leave self.connection as None)
+                continue;
+            } else {
+                // Connection is still good, restore it
+                self.connection = Some(connection);
             }
         }
 
@@ -177,7 +199,10 @@ where
 
 impl<E> Resolver<E>
 where
-    E: commonware_runtime::Network + commonware_runtime::Spawner + Clone,
+    E: commonware_runtime::Network
+        + commonware_runtime::Spawner
+        + commonware_runtime::Clock
+        + Clone,
 {
     pub fn new(context: E, server_addr: SocketAddr) -> Self {
         let (command_sender, command_receiver) = mpsc::channel(64);
@@ -259,7 +284,10 @@ where
 
 impl<E> Drop for Resolver<E>
 where
-    E: commonware_runtime::Network + commonware_runtime::Spawner + Clone,
+    E: commonware_runtime::Network
+        + commonware_runtime::Spawner
+        + commonware_runtime::Clock
+        + Clone,
 {
     fn drop(&mut self) {
         self.shutdown_flag.store(true, Ordering::Relaxed);
@@ -280,7 +308,10 @@ where
 
 impl<E> ResolverTrait for Resolver<E>
 where
-    E: commonware_runtime::Network + commonware_runtime::Spawner + Clone,
+    E: commonware_runtime::Network
+        + commonware_runtime::Spawner
+        + commonware_runtime::Clock
+        + Clone,
 {
     type Digest = Digest;
     type Key = crate::Key;
