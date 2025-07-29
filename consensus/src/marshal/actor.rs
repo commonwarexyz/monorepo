@@ -34,7 +34,7 @@ use governor::{clock::Clock as GClock, Quota};
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{btree_map::Entry, BTreeMap},
     marker::PhantomData,
     time::{Duration, Instant},
 };
@@ -105,7 +105,7 @@ pub struct Actor<
     last_processed_view: u64,
 
     // Outstanding waiters for blocks
-    waiters: HashMap<B::Commitment, Waiter<B>>,
+    waiters: BTreeMap<B::Commitment, Waiter<B>>,
 
     // ---------- Prunable Storage ----------
     // Blocks verified stored by view
@@ -305,7 +305,7 @@ impl<
                 partition_prefix: config.partition_prefix,
 
                 last_processed_view: 0,
-                waiters: HashMap::new(),
+                waiters: BTreeMap::new(),
 
                 verified_blocks,
                 notarized_blocks,
