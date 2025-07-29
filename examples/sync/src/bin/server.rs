@@ -3,7 +3,6 @@
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Listener, Metrics as _, Network, Runner, RwLock, Spawner as _,
@@ -12,10 +11,11 @@ use commonware_storage::{adb::any::sync::SyncTarget, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     crate_version, create_adb_config, create_test_operations, Database, ErrorResponse,
-    GetOperationsRequest, GetOperationsResponse, Message, Operation, ProtocolError,
-    MAX_MESSAGE_SIZE,
+    GetOperationsRequest, GetOperationsResponse, GetSyncTargetRequest, GetSyncTargetResponse,
+    Message, Operation, ProtocolError, RequestId, MAX_MESSAGE_SIZE,
 };
 use commonware_utils::parse_duration;
+use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
@@ -23,9 +23,11 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime},
 };
+use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 const MAX_BATCH_SIZE: u64 = 100;
+const MAX_CONCURRENT_REQUESTS: usize = 100;
 
 /// Server configuration.
 #[derive(Debug, Clone)]
@@ -162,7 +164,10 @@ where
 }
 
 /// Handle a request for sync target.
-async fn handle_get_sync_target<E>(state: &State<E>) -> Result<SyncTarget<Digest>, ProtocolError>
+async fn handle_get_sync_target<E>(
+    state: &State<E>,
+    request: GetSyncTargetRequest,
+) -> Result<GetSyncTargetResponse, ProtocolError>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
@@ -180,11 +185,15 @@ where
 
     drop(database);
 
-    let response = SyncTarget {
-        root,
-        lower_bound_ops,
-        upper_bound_ops,
+    let response = GetSyncTargetResponse {
+        request_id: request.request_id,
+        target: SyncTarget {
+            root,
+            lower_bound_ops,
+            upper_bound_ops,
+        },
     };
+
     debug!(?response, "serving target update");
     Ok(response)
 }
@@ -202,7 +211,7 @@ where
 
     let database = state.database.read().await;
 
-    // Check if we have enough operations
+    // Calculate how many operations to return
     let db_size = database.op_count();
     if request.start_loc >= db_size {
         return Err(ProtocolError::InvalidRequest {
@@ -213,11 +222,11 @@ where
         });
     }
 
-    // Calculate how many operations to return
     let max_ops = std::cmp::min(request.max_ops.get(), db_size - request.start_loc);
     let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
 
     debug!(
+        request_id = request.request_id.value(),
         max_ops,
         start_loc = request.start_loc,
         db_size,
@@ -232,95 +241,180 @@ where
     drop(database);
 
     let (proof, operations) = result.map_err(|e| {
-        warn!(error = %e, "❌ failed to generate historical proof");
+        warn!(error = %e, "failed to generate historical proof");
         ProtocolError::DatabaseError(e)
     })?;
 
     debug!(
+        request_id = request.request_id.value(),
         operations_len = operations.len(),
         proof_len = proof.digests.len(),
         "sending operations and proof"
     );
 
-    Ok(GetOperationsResponse { proof, operations })
+    Ok(GetOperationsResponse {
+        request_id: request.request_id,
+        proof,
+        operations,
+    })
 }
 
-/// Handle a client connection using [commonware_runtime::Network].
+/// Create an error response message with proper request ID correlation.
+fn create_error_response<E>(
+    request_id: RequestId,
+    error: ProtocolError,
+    client_addr: SocketAddr,
+    operation: &str,
+    state: &State<E>,
+) -> Message
+where
+    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+{
+    warn!(
+        client_addr = %client_addr,
+        request_id = request_id.value(),
+        error = %error,
+        "{operation} failed",
+    );
+    state.error_counter.inc();
+
+    let error_code = match error {
+        ProtocolError::InvalidRequest { .. } => commonware_sync::ErrorCode::InvalidRequest,
+        ProtocolError::DatabaseError(_) => commonware_sync::ErrorCode::DatabaseError,
+        ProtocolError::NetworkError(_) => commonware_sync::ErrorCode::NetworkError,
+    };
+
+    Message::Error(ErrorResponse {
+        request_id,
+        error_code,
+        message: error.to_string(),
+    })
+}
+
+/// Process a message asynchronously and return the appropriate response.
+async fn process_request<E>(
+    state: Arc<State<E>>,
+    message: Message,
+    client_addr: SocketAddr,
+) -> Message
+where
+    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+{
+    let request_id = message.request_id();
+
+    match message {
+        Message::GetOperationsRequest(request) => {
+            let request_id = request.request_id;
+            match handle_get_operations_request(&state, request).await {
+                Ok(response) => Message::GetOperationsResponse(response),
+                Err(e) => {
+                    create_error_response(request_id, e, client_addr, "getOperations", &*state)
+                }
+            }
+        }
+
+        Message::GetSyncTargetRequest(request) => {
+            let request_id = request.request_id;
+            match handle_get_sync_target(&state, request).await {
+                Ok(response) => Message::GetSyncTargetResponse(response),
+                Err(e) => {
+                    create_error_response(request_id, e, client_addr, "getSyncTarget", &*state)
+                }
+            }
+        }
+
+        _ => create_error_response(
+            request_id,
+            ProtocolError::InvalidRequest {
+                message: "unexpected message type".to_string(),
+            },
+            client_addr,
+            "unexpected message type",
+            &*state,
+        ),
+    }
+}
+
+/// Handle a client connection with concurrent request processing.
 async fn handle_client<E>(
     state: Arc<State<E>>,
     mut sink: commonware_runtime::SinkOf<E>,
     mut stream: commonware_runtime::StreamOf<E>,
     client_addr: SocketAddr,
+    context: E,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
         + commonware_runtime::Metrics
-        + commonware_runtime::Network,
+        + commonware_runtime::Network
+        + commonware_runtime::Spawner
+        + Clone,
 {
     info!(client_addr = %client_addr, "client connected");
 
+    let (response_sender, mut response_receiver) = mpsc::channel::<Message>(64);
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
+
     loop {
-        // Read length-prefixed message
-        let message_data = match recv_frame(&mut stream, MAX_MESSAGE_SIZE).await {
-            Ok(data) => data,
-            Err(e) => {
-                info!(client_addr = %client_addr, error = %e, "recv failed (likely because client disconnected)");
-                state.error_counter.inc();
-                break;
-            }
-        };
+        select! {
+            message_result = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
+                match message_result {
+                    Ok(message_data) => {
+                        let message: Message = match Message::decode(&message_data[..]) {
+                            Ok(msg) => msg,
+                            Err(e) => {
+                                error!(client_addr = %client_addr, error = %e, "failed to parse message");
+                                state.error_counter.inc();
+                                continue;
+                            }
+                        };
 
-        // Parse the message
-        let message: Message = match Message::decode(&message_data[..]) {
-            Ok(msg) => msg,
-            Err(e) => {
-                error!(client_addr = %client_addr, error = %e, "❌ failed to parse message");
-                state.error_counter.inc();
-                continue;
-            }
-        };
+                        let permit = match semaphore.clone().try_acquire_owned() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                warn!(client_addr = %client_addr, "too many concurrent requests, dropping request");
+                                state.error_counter.inc();
+                                continue;
+                            }
+                        };
 
-        // Handle the message
-        let response = match message {
-            Message::GetOperationsRequest(request) => {
-                match handle_get_operations_request(&state, request).await {
-                    Ok(response) => Message::GetOperationsResponse(response),
+                        let state_clone = state.clone();
+                        let mut response_sender_clone = response_sender.clone();
+
+                        context.with_label("request-handler").spawn(move |_| async move {
+                            let _permit = permit;
+                            let response = process_request(state_clone, message, client_addr).await;
+
+                            if let Err(e) = response_sender_clone.send(response).await {
+                                debug!(client_addr = %client_addr, error = %e, "failed to send response to main loop");
+                            }
+                        });
+                    }
                     Err(e) => {
-                        warn!(client_addr = %client_addr, error = %e, "❌ getOperations failed");
+                        info!(client_addr = %client_addr, error = %e, "recv failed (client likely disconnected)");
                         state.error_counter.inc();
-                        Message::Error(e.into())
+                        break Ok(());
                     }
                 }
-            }
-            Message::GetSyncTargetRequest => match handle_get_sync_target(&state).await {
-                Ok(response) => Message::GetSyncTargetResponse(response),
-                Err(e) => {
-                    warn!(client_addr = %client_addr, error = %e, "❌ getSyncTarget failed");
-                    state.error_counter.inc();
-                    Message::Error(e.into())
-                }
             },
-            _ => {
-                warn!(client_addr = %client_addr, "❌ unexpected message type");
-                state.error_counter.inc();
-                Message::Error(ErrorResponse {
-                    error_code: commonware_sync::ErrorCode::InvalidRequest,
-                    message: "unexpected message type".to_string(),
-                })
-            }
-        };
 
-        // Send the response with length prefix
-        let response_data = response.encode().to_vec();
-        if let Err(e) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
-            info!(client_addr = %client_addr, error = %e, "send failed (likely because client disconnected)");
-            state.error_counter.inc();
-            break;
+            response_opt = response_receiver.next() => {
+                if let Some(response) = response_opt {
+                    let response_data = response.encode().to_vec();
+
+                    if let Err(e) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
+                        info!(client_addr = %client_addr, error = %e, "send failed (client likely disconnected)");
+                        state.error_counter.inc();
+                        break Ok(());
+                    }
+                } else {
+                    // Channel closed
+                    break Ok(());
+                }
+            }
         }
     }
-
-    Ok(())
 }
 
 fn main() {
@@ -530,9 +624,10 @@ fn main() {
                     match client_result {
                         Ok((client_addr, sink, stream)) => {
                             let state = state.clone();
+                            let context = context.clone();
                             context.with_label("client").spawn(move|_|async move {
                                 if let Err(e) =
-                                    handle_client(state.clone(), sink, stream, client_addr).await
+                                    handle_client(state.clone(), sink, stream, client_addr, context.clone()).await
                                 {
                                     error!(client_addr = %client_addr, error = %e, "❌ error handling client");
                                 }

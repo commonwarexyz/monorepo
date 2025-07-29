@@ -55,7 +55,7 @@ async fn target_update_task<E>(
     initial_target: SyncTarget<Digest>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
-    E: commonware_runtime::Network + commonware_runtime::Clock,
+    E: commonware_runtime::Network + commonware_runtime::Clock + commonware_runtime::Spawner,
 {
     let mut current_target = initial_target;
 
