@@ -23,11 +23,9 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 const MAX_BATCH_SIZE: u64 = 100;
-const MAX_CONCURRENT_REQUESTS: usize = 100;
 
 /// Server configuration.
 #[derive(Debug, Clone)]
@@ -211,7 +209,7 @@ where
 
     let database = state.database.read().await;
 
-    // Calculate how many operations to return
+    // Check if we have enough operations
     let db_size = database.op_count();
     if request.start_loc >= db_size {
         return Err(ProtocolError::InvalidRequest {
@@ -222,6 +220,7 @@ where
         });
     }
 
+    // Calculate how many operations to return
     let max_ops = std::cmp::min(request.max_ops.get(), db_size - request.start_loc);
     let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
 
@@ -354,7 +353,6 @@ where
     info!(client_addr = %client_addr, "client connected");
 
     let (response_sender, mut response_receiver) = mpsc::channel::<Message>(64);
-    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
 
     loop {
         select! {
@@ -370,20 +368,10 @@ where
                             }
                         };
 
-                        let permit = match semaphore.clone().try_acquire_owned() {
-                            Ok(permit) => permit,
-                            Err(_) => {
-                                warn!(client_addr = %client_addr, "too many concurrent requests, dropping request");
-                                state.error_counter.inc();
-                                continue;
-                            }
-                        };
-
                         let state_clone = state.clone();
                         let mut response_sender_clone = response_sender.clone();
 
                         context.with_label("request-handler").spawn(move |_| async move {
-                            let _permit = permit;
                             let response = process_request(state_clone, message, client_addr).await;
 
                             if let Err(e) = response_sender_clone.send(response).await {
