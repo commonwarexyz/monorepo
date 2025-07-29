@@ -43,10 +43,10 @@ struct IoTask<E>
 where
     E: commonware_runtime::Network + commonware_runtime::Spawner + commonware_runtime::Clock,
 {
+    context: E,
     server_addr: SocketAddr,
     request_receiver: mpsc::Receiver<IoRequest>,
     pending_requests: HashMap<RequestId, oneshot::Sender<Result<Message, ResolverError>>>,
-    context: E,
 }
 
 impl<E> IoTask<E>
