@@ -26,11 +26,15 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{array::U64, Array};
-use futures::{channel::mpsc, try_join, StreamExt};
+use futures::{
+    channel::{mpsc, oneshot},
+    try_join, StreamExt,
+};
 use governor::{clock::Clock as GClock, Quota};
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 use std::{
+    collections::{hash_map::Entry, HashMap},
     marker::PhantomData,
     time::{Duration, Instant},
 };
@@ -42,6 +46,29 @@ enum SearchDepth {
     Verified = 1,
     Notarized = 2,
     Finalized = 3,
+}
+
+/// A waiter for a block.
+struct Waiter<B: Block> {
+    // The receiver registered with the buffer
+    receiver: oneshot::Receiver<B>,
+    // The responders to the request
+    responders: Vec<oneshot::Sender<B>>,
+}
+
+impl<B: Block> Waiter<B> {
+    /// Create a new waiter.
+    fn new(receiver: oneshot::Receiver<B>, responder: oneshot::Sender<B>) -> Self {
+        Self {
+            receiver,
+            responders: vec![responder],
+        }
+    }
+
+    /// Add a responder to the waiter.
+    fn add_responder(&mut self, responder: oneshot::Sender<B>) {
+        self.responders.push(responder);
+    }
 }
 
 /// Application actor.
@@ -85,7 +112,10 @@ pub struct Actor<
     // Last view processed
     last_processed_view: u64,
 
-    // ---------- Storage ----------
+    // Outstanding waiters for blocks
+    waiters: HashMap<B::Commitment, Waiter<B>>,
+
+    // ---------- Prunable Storage ----------
     // Blocks verified stored by view<>digest
     verified: prunable::Archive<TwoCap, R, B::Commitment, B>,
     // Notarizations stored by view<>digest
@@ -96,6 +126,8 @@ pub struct Actor<
     // Finalizations stored by view, stored temporarily
     finalization_by_view:
         prunable::Archive<TwoCap, R, B::Commitment, Finalization<V, B::Commitment>>,
+
+    // ---------- Long-Term Storage ----------
     // Finalizations stored by height
     finalized: immutable::Archive<R, B::Commitment, Finalization<V, B::Commitment>>,
     // Blocks finalized stored by height
@@ -271,6 +303,7 @@ impl<
                 partition_prefix: config.partition_prefix,
 
                 last_processed_view: 0,
+                waiters: HashMap::new(),
 
                 verified,
                 notarized,
@@ -340,6 +373,27 @@ impl<
 
         // Handle messages
         loop {
+            // Check for completed waiters
+            self.waiters.retain(|_, waiter| {
+                // Check for any canceled requests
+                waiter.responders.retain(|tx| !tx.is_canceled());
+                if waiter.responders.is_empty() {
+                    return false;
+                }
+
+                // Check for any completed receivers
+                match waiter.receiver.try_recv() {
+                    Ok(Some(block)) => {
+                        for responder in waiter.responders.drain(..) {
+                            let _ = responder.send(block.clone());
+                        }
+                        false
+                    }
+                    Ok(None) => true, // Block not ready, keep waiting
+                    Err(oneshot::Canceled) => false,
+                }
+            });
+
             // Select messages
             select! {
                 // Handle consensus before finalizer or backfiller
@@ -395,22 +449,49 @@ impl<
                                 resolver_by_digest.fetch(commitment).await;
                             }
                         }
-                        Message::Get { view, payload, response } => {
+                        Message::Get { payload, response } => {
+                            // Check for block locally
+                            let result = self.search_for_block(&mut buffer, payload, SearchDepth::Finalized).await;
+                            let _ = response.send(result);
+                        }
+                        Message::Subscribe { view, payload, response } => {
                             // Check for block locally
                             if let Some(block) = self.search_for_block(&mut buffer, payload, SearchDepth::Finalized).await {
                                 let _ = response.send(block);
                                 continue;
                             }
 
-                            // Fetch from network
+                            // We don't have the block locally, so fetch the block from the network
+                            // if we have an associated view. If we only have the digest, don't make
+                            // the request as we wouldn't know when to drop it, and the request may
+                            // never complete if the block is not finalized.
                             if let Some(view) = view {
-                                debug!(view, ?payload, "required block missing");
+                                // Sanity-check that we don't have the notarization for the view
+                                if self.get_notarization(Identifier::Index(view)).await.is_some() {
+                                    warn!(view, ?payload, "invalid get request: block not found, but notarization found");
+                                    continue;
+                                }
+
+                                // Fetch from network
+                                //
+                                // If this is a valid view, this request should be fine to "keep
+                                // open" even if the oneshot is cancelled.
+                                debug!(view, ?payload, "requested block missing");
                                 resolver_by_view.fetch(view.into()).await;
                             }
 
                             // Register waiter
                             debug!(view, ?payload, "registering waiter");
-                            buffer.subscribe_prepared(None, payload, None, response).await;
+                            match self.waiters.entry(payload) {
+                                Entry::Occupied(mut entry) => {
+                                    entry.get_mut().add_responder(response);
+                                }
+                                Entry::Vacant(entry) => {
+                                    let (tx, rx) = oneshot::channel();
+                                    buffer.subscribe_prepared(None, payload, None, tx).await;
+                                    entry.insert(Waiter::new(rx, response));
+                                }
+                            }
                         }
                     }
                 },
