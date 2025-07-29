@@ -10,9 +10,9 @@ use commonware_runtime::{
 use commonware_storage::{adb::any::sync::SyncTarget, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    crate_version, create_adb_config, create_test_operations, Database, Error, ErrorResponse,
-    GetOperationsRequest, GetOperationsResponse, GetSyncTargetRequest, GetSyncTargetResponse,
-    Message, Operation, RequestId, MAX_MESSAGE_SIZE,
+    crate_version, create_adb_config, create_test_operations, Database, Error, ErrorCode,
+    ErrorResponse, GetOperationsRequest, GetOperationsResponse, GetSyncTargetRequest,
+    GetSyncTargetResponse, Message, Operation, MAX_MESSAGE_SIZE,
 };
 use commonware_utils::parse_duration;
 use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -254,16 +254,6 @@ where
     })
 }
 
-/// Create an error response message
-fn create_error_response(request_id: RequestId, error: Error) -> Message {
-    let error_code = error.to_error_code();
-    Message::Error(ErrorResponse {
-        request_id,
-        error_code,
-        message: error.to_string(),
-    })
-}
-
 /// Handle a message from a client and return the appropriate response.
 async fn handle_message<E>(state: Arc<State<E>>, message: Message) -> Message
 where
@@ -276,7 +266,11 @@ where
                 Ok(response) => Message::GetOperationsResponse(response),
                 Err(e) => {
                     state.error_counter.inc();
-                    create_error_response(request_id, e)
+                    Message::Error(ErrorResponse {
+                        request_id,
+                        error_code: e.to_error_code(),
+                        message: e.to_string(),
+                    })
                 }
             }
         }
@@ -286,17 +280,22 @@ where
                 Ok(response) => Message::GetSyncTargetResponse(response),
                 Err(e) => {
                     state.error_counter.inc();
-                    create_error_response(request_id, e)
+                    Message::Error(ErrorResponse {
+                        request_id,
+                        error_code: e.to_error_code(),
+                        message: e.to_string(),
+                    })
                 }
             }
         }
 
         _ => {
             state.error_counter.inc();
-            create_error_response(
+            Message::Error(ErrorResponse {
                 request_id,
-                Error::InvalidRequest("unexpected message type".to_string()),
-            )
+                error_code: ErrorCode::InvalidRequest,
+                message: "unexpected message type".to_string(),
+            })
         }
     }
 }
