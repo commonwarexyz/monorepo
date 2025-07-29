@@ -19,6 +19,8 @@ use futures::{
 use std::{collections::HashMap, marker::PhantomData, net::SocketAddr, num::NonZeroU64};
 use tracing::{debug, error, info, warn};
 
+const REQUEST_BUFFER_SIZE: usize = 64;
+
 /// Request data sent to the I/O task.
 struct IoRequest {
     message: Message,
@@ -132,7 +134,7 @@ where
         + Clone,
 {
     pub fn new(context: E, server_addr: SocketAddr) -> Self {
-        let (request_sender, request_receiver) = mpsc::channel(64);
+        let (request_sender, request_receiver) = mpsc::channel(REQUEST_BUFFER_SIZE);
 
         let io_task = IoTask {
             server_addr,
