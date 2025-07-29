@@ -33,7 +33,6 @@ where
 
 /// Request data sent to the I/O task.
 struct IoRequest {
-    request_id: RequestId,
     message: Message,
     response_sender: oneshot::Sender<Result<Message, ResolverError>>,
 }
@@ -73,7 +72,8 @@ where
                 // Wait for request to send
                 request_opt = self.request_receiver.next() => {
                     match request_opt {
-                        Some(IoRequest { request_id, message, response_sender }) => {
+                        Some(IoRequest { message, response_sender }) => {
+                            let request_id = message.request_id();
                             // Store pending request for correlation
                             self.pending_requests.insert(request_id, response_sender);
 
@@ -174,12 +174,9 @@ where
     }
 
     async fn send_request(&self, message: Message) -> Result<Message, ResolverError> {
-        // Extract the request_id from the message itself - don't create a new one!
-        let request_id = message.request_id();
         let (response_sender, response_receiver) = oneshot::channel();
 
         let request = IoRequest {
-            request_id,
             message,
             response_sender,
         };
