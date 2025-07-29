@@ -16,7 +16,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Metrics as MetricsTrait, Storage};
 use commonware_utils::{Array, NZU64};
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{future::Either, stream::FuturesUnordered, StreamExt};
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
@@ -337,6 +337,9 @@ where
                 }
             }
             Err(e) => {
+                // We couldn't get the operations we requested. When we scan for gaps
+                // in the sync range, we will request them again if we haven't already
+                // requested or received these operations.
                 warn!(start_loc, error = ?e, "batch fetch failed, retrying");
             }
         }
@@ -345,27 +348,22 @@ where
 
     /// Wait for the next synchronization event.
     async fn wait_for_event(&mut self) -> Result<SyncEvent<H::Digest, K, V>, Error> {
-        if let Some(ref mut update_rx) = self.config.update_receiver {
-            select! {
-                update = update_rx.next() => {
-                    match update {
-                        Some(target) => Ok(SyncEvent::TargetUpdate(target)),
-                        None => Ok(SyncEvent::UpdateChannelClosed),
-                    }
-                },
-                result = self.outstanding_requests.futures_mut().next() => {
-                    let fetch_result = result.ok_or(Error::SyncStalled)?;
-                    Ok(SyncEvent::BatchReceived(fetch_result))
-                },
-            }
-        } else {
-            let fetch_result = self
-                .outstanding_requests
-                .futures_mut()
-                .next()
-                .await
-                .ok_or(Error::SyncStalled)?;
-            Ok(SyncEvent::BatchReceived(fetch_result))
+        let target_update_fut = match &mut self.config.update_receiver {
+            Some(update_rx) => Either::Left(update_rx.next()),
+            None => Either::Right(futures::future::pending()),
+        };
+
+        select! {
+            target = target_update_fut => {
+                match target {
+                    Some(target) => Ok(SyncEvent::TargetUpdate(target)),
+                    None => Ok(SyncEvent::UpdateChannelClosed),
+                }
+            },
+            result = self.outstanding_requests.futures_mut().next() => {
+                let fetch_result = result.ok_or(Error::SyncStalled)?;
+                Ok(SyncEvent::BatchReceived(fetch_result))
+            },
         }
     }
 
