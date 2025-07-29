@@ -47,7 +47,7 @@ pub trait Resolver: Send + Sync + 'static {
 
 /// Resolver that works by querying an [Any] database.
 #[derive(Clone)]
-pub(super) struct AnyResolver<E, K, V, H, T>
+pub struct AnyResolver<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
