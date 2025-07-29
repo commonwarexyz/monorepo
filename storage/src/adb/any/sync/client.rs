@@ -8,10 +8,10 @@ use crate::{
             },
             SyncConfig,
         },
-        operation::Fixed,
     },
     journal::fixed::{Config as JConfig, Journal},
     mmr::{self, iterator::leaf_num_to_pos},
+    store::operation::Fixed,
     translator::Translator,
 };
 use commonware_cryptography::Hasher;

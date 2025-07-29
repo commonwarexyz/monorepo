@@ -6,8 +6,7 @@
 
 use crate::{
     adb::{
-        any::{Any, Config as AConfig, UpdateResult},
-        operation::Fixed,
+        any::{Any, Config as AConfig},
         Error,
     },
     index::Index,
@@ -18,6 +17,7 @@ use crate::{
         storage::Grafting as GStorage,
         verification::Proof,
     },
+    store::{operation::Fixed, UpdateResult},
     translator::Translator,
 };
 use commonware_codec::{Encode as _, FixedSize};
