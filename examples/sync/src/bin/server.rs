@@ -299,11 +299,12 @@ where
 
         _ => {
             state.error_counter.inc();
-            Message::Error(ErrorResponse {
+            create_error_response(
                 request_id,
-                error_code: commonware_sync::ErrorCode::InvalidRequest,
-                message: "unexpected message type".to_string(),
-            })
+                ProtocolError::InvalidRequest {
+                    message: "unexpected message type".to_string(),
+                },
+            )
         }
     }
 }
