@@ -171,17 +171,14 @@ where
 {
     state.request_counter.inc();
 
-    let database = state.database.read().await;
-
     // Get the current database state
+    let database = state.database.read().await;
     let lower_bound_ops = database.inactivity_floor_loc();
     let upper_bound_ops = database.op_count().saturating_sub(1);
     let root = {
         let mut hasher = Standard::new();
         database.root(&mut hasher)
     };
-
-    drop(database);
 
     let response = GetSyncTargetResponse {
         request_id: request.request_id,
@@ -197,7 +194,7 @@ where
 }
 
 /// Handle a GetOperationsRequest and return operations with proof.
-async fn handle_get_operations_request<E>(
+async fn handle_get_operations<E>(
     state: &State<E>,
     request: GetOperationsRequest,
 ) -> Result<GetOperationsResponse, ProtocolError>
@@ -259,30 +256,12 @@ where
 }
 
 /// Create an error response message with proper request ID correlation.
-fn create_error_response<E>(
-    request_id: RequestId,
-    error: ProtocolError,
-    client_addr: SocketAddr,
-    operation: &str,
-    state: &State<E>,
-) -> Message
-where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-{
-    warn!(
-        client_addr = %client_addr,
-        request_id = request_id.value(),
-        error = %error,
-        "{operation} failed",
-    );
-    state.error_counter.inc();
-
+fn create_error_response(request_id: RequestId, error: ProtocolError) -> Message {
     let error_code = match error {
         ProtocolError::InvalidRequest { .. } => commonware_sync::ErrorCode::InvalidRequest,
         ProtocolError::DatabaseError(_) => commonware_sync::ErrorCode::DatabaseError,
         ProtocolError::NetworkError(_) => commonware_sync::ErrorCode::NetworkError,
     };
-
     Message::Error(ErrorResponse {
         request_id,
         error_code,
@@ -291,23 +270,18 @@ where
 }
 
 /// Process a message asynchronously and return the appropriate response.
-async fn process_request<E>(
-    state: Arc<State<E>>,
-    message: Message,
-    client_addr: SocketAddr,
-) -> Message
+async fn handle_message<E>(state: Arc<State<E>>, message: Message) -> Message
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
-    let request_id = message.request_id();
-
     match message {
         Message::GetOperationsRequest(request) => {
             let request_id = request.request_id;
-            match handle_get_operations_request(&state, request).await {
+            match handle_get_operations(&state, request).await {
                 Ok(response) => Message::GetOperationsResponse(response),
                 Err(e) => {
-                    create_error_response(request_id, e, client_addr, "getOperations", &*state)
+                    state.error_counter.inc();
+                    create_error_response(request_id, e)
                 }
             }
         }
@@ -317,20 +291,20 @@ where
             match handle_get_sync_target(&state, request).await {
                 Ok(response) => Message::GetSyncTargetResponse(response),
                 Err(e) => {
-                    create_error_response(request_id, e, client_addr, "getSyncTarget", &*state)
+                    state.error_counter.inc();
+                    create_error_response(request_id, e)
                 }
             }
         }
 
-        _ => create_error_response(
-            request_id,
-            ProtocolError::InvalidRequest {
+        _ => {
+            state.error_counter.inc();
+            Message::Error(ErrorResponse {
+                request_id: RequestId::default(),
+                error_code: commonware_sync::ErrorCode::InvalidRequest,
                 message: "unexpected message type".to_string(),
-            },
-            client_addr,
-            "unexpected message type",
-            &*state,
-        ),
+            })
+        }
     }
 }
 
@@ -370,10 +344,8 @@ where
 
                         let state_clone = state.clone();
                         let mut response_sender_clone = response_sender.clone();
-
                         context.with_label("request-handler").spawn(move |_| async move {
-                            let response = process_request(state_clone, message, client_addr).await;
-
+                            let response = handle_message(state_clone, message).await;
                             if let Err(e) = response_sender_clone.send(response).await {
                                 debug!(client_addr = %client_addr, error = %e, "failed to send response to main loop");
                             }
