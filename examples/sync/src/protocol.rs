@@ -177,9 +177,6 @@ pub enum Error {
     #[error("Database error: {0}")]
     DatabaseError(String),
 
-    #[error("Connection failed: {0}")]
-    ConnectionFailed(String),
-
     #[error("I/O task unavailable: {0}")]
     IoTaskUnavailable(String),
 
