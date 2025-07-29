@@ -1,7 +1,9 @@
 //! Provides a [Resolver] implementation that communicates with a remote server
 //! to fetch operations and proofs.
 
-use crate::{GetOperationsRequest, GetSyncTargetRequest, Message, RequestId, MAX_MESSAGE_SIZE};
+use crate::{
+    Error, GetOperationsRequest, GetSyncTargetRequest, Message, RequestId, MAX_MESSAGE_SIZE,
+};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
@@ -15,13 +17,12 @@ use futures::{
     SinkExt, StreamExt,
 };
 use std::{collections::HashMap, marker::PhantomData, net::SocketAddr, num::NonZeroU64};
-use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 /// Request data sent to the I/O task.
 struct IoRequest {
     message: Message,
-    response_sender: oneshot::Sender<Result<Message, ResolverError>>,
+    response_sender: oneshot::Sender<Result<Message, Error>>,
 }
 
 /// I/O task that manages connection and request/response correlation.
@@ -32,7 +33,7 @@ where
     context: E,
     server_addr: SocketAddr,
     request_receiver: mpsc::Receiver<IoRequest>,
-    pending_requests: HashMap<RequestId, oneshot::Sender<Result<Message, ResolverError>>>,
+    pending_requests: HashMap<RequestId, oneshot::Sender<Result<Message, Error>>>,
 }
 
 impl<E> IoTask<E>
@@ -150,7 +151,7 @@ where
         }
     }
 
-    pub async fn get_sync_target(&self) -> Result<SyncTarget<Digest>, ResolverError> {
+    pub async fn get_sync_target(&self) -> Result<SyncTarget<Digest>, Error> {
         let request = GetSyncTargetRequest {
             request_id: RequestId::new(),
         };
@@ -163,16 +164,16 @@ where
             Message::GetSyncTargetResponse(response) => Ok(response.target),
             Message::Error(err) => {
                 error!(error = %err.message, "server error");
-                Err(ResolverError::ServerError(err.message))
+                Err(Error::ServerError(err.message))
             }
             _ => {
                 error!("unexpected response type");
-                Err(ResolverError::UnexpectedResponse)
+                Err(Error::UnexpectedResponse)
             }
         }
     }
 
-    async fn send_request(&self, message: Message) -> Result<Message, ResolverError> {
+    async fn send_request(&self, message: Message) -> Result<Message, Error> {
         let (response_sender, response_receiver) = oneshot::channel();
 
         let request = IoRequest {
@@ -184,11 +185,11 @@ where
             .clone()
             .send(request)
             .await
-            .map_err(|_| ResolverError::ConnectionError("I/O task unavailable".to_string()))?;
+            .map_err(|_| Error::IoTaskUnavailable("request channel closed".to_string()))?;
 
         response_receiver
             .await
-            .map_err(|_| ResolverError::ConnectionError("I/O task dropped response".to_string()))?
+            .map_err(|_| Error::IoTaskUnavailable("response channel closed".to_string()))?
     }
 }
 
@@ -230,26 +231,10 @@ where
                     success_tx,
                 })
             }
-            Message::Error(err) => Err(SyncError::Resolver(Box::new(ResolverError::ServerError(
+            Message::Error(err) => Err(SyncError::Resolver(Box::new(Error::ServerError(
                 err.message,
             )))),
-            _ => Err(SyncError::Resolver(Box::new(
-                ResolverError::UnexpectedResponse,
-            ))),
+            _ => Err(SyncError::Resolver(Box::new(Error::UnexpectedResponse))),
         }
     }
-}
-
-#[derive(Debug, Clone, Error)]
-pub enum ResolverError {
-    #[error("connection error: {0}")]
-    ConnectionError(String),
-    #[error("network error: {0}")]
-    NetworkError(String),
-    #[error("protocol error: {0}")]
-    ProtocolError(String),
-    #[error("server error: {0}")]
-    ServerError(String),
-    #[error("unexpected response")]
-    UnexpectedResponse,
 }

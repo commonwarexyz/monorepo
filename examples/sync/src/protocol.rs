@@ -169,16 +169,31 @@ pub enum ErrorCode {
 }
 
 /// Errors that can occur during protocol operations.
-#[derive(Debug, Error)]
-pub enum ProtocolError {
+#[derive(Debug, Clone, Error)]
+pub enum Error {
     #[error("Invalid request: {message}")]
     InvalidRequest { message: String },
 
     #[error("Database error: {0}")]
-    DatabaseError(#[from] commonware_storage::adb::Error),
+    DatabaseError(String),
 
-    #[error("Network error: {0}")]
-    NetworkError(String),
+    #[error("Connection failed: {0}")]
+    ConnectionFailed(String),
+
+    #[error("I/O task unavailable: {0}")]
+    IoTaskUnavailable(String),
+
+    #[error("Message encoding failed: {0}")]
+    EncodingFailed(String),
+
+    #[error("Message decoding failed: {0}")]
+    DecodingFailed(String),
+
+    #[error("Server error: {0}")]
+    ServerError(String),
+
+    #[error("Unexpected response type")]
+    UnexpectedResponse,
 }
 
 impl Write for Message {
@@ -429,15 +444,15 @@ impl Read for ErrorCode {
 
 impl GetOperationsRequest {
     /// Validate the request parameters.
-    pub fn validate(&self) -> Result<(), ProtocolError> {
+    pub fn validate(&self) -> Result<(), Error> {
         if self.start_loc >= self.size {
-            return Err(ProtocolError::InvalidRequest {
+            return Err(Error::InvalidRequest {
                 message: format!("start_loc >= size ({}) >= ({})", self.start_loc, self.size),
             });
         }
 
         if self.max_ops.get() == 0 {
-            return Err(ProtocolError::InvalidRequest {
+            return Err(Error::InvalidRequest {
                 message: "max_ops cannot be zero".to_string(),
             });
         }
@@ -517,7 +532,7 @@ mod tests {
         };
         assert!(matches!(
             request.validate(),
-            Err(ProtocolError::InvalidRequest { .. })
+            Err(Error::InvalidRequest { .. })
         ));
 
         // start_loc beyond size
@@ -529,7 +544,7 @@ mod tests {
         };
         assert!(matches!(
             request.validate(),
-            Err(ProtocolError::InvalidRequest { .. })
+            Err(Error::InvalidRequest { .. })
         ));
     }
 }

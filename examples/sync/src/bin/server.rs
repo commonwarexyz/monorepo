@@ -10,9 +10,9 @@ use commonware_runtime::{
 use commonware_storage::{adb::any::sync::SyncTarget, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    crate_version, create_adb_config, create_test_operations, Database, ErrorResponse,
+    crate_version, create_adb_config, create_test_operations, Database, Error, ErrorResponse,
     GetOperationsRequest, GetOperationsResponse, GetSyncTargetRequest, GetSyncTargetResponse,
-    Message, Operation, ProtocolError, RequestId, MAX_MESSAGE_SIZE,
+    Message, Operation, RequestId, MAX_MESSAGE_SIZE,
 };
 use commonware_utils::parse_duration;
 use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -166,7 +166,7 @@ where
 async fn handle_get_sync_target<E>(
     state: &State<E>,
     request: GetSyncTargetRequest,
-) -> Result<GetSyncTargetResponse, ProtocolError>
+) -> Result<GetSyncTargetResponse, Error>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
@@ -198,7 +198,7 @@ where
 async fn handle_get_operations<E>(
     state: &State<E>,
     request: GetOperationsRequest,
-) -> Result<GetOperationsResponse, ProtocolError>
+) -> Result<GetOperationsResponse, Error>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
@@ -210,7 +210,7 @@ where
     // Check if we have enough operations
     let db_size = database.op_count();
     if request.start_loc >= db_size {
-        return Err(ProtocolError::InvalidRequest {
+        return Err(Error::InvalidRequest {
             message: format!(
                 "start_loc >= database size ({}) >= ({})",
                 request.start_loc, db_size
@@ -239,7 +239,7 @@ where
 
     let (proof, operations) = result.map_err(|e| {
         warn!(error = %e, "failed to generate historical proof");
-        ProtocolError::DatabaseError(e)
+        Error::DatabaseError(e.to_string())
     })?;
 
     debug!(
@@ -257,11 +257,16 @@ where
 }
 
 /// Create an error response message
-fn create_error_response(request_id: RequestId, error: ProtocolError) -> Message {
+fn create_error_response(request_id: RequestId, error: Error) -> Message {
     let error_code = match error {
-        ProtocolError::InvalidRequest { .. } => commonware_sync::ErrorCode::InvalidRequest,
-        ProtocolError::DatabaseError(_) => commonware_sync::ErrorCode::DatabaseError,
-        ProtocolError::NetworkError(_) => commonware_sync::ErrorCode::NetworkError,
+        Error::InvalidRequest { .. } => commonware_sync::ErrorCode::InvalidRequest,
+        Error::DatabaseError(_) => commonware_sync::ErrorCode::DatabaseError,
+        Error::ConnectionFailed(_)
+        | Error::IoTaskUnavailable(_)
+        | Error::EncodingFailed(_)
+        | Error::DecodingFailed(_) => commonware_sync::ErrorCode::NetworkError,
+        Error::ServerError(_) => commonware_sync::ErrorCode::InternalError,
+        Error::UnexpectedResponse => commonware_sync::ErrorCode::InvalidRequest,
     };
     Message::Error(ErrorResponse {
         request_id,
@@ -301,7 +306,7 @@ where
             state.error_counter.inc();
             create_error_response(
                 request_id,
-                ProtocolError::InvalidRequest {
+                Error::InvalidRequest {
                     message: "unexpected message type".to_string(),
                 },
             )
