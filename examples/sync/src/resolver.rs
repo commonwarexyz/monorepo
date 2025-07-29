@@ -18,15 +18,6 @@ use std::{collections::HashMap, marker::PhantomData, net::SocketAddr, num::NonZe
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-/// Connection state for persistent networking.
-struct Connection<E>
-where
-    E: commonware_runtime::Network,
-{
-    sink: commonware_runtime::SinkOf<E>,
-    stream: commonware_runtime::StreamOf<E>,
-}
-
 /// Network resolver that fetches operations from a remote server.
 #[derive(Clone)]
 pub struct Resolver<E>
@@ -54,7 +45,6 @@ where
 {
     server_addr: SocketAddr,
     request_receiver: mpsc::Receiver<IoRequest>,
-    connection: Option<Connection<E>>,
     pending_requests: HashMap<RequestId, oneshot::Sender<Result<Message, ResolverError>>>,
     context: E,
 }
@@ -66,21 +56,19 @@ where
     async fn run(mut self) {
         info!(server_addr = %self.server_addr, "I/O task starting");
 
-        loop {
-            // Ensure we have a valid connection before proceeding
-            if self.connection.is_none() {
-                if let Err(e) = self.establish_connection().await {
-                    error!(error = %e, "failed to establish connection, retrying in 1s...");
-                    // Add a small delay before retrying to avoid tight loop on persistent failures
-                    self.context.sleep(std::time::Duration::from_secs(1)).await;
-                    continue;
-                }
+        // Establish connection once - if this fails, we're done
+        let (mut sink, mut stream) = match self.context.dial(self.server_addr).await {
+            Ok((sink, stream)) => {
+                info!(server_addr = %self.server_addr, "connection established");
+                (sink, stream)
             }
+            Err(e) => {
+                error!(error = %e, "failed to establish connection, exiting");
+                return;
+            }
+        };
 
-            // Take ownership of connection to avoid borrow conflicts
-            let mut connection = self.connection.take().unwrap();
-            let mut keep_connection = true;
-
+        loop {
             select! {
                 // Wait for request to send
                 request_opt = self.request_receiver.next() => {
@@ -89,28 +77,26 @@ where
                             // Store pending request for correlation
                             self.pending_requests.insert(request_id, response_sender);
 
-                            // Send request directly (non-blocking to caller)
+                            // Send request - if this fails, we're done
                             let data = message.encode().to_vec();
-                            if let Err(e) = send_frame(&mut connection.sink, &data, MAX_MESSAGE_SIZE).await {
-                                error!(error = %e, "failed to send request");
-                                // Remove from pending and notify sender
-                                if let Some(sender) = self.pending_requests.remove(&request_id) {
-                                    let _ = sender.send(Err(ResolverError::ConnectionError(e.to_string())));
-                                }
-                                keep_connection = false;
+                            if let Err(e) = send_frame(&mut sink, &data, MAX_MESSAGE_SIZE).await {
+                                error!(error = %e, "failed to send request, exiting");
+                                return;
                             } else {
                                 debug!(request_id = request_id.value(), "request sent, awaiting response");
                             }
                         },
-                        None => break, // Channel closed, exit task
+                        None => {
+                            info!("request channel closed, exiting");
+                            return;
+                        }
                     }
                 },
 
                 // Wait for response
-                response_result = recv_frame(&mut connection.stream, MAX_MESSAGE_SIZE) => {
+                response_result = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
                     match response_result {
                         Ok(response_data) => {
-                            // Give response to waiting receiver oneshot
                             match Message::decode(&response_data[..]) {
                                 Ok(message) => {
                                     let request_id = message.request_id();
@@ -122,38 +108,19 @@ where
                                     }
                                 },
                                 Err(e) => {
-                                    error!(error = %e, "failed to decode response");
-                                    keep_connection = false;
+                                    error!(error = %e, "failed to decode response, exiting");
+                                    return;
                                 }
                             }
                         },
                         Err(e) => {
-                            error!(error = %e, "connection error, will reconnect");
-                            keep_connection = false;
+                            error!(error = %e, "connection error, exiting");
+                            return;
                         }
                     }
                 }
             }
-
-            // Restore connection if it's still good
-            if keep_connection {
-                self.connection = Some(connection);
-            }
         }
-    }
-
-    async fn establish_connection(&mut self) -> Result<(), ResolverError> {
-        info!(server_addr = %self.server_addr, "establishing connection");
-
-        let (sink, stream) = self
-            .context
-            .dial(self.server_addr)
-            .await
-            .map_err(|e| ResolverError::ConnectionError(e.to_string()))?;
-
-        self.connection = Some(Connection { sink, stream });
-        info!(server_addr = %self.server_addr, "connection established");
-        Ok(())
     }
 }
 
@@ -170,7 +137,6 @@ where
         let io_task = IoTask {
             server_addr,
             request_receiver,
-            connection: None,
             pending_requests: HashMap::new(),
             context: context.clone(),
         };
