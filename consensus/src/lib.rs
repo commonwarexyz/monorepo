@@ -12,6 +12,7 @@ pub mod aggregation;
 pub mod ordered_broadcast;
 pub mod simplex;
 pub mod threshold_simplex;
+pub mod tuple;
 
 /// Viewable is a trait that provides access to the view (round) number.
 /// Any consensus message or object that is associated with a specific view should implement this.
