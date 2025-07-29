@@ -8,7 +8,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum Error {
     /// Failed to establish connection to server
-    #[error("Failed to connect to server at {addr}: {source}")]
+    #[error("failed to connect to server at {addr}: {source}")]
     ConnectionFailed {
         addr: SocketAddr,
         #[source]
@@ -16,58 +16,58 @@ pub enum Error {
     },
 
     /// Network runtime error
-    #[error("Runtime network error")]
+    #[error("runtime network error")]
     RuntimeNetwork(#[from] commonware_runtime::Error),
 
     /// Stream error during communication
-    #[error("Stream error")]
+    #[error("stream error")]
     Stream(#[from] commonware_stream::Error),
 
     /// Failed to encode message for transmission
-    #[error("Failed to encode message")]
+    #[error("failed to encode message")]
     Encode(#[from] commonware_codec::Error),
 
     /// Failed to decode received message
-    #[error("Failed to decode message")]
+    #[error("failed to decode message")]
     Decode(#[source] commonware_codec::Error),
 
     /// Received unexpected response type for a request
-    #[error("Unexpected response type for request {request_id}")]
+    #[error("unexpected response type for request {request_id}")]
     UnexpectedResponse { request_id: u64 },
 
     /// Server returned an error response
-    #[error("Server error (code: {code:?}): {message}")]
+    #[error("server error (code: {code:?}): {message}")]
     ServerError {
         code: crate::ErrorCode,
         message: String,
     },
 
     /// Invalid request parameters
-    #[error("Invalid request: {0}")]
+    #[error("invalid request: {0}")]
     InvalidRequest(String),
 
     /// Database operation failed
-    #[error("Database operation failed")]
+    #[error("database operation failed")]
     Database(#[from] commonware_storage::adb::Error),
 
     /// Request channel to I/O task closed unexpectedly
-    #[error("Request channel closed - I/O task may have terminated")]
+    #[error("request channel closed - I/O task may have terminated")]
     RequestChannelClosed,
 
     /// Response channel closed before receiving response
-    #[error("Response channel closed for request {request_id}")]
+    #[error("response channel closed for request {request_id}")]
     ResponseChannelClosed { request_id: u64 },
 
     /// Target update channel error
-    #[error("Target update channel error: {reason}")]
+    #[error("target update channel error: {reason}")]
     TargetUpdateChannel { reason: String },
 
     /// Configuration error
-    #[error("Invalid configuration: {0}")]
+    #[error("invalid configuration: {0}")]
     InvalidConfig(String),
 
     /// Sync operation failed
-    #[error("Sync failed")]
+    #[error("sync failed")]
     Sync(#[from] SyncError),
 }
 
