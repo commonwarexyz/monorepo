@@ -1,8 +1,4 @@
 //! Error types for the sync example.
-//!
-//! This module defines all application-level errors that can occur during
-//! synchronization between client and server. Protocol-level error codes
-//! remain in the protocol module as they are part of the wire format.
 
 use commonware_storage::adb::any::sync::Error as SyncError;
 use std::net::SocketAddr;

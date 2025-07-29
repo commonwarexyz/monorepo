@@ -329,7 +329,7 @@ where
                         let message: Message = match Message::decode(&message_data[..]) {
                             Ok(msg) => msg,
                             Err(e) => {
-                                error!(client_addr = %client_addr, error = %e, "failed to parse message");
+                                warn!(client_addr = %client_addr, error = %e, "failed to parse message");
                                 state.error_counter.inc();
                                 continue;
                             }
@@ -342,7 +342,7 @@ where
                         context.with_label("request-handler").spawn(move |_| async move {
                             let response = handle_message(state_clone, message).await;
                             if let Err(e) = response_sender_clone.send(response).await {
-                                debug!(client_addr = %client_addr, error = %e, "failed to send response to main loop");
+                                warn!(client_addr = %client_addr, error = %e, "failed to send response to main loop");
                             }
                         });
                     }
@@ -584,12 +584,12 @@ fn main() {
                                 if let Err(e) =
                                     handle_client(context,state.clone(), sink, stream, client_addr).await
                                 {
-                                    warn!(client_addr = %client_addr, error = %e, "❌ error handling client");
+                                    error!(client_addr = %client_addr, error = %e, "❌ error handling client");
                                 }
                             });
                         }
                         Err(e) => {
-                            warn!(error = %e, "❌ failed to accept client");
+                            error!(error = %e, "❌ failed to accept client");
                         }
                     }
                 }

@@ -71,7 +71,6 @@ where
                             // Store pending request for correlation
                             self.pending_requests.insert(request_id, response_sender);
 
-                            // Send request to IO task
                             let data = message.encode().to_vec();
                             if let Err(e) = send_frame(&mut sink, &data, MAX_MESSAGE_SIZE).await {
                                 error!(error = %e, "failed to send request, exiting");
