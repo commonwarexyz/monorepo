@@ -391,11 +391,9 @@ where
         match self.wait_for_event().await? {
             SyncEvent::TargetUpdate(new_target) => {
                 self = self.handle_target_update(new_target).await?;
-                Ok(StepResult::Continue(self))
             }
             SyncEvent::UpdateChannelClosed => {
                 self.config.update_receiver = None;
-                Ok(StepResult::Continue(self))
             }
             SyncEvent::BatchReceived(fetch_result) => {
                 // Process the fetch result
@@ -406,10 +404,9 @@ where
 
                 // Apply operations that are now contiguous with the current log size
                 self.apply_operations().await?;
-
-                Ok(StepResult::Continue(self))
             }
         }
+        Ok(StepResult::Continue(self))
     }
 
     /// Request batches of operations from the resolver.
@@ -432,7 +429,7 @@ where
             );
         }
 
-        // Calculate the number of requests to make
+        // Calculate the maximum number of requests to make
         let num_requests = self
             .config
             .max_outstanding_requests
@@ -536,6 +533,7 @@ where
                 break;
             };
 
+            // Remove the batch of operations that contains the next operation to apply.
             let operations = self.fetched_operations.remove(&range_start_loc).unwrap();
             // Skip operations that are before the next location.
             let skip_count = (next_loc - range_start_loc) as usize;
