@@ -30,7 +30,6 @@ pub trait Resolver: Send + Sync + Clone + 'static {
     type Key: Array;
     type Value: Array;
 
-    /// The digest type of the resolver.
     /// Get the operations starting at `start_loc` in the database, up to `max_ops` operations.
     /// Returns the operations and a proof that they were present in the database when it had
     /// `size` operations.
@@ -45,52 +44,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
            + 'a;
 }
 
-/// Resolver that works by querying an [Any] database.
-#[derive(Clone)]
-pub struct AnyResolver<E, K, V, H, T>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    #[allow(clippy::type_complexity)]
-    inner: Arc<RwLock<Any<E, K, V, H, T>>>,
-}
-
-impl<E, K, V, H, T> From<Arc<RwLock<Any<E, K, V, H, T>>>> for AnyResolver<E, K, V, H, T>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    fn from(arc: Arc<RwLock<Any<E, K, V, H, T>>>) -> Self {
-        Self { inner: arc }
-    }
-}
-
-impl<E, K, V, H, T> From<Any<E, K, V, H, T>> for AnyResolver<E, K, V, H, T>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator + Send + Sync + 'static,
-    T::Key: Send + Sync,
-{
-    fn from(db: Any<E, K, V, H, T>) -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(db)),
-        }
-    }
-}
-
-impl<E, K, V, H, T> Resolver for AnyResolver<E, K, V, H, T>
+impl<E, K, V, H, T> Resolver for Arc<Any<E, K, V, H, T>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -109,7 +63,40 @@ where
         start_loc: u64,
         max_ops: NonZeroU64,
     ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error> {
-        let db = self.inner.read().await;
+        self.historical_proof(size, start_loc, max_ops.get())
+            .await
+            .map_err(Error::Adb)
+            .map(|(proof, operations)| GetOperationsResult {
+                proof,
+                operations,
+                // Result of proof verification isn't used by this implementation.
+                success_tx: oneshot::channel().0,
+            })
+    }
+}
+
+/// Implement Resolver directly for Arc<RwLock<Any>> to provide maximum ergonomics.
+/// This eliminates the need for wrapper types while allowing direct database access.
+impl<E, K, V, H, T> Resolver for Arc<RwLock<Any<E, K, V, H, T>>>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator + Send + Sync + 'static,
+    T::Key: Send + Sync,
+{
+    type Digest = H::Digest;
+    type Key = K;
+    type Value = V;
+
+    async fn get_operations(
+        &self,
+        size: u64,
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error> {
+        let db = self.read().await;
         db.historical_proof(size, start_loc, max_ops.get())
             .await
             .map_err(Error::Adb)

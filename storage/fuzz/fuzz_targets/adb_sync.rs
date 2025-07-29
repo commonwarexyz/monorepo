@@ -5,7 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
     adb::any::{
-        sync::{self, resolver::AnyResolver},
+        sync::{self, resolver::Resolver},
         Any, Config,
     },
     mmr::hasher::Standard,
@@ -53,9 +53,9 @@ fn test_config(test_name: &str, pruning_delay: u64) -> Config<TwoCap> {
     }
 }
 
-async fn test_sync(
+async fn test_sync<R: Resolver<Digest = commonware_cryptography::sha256::Digest>>(
     context: deterministic::Context,
-    src: AnyResolver<deterministic::Context, Key, Value, Sha256, TwoCap>,
+    resolver: R,
     target: sync::SyncTarget<commonware_cryptography::sha256::Digest>,
     fetch_batch_size: u64,
     test_name: &str,
@@ -70,7 +70,7 @@ async fn test_sync(
         db_config: config,
         fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
         target,
-        resolver: src,
+        resolver,
         hasher: Standard::<Sha256>::new(),
         apply_batch_size: 100,
         max_outstanding_requests: 10,
@@ -139,7 +139,7 @@ fn fuzz(input: FuzzInput) {
                     let wrapped_src = Arc::new(RwLock::new(src));
                     let _result = test_sync(
                         context.clone(),
-                        wrapped_src.clone().into(),
+                        wrapped_src.clone(),
                         target,
                         *fetch_batch_size,
                         &format!("full_{sync_id}"),
