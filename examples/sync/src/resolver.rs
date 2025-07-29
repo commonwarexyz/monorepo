@@ -64,7 +64,7 @@ where
                             // Store pending request for correlation
                             self.pending_requests.insert(request_id, response_sender);
 
-                            // Send request - if this fails, we're done
+                            // Send request to IO task
                             let data = message.encode().to_vec();
                             if let Err(e) = send_frame(&mut sink, &data, MAX_MESSAGE_SIZE).await {
                                 error!(error = %e, "failed to send request, exiting");
@@ -95,8 +95,7 @@ where
                                     }
                                 },
                                 Err(e) => {
-                                    error!(error = %e, "failed to decode response, exiting");
-                                    return;
+                                    warn!(error = %e, "failed to decode response");
                                 }
                             }
                         },
