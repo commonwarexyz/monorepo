@@ -302,11 +302,11 @@ where
 
 /// Handle a client connection with concurrent request processing.
 async fn handle_client<E>(
+    context: E,
     state: Arc<State<E>>,
     mut sink: commonware_runtime::SinkOf<E>,
     mut stream: commonware_runtime::StreamOf<E>,
     client_addr: SocketAddr,
-    context: E,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     E: commonware_runtime::Storage
@@ -580,16 +580,16 @@ fn main() {
                         Ok((client_addr, sink, stream)) => {
                             let state = state.clone();
                             let context = context.clone();
-                            context.with_label("client").spawn(move|_|async move {
+                            context.with_label("client").spawn(move|context|async move {
                                 if let Err(e) =
-                                    handle_client(state.clone(), sink, stream, client_addr, context.clone()).await
+                                    handle_client(context,state.clone(), sink, stream, client_addr).await
                                 {
-                                    error!(client_addr = %client_addr, error = %e, "❌ error handling client");
+                                    warn!(client_addr = %client_addr, error = %e, "❌ error handling client");
                                 }
                             });
                         }
                         Err(e) => {
-                            error!(error = %e, "❌ failed to accept client");
+                            warn!(error = %e, "❌ failed to accept client");
                         }
                     }
                 }
