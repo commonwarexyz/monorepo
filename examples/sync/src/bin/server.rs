@@ -173,14 +173,15 @@ where
     state.request_counter.inc();
 
     // Get the current database state
-    let database = state.database.read().await;
-    let lower_bound_ops = database.inactivity_floor_loc();
-    let upper_bound_ops = database.op_count().saturating_sub(1);
-    let root = {
+    let (root, lower_bound_ops, upper_bound_ops) = {
         let mut hasher = Standard::new();
-        database.root(&mut hasher)
+        let database = state.database.read().await;
+        (
+            database.root(&mut hasher),
+            database.inactivity_floor_loc(),
+            database.op_count().saturating_sub(1),
+        )
     };
-
     let response = GetSyncTargetResponse {
         request_id: request.request_id,
         target: SyncTarget {
