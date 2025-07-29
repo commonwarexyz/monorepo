@@ -441,7 +441,7 @@ where
 
         for _ in 0..num_requests {
             // Find the next gap in the sync range that needs to be fetched.
-            let Some((start_loc, _end_loc)) = find_next_gap::<K, V>(
+            let Some((start_loc, end_loc)) = find_next_gap::<K, V>(
                 log_size,
                 self.config.target.upper_bound_ops,
                 &self.fetched_operations,
@@ -453,7 +453,8 @@ where
 
             // Kick off a request for the batch of operations
             let resolver = self.config.resolver.clone();
-            let batch_size = self.config.fetch_batch_size;
+            let gap_size = NZU64!(end_loc - start_loc + 1);
+            let batch_size = self.config.fetch_batch_size.min(gap_size);
             self.outstanding_requests.add(
                 start_loc,
                 Box::pin(async move {
