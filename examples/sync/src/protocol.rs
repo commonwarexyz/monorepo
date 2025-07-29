@@ -488,10 +488,7 @@ mod tests {
                 (ErrorCode::NetworkError, ErrorCode::NetworkError) => {}
                 (ErrorCode::Timeout, ErrorCode::Timeout) => {}
                 (ErrorCode::InternalError, ErrorCode::InternalError) => {}
-                _ => panic!(
-                    "ErrorCode roundtrip failed: {:?} != {:?}",
-                    error_code, decoded
-                ),
+                _ => panic!("ErrorCode roundtrip failed: {error_code:?} != {decoded:?}"),
             }
         }
     }
