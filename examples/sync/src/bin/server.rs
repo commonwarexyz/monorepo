@@ -210,12 +210,10 @@ where
     // Check if we have enough operations
     let db_size = database.op_count();
     if request.start_loc >= db_size {
-        return Err(Error::InvalidRequest {
-            message: format!(
-                "start_loc >= database size ({}) >= ({})",
-                request.start_loc, db_size
-            ),
-        });
+        return Err(Error::InvalidRequest(format!(
+            "start_loc >= database size ({}) >= ({})",
+            request.start_loc, db_size
+        )));
     }
 
     // Calculate how many operations to return
@@ -239,7 +237,7 @@ where
 
     let (proof, operations) = result.map_err(|e| {
         warn!(error = %e, "failed to generate historical proof");
-        Error::DatabaseError(e.to_string())
+        Error::Database(e)
     })?;
 
     debug!(
@@ -258,14 +256,7 @@ where
 
 /// Create an error response message
 fn create_error_response(request_id: RequestId, error: Error) -> Message {
-    let error_code = match error {
-        Error::InvalidRequest { .. } => commonware_sync::ErrorCode::InvalidRequest,
-        Error::DatabaseError(_) => commonware_sync::ErrorCode::DatabaseError,
-        Error::ServerError(_) | Error::ResolverError(_) => {
-            commonware_sync::ErrorCode::InternalError
-        }
-        Error::UnexpectedResponse => commonware_sync::ErrorCode::InvalidRequest,
-    };
+    let error_code = error.to_error_code();
     Message::Error(ErrorResponse {
         request_id,
         error_code,
@@ -304,9 +295,7 @@ where
             state.error_counter.inc();
             create_error_response(
                 request_id,
-                Error::InvalidRequest {
-                    message: "unexpected message type".to_string(),
-                },
+                Error::InvalidRequest("unexpected message type".to_string()),
             )
         }
     }

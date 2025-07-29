@@ -22,7 +22,6 @@ use std::{
     num::NonZeroU64,
     sync::atomic::{AtomicU64, Ordering},
 };
-use thiserror::Error;
 
 /// Maximum message size in bytes (10MB).
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
@@ -166,25 +165,6 @@ pub enum ErrorCode {
     Timeout,
     /// Internal server error.
     InternalError,
-}
-
-/// Errors that can occur during protocol operations.
-#[derive(Debug, Clone, Error)]
-pub enum Error {
-    #[error("Invalid request: {message}")]
-    InvalidRequest { message: String },
-
-    #[error("Database error: {0}")]
-    DatabaseError(String),
-
-    #[error("Resolver error: {0}")]
-    ResolverError(String),
-
-    #[error("Server error: {0}")]
-    ServerError(String),
-
-    #[error("Unexpected response type")]
-    UnexpectedResponse,
 }
 
 impl Write for Message {
@@ -435,17 +415,18 @@ impl Read for ErrorCode {
 
 impl GetOperationsRequest {
     /// Validate the request parameters.
-    pub fn validate(&self) -> Result<(), Error> {
+    pub fn validate(&self) -> Result<(), crate::Error> {
         if self.start_loc >= self.size {
-            return Err(Error::InvalidRequest {
-                message: format!("start_loc >= size ({}) >= ({})", self.start_loc, self.size),
-            });
+            return Err(crate::Error::InvalidRequest(format!(
+                "start_loc >= size ({}) >= ({})",
+                self.start_loc, self.size
+            )));
         }
 
         if self.max_ops.get() == 0 {
-            return Err(Error::InvalidRequest {
-                message: "max_ops cannot be zero".to_string(),
-            });
+            return Err(crate::Error::InvalidRequest(
+                "max_ops cannot be zero".to_string(),
+            ));
         }
 
         Ok(())
@@ -523,7 +504,7 @@ mod tests {
         };
         assert!(matches!(
             request.validate(),
-            Err(Error::InvalidRequest { .. })
+            Err(crate::Error::InvalidRequest(_))
         ));
 
         // start_loc beyond size
@@ -535,7 +516,7 @@ mod tests {
         };
         assert!(matches!(
             request.validate(),
-            Err(Error::InvalidRequest { .. })
+            Err(crate::Error::InvalidRequest(_))
         ));
     }
 }

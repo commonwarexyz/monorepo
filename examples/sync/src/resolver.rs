@@ -2,7 +2,7 @@
 //! to fetch operations and proofs.
 
 use crate::{
-    Error, GetOperationsRequest, GetSyncTargetRequest, Message, RequestId, MAX_MESSAGE_SIZE,
+    error::Error, GetOperationsRequest, GetSyncTargetRequest, Message, RequestId, MAX_MESSAGE_SIZE,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
@@ -53,6 +53,10 @@ where
             }
             Err(e) => {
                 error!(error = %e, "failed to establish connection, exiting");
+                // Notify all pending requests that the connection failed
+                for (_, response_sender) in self.pending_requests {
+                    let _ = response_sender.send(Err(Error::RequestChannelClosed));
+                }
                 return;
             }
         };
@@ -71,6 +75,10 @@ where
                             let data = message.encode().to_vec();
                             if let Err(e) = send_frame(&mut sink, &data, MAX_MESSAGE_SIZE).await {
                                 error!(error = %e, "failed to send request, exiting");
+                                // Notify the pending request of the error
+                                if let Some(response_sender) = self.pending_requests.remove(&request_id) {
+                                    let _ = response_sender.send(Err(Error::Stream(e)));
+                                }
                                 return;
                             } else {
                                 debug!(request_id = request_id.value(), "request sent, awaiting response");
@@ -99,11 +107,16 @@ where
                                 },
                                 Err(e) => {
                                     warn!(error = %e, "failed to decode response");
+                                    // Can't correlate with a specific request without decoding
                                 }
                             }
                         },
                         Err(e) => {
                             error!(error = %e, "connection error, exiting");
+                            // Notify all pending requests that the I/O task is shutting down
+                            for (_request_id, response_sender) in self.pending_requests.drain() {
+                                let _ = response_sender.send(Err(Error::RequestChannelClosed));
+                            }
                             return;
                         }
                     }
@@ -158,6 +171,8 @@ where
             request_id: RequestId::new(),
         };
 
+        let request_id = request.request_id.value();
+
         let response = self
             .send_request(Message::GetSyncTargetRequest(request))
             .await?;
@@ -166,11 +181,14 @@ where
             Message::GetSyncTargetResponse(response) => Ok(response.target),
             Message::Error(err) => {
                 error!(error = %err.message, "server error");
-                Err(Error::ServerError(err.message))
+                Err(Error::ServerError {
+                    code: err.error_code,
+                    message: err.message,
+                })
             }
             _ => {
                 error!("unexpected response type");
-                Err(Error::UnexpectedResponse)
+                Err(Error::UnexpectedResponse { request_id })
             }
         }
     }
@@ -178,6 +196,7 @@ where
     async fn send_request(&self, message: Message) -> Result<Message, Error> {
         let (response_sender, response_receiver) = oneshot::channel();
 
+        let request_id = message.request_id();
         let request = IoRequest {
             message,
             response_sender,
@@ -187,11 +206,13 @@ where
             .clone()
             .send(request)
             .await
-            .map_err(|_| Error::ResolverError("request channel closed".to_string()))?;
+            .map_err(|_| Error::RequestChannelClosed)?;
 
         response_receiver
             .await
-            .map_err(|_| Error::ResolverError("response channel closed".to_string()))?
+            .map_err(|_| Error::ResponseChannelClosed {
+                request_id: request_id.value(),
+            })?
     }
 }
 
@@ -219,10 +240,11 @@ where
             max_ops,
         };
 
+        let request_id = request.request_id.value();
+
         let response = self
             .send_request(Message::GetOperationsRequest(request))
-            .await
-            .map_err(|e| SyncError::Resolver(Box::new(e)))?;
+            .await?;
 
         match response {
             Message::GetOperationsResponse(response) => {
@@ -233,10 +255,11 @@ where
                     success_tx,
                 })
             }
-            Message::Error(err) => Err(SyncError::Resolver(Box::new(Error::ServerError(
-                err.message,
-            )))),
-            _ => Err(SyncError::Resolver(Box::new(Error::UnexpectedResponse))),
+            Message::Error(err) => Err(SyncError::from(Error::ServerError {
+                code: err.error_code,
+                message: err.message,
+            })),
+            _ => Err(SyncError::from(Error::UnexpectedResponse { request_id })),
         }
     }
 }
