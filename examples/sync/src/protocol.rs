@@ -416,6 +416,8 @@ impl Read for ErrorCode {
             0 => Ok(ErrorCode::InvalidRequest),
             1 => Ok(ErrorCode::DatabaseError),
             2 => Ok(ErrorCode::NetworkError),
+            3 => Ok(ErrorCode::Timeout),
+            4 => Ok(ErrorCode::InternalError),
             _ => Err(CodecError::InvalidEnum(discriminant)),
         }
     }
@@ -458,6 +460,40 @@ mod tests {
         // Should be consecutive
         assert_eq!(id2.value(), id1.value() + 1);
         assert_eq!(id3.value(), id2.value() + 1);
+    }
+
+    #[test]
+    fn test_error_code_roundtrip_serialization() {
+        use commonware_codec::{DecodeExt, Encode};
+
+        let test_cases = vec![
+            ErrorCode::InvalidRequest,
+            ErrorCode::DatabaseError,
+            ErrorCode::NetworkError,
+            ErrorCode::Timeout,
+            ErrorCode::InternalError,
+        ];
+
+        for error_code in test_cases {
+            // Serialize
+            let encoded = error_code.encode().to_vec();
+
+            // Deserialize
+            let decoded = ErrorCode::decode(&encoded[..]).expect("Failed to decode ErrorCode");
+
+            // Verify they match
+            match (&error_code, &decoded) {
+                (ErrorCode::InvalidRequest, ErrorCode::InvalidRequest) => {}
+                (ErrorCode::DatabaseError, ErrorCode::DatabaseError) => {}
+                (ErrorCode::NetworkError, ErrorCode::NetworkError) => {}
+                (ErrorCode::Timeout, ErrorCode::Timeout) => {}
+                (ErrorCode::InternalError, ErrorCode::InternalError) => {}
+                _ => panic!(
+                    "ErrorCode roundtrip failed: {:?} != {:?}",
+                    error_code, decoded
+                ),
+            }
+        }
     }
 
     #[test]
