@@ -75,7 +75,7 @@ where
     }
 }
 
-/// Implement Resolver directly for Arc<RwLock<Any>> to provide maximum ergonomics.
+/// Implement Resolver directly for `Arc<RwLock<Any>>` to provide maximum ergonomics.
 /// This eliminates the need for wrapper types while allowing direct database access.
 impl<E, K, V, H, T> Resolver for Arc<RwLock<Any<E, K, V, H, T>>>
 where
