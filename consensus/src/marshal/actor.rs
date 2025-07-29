@@ -734,10 +734,23 @@ impl<
         (receiver, resolver)
     }
 
+    // -------------------- Waiters --------------------
+
+    /// Remove a waiter for a digest and send the block to all responders.
+    async fn resolve_waiter(&mut self, commitment: B::Commitment, block: &B) {
+        if let Some(mut waiter) = self.waiters.remove(&commitment) {
+            for responder in waiter.responders.drain(..) {
+                let _ = responder.send(block.clone());
+            }
+        }
+    }
+
     // -------------------- Storage --------------------
 
     /// Add a verified block to the archive.
     async fn put_verified(&mut self, view: u64, commitment: B::Commitment, block: B) {
+        self.resolve_waiter(commitment, &block).await;
+
         match self.verified.put_sync(view, commitment, block).await {
             Ok(_) => {
                 debug!(view, "verified stored");
@@ -783,6 +796,8 @@ impl<
         notarization: Notarization<V, B::Commitment>,
         block: B,
     ) {
+        self.resolve_waiter(commitment, &block).await;
+
         match self
             .notarized
             .put_sync(view, commitment, (notarization, block))
@@ -811,6 +826,8 @@ impl<
         block: B,
         notifier: &mut mpsc::Sender<()>,
     ) {
+        self.resolve_waiter(commitment, &block).await;
+
         if let Err(e) = self.blocks.put_sync(height, commitment, block).await {
             panic!("Failed to insert block: {e}");
         }
@@ -826,6 +843,8 @@ impl<
         block: B,
         notifier: &mut mpsc::Sender<()>,
     ) {
+        self.resolve_waiter(commitment, &block).await;
+
         if let Err(e) = try_join!(
             self.finalized.put_sync(height, commitment, finalization),
             self.blocks.put_sync(height, commitment, block),
