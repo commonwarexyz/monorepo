@@ -18,19 +18,6 @@ use std::{collections::HashMap, marker::PhantomData, net::SocketAddr, num::NonZe
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-/// Network resolver that fetches operations from a remote server.
-#[derive(Clone)]
-pub struct Resolver<E>
-where
-    E: commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + commonware_runtime::Clock
-        + Clone,
-{
-    request_sender: mpsc::Sender<IoRequest>,
-    _phantom: PhantomData<E>,
-}
-
 /// Request data sent to the I/O task.
 struct IoRequest {
     message: Message,
@@ -122,6 +109,19 @@ where
             }
         }
     }
+}
+
+/// Network resolver that fetches operations from a remote server.
+#[derive(Clone)]
+pub struct Resolver<E>
+where
+    E: commonware_runtime::Network
+        + commonware_runtime::Spawner
+        + commonware_runtime::Clock
+        + Clone,
+{
+    request_sender: mpsc::Sender<IoRequest>,
+    _phantom: PhantomData<E>,
 }
 
 impl<E> Resolver<E>
