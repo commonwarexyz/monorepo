@@ -26,6 +26,7 @@ use std::{
 use tracing::{debug, error, info, warn};
 
 const MAX_BATCH_SIZE: u64 = 100;
+const RESPONSE_BUFFER_SIZE: usize = 64;
 
 /// Server configuration.
 #[derive(Debug, Clone)]
@@ -88,7 +89,7 @@ where
     }
 
     /// Add operations to the database if the configured interval has passed.
-    async fn maybe_add_operation(
+    async fn maybe_add_operations(
         &self,
         context: &mut E,
         config: &Config,
@@ -201,8 +202,8 @@ async fn handle_get_operations<E>(
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
-    request.validate()?;
     state.request_counter.inc();
+    request.validate()?;
 
     let database = state.database.read().await;
 
@@ -269,14 +270,14 @@ fn create_error_response(request_id: RequestId, error: ProtocolError) -> Message
     })
 }
 
-/// Process a message asynchronously and return the appropriate response.
+/// Handle a message from a client and return the appropriate response.
 async fn handle_message<E>(state: Arc<State<E>>, message: Message) -> Message
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
+    let request_id = message.request_id();
     match message {
         Message::GetOperationsRequest(request) => {
-            let request_id = request.request_id;
             match handle_get_operations(&state, request).await {
                 Ok(response) => Message::GetOperationsResponse(response),
                 Err(e) => {
@@ -287,7 +288,6 @@ where
         }
 
         Message::GetSyncTargetRequest(request) => {
-            let request_id = request.request_id;
             match handle_get_sync_target(&state, request).await {
                 Ok(response) => Message::GetSyncTargetResponse(response),
                 Err(e) => {
@@ -300,7 +300,7 @@ where
         _ => {
             state.error_counter.inc();
             Message::Error(ErrorResponse {
-                request_id: RequestId::default(),
+                request_id,
                 error_code: commonware_sync::ErrorCode::InvalidRequest,
                 message: "unexpected message type".to_string(),
             })
@@ -326,9 +326,10 @@ where
 {
     info!(client_addr = %client_addr, "client connected");
 
-    let (response_sender, mut response_receiver) = mpsc::channel::<Message>(64);
+    let (response_sender, mut response_receiver) = mpsc::channel::<Message>(RESPONSE_BUFFER_SIZE);
 
     loop {
+        // Wait until we receive a message from the client or we have a response to send.
         select! {
             message_result = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
                 match message_result {
@@ -342,6 +343,8 @@ where
                             }
                         };
 
+                        // Start a new task to handle the message.
+                        // The response will be sent on `response_sender`.
                         let state_clone = state.clone();
                         let mut response_sender_clone = response_sender.clone();
                         context.with_label("request-handler").spawn(move |_| async move {
@@ -361,8 +364,8 @@ where
 
             response_opt = response_receiver.next() => {
                 if let Some(response) = response_opt {
+                    // We have a response to send to the client.
                     let response_data = response.encode().to_vec();
-
                     if let Err(e) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
                         info!(client_addr = %client_addr, error = %e, "send failed (client likely disconnected)");
                         state.error_counter.inc();
@@ -575,7 +578,7 @@ fn main() {
             select! {
                 _ = context.sleep_until(next_op_time) => {
                     // Add operations to the database
-                    if let Err(e) = state.maybe_add_operation(&mut context, &config).await {
+                    if let Err(e) = state.maybe_add_operations(&mut context, &config).await {
                         warn!(error = %e, "failed to add additional operations");
                     }
                     next_op_time = context.current() + config.op_interval;
