@@ -5,7 +5,6 @@ use crate::{GetOperationsRequest, GetSyncTargetRequest, Message, RequestId, MAX_
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
-use commonware_runtime::RwLock;
 use commonware_storage::adb::any::sync::{
     resolver::{GetOperationsResult, Resolver as ResolverTrait},
     Error as SyncError, SyncTarget,
@@ -15,16 +14,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use std::{
-    collections::HashMap,
-    marker::PhantomData,
-    net::SocketAddr,
-    num::NonZeroU64,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-};
+use std::{collections::HashMap, marker::PhantomData, net::SocketAddr, num::NonZeroU64};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
@@ -47,9 +37,6 @@ where
         + Clone,
 {
     command_sender: mpsc::Sender<IoCommand>,
-    io_task_handle_receiver: Arc<RwLock<Option<oneshot::Receiver<commonware_runtime::Handle<()>>>>>,
-    shutdown_flag: Arc<AtomicBool>,
-    context: E,
     _phantom: PhantomData<E>,
 }
 
@@ -60,7 +47,6 @@ enum IoCommand {
         message: Message,
         response_sender: oneshot::Sender<Result<Message, ResolverError>>,
     },
-    Shutdown,
 }
 
 /// I/O task that manages connection and request/response correlation.
@@ -72,7 +58,6 @@ where
     command_receiver: mpsc::Receiver<IoCommand>,
     connection: Option<Connection<E>>,
     pending_requests: HashMap<RequestId, oneshot::Sender<Result<Message, ResolverError>>>,
-    shutdown_flag: Arc<AtomicBool>,
     context: E,
 }
 
@@ -84,10 +69,6 @@ where
         info!(server_addr = %self.server_addr, "I/O task starting");
 
         loop {
-            if self.shutdown_flag.load(Ordering::Relaxed) {
-                break;
-            }
-
             // Ensure we have a valid connection before proceeding
             if self.connection.is_none() {
                 if let Err(e) = self.establish_connection().await {
@@ -116,7 +97,7 @@ where
                                 error!(error = %e, "failed to send request");
                                 // Remove from pending and notify sender
                                 if let Some(sender) = self.pending_requests.remove(&request_id) {
-                                    let _ = sender.send(Err(ResolverError::NetworkError(e.to_string())));
+                                    let _ = sender.send(Err(ResolverError::ConnectionError(e.to_string())));
                                 }
                                 // Mark connection as failed
                                 connection_failed = true;
@@ -124,7 +105,7 @@ where
                                 debug!(request_id = request_id.value(), "request sent, awaiting response");
                             }
                         },
-                        Some(IoCommand::Shutdown) | None => break,
+                        None => break, // Channel closed, exit task
                     }
                 },
 
@@ -206,33 +187,23 @@ where
 {
     pub fn new(context: E, server_addr: SocketAddr) -> Self {
         let (command_sender, command_receiver) = mpsc::channel(64);
-        let shutdown_flag = Arc::new(AtomicBool::new(false));
-        let (handle_sender, handle_receiver) = oneshot::channel();
 
         let context_for_io_task = context.clone();
-        let context_for_resolver = context.clone();
 
         let io_task = IoTask {
             server_addr,
             command_receiver,
             connection: None,
             pending_requests: HashMap::new(),
-            shutdown_flag: shutdown_flag.clone(),
             context: context_for_io_task,
         };
 
-        let handle = context.spawn(move |_| async move {
+        let _handle = context.spawn(move |_| async move {
             io_task.run().await;
         });
 
-        // Send the handle synchronously through the oneshot channel
-        let _ = handle_sender.send(handle);
-
         Self {
             command_sender,
-            io_task_handle_receiver: Arc::new(RwLock::new(Some(handle_receiver))),
-            shutdown_flag,
-            context: context_for_resolver,
             _phantom: PhantomData,
         }
     }
@@ -279,30 +250,6 @@ where
         response_receiver
             .await
             .map_err(|_| ResolverError::ConnectionError("I/O task dropped response".to_string()))?
-    }
-}
-
-impl<E> Drop for Resolver<E>
-where
-    E: commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + commonware_runtime::Clock
-        + Clone,
-{
-    fn drop(&mut self) {
-        self.shutdown_flag.store(true, Ordering::Relaxed);
-        let _ = self.command_sender.try_send(IoCommand::Shutdown);
-
-        // Use the stored context for proper cleanup
-        let io_task_handle_receiver = self.io_task_handle_receiver.clone();
-        let context = self.context.clone();
-        context.spawn(move |_| async move {
-            if let Some(handle_receiver) = io_task_handle_receiver.write().await.take() {
-                if let Ok(handle) = handle_receiver.await {
-                    handle.abort();
-                }
-            }
-        });
     }
 }
 
