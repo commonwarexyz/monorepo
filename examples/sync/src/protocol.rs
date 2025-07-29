@@ -183,12 +183,6 @@ pub enum Error {
     #[error("I/O task unavailable: {0}")]
     IoTaskUnavailable(String),
 
-    #[error("Message encoding failed: {0}")]
-    EncodingFailed(String),
-
-    #[error("Message decoding failed: {0}")]
-    DecodingFailed(String),
-
     #[error("Server error: {0}")]
     ServerError(String),
 
