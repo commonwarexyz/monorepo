@@ -17,7 +17,6 @@ use rand::Rng;
 use std::{
     net::{Ipv4Addr, SocketAddr},
     num::NonZeroU64,
-    sync::Arc,
     time::Duration,
 };
 use tracing::{debug, error, info, warn};
@@ -49,7 +48,7 @@ struct Config {
 /// on `update_sender`.
 async fn target_update_task<E>(
     context: E,
-    resolver: Arc<Resolver<E>>,
+    resolver: Resolver<E>,
     update_sender: mpsc::Sender<SyncTarget<Digest>>,
     interval_duration: Duration,
     initial_target: SyncTarget<Digest>,
@@ -111,7 +110,7 @@ where
         + Clone,
 {
     // Get initial sync target
-    let resolver = Arc::new(Resolver::new(context.clone(), config.server));
+    let resolver = Resolver::new(context.clone(), config.server);
     let initial_target = resolver.get_sync_target().await?;
     info!(
         sync_iteration,

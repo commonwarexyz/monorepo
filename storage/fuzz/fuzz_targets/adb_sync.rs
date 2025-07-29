@@ -70,7 +70,7 @@ async fn test_sync(
         db_config: config,
         fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
         target,
-        resolver: src.into(),
+        resolver: src,
         hasher: Standard::<Sha256>::new(),
         apply_batch_size: 100,
         max_outstanding_requests: 10,

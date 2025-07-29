@@ -25,7 +25,7 @@ pub struct GetOperationsResult<D: Digest, K: Array, V: Array> {
 }
 
 /// Trait for network communication with the sync server
-pub trait Resolver: Send + Sync + 'static {
+pub trait Resolver: Send + Sync + Clone + 'static {
     type Digest: Digest;
     type Key: Array;
     type Value: Array;
@@ -127,6 +127,7 @@ pub(super) mod tests {
     use super::*;
     use std::marker::PhantomData;
 
+    #[derive(Clone)]
     pub struct FailResolver<D, K, V> {
         _digest: PhantomData<D>,
         _key: PhantomData<K>,
