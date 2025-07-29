@@ -102,3 +102,10 @@ path = "fuzz_targets/lthash_operations.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bls12381_tle"
+path = "fuzz_targets/bls12381_tle.rs"
+test = false
+doc = false
+bench = false
