@@ -36,17 +36,15 @@ where
         + commonware_runtime::Clock
         + Clone,
 {
-    command_sender: mpsc::Sender<IoCommand>,
+    request_sender: mpsc::Sender<IoRequest>,
     _phantom: PhantomData<E>,
 }
 
-/// Commands sent to the I/O task.
-enum IoCommand {
-    SendRequest {
-        request_id: RequestId,
-        message: Message,
-        response_sender: oneshot::Sender<Result<Message, ResolverError>>,
-    },
+/// Request data sent to the I/O task.
+struct IoRequest {
+    request_id: RequestId,
+    message: Message,
+    response_sender: oneshot::Sender<Result<Message, ResolverError>>,
 }
 
 /// I/O task that manages connection and request/response correlation.
@@ -55,7 +53,7 @@ where
     E: commonware_runtime::Network + commonware_runtime::Spawner + commonware_runtime::Clock,
 {
     server_addr: SocketAddr,
-    command_receiver: mpsc::Receiver<IoCommand>,
+    request_receiver: mpsc::Receiver<IoRequest>,
     connection: Option<Connection<E>>,
     pending_requests: HashMap<RequestId, oneshot::Sender<Result<Message, ResolverError>>>,
     context: E,
@@ -81,13 +79,13 @@ where
 
             // Take ownership of connection to avoid borrow conflicts
             let mut connection = self.connection.take().unwrap();
-            let mut connection_failed = false;
+            let mut keep_connection = true;
 
             select! {
                 // Wait for request to send
-                command_opt = self.command_receiver.next() => {
-                    match command_opt {
-                        Some(IoCommand::SendRequest { request_id, message, response_sender }) => {
+                request_opt = self.request_receiver.next() => {
+                    match request_opt {
+                        Some(IoRequest { request_id, message, response_sender }) => {
                             // Store pending request for correlation
                             self.pending_requests.insert(request_id, response_sender);
 
@@ -99,8 +97,7 @@ where
                                 if let Some(sender) = self.pending_requests.remove(&request_id) {
                                     let _ = sender.send(Err(ResolverError::ConnectionError(e.to_string())));
                                 }
-                                // Mark connection as failed
-                                connection_failed = true;
+                                keep_connection = false;
                             } else {
                                 debug!(request_id = request_id.value(), "request sent, awaiting response");
                             }
@@ -126,26 +123,20 @@ where
                                 },
                                 Err(e) => {
                                     error!(error = %e, "failed to decode response");
-                                    // Mark connection as failed
-                                    connection_failed = true;
+                                    keep_connection = false;
                                 }
                             }
                         },
                         Err(e) => {
                             error!(error = %e, "connection error, will reconnect");
-                            // Mark connection as failed
-                            connection_failed = true;
+                            keep_connection = false;
                         }
                     }
                 }
             }
 
-            // Handle connection state after the select
-            if connection_failed {
-                // Connection failed, don't restore it (leave self.connection as None)
-                continue;
-            } else {
-                // Connection is still good, restore it
+            // Restore connection if it's still good
+            if keep_connection {
                 self.connection = Some(connection);
             }
         }
@@ -186,13 +177,13 @@ where
         + Clone,
 {
     pub fn new(context: E, server_addr: SocketAddr) -> Self {
-        let (command_sender, command_receiver) = mpsc::channel(64);
+        let (request_sender, request_receiver) = mpsc::channel(64);
 
         let context_for_io_task = context.clone();
 
         let io_task = IoTask {
             server_addr,
-            command_receiver,
+            request_receiver,
             connection: None,
             pending_requests: HashMap::new(),
             context: context_for_io_task,
@@ -203,7 +194,7 @@ where
         });
 
         Self {
-            command_sender,
+            request_sender,
             _phantom: PhantomData,
         }
     }
@@ -235,15 +226,15 @@ where
         let request_id = message.request_id();
         let (response_sender, response_receiver) = oneshot::channel();
 
-        let command = IoCommand::SendRequest {
+        let request = IoRequest {
             request_id,
             message,
             response_sender,
         };
 
-        self.command_sender
+        self.request_sender
             .clone()
-            .send(command)
+            .send(request)
             .await
             .map_err(|_| ResolverError::ConnectionError("I/O task unavailable".to_string()))?;
 
