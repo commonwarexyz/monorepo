@@ -140,11 +140,6 @@ where
                 self.connection = Some(connection);
             }
         }
-
-        info!("I/O task shutting down");
-        self.fail_all_pending_requests(ResolverError::ConnectionError(
-            "I/O task shutting down".to_string(),
-        ));
     }
 
     async fn establish_connection(&mut self) -> Result<(), ResolverError> {
@@ -160,13 +155,6 @@ where
         info!(server_addr = %self.server_addr, "connection established");
         Ok(())
     }
-
-    fn fail_all_pending_requests(&mut self, error: ResolverError) {
-        for (request_id, response_sender) in self.pending_requests.drain() {
-            debug!(request_id = request_id.value(), "failing pending request");
-            let _ = response_sender.send(Err(error.clone()));
-        }
-    }
 }
 
 impl<E> Resolver<E>
@@ -179,14 +167,12 @@ where
     pub fn new(context: E, server_addr: SocketAddr) -> Self {
         let (request_sender, request_receiver) = mpsc::channel(64);
 
-        let context_for_io_task = context.clone();
-
         let io_task = IoTask {
             server_addr,
             request_receiver,
             connection: None,
             pending_requests: HashMap::new(),
-            context: context_for_io_task,
+            context: context.clone(),
         };
 
         let _handle = context.spawn(move |_| async move {
