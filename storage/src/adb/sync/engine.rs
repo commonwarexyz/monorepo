@@ -1,6 +1,8 @@
 //! Core sync engine components that are shared across sync clients.
 
 use crate::mmr::verification::Proof;
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
 use futures::stream::FuturesUnordered;
 use std::{
@@ -39,6 +41,37 @@ pub struct SyncTarget<D: Digest> {
     pub lower_bound_ops: u64,
     /// Upper bound of operations to sync (inclusive)
     pub upper_bound_ops: u64,
+}
+
+impl<D: Digest> Write for SyncTarget<D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.root.write(buf);
+        self.lower_bound_ops.write(buf);
+        self.upper_bound_ops.write(buf);
+    }
+}
+
+impl<D: Digest> EncodeSize for SyncTarget<D> {
+    fn encode_size(&self) -> usize {
+        self.root.encode_size()
+            + self.lower_bound_ops.encode_size()
+            + self.upper_bound_ops.encode_size()
+    }
+}
+
+impl<D: Digest> Read for SyncTarget<D> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let root = D::read(buf)?;
+        let lower_bound_ops = u64::read(buf)?;
+        let upper_bound_ops = u64::read(buf)?;
+        Ok(Self {
+            root,
+            lower_bound_ops,
+            upper_bound_ops,
+        })
+    }
 }
 
 /// Result from a fetch operation with its starting location

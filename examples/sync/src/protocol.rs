@@ -13,7 +13,7 @@
 use crate::Operation;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, ReadRangeExt as _, Write,
+    EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, ReadRangeExt as _, Write,
 };
 use commonware_cryptography::sha256::Digest;
 use commonware_storage::{adb::sync::engine::SyncTarget, mmr::verification::Proof};
