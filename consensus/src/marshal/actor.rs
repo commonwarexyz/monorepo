@@ -63,7 +63,18 @@ impl<B: Block> Waiter<B> {
     }
 }
 
-/// Application actor.
+/// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
+/// receiving notarizations and finalizations from consensus, and reconstructing a total order
+/// of blocks.
+///
+/// The actor is designed to be used in a view-based model. Each view corresponds to a
+/// potential block in the chain. The actor will only finalize a block if it has a
+/// corresponding finalization.
+///
+/// The actor also provides a backfill mechanism for missing blocks. If the actor receives a
+/// finalization for a block that is ahead of its current view, it will request the missing blocks
+/// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
+/// behind.
 pub struct Actor<
     B: Block,
     R: Rng + Spawner + Metrics + Clock + GClock + Storage,

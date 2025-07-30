@@ -7,8 +7,8 @@ use futures::{
 };
 use tracing::error;
 
-/// Messages sent from the resolver's [`Consumer`]/[`Producer`] implementation
-/// to the marshal [`Actor`](super::super::actor::Actor).
+/// Messages sent from the resolver's [Consumer]/[Producer] implementation
+/// to the marshal [Actor](super::super::actor::Actor).
 pub enum Message<K: Array> {
     /// A request to deliver a value for a given key.
     Deliver {
@@ -30,7 +30,7 @@ pub enum Message<K: Array> {
 
 /// A handler that forwards requests from the resolver to the marshal actor.
 ///
-/// This struct implements the [`Consumer`] and [`Producer`] traits from the
+/// This struct implements the [Consumer] and [Producer] traits from the
 /// resolver, and acts as a bridge to the main actor loop.
 #[derive(Clone)]
 pub struct Handler<K: Array> {

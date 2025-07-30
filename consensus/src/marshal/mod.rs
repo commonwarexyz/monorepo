@@ -1,3 +1,55 @@
+//! Ordered notification of finalized blocks.
+//!
+//! # Architecture
+//!
+//! The core of the module is the [actor::Actor]. It marshals the finalized blocks into order by:
+//!
+//! - Receiving uncertified blocks from a broadcast mechanism
+//! - Receiving notarizations and finalizations from consensus
+//! - Reconstructing a total order of finalized blocks
+//! - Providing a backfill mechanism for missing blocks
+//!
+//! The actor interacts with four main components:
+//! - [crate::Reporter]: Receives ordered, finalized blocks
+//! - [crate::threshold_simplex]: Provides consensus messages
+//! - Application: Provides verified blocks
+//! - [commonware_broadcast::buffered]: Provides uncertified blocks received from the network
+//! - [commonware_resolver::p2p]: Provides a backfill mechanism for missing blocks
+//!
+//! # Design Decisions
+//!
+//! ## Finalization
+//!
+//! The actor uses a view-based model to track the state of the chain. Each view corresponds
+//! to a potential block in the chain. The actor will only finalize a block (and its ancestors)
+//! if it has a corresponding finalization from consensus.
+//!
+//! ## Backfill
+//!
+//! The actor provides a backfill mechanism for missing blocks. If the actor notices a gap in its
+//! knowledge of finalized blocks, it will request the missing blocks from its peers. This ensures
+//! that the actor can catch up to the rest of the network if it falls behind.
+//!
+//! ## Storage
+//!
+//! The actor uses a combination of prunable and immutable storage to store blocks and
+//! finalizations. Prunable storage is used to store data that is only needed for a short
+//! period of time, such as unverified blocks or notarizations. Immutable storage is used to
+//! store data that needs to be persisted indefinitely, such as finalized blocks. This allows
+//! the actor to keep its storage footprint small while still providing a full history of the
+//! chain.
+//!
+//! ## Limitations and Future Work
+//!
+//! - Only works with [crate::threshold_simplex] rather than general consensus.
+//! - Assumes at-most one notarization per view, incompatible with some consensus protocols.
+//! - No state sync supported. Will attempt to sync every block in the history of the chain.
+//! - Stores the entire history of the chain, which requires indefinite amounts of disk space.
+//! - Uses [`resolver::p2p`](`commonware_resolver::p2p`) for backfilling rather than a general
+//!   [`Resolver`](`commonware_resolver::Resolver`).
+//! - Uses [`broadcast::buffered`](`commonware_broadcast::buffered`) for broadcasting and receiving
+//!   uncertified blocks from the network.
+
 pub mod actor;
 pub mod config;
 pub mod finalizer;
