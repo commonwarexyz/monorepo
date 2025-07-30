@@ -269,3 +269,241 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Array, NetS: Sender<P
         self.requester.len_blocked()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::p2p::mocks::Key as MockKey;
+    use bytes::Bytes;
+    use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, PrivateKeyExt, Signer};
+    use commonware_p2p::{utils::requester::Config as RequesterConfig, Recipients, Sender};
+    use commonware_runtime::{
+        deterministic::{Context, Runner},
+        Runner as _,
+    };
+    use governor::Quota;
+    use std::{fmt, time::Duration};
+
+    // Mock error type for testing
+    #[derive(Debug)]
+    struct MockError;
+
+    impl fmt::Display for MockError {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "mock error")
+        }
+    }
+
+    impl std::error::Error for MockError {}
+
+    // Mock sender for testing
+    #[derive(Clone, Debug)]
+    struct MockSender;
+
+    impl Sender for MockSender {
+        type PublicKey = Ed25519PublicKey;
+        type Error = MockError;
+
+        async fn send(
+            &mut self,
+            _recipients: Recipients<Self::PublicKey>,
+            _message: Bytes,
+            _priority: bool,
+        ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+            Ok(vec![])
+        }
+    }
+
+    fn create_test_fetcher() -> Fetcher<Context, Ed25519PublicKey, MockKey, MockSender> {
+        let context = Context::default();
+        let public_key = commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
+        let requester_config = RequesterConfig {
+            public_key,
+            rate_limit: Quota::per_second(std::num::NonZeroU32::new(10).unwrap()),
+            initial: Duration::from_millis(100),
+            timeout: Duration::from_secs(5),
+        };
+        let retry_timeout = Duration::from_millis(100);
+        let priority_requests = false;
+
+        Fetcher::new(context, requester_config, retry_timeout, priority_requests)
+    }
+
+    #[test]
+    fn test_retain_function() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+
+            // Add some keys to pending and active states
+            fetcher.add_pending(MockKey(1));
+            fetcher.add_pending(MockKey(2));
+            fetcher.add_pending(MockKey(3));
+
+            // Add keys to active state by simulating successful fetch
+            fetcher.active.insert(100, MockKey(10));
+            fetcher.active.insert(101, MockKey(20));
+            fetcher.active.insert(102, MockKey(30));
+
+            // Verify initial state
+            assert_eq!(fetcher.len(), 6);
+            assert_eq!(fetcher.len_pending(), 3);
+            assert_eq!(fetcher.len_active(), 3);
+
+            // Retain keys with value <= 10
+            fetcher.retain(|key| key.0 <= 10);
+
+            // Check that only keys with value <= 10 remain
+            // MockKey(1) from pending should remain
+            // MockKey(10) from active should remain
+            // MockKey(2), MockKey(3) from pending should be removed (2 <= 10 and 3 <= 10, wait that's wrong)
+            // Actually all keys <= 10 should remain: 1, 2, 3, 10
+            assert_eq!(fetcher.len(), 4); // Key(1), Key(2), Key(3), Key(10)
+            assert_eq!(fetcher.len_pending(), 3); // Key(1), Key(2), Key(3)
+            assert_eq!(fetcher.len_active(), 1); // Key(10)
+
+            // Verify specific keys
+            assert!(fetcher.pending.contains(&MockKey(1)));
+            assert!(fetcher.pending.contains(&MockKey(2)));
+            assert!(fetcher.pending.contains(&MockKey(3)));
+            assert!(fetcher.active.contains_right(&MockKey(10)));
+            assert!(!fetcher.active.contains_right(&MockKey(20)));
+            assert!(!fetcher.active.contains_right(&MockKey(30)));
+        });
+    }
+
+    #[test]
+    fn test_clear_function() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+
+            // Add some keys to pending and active states
+            fetcher.add_pending(MockKey(1));
+            fetcher.add_pending(MockKey(2));
+            fetcher.add_pending(MockKey(3));
+
+            // Add keys to active state
+            fetcher.active.insert(100, MockKey(10));
+            fetcher.active.insert(101, MockKey(20));
+            fetcher.active.insert(102, MockKey(30));
+
+            // Verify initial state
+            assert_eq!(fetcher.len(), 6);
+            assert_eq!(fetcher.len_pending(), 3);
+            assert_eq!(fetcher.len_active(), 3);
+
+            // Clear all fetches
+            fetcher.clear();
+
+            // Verify everything is cleared
+            assert_eq!(fetcher.len(), 0);
+            assert_eq!(fetcher.len_pending(), 0);
+            assert_eq!(fetcher.len_active(), 0);
+
+            // Verify specific collections are empty
+            assert!(fetcher.pending.is_empty());
+            assert!(fetcher.active.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_len_functions() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+
+            // Initially empty
+            assert_eq!(fetcher.len(), 0);
+            assert_eq!(fetcher.len_pending(), 0);
+            assert_eq!(fetcher.len_active(), 0);
+
+            // Add pending keys
+            fetcher.add_pending(MockKey(1));
+            fetcher.add_pending(MockKey(2));
+            assert_eq!(fetcher.len(), 2);
+            assert_eq!(fetcher.len_pending(), 2);
+            assert_eq!(fetcher.len_active(), 0);
+
+            // Add active keys
+            fetcher.active.insert(100, MockKey(10));
+            fetcher.active.insert(101, MockKey(20));
+            assert_eq!(fetcher.len(), 4);
+            assert_eq!(fetcher.len_pending(), 2);
+            assert_eq!(fetcher.len_active(), 2);
+
+            // Remove one pending key
+            assert!(fetcher.pending.remove(&MockKey(1)));
+            assert_eq!(fetcher.len(), 3);
+            assert_eq!(fetcher.len_pending(), 1);
+            assert_eq!(fetcher.len_active(), 2);
+
+            // Remove one active key
+            assert!(fetcher.active.remove_by_right(&MockKey(10)).is_some());
+            assert_eq!(fetcher.len(), 2);
+            assert_eq!(fetcher.len_pending(), 1);
+            assert_eq!(fetcher.len_active(), 1);
+        });
+    }
+
+    #[test]
+    fn test_retain_with_empty_collections() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+
+            // Test retain on empty collections
+            fetcher.retain(|_| true);
+            assert_eq!(fetcher.len(), 0);
+
+            fetcher.retain(|_| false);
+            assert_eq!(fetcher.len(), 0);
+        });
+    }
+
+    #[test]
+    fn test_retain_all_elements_match_predicate() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+
+            // Add keys
+            fetcher.add_pending(MockKey(1));
+            fetcher.add_pending(MockKey(2));
+            fetcher.active.insert(100, MockKey(10));
+            fetcher.active.insert(101, MockKey(20));
+
+            let initial_len = fetcher.len();
+
+            // Retain all (predicate always returns true)
+            fetcher.retain(|_| true);
+
+            // Nothing should be removed
+            assert_eq!(fetcher.len(), initial_len);
+            assert_eq!(fetcher.len_pending(), 2);
+            assert_eq!(fetcher.len_active(), 2);
+        });
+    }
+
+    #[test]
+    fn test_retain_no_elements_match_predicate() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+
+            // Add keys
+            fetcher.add_pending(MockKey(1));
+            fetcher.add_pending(MockKey(2));
+            fetcher.active.insert(100, MockKey(10));
+            fetcher.active.insert(101, MockKey(20));
+
+            // Retain none (predicate always returns false)
+            fetcher.retain(|_| false);
+
+            // Everything should be removed
+            assert_eq!(fetcher.len(), 0);
+            assert_eq!(fetcher.len_pending(), 0);
+            assert_eq!(fetcher.len_active(), 0);
+        });
+    }
+}
