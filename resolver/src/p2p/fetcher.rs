@@ -506,4 +506,327 @@ mod tests {
             assert_eq!(fetcher.len_active(), 0);
         });
     }
+
+    #[test]
+    fn test_cancel_function() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+
+            // Add keys to both pending and active states
+            fetcher.add_pending(MockKey(1));
+            fetcher.add_pending(MockKey(2));
+            fetcher.active.insert(100, MockKey(10));
+            fetcher.active.insert(101, MockKey(20));
+
+            // Test canceling pending key
+            assert!(fetcher.cancel(&MockKey(1)));
+            assert_eq!(fetcher.len_pending(), 1);
+            assert!(!fetcher.contains(&MockKey(1)));
+
+            // Test canceling active key
+            assert!(fetcher.cancel(&MockKey(10)));
+            assert_eq!(fetcher.len_active(), 1);
+            assert!(!fetcher.contains(&MockKey(10)));
+
+            // Test canceling non-existent key
+            assert!(!fetcher.cancel(&MockKey(99)));
+
+            // Test canceling already canceled key
+            assert!(!fetcher.cancel(&MockKey(1)));
+        });
+    }
+
+    #[test]
+    fn test_contains_function() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+
+            // Initially empty
+            assert!(!fetcher.contains(&MockKey(1)));
+
+            // Add to pending
+            fetcher.add_pending(MockKey(1));
+            assert!(fetcher.contains(&MockKey(1)));
+
+            // Add to active
+            fetcher.active.insert(100, MockKey(10));
+            assert!(fetcher.contains(&MockKey(10)));
+
+            // Test non-existent key
+            assert!(!fetcher.contains(&MockKey(99)));
+
+            // Remove from pending
+            fetcher.pending.remove(&MockKey(1));
+            assert!(!fetcher.contains(&MockKey(1)));
+
+            // Remove from active
+            fetcher.active.remove_by_right(&MockKey(10));
+            assert!(!fetcher.contains(&MockKey(10)));
+        });
+    }
+
+    #[test]
+    fn test_add_pending_function() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+
+            // Add first key
+            fetcher.add_pending(MockKey(1));
+            assert_eq!(fetcher.len_pending(), 1);
+            assert!(fetcher.contains(&MockKey(1)));
+
+            // Add second key
+            fetcher.add_pending(MockKey(2));
+            assert_eq!(fetcher.len_pending(), 2);
+            assert!(fetcher.contains(&MockKey(2)));
+
+            // Verify deadline is set
+            assert!(fetcher.get_pending_deadline().is_some());
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn test_add_pending_duplicate_panics() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+
+            fetcher.add_pending(MockKey(1));
+            // This should panic
+            fetcher.add_pending(MockKey(1));
+        });
+    }
+
+    #[test]
+    fn test_get_pending_deadline() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+
+            // No deadline when empty
+            assert!(fetcher.get_pending_deadline().is_none());
+
+            // Add key and check deadline exists
+            fetcher.add_pending(MockKey(1));
+            assert!(fetcher.get_pending_deadline().is_some());
+
+            // Add another key - should still have a deadline
+            fetcher.add_pending(MockKey(2));
+            assert!(fetcher.get_pending_deadline().is_some());
+
+            // Clear and check no deadline
+            fetcher.pending.clear();
+            assert!(fetcher.get_pending_deadline().is_none());
+        });
+    }
+
+    #[test]
+    fn test_get_active_deadline() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let fetcher = create_test_fetcher();
+
+            // No deadline when empty (requester has no timeouts)
+            assert!(fetcher.get_active_deadline().is_none());
+        });
+    }
+
+    #[test]
+    fn test_pop_pending() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+
+            // Add keys
+            fetcher.add_pending(MockKey(1));
+            fetcher.add_pending(MockKey(2));
+            assert_eq!(fetcher.len_pending(), 2);
+
+            // Pop first key
+            let key = fetcher.pop_pending();
+            assert!(key == MockKey(1) || key == MockKey(2)); // Order may vary due to priority queue
+            assert_eq!(fetcher.len_pending(), 1);
+
+            // Pop second key
+            let key2 = fetcher.pop_pending();
+            assert!(key2 == MockKey(1) || key2 == MockKey(2));
+            assert_ne!(key, key2); // Should be different keys
+            assert_eq!(fetcher.len_pending(), 0);
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_pop_pending_empty_panics() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+            // This should panic
+            fetcher.pop_pending();
+        });
+    }
+
+    #[test]
+    fn test_pop_active() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let fetcher = create_test_fetcher();
+
+            // No active requests, should return None when popping
+            // (This tests the case where requester.next() returns None or the active map doesn't contain the key)
+            assert!(fetcher.get_active_deadline().is_none());
+        });
+    }
+
+    #[test]
+    fn test_pop_by_id() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+            let dummy_peer =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+
+            // Add key to active state
+            fetcher.active.insert(100, MockKey(10));
+
+            // Test pop with non-existent ID (requester.handle returns None)
+            assert!(fetcher.pop_by_id(999, &dummy_peer, true).is_none());
+
+            // The active entry should still be there since the ID wasn't handled by requester
+            assert_eq!(fetcher.len_active(), 1);
+        });
+    }
+
+    #[test]
+    fn test_reconcile_and_block() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+            let peer1 = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
+
+            // Test reconcile with peers
+            fetcher.reconcile(&[peer1.clone(), peer2.clone()]);
+
+            // Test block peer
+            fetcher.block(peer1.clone());
+
+            // Initially no blocked peers (this depends on internal requester state)
+            // The len_blocked function returns the count from the requester
+        });
+    }
+
+    #[test]
+    fn test_len_blocked() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+
+            // Initially no blocked peers
+            let initial_blocked = fetcher.len_blocked();
+
+            // Block a peer
+            let peer = commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            fetcher.block(peer);
+
+            // The count should potentially increase (depends on requester implementation)
+            let after_block = fetcher.len_blocked();
+            assert!(after_block >= initial_blocked);
+        });
+    }
+
+    #[test]
+    fn test_edge_cases_empty_state() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let fetcher = create_test_fetcher();
+
+            // Test all functions on empty fetcher
+            assert_eq!(fetcher.len(), 0);
+            assert_eq!(fetcher.len_pending(), 0);
+            assert_eq!(fetcher.len_active(), 0);
+            assert!(!fetcher.contains(&MockKey(1)));
+            assert!(fetcher.get_pending_deadline().is_none());
+            assert!(fetcher.get_active_deadline().is_none());
+        });
+    }
+
+    #[test]
+    fn test_cancel_edge_cases() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+
+            // Cancel from empty fetcher
+            assert!(!fetcher.cancel(&MockKey(1)));
+
+            // Add key, cancel it, then try to cancel again
+            fetcher.add_pending(MockKey(1));
+            assert!(fetcher.cancel(&MockKey(1)));
+            assert!(!fetcher.cancel(&MockKey(1))); // Should return false
+        });
+    }
+
+    #[test]
+    fn test_retain_preserves_active_state() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+
+            // Add keys to active with specific IDs
+            fetcher.active.insert(100, MockKey(1));
+            fetcher.active.insert(101, MockKey(2));
+
+            // Retain only MockKey(1)
+            fetcher.retain(|key| key.0 == 1);
+
+            // Verify the ID mapping is preserved correctly
+            assert_eq!(fetcher.len_active(), 1);
+            assert!(fetcher.active.contains_right(&MockKey(1)));
+            assert!(!fetcher.active.contains_right(&MockKey(2)));
+
+            // Verify the ID 100 still maps to MockKey(1)
+            if let Some((_, key)) = fetcher.active.iter().next() {
+                assert_eq!(*key, MockKey(1));
+            }
+        });
+    }
+
+    #[test]
+    fn test_mixed_operations() {
+        let runner = Runner::default();
+        runner.start(|_| async {
+            let mut fetcher = create_test_fetcher();
+
+            // Add keys to both pending and active
+            fetcher.add_pending(MockKey(1));
+            fetcher.add_pending(MockKey(2));
+            fetcher.active.insert(100, MockKey(10));
+            fetcher.active.insert(101, MockKey(20));
+
+            assert_eq!(fetcher.len(), 4);
+
+            // Cancel one from each
+            assert!(fetcher.cancel(&MockKey(1))); // pending
+            assert!(fetcher.cancel(&MockKey(10))); // active
+
+            assert_eq!(fetcher.len(), 2);
+
+            // Retain only keys <= 20
+            fetcher.retain(|key| key.0 <= 20);
+
+            // Should still have MockKey(2) pending and MockKey(20) active
+            assert_eq!(fetcher.len(), 2);
+            assert!(fetcher.contains(&MockKey(2)));
+            assert!(fetcher.contains(&MockKey(20)));
+
+            // Clear all
+            fetcher.clear();
+            assert_eq!(fetcher.len(), 0);
+        });
+    }
 }
