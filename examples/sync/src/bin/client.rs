@@ -10,7 +10,7 @@ use commonware_storage::{
     adb::any::sync::{self, client::Config as SyncConfig, SyncTarget},
     mmr::hasher::Standard,
 };
-use commonware_sync::{crate_version, create_adb_config, Resolver};
+use commonware_sync::{crate_version, create_adb_config, Error, Resolver};
 use commonware_utils::parse_duration;
 use futures::channel::mpsc;
 use rand::Rng;
@@ -23,9 +23,14 @@ use tracing::{debug, error, info, warn};
 
 /// Default server address.
 const DEFAULT_SERVER: &str = "127.0.0.1:8080";
+
+/// Default client storage directory prefix.
 const DEFAULT_CLIENT_DIR_PREFIX: &str = "/tmp/commonware-sync/client";
+
+/// Size of the channel for target updates.
 const UPDATE_CHANNEL_SIZE: usize = 16;
 
+/// Client configuration.
 #[derive(Debug)]
 struct Config {
     /// Server address to connect to.
@@ -40,6 +45,8 @@ struct Config {
     target_update_interval: Duration,
     /// Interval between sync operations.
     sync_interval: Duration,
+    /// Maximum number of outstanding requests.
+    max_outstanding_requests: usize,
 }
 
 /// Periodically request target updates from server and send them to sync client
@@ -50,9 +57,9 @@ async fn target_update_task<E>(
     update_sender: mpsc::Sender<SyncTarget<Digest>>,
     interval_duration: Duration,
     initial_target: SyncTarget<Digest>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+) -> Result<(), Error>
 where
-    E: commonware_runtime::Network + commonware_runtime::Clock + Clone,
+    E: commonware_runtime::Network + commonware_runtime::Clock + commonware_runtime::Spawner,
 {
     let mut current_target = initial_target;
 
@@ -80,7 +87,9 @@ where
                         }
                         Err(e) => {
                             warn!(error = %e, "failed to send target update to sync client");
-                            return Err(e.into());
+                            return Err(Error::TargetUpdateChannel {
+                                reason: e.to_string(),
+                            });
                         }
                     }
                 } else {
@@ -96,11 +105,7 @@ where
 }
 
 /// Perform a single sync by opening the database, syncing, and closing it.
-async fn sync<E>(
-    context: &E,
-    config: &Config,
-    sync_iteration: u32,
-) -> Result<(), Box<dyn std::error::Error>>
+async fn sync<E>(context: &E, config: &Config, sync_iteration: u32) -> Result<(), Error>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
@@ -158,6 +163,7 @@ where
         resolver,
         hasher: Standard::new(),
         apply_batch_size: 1024,
+        max_outstanding_requests: config.max_outstanding_requests,
         update_receiver: Some(update_receiver),
     };
 
@@ -169,7 +175,6 @@ where
 
     // Get the root digest of the synced database
     let got_root = database.root(&mut Standard::new());
-
     info!(
         sync_iteration,
         database_ops = database.op_count(),
@@ -178,21 +183,20 @@ where
         "✅ sync completed successfully"
     );
 
+    // Close the database so it can be reopened on next iteration
     debug!(
         sync_iteration,
         "Database state before close: ops={}, root={:?}",
         database.op_count(),
         got_root
     );
-
-    // Close the database so it can be reopened on next iteration
     database.close().await?;
 
     Ok(())
 }
 
 /// Continuously sync the database to the server's state.
-async fn run<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+async fn run<E>(context: E, config: Config) -> Result<(), Error>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
@@ -266,6 +270,14 @@ fn main() {
                 .help("Interval between sync operations ('ms', 's', 'm', 'h')")
                 .default_value("10s"),
         )
+        .arg(
+            Arg::new("max-outstanding-requests")
+                .short('r')
+                .long("max-outstanding-requests")
+                .value_name("COUNT")
+                .help("Maximum number of outstanding sync requests")
+                .default_value("1"),
+        )
         .get_matches();
 
     let config = Config {
@@ -318,8 +330,15 @@ fn main() {
                 eprintln!("❌ Invalid sync interval: {e}");
                 std::process::exit(1);
             }),
+        max_outstanding_requests: matches
+            .get_one::<String>("max-outstanding-requests")
+            .unwrap()
+            .parse()
+            .unwrap_or_else(|e| {
+                eprintln!("❌ Invalid max outstanding requests: {e}");
+                std::process::exit(1);
+            }),
     };
-
     info!(
         server = %config.server,
         batch_size = config.batch_size,
@@ -327,6 +346,7 @@ fn main() {
         metrics_port = config.metrics_port,
         target_update_interval = ?config.target_update_interval,
         sync_interval = ?config.sync_interval,
+        max_outstanding_requests = config.max_outstanding_requests,
         "client starting with configuration"
     );
 

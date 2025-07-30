@@ -3,7 +3,6 @@
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Listener, Metrics as _, Network, Runner, RwLock, Spawner as _,
@@ -11,11 +10,12 @@ use commonware_runtime::{
 use commonware_storage::{adb::any::sync::SyncTarget, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    crate_version, create_adb_config, create_test_operations, Database, ErrorResponse,
-    GetOperationsRequest, GetOperationsResponse, Message, Operation, ProtocolError,
-    MAX_MESSAGE_SIZE,
+    crate_version, create_adb_config, create_test_operations, Database, Error, ErrorCode,
+    ErrorResponse, GetOperationsRequest, GetOperationsResponse, GetSyncTargetRequest,
+    GetSyncTargetResponse, Message, Operation, MAX_MESSAGE_SIZE,
 };
 use commonware_utils::parse_duration;
+use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
@@ -25,7 +25,11 @@ use std::{
 };
 use tracing::{debug, error, info, warn};
 
+/// Maximum batch size for operations.
 const MAX_BATCH_SIZE: u64 = 100;
+
+/// Size of the channel for responses.
+const RESPONSE_BUFFER_SIZE: usize = 64;
 
 /// Server configuration.
 #[derive(Debug, Clone)]
@@ -88,7 +92,7 @@ where
     }
 
     /// Add operations to the database if the configured interval has passed.
-    async fn maybe_add_operation(
+    async fn maybe_add_operations(
         &self,
         context: &mut E,
         config: &Config,
@@ -162,55 +166,58 @@ where
 }
 
 /// Handle a request for sync target.
-async fn handle_get_sync_target<E>(state: &State<E>) -> Result<SyncTarget<Digest>, ProtocolError>
+async fn handle_get_sync_target<E>(
+    state: &State<E>,
+    request: GetSyncTargetRequest,
+) -> Result<GetSyncTargetResponse, Error>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
     state.request_counter.inc();
 
-    let database = state.database.read().await;
-
     // Get the current database state
-    let lower_bound_ops = database.inactivity_floor_loc();
-    let upper_bound_ops = database.op_count().saturating_sub(1);
-    let root = {
+    let (root, lower_bound_ops, upper_bound_ops) = {
         let mut hasher = Standard::new();
-        database.root(&mut hasher)
+        let database = state.database.read().await;
+        (
+            database.root(&mut hasher),
+            database.inactivity_floor_loc(),
+            database.op_count().saturating_sub(1),
+        )
+    };
+    let response = GetSyncTargetResponse {
+        request_id: request.request_id,
+        target: SyncTarget {
+            root,
+            lower_bound_ops,
+            upper_bound_ops,
+        },
     };
 
-    drop(database);
-
-    let response = SyncTarget {
-        root,
-        lower_bound_ops,
-        upper_bound_ops,
-    };
     debug!(?response, "serving target update");
     Ok(response)
 }
 
 /// Handle a GetOperationsRequest and return operations with proof.
-async fn handle_get_operations_request<E>(
+async fn handle_get_operations<E>(
     state: &State<E>,
     request: GetOperationsRequest,
-) -> Result<GetOperationsResponse, ProtocolError>
+) -> Result<GetOperationsResponse, Error>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
-    request.validate()?;
     state.request_counter.inc();
+    request.validate()?;
 
     let database = state.database.read().await;
 
     // Check if we have enough operations
     let db_size = database.op_count();
     if request.start_loc >= db_size {
-        return Err(ProtocolError::InvalidRequest {
-            message: format!(
-                "start_loc >= database size ({}) >= ({})",
-                request.start_loc, db_size
-            ),
-        });
+        return Err(Error::InvalidRequest(format!(
+            "start_loc >= database size ({}) >= ({})",
+            request.start_loc, db_size
+        )));
     }
 
     // Calculate how many operations to return
@@ -218,6 +225,7 @@ where
     let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
 
     debug!(
+        request_id = request.request_id.value(),
         max_ops,
         start_loc = request.start_loc,
         db_size,
@@ -232,21 +240,73 @@ where
     drop(database);
 
     let (proof, operations) = result.map_err(|e| {
-        warn!(error = %e, "❌ failed to generate historical proof");
-        ProtocolError::DatabaseError(e)
+        warn!(error = %e, "failed to generate historical proof");
+        Error::Database(e)
     })?;
 
     debug!(
+        request_id = request.request_id.value(),
         operations_len = operations.len(),
         proof_len = proof.digests.len(),
         "sending operations and proof"
     );
 
-    Ok(GetOperationsResponse { proof, operations })
+    Ok(GetOperationsResponse {
+        request_id: request.request_id,
+        proof,
+        operations,
+    })
 }
 
-/// Handle a client connection using [commonware_runtime::Network].
+/// Handle a message from a client and return the appropriate response.
+async fn handle_message<E>(state: Arc<State<E>>, message: Message) -> Message
+where
+    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+{
+    let request_id = message.request_id();
+    match message {
+        Message::GetOperationsRequest(request) => {
+            match handle_get_operations(&state, request).await {
+                Ok(response) => Message::GetOperationsResponse(response),
+                Err(e) => {
+                    state.error_counter.inc();
+                    Message::Error(ErrorResponse {
+                        request_id,
+                        error_code: e.to_error_code(),
+                        message: e.to_string(),
+                    })
+                }
+            }
+        }
+
+        Message::GetSyncTargetRequest(request) => {
+            match handle_get_sync_target(&state, request).await {
+                Ok(response) => Message::GetSyncTargetResponse(response),
+                Err(e) => {
+                    state.error_counter.inc();
+                    Message::Error(ErrorResponse {
+                        request_id,
+                        error_code: e.to_error_code(),
+                        message: e.to_string(),
+                    })
+                }
+            }
+        }
+
+        _ => {
+            state.error_counter.inc();
+            Message::Error(ErrorResponse {
+                request_id,
+                error_code: ErrorCode::InvalidRequest,
+                message: "unexpected message type".to_string(),
+            })
+        }
+    }
+}
+
+/// Handle a client connection with concurrent request processing.
 async fn handle_client<E>(
+    context: E,
     state: Arc<State<E>>,
     mut sink: commonware_runtime::SinkOf<E>,
     mut stream: commonware_runtime::StreamOf<E>,
@@ -256,71 +316,66 @@ where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
         + commonware_runtime::Metrics
-        + commonware_runtime::Network,
+        + commonware_runtime::Network
+        + commonware_runtime::Spawner
+        + Clone,
 {
     info!(client_addr = %client_addr, "client connected");
 
+    // Wait until we receive a message from the client or we have a response to send.
+    let (response_sender, mut response_receiver) = mpsc::channel::<Message>(RESPONSE_BUFFER_SIZE);
     loop {
-        // Read length-prefixed message
-        let message_data = match recv_frame(&mut stream, MAX_MESSAGE_SIZE).await {
-            Ok(data) => data,
-            Err(e) => {
-                info!(client_addr = %client_addr, error = %e, "recv failed (likely because client disconnected)");
-                state.error_counter.inc();
-                break;
-            }
-        };
+        select! {
+            incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
+                match incoming {
+                    Ok(message_data) => {
+                        // Parse the message.
+                        let message: Message = match Message::decode(&message_data[..]) {
+                            Ok(msg) => msg,
+                            Err(e) => {
+                                warn!(client_addr = %client_addr, error = %e, "failed to parse message");
+                                state.error_counter.inc();
+                                continue;
+                            }
+                        };
 
-        // Parse the message
-        let message: Message = match Message::decode(&message_data[..]) {
-            Ok(msg) => msg,
-            Err(e) => {
-                error!(client_addr = %client_addr, error = %e, "❌ failed to parse message");
-                state.error_counter.inc();
-                continue;
-            }
-        };
-
-        // Handle the message
-        let response = match message {
-            Message::GetOperationsRequest(request) => {
-                match handle_get_operations_request(&state, request).await {
-                    Ok(response) => Message::GetOperationsResponse(response),
+                        // Start a new task to handle the message.
+                        // The response will be sent on `response_sender`.
+                        context.with_label("request-handler").spawn({
+                            let state = state.clone();
+                            let mut response_sender = response_sender.clone();
+                            move |_| async move {
+                                let response = handle_message(state, message).await;
+                                if let Err(e) = response_sender.send(response).await {
+                                    warn!(client_addr = %client_addr, error = %e, "failed to send response to main loop");
+                                }
+                            }
+                        });
+                    }
                     Err(e) => {
-                        warn!(client_addr = %client_addr, error = %e, "❌ getOperations failed");
+                        info!(client_addr = %client_addr, error = %e, "recv failed (client likely disconnected)");
                         state.error_counter.inc();
-                        Message::Error(e.into())
+                        break Ok(());
                     }
                 }
-            }
-            Message::GetSyncTargetRequest => match handle_get_sync_target(&state).await {
-                Ok(response) => Message::GetSyncTargetResponse(response),
-                Err(e) => {
-                    warn!(client_addr = %client_addr, error = %e, "❌ getSyncTarget failed");
-                    state.error_counter.inc();
-                    Message::Error(e.into())
-                }
             },
-            _ => {
-                warn!(client_addr = %client_addr, "❌ unexpected message type");
-                state.error_counter.inc();
-                Message::Error(ErrorResponse {
-                    error_code: commonware_sync::ErrorCode::InvalidRequest,
-                    message: "unexpected message type".to_string(),
-                })
-            }
-        };
 
-        // Send the response with length prefix
-        let response_data = response.encode().to_vec();
-        if let Err(e) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
-            info!(client_addr = %client_addr, error = %e, "send failed (likely because client disconnected)");
-            state.error_counter.inc();
-            break;
+            outgoing = response_receiver.next() => {
+                if let Some(response) = outgoing {
+                    // We have a response to send to the client.
+                    let response_data = response.encode().to_vec();
+                    if let Err(e) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
+                        info!(client_addr = %client_addr, error = %e, "send failed (client likely disconnected)");
+                        state.error_counter.inc();
+                        break Ok(());
+                    }
+                } else {
+                    // Channel closed
+                    break Ok(());
+                }
+            }
         }
     }
-
-    Ok(())
 }
 
 fn main() {
@@ -430,7 +485,6 @@ fn main() {
                 std::process::exit(1);
             }),
     };
-
     info!(
         port = config.port,
         initial_ops = config.initial_ops,
@@ -456,9 +510,8 @@ fn main() {
         );
 
         // Create and initialize database
-        let db_config = create_adb_config();
         info!("initializing database");
-
+        let db_config = create_adb_config();
         let mut database = match Database::init(context.with_label("database"), db_config).await {
             Ok(db) => db,
             Err(e) => {
@@ -470,7 +523,6 @@ fn main() {
         // Create and add initial operations
         let initial_ops = create_test_operations(config.initial_ops, context.next_u64());
         info!(operations_len = initial_ops.len(), "creating initial operations");
-
         if let Err(e) = add_operations(&mut database, initial_ops).await {
             error!(error = %e, "❌ failed to add initial operations");
             return;
@@ -490,7 +542,6 @@ fn main() {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
-
         info!(
             op_count = database.op_count(),
             root = %root_hex,
@@ -506,7 +557,6 @@ fn main() {
                 return;
             }
         };
-
         info!(
             addr = %addr,
             op_interval = ?config.op_interval,
@@ -516,12 +566,11 @@ fn main() {
 
         let state = Arc::new(State::new(context.with_label("server"), database));
         let mut next_op_time = context.current() + config.op_interval;
-
         loop {
             select! {
                 _ = context.sleep_until(next_op_time) => {
                     // Add operations to the database
-                    if let Err(e) = state.maybe_add_operation(&mut context, &config).await {
+                    if let Err(e) = state.maybe_add_operations(&mut context, &config).await {
                         warn!(error = %e, "failed to add additional operations");
                     }
                     next_op_time = context.current() + config.op_interval;
@@ -530,9 +579,10 @@ fn main() {
                     match client_result {
                         Ok((client_addr, sink, stream)) => {
                             let state = state.clone();
-                            context.with_label("client").spawn(move|_|async move {
+                            let context = context.clone();
+                            context.with_label("client").spawn(move|context|async move {
                                 if let Err(e) =
-                                    handle_client(state.clone(), sink, stream, client_addr).await
+                                    handle_client(context,state.clone(), sink, stream, client_addr).await
                                 {
                                     error!(client_addr = %client_addr, error = %e, "❌ error handling client");
                                 }

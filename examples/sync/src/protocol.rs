@@ -17,14 +17,58 @@ use commonware_codec::{
 };
 use commonware_cryptography::sha256::Digest;
 use commonware_storage::{adb::any::sync::SyncTarget, mmr::verification::Proof};
-use std::num::NonZeroU64;
-use thiserror::Error;
+use std::{
+    mem::size_of,
+    num::NonZeroU64,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 /// Maximum message size in bytes (10MB).
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
 /// Maximum number of digests in a proof.
 const MAX_DIGESTS: usize = 10_000;
+
+/// Unique identifier for correlating requests with responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RequestId(u64);
+
+impl Default for RequestId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RequestId {
+    pub fn new() -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        RequestId(COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub fn value(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Write for RequestId {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
+    }
+}
+
+impl EncodeSize for RequestId {
+    fn encode_size(&self) -> usize {
+        self.0.encode_size()
+    }
+}
+
+impl Read for RequestId {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(RequestId(u64::read(buf)?))
+    }
+}
 
 /// Network protocol messages for syncing a [commonware_storage::adb::any::Any] database.
 #[derive(Debug, Clone)]
@@ -34,9 +78,9 @@ pub enum Message {
     /// Response with operations and proof.
     GetOperationsResponse(GetOperationsResponse),
     /// Request sync target from server.
-    GetSyncTargetRequest,
+    GetSyncTargetRequest(GetSyncTargetRequest),
     /// Response with sync target.
-    GetSyncTargetResponse(SyncTarget<Digest>),
+    GetSyncTargetResponse(GetSyncTargetResponse),
     /// Error response.
     /// Note that, in this example, the server sends an error response to the client in the event
     /// of an invalid request or internal error. In a real-world application, this may be inadvisable.
@@ -45,9 +89,23 @@ pub enum Message {
     Error(ErrorResponse),
 }
 
+impl Message {
+    pub fn request_id(&self) -> RequestId {
+        match self {
+            Message::GetOperationsRequest(req) => req.request_id,
+            Message::GetOperationsResponse(resp) => resp.request_id,
+            Message::GetSyncTargetRequest(req) => req.request_id,
+            Message::GetSyncTargetResponse(resp) => resp.request_id,
+            Message::Error(err) => err.request_id,
+        }
+    }
+}
+
 /// Request for operations from the server.
 #[derive(Debug, Clone)]
 pub struct GetOperationsRequest {
+    /// Unique identifier for this request.
+    pub request_id: RequestId,
     /// Size of the database at the root we are syncing to.
     pub size: u64,
     /// Starting location for the operations.
@@ -59,15 +117,35 @@ pub struct GetOperationsRequest {
 /// Response with operations and proof.
 #[derive(Debug, Clone)]
 pub struct GetOperationsResponse {
+    /// Unique identifier matching the original request.
+    pub request_id: RequestId,
     /// Serialized proof that the operations were in the database.
     pub proof: Proof<Digest>,
     /// Serialized operations in the requested range.
     pub operations: Vec<Operation>,
 }
 
+/// Request for sync target from server.
+#[derive(Debug, Clone)]
+pub struct GetSyncTargetRequest {
+    /// Unique identifier for this request.
+    pub request_id: RequestId,
+}
+
+/// Response with sync target.
+#[derive(Debug, Clone)]
+pub struct GetSyncTargetResponse {
+    /// Unique identifier matching the original request.
+    pub request_id: RequestId,
+    /// Sync target information.
+    pub target: SyncTarget<Digest>,
+}
+
 /// Error response.
 #[derive(Debug, Clone)]
 pub struct ErrorResponse {
+    /// Unique identifier matching the original request.
+    pub request_id: RequestId,
     /// Error code.
     pub error_code: ErrorCode,
     /// Human-readable error message.
@@ -89,19 +167,6 @@ pub enum ErrorCode {
     InternalError,
 }
 
-/// Errors that can occur during protocol operations.
-#[derive(Debug, Error)]
-pub enum ProtocolError {
-    #[error("Invalid request: {message}")]
-    InvalidRequest { message: String },
-
-    #[error("Database error: {0}")]
-    DatabaseError(#[from] commonware_storage::adb::Error),
-
-    #[error("Network error: {0}")]
-    NetworkError(String),
-}
-
 impl Write for Message {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
@@ -113,8 +178,9 @@ impl Write for Message {
                 1u8.write(buf);
                 resp.write(buf);
             }
-            Message::GetSyncTargetRequest => {
+            Message::GetSyncTargetRequest(req) => {
                 2u8.write(buf);
+                req.write(buf);
             }
             Message::GetSyncTargetResponse(resp) => {
                 3u8.write(buf);
@@ -134,7 +200,7 @@ impl EncodeSize for Message {
         1 + match self {
             Message::GetOperationsRequest(req) => req.encode_size(),
             Message::GetOperationsResponse(resp) => resp.encode_size(),
-            Message::GetSyncTargetRequest => 0,
+            Message::GetSyncTargetRequest(req) => req.encode_size(),
             Message::GetSyncTargetResponse(resp) => resp.encode_size(),
             Message::Error(err) => err.encode_size(),
         }
@@ -153,8 +219,12 @@ impl Read for Message {
             1 => Ok(Message::GetOperationsResponse(GetOperationsResponse::read(
                 buf,
             )?)),
-            2 => Ok(Message::GetSyncTargetRequest),
-            3 => Ok(Message::GetSyncTargetResponse(SyncTarget::read(buf)?)),
+            2 => Ok(Message::GetSyncTargetRequest(GetSyncTargetRequest::read(
+                buf,
+            )?)),
+            3 => Ok(Message::GetSyncTargetResponse(GetSyncTargetResponse::read(
+                buf,
+            )?)),
             4 => Ok(Message::Error(ErrorResponse::read(buf)?)),
             _ => Err(CodecError::InvalidEnum(discriminant)),
         }
@@ -163,6 +233,7 @@ impl Read for Message {
 
 impl Write for GetOperationsRequest {
     fn write(&self, buf: &mut impl BufMut) {
+        self.request_id.write(buf);
         self.size.write(buf);
         self.start_loc.write(buf);
         self.max_ops.get().write(buf);
@@ -171,7 +242,10 @@ impl Write for GetOperationsRequest {
 
 impl EncodeSize for GetOperationsRequest {
     fn encode_size(&self) -> usize {
-        self.size.encode_size() + self.start_loc.encode_size() + self.max_ops.get().encode_size()
+        self.request_id.encode_size()
+            + self.size.encode_size()
+            + self.start_loc.encode_size()
+            + self.max_ops.get().encode_size()
     }
 }
 
@@ -179,12 +253,14 @@ impl Read for GetOperationsRequest {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let request_id = RequestId::read_cfg(buf, &())?;
         let size = u64::read(buf)?;
         let start_loc = u64::read(buf)?;
         let max_ops_raw = u64::read(buf)?;
         let max_ops = NonZeroU64::new(max_ops_raw)
             .ok_or_else(|| CodecError::Invalid("GetOperationsRequest", "max_ops cannot be zero"))?;
         Ok(Self {
+            request_id,
             size,
             start_loc,
             max_ops,
@@ -194,6 +270,7 @@ impl Read for GetOperationsRequest {
 
 impl Write for GetOperationsResponse {
     fn write(&self, buf: &mut impl BufMut) {
+        self.request_id.write(buf);
         self.proof.write(buf);
         self.operations.write(buf);
     }
@@ -201,7 +278,7 @@ impl Write for GetOperationsResponse {
 
 impl EncodeSize for GetOperationsResponse {
     fn encode_size(&self) -> usize {
-        self.proof.encode_size() + self.operations.encode_size()
+        self.request_id.encode_size() + self.proof.encode_size() + self.operations.encode_size()
     }
 }
 
@@ -209,17 +286,67 @@ impl Read for GetOperationsResponse {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let request_id = RequestId::read_cfg(buf, &())?;
         let proof = Proof::read_cfg(buf, &MAX_DIGESTS)?;
         let operations = {
             let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
             Vec::<Operation>::read_cfg(buf, &(range_cfg, ()))?
         };
-        Ok(Self { proof, operations })
+        Ok(Self {
+            request_id,
+            proof,
+            operations,
+        })
+    }
+}
+
+impl Write for GetSyncTargetRequest {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.request_id.write(buf);
+    }
+}
+
+impl EncodeSize for GetSyncTargetRequest {
+    fn encode_size(&self) -> usize {
+        self.request_id.encode_size()
+    }
+}
+
+impl Read for GetSyncTargetRequest {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let request_id = RequestId::read_cfg(buf, &())?;
+        Ok(Self { request_id })
+    }
+}
+
+impl Write for GetSyncTargetResponse {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.request_id.write(buf);
+        self.target.write(buf);
+    }
+}
+
+impl EncodeSize for GetSyncTargetResponse {
+    fn encode_size(&self) -> usize {
+        self.request_id.encode_size() + self.target.encode_size()
+    }
+}
+
+impl Read for GetSyncTargetResponse {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let request_id = RequestId::read_cfg(buf, &())?;
+        let target = SyncTarget::read_cfg(buf, &())?;
+        Ok(Self { request_id, target })
     }
 }
 
 impl Write for ErrorResponse {
     fn write(&self, buf: &mut impl BufMut) {
+        self.request_id.write(buf);
         self.error_code.write(buf);
         self.message.as_bytes().to_vec().write(buf);
     }
@@ -227,7 +354,9 @@ impl Write for ErrorResponse {
 
 impl EncodeSize for ErrorResponse {
     fn encode_size(&self) -> usize {
-        self.error_code.encode_size() + self.message.as_bytes().to_vec().encode_size()
+        self.request_id.encode_size()
+            + self.error_code.encode_size()
+            + self.message.as_bytes().to_vec().encode_size()
     }
 }
 
@@ -235,12 +364,14 @@ impl Read for ErrorResponse {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let request_id = RequestId::read_cfg(buf, &())?;
         let error_code = ErrorCode::read(buf)?;
         // Read string as Vec<u8> and convert to String
         let message_bytes = Vec::<u8>::read_range(buf, 0..=MAX_MESSAGE_SIZE)?;
         let message = String::from_utf8(message_bytes)
             .map_err(|_| CodecError::Invalid("ErrorResponse", "invalid UTF-8 in message"))?;
         Ok(Self {
+            request_id,
             error_code,
             message,
         })
@@ -282,33 +413,20 @@ impl Read for ErrorCode {
     }
 }
 
-impl From<ProtocolError> for ErrorResponse {
-    fn from(error: ProtocolError) -> Self {
-        let (error_code, message) = match error {
-            ProtocolError::InvalidRequest { message } => (ErrorCode::InvalidRequest, message),
-            ProtocolError::DatabaseError(e) => (ErrorCode::DatabaseError, e.to_string()),
-            ProtocolError::NetworkError(e) => (ErrorCode::NetworkError, e),
-        };
-        ErrorResponse {
-            error_code,
-            message,
-        }
-    }
-}
-
 impl GetOperationsRequest {
     /// Validate the request parameters.
-    pub fn validate(&self) -> Result<(), ProtocolError> {
+    pub fn validate(&self) -> Result<(), crate::Error> {
         if self.start_loc >= self.size {
-            return Err(ProtocolError::InvalidRequest {
-                message: format!("start_loc >= size ({}) >= ({})", self.start_loc, self.size),
-            });
+            return Err(crate::Error::InvalidRequest(format!(
+                "start_loc >= size ({}) >= ({})",
+                self.start_loc, self.size
+            )));
         }
 
         if self.max_ops.get() == 0 {
-            return Err(ProtocolError::InvalidRequest {
-                message: "max_ops cannot be zero".to_string(),
-            });
+            return Err(crate::Error::InvalidRequest(
+                "max_ops cannot be zero".to_string(),
+            ));
         }
 
         Ok(())
@@ -321,9 +439,56 @@ mod tests {
     use commonware_utils::NZU64;
 
     #[test]
+    fn test_request_id_generation() {
+        let id1 = RequestId::new();
+        let id2 = RequestId::new();
+        let id3 = RequestId::new();
+
+        // Request IDs should be incrementing
+        assert!(id2.value() > id1.value());
+        assert!(id3.value() > id2.value());
+
+        // Should be consecutive
+        assert_eq!(id2.value(), id1.value() + 1);
+        assert_eq!(id3.value(), id2.value() + 1);
+    }
+
+    #[test]
+    fn test_error_code_roundtrip_serialization() {
+        use commonware_codec::{DecodeExt, Encode};
+
+        let test_cases = vec![
+            ErrorCode::InvalidRequest,
+            ErrorCode::DatabaseError,
+            ErrorCode::NetworkError,
+            ErrorCode::Timeout,
+            ErrorCode::InternalError,
+        ];
+
+        for error_code in test_cases {
+            // Serialize
+            let encoded = error_code.encode().to_vec();
+
+            // Deserialize
+            let decoded = ErrorCode::decode(&encoded[..]).expect("Failed to decode ErrorCode");
+
+            // Verify they match
+            match (&error_code, &decoded) {
+                (ErrorCode::InvalidRequest, ErrorCode::InvalidRequest) => {}
+                (ErrorCode::DatabaseError, ErrorCode::DatabaseError) => {}
+                (ErrorCode::NetworkError, ErrorCode::NetworkError) => {}
+                (ErrorCode::Timeout, ErrorCode::Timeout) => {}
+                (ErrorCode::InternalError, ErrorCode::InternalError) => {}
+                _ => panic!("ErrorCode roundtrip failed: {error_code:?} != {decoded:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn test_get_operations_request_validation() {
         // Valid request
         let request = GetOperationsRequest {
+            request_id: RequestId::new(),
             size: 100,
             start_loc: 10,
             max_ops: NZU64!(50),
@@ -332,24 +497,26 @@ mod tests {
 
         // Invalid start_loc
         let request = GetOperationsRequest {
+            request_id: RequestId::new(),
             size: 100,
             start_loc: 100,
             max_ops: NZU64!(50),
         };
         assert!(matches!(
             request.validate(),
-            Err(ProtocolError::InvalidRequest { .. })
+            Err(crate::Error::InvalidRequest(_))
         ));
 
         // start_loc beyond size
         let request = GetOperationsRequest {
+            request_id: RequestId::new(),
             size: 100,
             start_loc: 150,
             max_ops: NZU64!(50),
         };
         assert!(matches!(
             request.validate(),
-            Err(ProtocolError::InvalidRequest { .. })
+            Err(crate::Error::InvalidRequest(_))
         ));
     }
 }

@@ -13,6 +13,8 @@
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_storage::adb::any::Config;
 
+pub mod error;
+pub use error::Error;
 pub mod protocol;
 pub use protocol::*;
 pub mod resolver;

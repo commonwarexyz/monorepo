@@ -2,14 +2,18 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
-    adb::any::{sync, Any, Config},
+    adb::any::{
+        sync::{self, resolver::Resolver},
+        Any, Config,
+    },
     mmr::hasher::Standard,
     translator::TwoCap,
 };
 use commonware_utils::{array::FixedBytes, NZU64};
 use libfuzzer_sys::fuzz_target;
+use std::sync::Arc;
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
@@ -49,9 +53,9 @@ fn test_config(test_name: &str, pruning_delay: u64) -> Config<TwoCap> {
     }
 }
 
-async fn test_sync(
+async fn test_sync<R: Resolver<Digest = commonware_cryptography::sha256::Digest>>(
     context: deterministic::Context,
-    src: &Any<deterministic::Context, Key, Value, Sha256, TwoCap>,
+    resolver: R,
     target: sync::SyncTarget<commonware_cryptography::sha256::Digest>,
     fetch_batch_size: u64,
     test_name: &str,
@@ -66,9 +70,10 @@ async fn test_sync(
         db_config: config,
         fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
         target,
-        resolver: src,
+        resolver,
         hasher: Standard::<Sha256>::new(),
         apply_batch_size: 100,
+        max_outstanding_requests: 10,
     };
 
     if let Ok(synced) = sync::sync(sync_config).await {
@@ -131,15 +136,19 @@ fn fuzz(input: FuzzInput) {
                         upper_bound_ops: src.op_count() - 1,
                     };
 
+                    let wrapped_src = Arc::new(RwLock::new(src));
                     let _result = test_sync(
                         context.clone(),
-                        &src,
+                        wrapped_src.clone(),
                         target,
                         *fetch_batch_size,
                         &format!("full_{sync_id}"),
                         input.pruning_delay,
                     )
                     .await;
+                    src = Arc::try_unwrap(wrapped_src)
+                        .unwrap_or_else(|_| panic!("Failed to unwrap src"))
+                        .into_inner();
                     sync_id += 1;
                 }
             }
