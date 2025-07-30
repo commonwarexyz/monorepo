@@ -567,8 +567,8 @@ impl<
                             // If we haven't fully repaired the gap, then also request any possible
                             // finalizations for the blocks in the remaining gap. This may help
                             // shrink the size of the gap.
-                            let gap_end = cursor.height();
-                            let gap_start = std::cmp::max(height, gap_end.saturating_sub(self.max_repair));
+                            let gap_start = height;
+                            let gap_end = std::cmp::min(cursor.height(), gap_start.saturating_add(self.max_repair));
                             debug!(gap_start, gap_end, "requesting any finalized blocks");
                             for height in gap_start..gap_end {
                                 finalization_resolver_by_height.fetch(height.into()).await;
