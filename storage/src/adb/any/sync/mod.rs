@@ -4,6 +4,7 @@ use crate::{
             sync::client::{Client, Config},
             Any,
         },
+        operation::Fixed,
         sync::{engine::SyncTarget, resolver::Resolver},
     },
     mmr,
@@ -85,7 +86,7 @@ where
     V: Array,
     H: Hasher,
     T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+    R: Resolver<Digest = H::Digest, Op = Fixed<K, V>>,
 {
     let client = Client::new(config).await?;
     client.sync().await

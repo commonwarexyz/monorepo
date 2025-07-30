@@ -9,7 +9,6 @@ use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_storage::adb::{
     any::sync::Error as SyncError,
-    operation::Fixed,
     sync::{
         engine::{FetchResult, SyncTarget},
         resolver::Resolver as ResolverTrait,
@@ -227,15 +226,14 @@ where
         + Clone,
 {
     type Digest = Digest;
-    type Key = crate::Key;
-    type Value = crate::Value;
+    type Op = crate::Operation;
 
     async fn get_operations(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Fixed<Self::Key, Self::Value>, Self::Digest>, SyncError> {
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, SyncError> {
         let request = GetOperationsRequest {
             request_id: RequestId::new(),
             size,

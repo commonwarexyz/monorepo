@@ -6,6 +6,7 @@ use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
     adb::{
         any::{sync, Any, Config},
+        operation::Fixed,
         sync::{engine::SyncTarget, resolver::Resolver},
     },
     mmr::hasher::Standard,
@@ -53,7 +54,9 @@ fn test_config(test_name: &str, pruning_delay: u64) -> Config<TwoCap> {
     }
 }
 
-async fn test_sync<R: Resolver<Digest = commonware_cryptography::sha256::Digest>>(
+async fn test_sync<
+    R: Resolver<Digest = commonware_cryptography::sha256::Digest, Op = Fixed<Key, Value>>,
+>(
     context: deterministic::Context,
     resolver: R,
     target: SyncTarget<commonware_cryptography::sha256::Digest>,

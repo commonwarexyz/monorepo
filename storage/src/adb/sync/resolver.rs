@@ -15,8 +15,7 @@ use std::{future::Future, num::NonZeroU64, sync::Arc};
 /// Trait for network communication with the sync server
 pub trait Resolver: Send + Sync + Clone + 'static {
     type Digest: Digest;
-    type Key: Array;
-    type Value: Array;
+    type Op;
 
     /// Get the operations starting at `start_loc` in the database, up to `max_ops` operations.
     /// Returns the operations and a proof that they were present in the database when it had
@@ -27,9 +26,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<FetchResult<Fixed<Self::Key, Self::Value>, Self::Digest>, Error>>
-           + Send
-           + 'a;
+    ) -> impl Future<Output = Result<FetchResult<Self::Op, Self::Digest>, Error>> + Send + 'a;
 }
 
 impl<E, K, V, H, T> Resolver for Arc<Any<E, K, V, H, T>>
@@ -42,15 +39,14 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Key = K;
-    type Value = V;
+    type Op = Fixed<K, V>;
 
     async fn get_operations(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Fixed<Self::Key, Self::Value>, Self::Digest>, Error> {
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Error> {
         self.historical_proof(size, start_loc, max_ops.get())
             .await
             .map_err(Error::Adb)
@@ -75,15 +71,14 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Key = K;
-    type Value = V;
+    type Op = Fixed<K, V>;
 
     async fn get_operations(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Fixed<Self::Key, Self::Value>, Self::Digest>, Error> {
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Error> {
         let db = self.read().await;
         db.historical_proof(size, start_loc, max_ops.get())
             .await
@@ -116,15 +111,14 @@ pub(crate) mod tests {
         V: Array,
     {
         type Digest = D;
-        type Key = K;
-        type Value = V;
+        type Op = Fixed<K, V>;
 
         async fn get_operations(
             &self,
             _size: u64,
             _start_loc: u64,
             _max_ops: NonZeroU64,
-        ) -> Result<FetchResult<Fixed<Self::Key, Self::Value>, Self::Digest>, Error> {
+        ) -> Result<FetchResult<Self::Op, Self::Digest>, Error> {
             Err(Error::AlreadyComplete)
         }
     }

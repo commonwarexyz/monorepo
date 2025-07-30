@@ -33,7 +33,7 @@ where
     V: Array,
     H: Hasher,
     T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+    R: Resolver<Digest = H::Digest, Op = Fixed<K, V>>,
 {
     /// Context for the database.
     pub context: E,
@@ -73,7 +73,7 @@ where
     V: Array,
     H: Hasher,
     T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+    R: Resolver<Digest = H::Digest, Op = Fixed<K, V>>,
 {
     /// Validate the configuration parameters
     pub fn validate(&self) -> Result<(), Error> {
@@ -96,7 +96,7 @@ where
     V: Array,
     H: Hasher,
     T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+    R: Resolver<Digest = H::Digest, Op = Fixed<K, V>>,
 {
     config: Config<E, K, V, H, T, R>,
 
@@ -123,7 +123,7 @@ where
     V: Array,
     H: Hasher,
     T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+    R: Resolver<Digest = H::Digest, Op = Fixed<K, V>>,
 {
     /// Create a new sync client.
     pub(super) async fn new(config: Config<E, K, V, H, T, R>) -> Result<Self, Error> {
@@ -616,7 +616,7 @@ where
     V: Array,
     H: Hasher,
     T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+    R: Resolver<Digest = H::Digest, Op = Fixed<K, V>>,
 {
     // Build the complete database from the log
     let db = adb::any::Any::init_synced(
