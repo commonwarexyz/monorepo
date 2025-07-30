@@ -12,8 +12,10 @@ mod tests {
         mocks::{application::Application, block::Block},
     };
     use crate::{
-        threshold_simplex::types::{Finalization, Proposal},
-        Reporter,
+        threshold_simplex::types::{
+            finalize_namespace, notarize_namespace, Activity, Finalization, Notarization, Proposal,
+        },
+        Block as _, Reporter,
     };
     use commonware_broadcast::buffered;
     use commonware_codec::Encode;
@@ -22,7 +24,8 @@ mod tests {
             dkg::ops::generate_shares,
             primitives::{
                 group::Share,
-                ops, poly,
+                ops::{partial_sign_message, threshold_signature_recover},
+                poly,
                 variant::{MinPk, Variant},
             },
         },
@@ -30,13 +33,9 @@ mod tests {
         sha256::{self, Digest as Sha256Digest},
         Digestible, PrivateKeyExt as _, Signer as _,
     };
-    use commonware_p2p::simulated::{self, Network, Oracle};
-    use commonware_resolver::p2p::{
-        self as resolver,
-        mocks::{Consumer, Producer},
-    };
+    use commonware_p2p::simulated::{self, Link, Network, Oracle};
+    use commonware_resolver::p2p as resolver;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use futures::channel::mpsc;
     use governor::Quota;
     use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
@@ -44,18 +43,22 @@ mod tests {
     type B = Block<D>;
     type P = PublicKey;
     type V = MinPk;
-    type S = <MinPk as Variant>::Signature;
     type Sh = Share;
     type E = PrivateKey;
 
+    const NAMESPACE: &[u8] = b"test";
+    const NETWORK_SPEED: Duration = Duration::from_millis(100);
+    const SUCCESS_RATE: f64 = 1.0;
+    const JITTER: f64 = NETWORK_SPEED.as_millis() as f64 / 2.0;
+    const NUM_VALIDATORS: u32 = 4;
+    const QUORUM: u32 = 3;
+    const NUM_BLOCKS: u64 = 100;
+
     #[test]
     fn basic_finalization() {
-        const NUM_VALIDATORS: u32 = 4;
-        const QUORUM: u32 = 3;
-        const NUM_BLOCKS: u64 = 10;
-
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(move |context| async move {
+        runner.start(|mut context| async move {
+            // Initialize network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 simulated::Config {
@@ -63,63 +66,117 @@ mod tests {
                 },
             );
             network.start();
-            let (poly, shares) =
-                generate_shares::<_, V>(&mut context, None, NUM_VALIDATORS, QUORUM);
 
+            // Generate private keys and sort them by public key.
+            let mut schemes = (0..NUM_VALIDATORS)
+                .map(|i| PrivateKey::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            schemes.sort_by_key(|s| s.public_key());
+            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+
+            // Generate shares
+            let (identity, shares) =
+                generate_shares::<_, V>(&mut context, None, NUM_VALIDATORS, QUORUM);
+            let identity = *poly::public::<V>(&identity);
+
+            // Initialize validators
             let mut pks = Vec::new();
             let mut secrets = Vec::new();
-            for i in 0..NUM_VALIDATORS {
-                let secret = PrivateKey::from_seed(i as u64);
-                pks.push(secret.public_key());
-                secrets.push(secret);
+            for scheme in schemes.iter() {
+                pks.push(scheme.public_key());
+                secrets.push(scheme);
             }
 
+            // Initialize applications and actors
             let mut applications = BTreeMap::new();
             let mut actors = Vec::new();
             let coordinator = resolver::mocks::Coordinator::new(pks.clone());
 
             for i in 0..NUM_VALIDATORS as usize {
                 let (application, actor) = setup_validator(
-                    context.with_label(&format!("validator-{}", i)),
+                    context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     coordinator.clone(),
                     secrets[i].clone(),
-                    poly.clone(),
-                    shares[i].clone(),
+                    identity,
                 )
                 .await;
                 applications.insert(pks[i].clone(), application);
                 actors.push(actor);
             }
 
-            let mut blocks = Vec::new();
+            // Add links between all peers
+            let link = Link {
+                latency: NETWORK_SPEED.as_millis() as f64,
+                jitter: JITTER,
+                success_rate: SUCCESS_RATE,
+            };
+            for p1 in peers.iter() {
+                for p2 in peers.iter() {
+                    if p2 == p1 {
+                        continue;
+                    }
+                    oracle
+                        .add_link(p1.clone(), p2.clone(), link.clone())
+                        .await
+                        .unwrap();
+                }
+            }
+
+            // Generate blocks, skipping the genesis block.
+            let mut blocks = Vec::<B>::new();
             let mut parent = sha256::hash(b"");
-            for i in 0..NUM_BLOCKS {
-                let block = B::new::<sha256::Digest>(parent, i, i);
+            for i in 1..=NUM_BLOCKS {
+                let block = B::new::<sha256::Sha256>(parent, i, i);
                 parent = block.digest();
                 blocks.push(block);
             }
 
-            for (i, block) in blocks.iter().enumerate() {
+            // Broadcast and finalize blocks // TODO: make the order random
+            for block in blocks.iter() {
+                // Skip genesis block
+                let height = block.height();
+                assert!(height > 0, "genesis block should not have been generated");
+
+                // Broadcast block by one validator
+                let actor_index: usize = (height % (NUM_VALIDATORS as u64)) as usize;
+                let mut actor = actors[actor_index].clone();
+                actor.broadcast(block.clone()).await;
+                actor.verified(height, block.clone()).await;
+
+                // Wait for the block to be broadcast, but due to jitter, we may or may not receive
+                // the block before continuing.
+                context.sleep(NETWORK_SPEED).await;
+
+                // Notarize block by the validator that broadcasted it
                 let proposal = Proposal {
-                    view: i as u64,
-                    parent: sha256::hash(b""),
+                    view: height,
+                    parent: height.checked_sub(1).unwrap(),
                     payload: block.digest(),
                 };
-                let finalization = make_finalization(proposal, &poly, &shares, QUORUM);
-                let mut actor = actors[i % NUM_VALIDATORS as usize].clone();
+                let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
                 actor
-                    .report(crate::threshold_simplex::types::Activity::Finalization(
-                        finalization,
-                    ))
+                    .report(Activity::Notarization(notarization.clone()))
                     .await;
-                context.sleep(Duration::from_millis(100)).await;
+
+                // Finalize block by all validators
+                let fin = make_finalization(proposal, &shares, QUORUM);
+                for actor in actors.iter_mut() {
+                    actor.report(Activity::Finalization(fin.clone())).await;
+                }
             }
 
+            // Wait for things to complete
             context.sleep(Duration::from_secs(5)).await;
 
-            for (_, app) in applications {
-                assert_eq!(app.blocks().len(), NUM_BLOCKS as usize);
+            // Check that all applications received all blocks.
+            assert_eq!(applications.len(), NUM_VALIDATORS as usize);
+            for (i, app) in applications {
+                assert!(
+                    app.blocks().len() == NUM_BLOCKS as usize,
+                    "validator {i} has {:?} blocks",
+                    app.blocks().keys().collect::<Vec<_>>(),
+                );
             }
         });
     }
@@ -129,44 +186,18 @@ mod tests {
         oracle: &mut Oracle<P>,
         coordinator: resolver::mocks::Coordinator<P>,
         secret: E,
-        poly: poly::Public<V>,
-        share: Sh,
+        identity: <V as Variant>::Public,
     ) -> (
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<V, B>,
     ) {
-        let (backfill_by_digest_tx, backfill_by_digest_rx) = mpsc::channel(100);
-        let (backfill_by_height_tx, backfill_by_height_rx) = mpsc::channel(100);
-        let (backfill_by_view_tx, backfill_by_view_rx) = mpsc::channel(100);
-
-        let (resolver_engine, resolver) = resolver::Engine::new(
-            context.clone(),
-            resolver::Config {
-                coordinator,
-                consumer: Consumer::new().0,
-                producer: Producer::default(),
-                mailbox_size: 100,
-                requester_config: commonware_p2p::utils::requester::Config {
-                    public_key: secret.public_key(),
-                    rate_limit: Quota::per_second(NonZeroU32::new(10).unwrap()),
-                    initial: Duration::from_millis(100),
-                    timeout: Duration::from_millis(400),
-                },
-                fetch_retry_timeout: Duration::from_millis(100),
-                priority_requests: false,
-                priority_responses: false,
-            },
-        );
-        let network = oracle.register(secret.public_key(), 0).await.unwrap();
-        resolver_engine.start(network);
-
         let config = Config {
             public_key: secret.public_key(),
-            identity: share.public::<V>(),
+            identity,
             coordinator,
             mailbox_size: 100,
             backfill_quota: Quota::per_second(NonZeroU32::new(1).unwrap()),
-            namespace: b"test".to_vec(),
+            namespace: NAMESPACE.to_vec(),
             view_retention_timeout: 10,
             max_repair: 10,
             codec_config: (),
@@ -174,12 +205,11 @@ mod tests {
             prunable_items_per_section: 10u64,
             replay_buffer: 1024,
             write_buffer: 1024,
-            finalized_freezer_table_initial_size: 10,
+            freezer_table_initial_size: 64,
             freezer_table_resize_frequency: 10,
             freezer_table_resize_chunk_size: 10,
             freezer_journal_target_size: 1024,
             freezer_journal_compression: None,
-            blocks_freezer_table_initial_size: 10,
             immutable_items_per_section: 10u64,
         };
 
@@ -197,37 +227,50 @@ mod tests {
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
         let network = oracle.register(secret.public_key(), 1).await.unwrap();
         broadcast_engine.start(network);
+
+        // Start the actor
+        let backfill_by_digest = oracle.register(secret.public_key(), 2).await.unwrap();
+        let backfill_by_height = oracle.register(secret.public_key(), 3).await.unwrap();
+        let backfill_by_view = oracle.register(secret.public_key(), 4).await.unwrap();
         actor.start(
             application.clone(),
             buffer,
-            (backfill_by_digest_tx, backfill_by_digest_rx),
-            (backfill_by_height_tx, backfill_by_height_rx),
-            (backfill_by_view_tx, backfill_by_view_rx),
+            backfill_by_digest,
+            backfill_by_height,
+            backfill_by_view,
         );
 
         (application, mailbox)
     }
 
-    fn make_finalization(
-        proposal: Proposal<D>,
-        poly: &poly::Public<V>,
-        shares: &[Sh],
-        quorum: u32,
-    ) -> Finalization<V, D> {
-        let msg = proposal.encode();
-        let sig_evals: Vec<_> = shares
+    fn make_finalization(proposal: Proposal<D>, shares: &[Sh], quorum: u32) -> Finalization<V, D> {
+        let proposal_msg = proposal.encode();
+        let partials: Vec<_> = shares
             .iter()
             .take(quorum as usize)
-            .map(|share| {
-                let sig_share = ops::partial_sign_message(share, Some(b"test"), &msg);
-                poly::Eval {
-                    index: share.index,
-                    value: sig_share,
-                }
+            .map(|s| {
+                partial_sign_message::<V>(s, Some(&finalize_namespace(NAMESPACE)), &proposal_msg)
             })
             .collect();
-        let signature = S::recover(quorum, &sig_evals).unwrap();
+        let signature = threshold_signature_recover::<V, _>(quorum, &partials).unwrap();
         Finalization {
+            proposal,
+            proposal_signature: signature,
+            seed_signature: signature,
+        }
+    }
+
+    fn make_notarization(proposal: Proposal<D>, shares: &[Sh], quorum: u32) -> Notarization<V, D> {
+        let proposal_msg = proposal.encode();
+        let partials: Vec<_> = shares
+            .iter()
+            .take(quorum as usize)
+            .map(|s| {
+                partial_sign_message::<V>(s, Some(&notarize_namespace(NAMESPACE)), &proposal_msg)
+            })
+            .collect();
+        let signature = threshold_signature_recover::<V, _>(quorum, &partials).unwrap();
+        Notarization {
             proposal,
             proposal_signature: signature,
             seed_signature: signature,

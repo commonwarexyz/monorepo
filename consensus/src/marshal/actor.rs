@@ -215,7 +215,7 @@ impl<
                     "{}-finalizations-by-height-freezer-table",
                     config.partition_prefix
                 ),
-                freezer_table_initial_size: config.finalized_freezer_table_initial_size,
+                freezer_table_initial_size: config.freezer_table_initial_size,
                 freezer_table_resize_frequency: config.freezer_table_resize_frequency,
                 freezer_table_resize_chunk_size: config.freezer_table_resize_chunk_size,
                 freezer_journal_partition: format!(
@@ -251,7 +251,7 @@ impl<
                     "{}-finalized_blocks-freezer-table",
                     config.partition_prefix
                 ),
-                freezer_table_initial_size: config.blocks_freezer_table_initial_size,
+                freezer_table_initial_size: config.freezer_table_initial_size,
                 freezer_table_resize_frequency: config.freezer_table_resize_frequency,
                 freezer_table_resize_chunk_size: config.freezer_table_resize_chunk_size,
                 freezer_journal_partition: format!(

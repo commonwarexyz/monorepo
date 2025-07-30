@@ -38,11 +38,8 @@ pub struct Config<V: Variant, P: PublicKey, Z: Coordinator<PublicKey = P>, B: Bl
     /// The number of items to store per section in immutable archives.
     pub immutable_items_per_section: u64,
 
-    /// The initial size of the freezer table for finalizations.
-    pub finalized_freezer_table_initial_size: u32,
-
-    /// The initial size of the freezer table for blocks.
-    pub blocks_freezer_table_initial_size: u32,
+    /// The initial size of the freezer table.
+    pub freezer_table_initial_size: u32,
 
     /// The frequency (in number of resizes) at which to check if the freezer table
     /// should be resized.

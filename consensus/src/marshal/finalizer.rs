@@ -61,13 +61,16 @@ impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>
     pub async fn run(mut self) {
         // Initialize last indexed from metadata store.
         // If the key does not exist, we assume the genesis block (height 0) has been indexed.
-        let mut height = *self.metadata.get(&LATEST_KEY).unwrap_or(&0);
+        let mut latest = *self.metadata.get(&LATEST_KEY).unwrap_or(&0);
 
         // The main loop to process finalized blocks. This loop will hot-spin until a block is
         // available, at which point it will process it and continue. If a block is not available,
         // it will request a repair and wait for a notification of an update before retrying.
         loop {
-            height += 1;
+            // The next height to process is the next height after the last processed height.
+            let height = latest + 1;
+
+            // Attempt to get the next block from the orchestrator.
             if let Some(block) = self.orchestrator.get(height).await {
                 // Sanity-check that the block height is the one we expect.
                 assert!(block.height() == height, "block height mismatch");
@@ -81,7 +84,8 @@ impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>
                 self.application.report(block).await;
 
                 // Record that we have processed up through this height.
-                if let Err(e) = self.metadata.put_sync(LATEST_KEY.clone(), height).await {
+                latest = height;
+                if let Err(e) = self.metadata.put_sync(LATEST_KEY.clone(), latest).await {
                     error!("Failed to update metadata: {e}");
                     return;
                 }
