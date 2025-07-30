@@ -914,7 +914,7 @@ impl<
     }
 
     /// Get a finalized block from the archive.
-    async fn get_finalized_block<'a>(&'a self, id: Identifier<'a, B::Commitment>) -> Option<B> {
+    async fn get_finalized_block(&self, id: Identifier<'_, B::Commitment>) -> Option<B> {
         match self.finalized_blocks.get(id).await {
             Ok(block) => block,
             Err(e) => panic!("Failed to get block: {e}"),
@@ -922,9 +922,9 @@ impl<
     }
 
     /// Get a finalization from the archive by height.
-    async fn get_finalization_by_height<'a>(
-        &'a self,
-        id: Identifier<'a, B::Commitment>,
+    async fn get_finalization_by_height(
+        &self,
+        id: Identifier<'_, B::Commitment>,
     ) -> Option<Finalization<V, B::Commitment>> {
         match self.finalizations_by_height.get(id).await {
             Ok(finalization) => finalization,
@@ -933,9 +933,9 @@ impl<
     }
 
     /// Get a finalization from the archive by view.
-    async fn get_finalization_from_view<'a>(
-        &'a self,
-        id: Identifier<'a, B::Commitment>,
+    async fn get_finalization_from_view(
+        &self,
+        id: Identifier<'_, B::Commitment>,
     ) -> Option<Finalization<V, B::Commitment>> {
         match self.finalizations_by_view.get(id).await {
             Ok(finalization) => finalization,
@@ -944,7 +944,7 @@ impl<
     }
 
     /// Get a verified block from the archive.
-    async fn get_verified_block<'a>(&'a self, id: Identifier<'a, B::Commitment>) -> Option<B> {
+    async fn get_verified_block(&self, id: Identifier<'_, B::Commitment>) -> Option<B> {
         match self.verified_blocks.get(id).await {
             Ok(verified) => verified,
             Err(e) => panic!("Failed to get verified block: {e}"),
@@ -952,9 +952,9 @@ impl<
     }
 
     /// Get a notarized block from the archive.
-    async fn get_notarized_block<'a>(
-        &'a self,
-        id: Identifier<'a, B::Commitment>,
+    async fn get_notarized_block(
+        &self,
+        id: Identifier<'_, B::Commitment>,
     ) -> Option<(Notarization<V, B::Commitment>, B)> {
         match self.notarized_blocks.get(id).await {
             Ok(notarization) => notarization,

@@ -34,8 +34,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 commonware-resolver = { workspace = true, features = ["mocks"] }
-commonware-p2p = { workspace = true }
-commonware-broadcast = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [lib]
