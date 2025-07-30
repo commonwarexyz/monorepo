@@ -8,11 +8,9 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_storage::adb::{
-    any::sync::{
-        resolver::{GetOperationsResult, Resolver as ResolverTrait},
-        Error as SyncError,
-    },
-    sync::engine::SyncTarget,
+    any::sync::{resolver::Resolver as ResolverTrait, Error as SyncError},
+    operation::Fixed,
+    sync::engine::{FetchResult, SyncTarget},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::{
@@ -234,7 +232,7 @@ where
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, SyncError> {
+    ) -> Result<FetchResult<Fixed<Self::Key, Self::Value>, Self::Digest>, SyncError> {
         let request = GetOperationsRequest {
             request_id: RequestId::new(),
             size,
@@ -251,7 +249,7 @@ where
         match response {
             Message::GetOperationsResponse(response) => {
                 let (success_tx, _success_rx) = oneshot::channel();
-                Ok(GetOperationsResult {
+                Ok(FetchResult {
                     operations: response.operations,
                     proof: response.proof,
                     success_tx,

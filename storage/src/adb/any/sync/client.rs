@@ -205,7 +205,7 @@ where
                         "received invalid batch size from resolver"
                     );
                     self.metrics.invalid_batches_received.inc();
-                    success_tx(false);
+                    let _ = success_tx.send(false);
                 } else {
                     // Verify the proof
                     let proof_valid = {
@@ -219,7 +219,7 @@ where
                         )
                     };
                     // Report success or failure to the resolver
-                    success_tx(proof_valid);
+                    let _ = success_tx.send(proof_valid);
                     if proof_valid {
                         // Extract pinned nodes if needed
                         self.set_pinned_nodes(&proof, start_loc, operations_len)?;
@@ -316,17 +316,7 @@ where
                 Box::pin(async move {
                     let result = resolver
                         .get_operations(target_size, start_loc, NZU64!(1))
-                        .await
-                        .map(|ops_result| FetchResult {
-                            proof: ops_result.proof,
-                            operations: ops_result.operations,
-                            success_tx: {
-                                let sender = ops_result.success_tx;
-                                Box::new(move |success: bool| {
-                                    let _ = sender.send(success);
-                                })
-                            },
-                        });
+                        .await;
                     IndexedFetchResult { start_loc, result }
                 }),
             );
@@ -376,12 +366,7 @@ where
                         .map(|ops_result| FetchResult {
                             proof: ops_result.proof,
                             operations: ops_result.operations,
-                            success_tx: {
-                                let sender = ops_result.success_tx;
-                                Box::new(move |success: bool| {
-                                    let _ = sender.send(success);
-                                })
-                            },
+                            success_tx: ops_result.success_tx,
                         });
                     IndexedFetchResult { start_loc, result }
                 }),

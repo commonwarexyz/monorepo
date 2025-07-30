@@ -2,8 +2,8 @@ use crate::{
     adb::{
         any::{sync::Error, Any},
         operation::Fixed,
+        sync::engine::FetchResult,
     },
-    mmr::verification::Proof,
     translator::Translator,
 };
 use commonware_cryptography::{Digest, Hasher};
@@ -11,18 +11,6 @@ use commonware_runtime::{Clock, Metrics, RwLock, Storage};
 use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::{future::Future, num::NonZeroU64, sync::Arc};
-
-/// Result of a call to [Resolver::get_operations].
-pub struct GetOperationsResult<D: Digest, K: Array, V: Array> {
-    /// Proof that the operations are valid.
-    pub proof: Proof<D>,
-    /// The operations in the requested range.
-    pub operations: Vec<Fixed<K, V>>,
-    /// A channel to send the result of the proof verification.
-    /// Caller should send `true` if the proof is valid, `false` otherwise.
-    /// Caller should ignore error if the channel is closed.
-    pub success_tx: oneshot::Sender<bool>,
-}
 
 /// Trait for network communication with the sync server
 pub trait Resolver: Send + Sync + Clone + 'static {
@@ -39,7 +27,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error>>
+    ) -> impl Future<Output = Result<FetchResult<Fixed<Self::Key, Self::Value>, Self::Digest>, Error>>
            + Send
            + 'a;
 }
@@ -62,11 +50,11 @@ where
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error> {
+    ) -> Result<FetchResult<Fixed<Self::Key, Self::Value>, Self::Digest>, Error> {
         self.historical_proof(size, start_loc, max_ops.get())
             .await
             .map_err(Error::Adb)
-            .map(|(proof, operations)| GetOperationsResult {
+            .map(|(proof, operations)| FetchResult {
                 proof,
                 operations,
                 // Result of proof verification isn't used by this implementation.
@@ -95,12 +83,12 @@ where
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error> {
+    ) -> Result<FetchResult<Fixed<Self::Key, Self::Value>, Self::Digest>, Error> {
         let db = self.read().await;
         db.historical_proof(size, start_loc, max_ops.get())
             .await
             .map_err(Error::Adb)
-            .map(|(proof, operations)| GetOperationsResult {
+            .map(|(proof, operations)| FetchResult {
                 proof,
                 operations,
                 // Result of proof verification isn't used by this implementation.
@@ -136,7 +124,7 @@ pub(super) mod tests {
             _size: u64,
             _start_loc: u64,
             _max_ops: NonZeroU64,
-        ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error> {
+        ) -> Result<FetchResult<Fixed<Self::Key, Self::Value>, Self::Digest>, Error> {
             Err(Error::AlreadyComplete)
         }
     }

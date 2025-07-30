@@ -4,7 +4,7 @@ use crate::mmr::verification::Proof;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
-use futures::stream::FuturesUnordered;
+use futures::{channel::oneshot, stream::FuturesUnordered};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
@@ -90,8 +90,7 @@ pub struct FetchResult<Op, D: Digest> {
     /// The operations that were fetched
     pub operations: Vec<Op>,
     /// Channel to report success/failure back to resolver
-    /// Using Box to avoid direct tokio dependency
-    pub success_tx: Box<dyn FnOnce(bool) + Send + Sync>,
+    pub success_tx: oneshot::Sender<bool>,
 }
 
 impl<Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<Op, D> {
@@ -300,7 +299,7 @@ mod tests {
                         digests: vec![],
                     },
                     operations: vec![],
-                    success_tx: Box::new(|_| {}),
+                    success_tx: oneshot::channel().0,
                 }),
             }
         });
