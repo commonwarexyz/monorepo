@@ -14,7 +14,7 @@ _Minimmit is so-named for the `2f + 1` proofs that provide its "faster block tim
 
 ## 3. Quorums
 
-- `L = n - 3f`
+- `L = 2f + 1`
 - `Q = n - f`
 
 _There exists `≥ 1` honest replica in any `Q`-set and `L`-set intersection._
@@ -206,7 +206,7 @@ _If you are in view `v` and have already broadcast `notarize(c, v)` for a `c` th
 - Honest replicas may broadcast a `nullify(v)` after first broadcasting a `notarize(c, v)`.
    - To broadcast both a `notarize(c, v)` and a `nullify(v)` message, a replica must first see that it is impossible for the proposal that it notarized to reach a quorum of `Q` `notarize(c, v)` messages. Otherwise, the replica is forbidden from broadcasting `nullify(v)`, no matter how much time has passed.
    - A replica knows it is impossible for its notarized proposal `c` to reach the finalization quorum `Q` once it has observed `L` other replicas that conflict. A conflicting replica has broadcast either a `nullify(v)` message or a `notarize(*, v)` message for a different proposal `*`.
-   - If a replica has seen `L` conflicting votes, at least `L - f = n - 4f ≥ f + 1` are from honest replicas. Therefore, the maximum number of `notarize(c, v)` it can receive is `n - (f + 1)`, or `4f` (strictly less than `Q`).
+   - If a replica has seen `L` conflicting votes, at least `L - f = f + 1` are from honest replicas. Therefore, the maximum number of `notarize(c, v)` it can receive is `n - (f + 1)`, or `4f` (strictly less than `Q`).
 - Suppose a correct leader broadcasts a block `c` and, after honest replicas broadcast `notarize(c, v)`, message delivery is disrupted, preventing any replica from receiving `L` such messages. In this state, replicas have locked on `c` for view `v` and cannot broadcast some `nullify(v)`. Progress is stalled until network conditions improve, allowing a `notarization(c, v)` to be assembled, which in turn allows replicas to enter view `v + 1`.
 - In any given view `v`, there may be multiple `notarization(*, v)` messages and one `nullification(v)`. If there are multiple `notarization(*, v)`s, no block `*` referenced by a `notarization(*, v)` can be finalized in `v`. If there exists some `nullification(v)`, no block can be finalized in `v`.
 
@@ -237,7 +237,7 @@ Minimmit can be instantiated in several different ways to tune performance when 
 - If `≥ f + 1` `notarize(c, v)` messages are observed for some `proposal(c, v, (c', v'))` considered invalid, request the missing `notarization(c, v')` or `nullification(v')` not found in our `proofs` (that prohibited us from broadcasting a `notarize(c, v)`) from the peers that consider it valid.
 - If stuck in the same view `v` for time `t_s`, re-broadcast some `proof(v - 1)` (to ensure all correct replicas enter `v`) and re-broadcast `r.notarized` (if not `⊥`) and `r.nullified` (if not `false`).
 - Assemble and broadcast a `finalization(c, v)` message after finalizing some `c` (i.e. `≥ Q` `notarize(c, v)` messages). This can both help lagging replicas catch up to the finalized tip and make it easier for downstream services to integrate.
-- Disseminate blocks using `(k,d)`-erasure codes, like [DispersedSimplex](#sing-a-song), [Kudzu](#kudzu), and [Alpenglow](#alpenglow), to avoid a leader broadcast bottleneck. Each `notarize` message would be augmented with the relevant fragment. `k` would be set to the number of replicas, and `d` can be set as `f+1` so that the replicas only have a bandwidth requirement of about ~5 times the size of the full block. If a `notarization` exists, then at least `f+1` honest nodes have been distributed a fragment. This prevents `Byzantine` nodes from constructing a `notarization` without honest nodes being able to reconstruct the block among themselves. `d` can be set at higher values like `n-3f` to halve the required bandwidth, but replicas would have to ignore any gossiped `notarization` messages, instead making sure to gather the `n-3f` `notarize` messages themselves.
+- Disseminate blocks using `(k,d)`-erasure codes, like [DispersedSimplex](#sing-a-song), [Kudzu](#kudzu), and [Alpenglow](#alpenglow), to avoid a leader broadcast bottleneck. Each `notarize` message would be augmented with the relevant fragment. `k` would be set to the number of replicas, and `d` can be set as `f+1` so that the replicas only have a bandwidth requirement of about ~5 times the size of the full block. If a `notarization` exists, then at least `f+1` honest nodes have been distributed a fragment. This prevents `Byzantine` nodes from constructing a `notarization` without honest nodes being able to reconstruct the block among themselves. `d` can be set at higher values like `2f+1` to halve the required bandwidth, but replicas would have to ignore any gossiped `notarization` messages, instead making sure to gather the `2f+1` `notarize` messages themselves.
 - To punish equivocating leaders, treat `propose` messages for different blocks in the same view as a slashable offense. To incentivize performant leaders, issue a reward for any block `c` included in the canonical chain.
 
 ## 11. Related Works
