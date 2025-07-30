@@ -243,4 +243,49 @@ mod tests {
             .iter()
             .any(|e| *e.0 == key3 && *e.1 == Duration::from_secs(2)));
     }
+
+    #[test]
+    fn test_retain() {
+        // Create a new PrioritySet
+        let mut pq = PrioritySet::new();
+
+        // Add items with different priorities
+        pq.put("key1", Duration::from_secs(10));
+        pq.put("key2", Duration::from_secs(5));
+        pq.put("item3", Duration::from_secs(15));
+
+        // Retain only items that start with "key"
+        pq.retain(|key| key.starts_with("key"));
+
+        // Verify that only "key1" and "key2" are present
+        assert_eq!(pq.len(), 2);
+        assert!(pq.contains(&"key1"));
+        assert!(pq.contains(&"key2"));
+        assert!(!pq.contains(&"item3"));
+
+        // Verify iteration order
+        let entries: Vec<_> = pq.iter().collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(*entries[0].0, "key2");
+        assert_eq!(*entries[1].0, "key1");
+    }
+
+    #[test]
+    fn test_clear() {
+        // Create a new PrioritySet
+        let mut pq = PrioritySet::new();
+
+        // Add some items
+        pq.put("key1", Duration::from_secs(10));
+        pq.put("key2", Duration::from_secs(5));
+
+        // Clear the set
+        pq.clear();
+
+        // Verify the set is empty
+        assert_eq!(pq.len(), 0);
+        assert!(pq.is_empty());
+        assert!(pq.iter().next().is_none());
+        assert!(pq.peek().is_none());
+    }
 }
