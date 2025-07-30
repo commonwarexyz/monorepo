@@ -49,7 +49,7 @@ where
     ) -> Result<FetchResult<Self::Op, Self::Digest>, Error> {
         self.historical_proof(size, start_loc, max_ops.get())
             .await
-            .map_err(Error::Adb)
+            .map_err(Error::database)
             .map(|(proof, operations)| FetchResult {
                 proof,
                 operations,
@@ -82,7 +82,7 @@ where
         let db = self.read().await;
         db.historical_proof(size, start_loc, max_ops.get())
             .await
-            .map_err(Error::Adb)
+            .map_err(Error::database)
             .map(|(proof, operations)| FetchResult {
                 proof,
                 operations,

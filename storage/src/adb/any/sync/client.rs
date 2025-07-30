@@ -1,4 +1,4 @@
-use super::{Error, SyncTargetUpdateReceiver};
+use super::Error;
 use crate::{
     adb::{
         self,
@@ -6,10 +6,10 @@ use crate::{
         operation::Fixed,
         sync::{
             engine::{
-                validate_target_update, FetchResult, IndexedFetchResult, OutstandingRequests,
-                StepResult, SyncEvent, SyncTarget,
+                validate_target_update, wait_for_event, FetchResult, IndexedFetchResult,
+                OutstandingRequests, StepResult, SyncEvent, SyncTarget, SyncTargetUpdateReceiver,
             },
-            gaps,
+            gaps::find_next_gap,
             resolver::Resolver,
         },
     },
@@ -18,10 +18,8 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
-use commonware_macros::select;
 use commonware_runtime::{Clock, Metrics as MetricsTrait, Storage};
 use commonware_utils::{Array, NZU64};
-use futures::{future::Either, StreamExt};
 use std::{collections::BTreeMap, num::NonZeroU64};
 use tracing::{debug, info, warn};
 
@@ -104,7 +102,7 @@ where
     fetched_operations: BTreeMap<u64, Vec<Fixed<K, V>>>,
 
     /// Outstanding fetch requests.
-    outstanding_requests: OutstandingRequests<Fixed<K, V>, H::Digest, Error>,
+    outstanding_requests: OutstandingRequests<Fixed<K, V>, H::Digest, crate::adb::Error>,
 
     /// Pinned nodes extracted from the batch of operations at the lower sync bound.
     pinned_nodes: Option<Vec<H::Digest>>,
@@ -144,12 +142,12 @@ where
         )
         .await
         .map_err(adb::Error::JournalError)
-        .map_err(Error::Adb)?;
+        .map_err(Error::adb)?;
 
         let log_size = log
             .size()
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::adb(adb::Error::JournalError(e)))?;
         assert!(log_size <= config.target.upper_bound_ops + 1);
 
         // Initialize metrics
@@ -184,7 +182,7 @@ where
     /// Handle the result of a fetch operation.
     fn handle_fetch_result(
         &mut self,
-        fetch_result: IndexedFetchResult<Fixed<K, V>, H::Digest, Error>,
+        fetch_result: IndexedFetchResult<Fixed<K, V>, H::Digest, crate::adb::Error>,
     ) -> Result<(), Error> {
         // Mark request as complete
         self.outstanding_requests.remove(fetch_result.start_loc);
@@ -242,27 +240,6 @@ where
         Ok(())
     }
 
-    /// Wait for the next synchronization event.
-    async fn wait_for_event(&mut self) -> Result<SyncEvent<Fixed<K, V>, H::Digest, Error>, Error> {
-        let target_update_fut = match &mut self.config.update_receiver {
-            Some(update_rx) => Either::Left(update_rx.next()),
-            None => Either::Right(futures::future::pending()),
-        };
-
-        select! {
-            target = target_update_fut => {
-                match target {
-                    Some(target) => Ok(SyncEvent::TargetUpdate(target)),
-                    None => Ok(SyncEvent::UpdateChannelClosed),
-                }
-            },
-            result = self.outstanding_requests.futures_mut().next() => {
-                let fetch_result = result.ok_or(Error::SyncStalled)?;
-                Ok(SyncEvent::BatchReceived(fetch_result))
-            },
-        }
-    }
-
     /// Execute one step of the sync process.
     /// Returns either a new client to continue with, or the final database if complete.
     async fn step(mut self) -> Result<StepResult<Self, adb::any::Any<E, K, V, H, T>>, Error> {
@@ -282,7 +259,12 @@ where
         }
 
         // Wait for the next synchronization event
-        match self.wait_for_event().await? {
+        match wait_for_event(
+            &mut self.config.update_receiver,
+            &mut self.outstanding_requests,
+        )
+        .await?
+        {
             SyncEvent::TargetUpdate(new_target) => {
                 self = self.handle_target_update(new_target).await?;
             }
@@ -317,7 +299,13 @@ where
                 Box::pin(async move {
                     let result = resolver
                         .get_operations(target_size, start_loc, NZU64!(1))
-                        .await;
+                        .await
+                        .map_err(|e| match e {
+                            crate::adb::sync::error::SyncError::Database(db_err) => db_err,
+                            _other => crate::adb::Error::JournalError(
+                                crate::journal::Error::UsizeTooSmall, // TODO replace this dummy error
+                            ),
+                        });
                     IndexedFetchResult { start_loc, result }
                 }),
             );
@@ -333,7 +321,7 @@ where
             .log
             .size()
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::adb(adb::Error::JournalError(e)))?;
 
         for _ in 0..num_requests {
             // Convert fetched operations to operation counts for shared gap detection
@@ -344,7 +332,7 @@ where
                 .collect();
 
             // Find the next gap in the sync range that needs to be fetched.
-            let Some((start_loc, end_loc)) = gaps::find_next_gap(
+            let Some((start_loc, end_loc)) = find_next_gap(
                 log_size,
                 self.config.target.upper_bound_ops,
                 &operation_counts,
@@ -368,6 +356,12 @@ where
                             proof: ops_result.proof,
                             operations: ops_result.operations,
                             success_tx: ops_result.success_tx,
+                        })
+                        .map_err(|e| match e {
+                            crate::adb::sync::error::SyncError::Database(db_err) => db_err,
+                            _other => crate::adb::Error::JournalError(
+                                crate::journal::Error::UsizeTooSmall, // TODO replace this dummy error
+                            ),
                         });
                     IndexedFetchResult { start_loc, result }
                 }),
@@ -390,7 +384,7 @@ where
             let end_pos_mmr = leaf_num_to_pos(start_loc + operations_len - 1);
             match proof.extract_pinned_nodes(start_pos_mmr, end_pos_mmr) {
                 Ok(nodes) => self.pinned_nodes = Some(nodes),
-                Err(e) => return Err(Error::PinnedNodes(e)),
+                Err(e) => return Err(Error::pinned_nodes_mmr(e)),
             }
         }
         Ok(())
@@ -411,7 +405,7 @@ where
             .log
             .size()
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::adb(adb::Error::JournalError(e)))?;
 
         // Remove any batches of operations with stale data.
         // That is, those whose last operation is before `next_loc`.
@@ -464,7 +458,7 @@ where
                 .append(op)
                 .await
                 .map_err(adb::Error::JournalError)
-                .map_err(Error::Adb)?;
+                .map_err(Error::adb)?;
             // No need to sync here -- the log will periodically sync its storage
             // and we will also sync when we're done applying all operations.
         }
@@ -536,7 +530,7 @@ where
             .log
             .size()
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::adb(adb::Error::JournalError(e)))?;
 
         // Calculate the target log size (upper bound is inclusive)
         let target_log_size = self.config.target.upper_bound_ops + 1;
@@ -574,12 +568,12 @@ where
     let log_size = log
         .size()
         .await
-        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+        .map_err(|e| Error::adb(adb::Error::JournalError(e)))?;
 
     if log_size <= lower_bound_ops {
         log.close()
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::adb(adb::Error::JournalError(e)))?;
         log = Journal::<E, Fixed<K, V>>::init_sync(
             context.clone().with_label("log"),
             JConfig {
@@ -593,12 +587,12 @@ where
         )
         .await
         .map_err(adb::Error::JournalError)
-        .map_err(Error::Adb)?;
+        .map_err(Error::adb)?;
     } else {
         // Prune the log to the new lower bound
         log.prune(lower_bound_ops)
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::adb(adb::Error::JournalError(e)))?;
     }
 
     Ok(log)
@@ -631,7 +625,7 @@ where
         },
     )
     .await
-    .map_err(Error::Adb)?;
+    .map_err(Error::adb)?;
 
     // Verify the final root digest matches the target
     let mut hasher = mmr::hasher::Standard::<H>::new();

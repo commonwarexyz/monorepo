@@ -7,14 +7,12 @@ use crate::{
         operation::Fixed,
         sync::{engine::SyncTarget, resolver::Resolver},
     },
-    mmr,
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use futures::channel::mpsc;
-use std::fmt;
 
 pub mod client;
 mod metrics;
@@ -22,51 +20,20 @@ mod metrics;
 /// Channel for sending sync target updates
 pub type SyncTargetUpdateSender<D> = mpsc::Sender<SyncTarget<D>>;
 
-/// Channel for receiving sync target updates
-pub type SyncTargetUpdateReceiver<D> = mpsc::Receiver<SyncTarget<D>>;
+/// Synchronization errors for Any database sync
+pub type Error = crate::adb::sync::error::SyncError<crate::adb::Error>;
 
-/// Synchronization errors
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// Hash mismatch after sync
-    #[error("root digest mismatch - expected {expected:?}, got {actual:?}")]
-    RootMismatch {
-        expected: Box<dyn fmt::Debug + Send + Sync>,
-        actual: Box<dyn fmt::Debug + Send + Sync>,
-    },
-    /// Invalid target parameters
-    #[error("invalid bounds: lower bound {lower_bound_pos} > upper bound {upper_bound_pos}")]
-    InvalidTarget {
-        lower_bound_pos: u64,
-        upper_bound_pos: u64,
-    },
-    /// Invalid client state
-    #[error("invalid client state")]
-    InvalidState,
-    /// Sync target root unchanged
-    #[error("sync target root unchanged")]
-    SyncTargetRootUnchanged,
-    /// Sync target moved backward
-    #[error("sync target moved backward: {old:?} -> {new:?}")]
-    SyncTargetMovedBackward {
-        old: Box<dyn fmt::Debug + Send + Sync>,
-        new: Box<dyn fmt::Debug + Send + Sync>,
-    },
-    /// Sync already completed
-    #[error("sync already completed")]
-    AlreadyComplete,
-    /// Error from the database
-    #[error("database error: {0}")]
-    Adb(crate::adb::Error),
-    /// Resolver error
-    #[error("resolver error: {0:?}")]
-    Resolver(Box<dyn fmt::Debug + Send + Sync>),
-    /// Sync stalled
-    #[error("sync stalled - no pending fetches")]
-    SyncStalled,
-    /// Error extracting pinned nodes
-    #[error("error extracting pinned nodes: {0}")]
-    PinnedNodes(mmr::Error),
+/// Helper functions for Any sync error conversion
+impl Error {
+    /// Create a database error from an ADB error
+    pub fn adb(err: crate::adb::Error) -> Self {
+        Self::Database(err)
+    }
+
+    /// Create a pinned nodes error from an MMR error
+    pub fn pinned_nodes_mmr(err: crate::mmr::Error) -> Self {
+        Self::PinnedNodes(err.to_string())
+    }
 }
 
 /// Synchronizes a database by fetching, verifying, and applying operations from a remote source.

@@ -4,7 +4,13 @@ use crate::mmr::verification::Proof;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
-use futures::{channel::oneshot, stream::FuturesUnordered};
+use commonware_macros::select;
+use futures::{
+    channel::{mpsc, oneshot},
+    future::Either,
+    stream::FuturesUnordered,
+    StreamExt,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
@@ -274,6 +280,37 @@ pub fn validate_target_update<D: Digest>(
     }
 
     Ok(())
+}
+
+/// Type alias for sync target update receivers
+pub type SyncTargetUpdateReceiver<D> = mpsc::Receiver<SyncTarget<D>>;
+
+/// Wait for the next synchronization event from either target updates or fetch results.
+pub async fn wait_for_event<Op, D, E>(
+    update_receiver: &mut Option<SyncTargetUpdateReceiver<D>>,
+    outstanding_requests: &mut OutstandingRequests<Op, D, E>,
+) -> Result<SyncEvent<Op, D, E>, crate::adb::sync::error::SyncError<E>>
+where
+    D: Digest,
+    E: std::fmt::Debug + std::fmt::Display,
+{
+    let target_update_fut = match update_receiver {
+        Some(update_rx) => Either::Left(update_rx.next()),
+        None => Either::Right(futures::future::pending()),
+    };
+
+    select! {
+        target = target_update_fut => {
+            match target {
+                Some(target) => Ok(SyncEvent::TargetUpdate(target)),
+                None => Ok(SyncEvent::UpdateChannelClosed),
+            }
+        },
+        result = outstanding_requests.futures_mut().next() => {
+            let fetch_result = result.ok_or(crate::adb::sync::error::SyncError::SyncStalled)?;
+            Ok(SyncEvent::BatchReceived(fetch_result))
+        },
+    }
 }
 
 #[cfg(test)]
