@@ -64,8 +64,8 @@ where
         loop {
             select! {
                 // Wait for request to send
-                request_opt = self.request_receiver.next() => {
-                    match request_opt {
+                outgoing = self.request_receiver.next() => {
+                    match outgoing {
                         Some(IoRequest { message, response_sender }) => {
                             let request_id = message.request_id();
                             // Store pending request for correlation
@@ -91,8 +91,8 @@ where
                 },
 
                 // Wait for response
-                response_result = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
-                    match response_result {
+                incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
+                    match incoming {
                         Ok(response_data) => {
                             match Message::decode(&response_data[..]) {
                                 Ok(message) => {

@@ -23,9 +23,14 @@ use tracing::{debug, error, info, warn};
 
 /// Default server address.
 const DEFAULT_SERVER: &str = "127.0.0.1:8080";
+
+/// Default client storage directory prefix.
 const DEFAULT_CLIENT_DIR_PREFIX: &str = "/tmp/commonware-sync/client";
+
+/// Size of the channel for target updates.
 const UPDATE_CHANNEL_SIZE: usize = 16;
 
+/// Client configuration.
 #[derive(Debug)]
 struct Config {
     /// Server address to connect to.
@@ -170,7 +175,6 @@ where
 
     // Get the root digest of the synced database
     let got_root = database.root(&mut Standard::new());
-
     info!(
         sync_iteration,
         database_ops = database.op_count(),
@@ -179,14 +183,13 @@ where
         "✅ sync completed successfully"
     );
 
+    // Close the database so it can be reopened on next iteration
     debug!(
         sync_iteration,
         "Database state before close: ops={}, root={:?}",
         database.op_count(),
         got_root
     );
-
-    // Close the database so it can be reopened on next iteration
     database.close().await?;
 
     Ok(())
@@ -336,7 +339,6 @@ fn main() {
                 std::process::exit(1);
             }),
     };
-
     info!(
         server = %config.server,
         batch_size = config.batch_size,

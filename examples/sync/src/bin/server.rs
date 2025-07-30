@@ -25,7 +25,10 @@ use std::{
 };
 use tracing::{debug, error, info, warn};
 
+/// Maximum batch size for operations.
 const MAX_BATCH_SIZE: u64 = 100;
+
+/// Size of the channel for responses.
 const RESPONSE_BUFFER_SIZE: usize = 64;
 
 /// Server configuration.
@@ -319,14 +322,14 @@ where
 {
     info!(client_addr = %client_addr, "client connected");
 
+    // Wait until we receive a message from the client or we have a response to send.
     let (response_sender, mut response_receiver) = mpsc::channel::<Message>(RESPONSE_BUFFER_SIZE);
-
     loop {
-        // Wait until we receive a message from the client or we have a response to send.
         select! {
-            message_result = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
-                match message_result {
+            incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
+                match incoming {
                     Ok(message_data) => {
+                        // Parse the message.
                         let message: Message = match Message::decode(&message_data[..]) {
                             Ok(msg) => msg,
                             Err(e) => {
@@ -338,12 +341,14 @@ where
 
                         // Start a new task to handle the message.
                         // The response will be sent on `response_sender`.
-                        let state_clone = state.clone();
-                        let mut response_sender_clone = response_sender.clone();
-                        context.with_label("request-handler").spawn(move |_| async move {
-                            let response = handle_message(state_clone, message).await;
-                            if let Err(e) = response_sender_clone.send(response).await {
-                                warn!(client_addr = %client_addr, error = %e, "failed to send response to main loop");
+                        context.with_label("request-handler").spawn({
+                            let state = state.clone();
+                            let mut response_sender = response_sender.clone();
+                            move |_| async move {
+                                let response = handle_message(state, message).await;
+                                if let Err(e) = response_sender.send(response).await {
+                                    warn!(client_addr = %client_addr, error = %e, "failed to send response to main loop");
+                                }
                             }
                         });
                     }
@@ -355,8 +360,8 @@ where
                 }
             },
 
-            response_opt = response_receiver.next() => {
-                if let Some(response) = response_opt {
+            outgoing = response_receiver.next() => {
+                if let Some(response) = outgoing {
                     // We have a response to send to the client.
                     let response_data = response.encode().to_vec();
                     if let Err(e) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
@@ -480,7 +485,6 @@ fn main() {
                 std::process::exit(1);
             }),
     };
-
     info!(
         port = config.port,
         initial_ops = config.initial_ops,
@@ -506,9 +510,8 @@ fn main() {
         );
 
         // Create and initialize database
-        let db_config = create_adb_config();
         info!("initializing database");
-
+        let db_config = create_adb_config();
         let mut database = match Database::init(context.with_label("database"), db_config).await {
             Ok(db) => db,
             Err(e) => {
@@ -520,7 +523,6 @@ fn main() {
         // Create and add initial operations
         let initial_ops = create_test_operations(config.initial_ops, context.next_u64());
         info!(operations_len = initial_ops.len(), "creating initial operations");
-
         if let Err(e) = add_operations(&mut database, initial_ops).await {
             error!(error = %e, "❌ failed to add initial operations");
             return;
@@ -540,7 +542,6 @@ fn main() {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
-
         info!(
             op_count = database.op_count(),
             root = %root_hex,
@@ -556,7 +557,6 @@ fn main() {
                 return;
             }
         };
-
         info!(
             addr = %addr,
             op_interval = ?config.op_interval,
@@ -566,7 +566,6 @@ fn main() {
 
         let state = Arc::new(State::new(context.with_label("server"), database));
         let mut next_op_time = context.current() + config.op_interval;
-
         loop {
             select! {
                 _ = context.sleep_until(next_op_time) => {
