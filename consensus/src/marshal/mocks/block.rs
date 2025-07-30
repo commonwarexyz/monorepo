@@ -89,3 +89,13 @@ impl<D: Digest> Committable for Block<D> {
         self.digest
     }
 }
+
+impl<D: Digest> crate::Block for Block<D> {
+    fn height(&self) -> u64 {
+        self.height
+    }
+
+    fn parent(&self) -> Self::Commitment {
+        self.parent
+    }
+}

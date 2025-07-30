@@ -417,7 +417,7 @@ impl<
                             let commitment = notarization.proposal.payload;
 
                             // If found, store notarization
-                            if let Some(block) = self.search_verified(&mut buffer, commitment).await {
+                            if let Some(block) = self.find_block_up_to_verified(&mut buffer, commitment).await {
                                 self.put_notarized_block(view, commitment, notarization, block).await;
                                 continue;
                             }
@@ -436,7 +436,7 @@ impl<
                             self.put_finalization_from_view(view, commitment, finalization.clone()).await;
 
                             // Search for block locally, otherwise fetch it remotely
-                            if let Some(block) = self.search_notarized(&mut buffer, commitment).await {
+                            if let Some(block) = self.find_block_up_to_notarized(&mut buffer, commitment).await {
                                 // If found, persist the finalization and block
                                 let height = block.height();
                                 self.put_finalization_and_finalized_block(height, commitment, finalization, block, &mut notifier_tx).await;
@@ -453,12 +453,12 @@ impl<
                         }
                         Message::Get { commitment, response } => {
                             // Check for block locally
-                            let result = self.search_finalized(&mut buffer, commitment).await;
+                            let result = self.find_block_up_to_finalized(&mut buffer, commitment).await;
                             let _ = response.send(result);
                         }
                         Message::Subscribe { view, commitment, response } => {
                             // Check for block locally
-                            if let Some(block) = self.search_finalized(&mut buffer, commitment).await {
+                            if let Some(block) = self.find_block_up_to_finalized(&mut buffer, commitment).await {
                                 let _ = response.send(block);
                                 continue;
                             }
@@ -553,7 +553,7 @@ impl<
                             // Iterate backwards, repairing blocks as we go.
                             while cursor.height() > height {
                                 let commitment = cursor.parent();
-                                if let Some(block) = self.search_notarized(&mut buffer, commitment).await {
+                                if let Some(block) = self.find_block_up_to_notarized(&mut buffer, commitment).await {
                                     self.put_finalized_block(block.height(), commitment, block.clone(), &mut notifier_tx).await;
                                     debug!(height = block.height(), "repaired block");
                                     cursor = block;
@@ -585,7 +585,7 @@ impl<
                     match message {
                         handler::Message::Produce { key: commitment, response } => {
                             // If found, send block
-                            if let Some(block) = self.search_finalized(&mut buffer, commitment).await {
+                            if let Some(block) = self.find_block_up_to_finalized(&mut buffer, commitment).await {
                                 let _ = response.send(block.encode().into());
                             } else {
                                 debug!(?commitment, "block missing on request");
@@ -861,8 +861,11 @@ impl<
         let _ = notifier.try_send(());
     }
 
-    /// Looks for a block in local storage, starting with the buffer, then verified.
-    async fn search_verified(
+    /// Looks for a block in local storage, starting with the `buffer`, then the `verified_blocks`
+    /// archive.
+    ///
+    /// The block may not be notarized.
+    async fn find_block_up_to_verified(
         &mut self,
         buffer: &mut buffered::Mailbox<P, B>,
         commitment: B::Commitment,
@@ -876,43 +879,37 @@ impl<
         self.get_verified_block(Identifier::Key(&commitment)).await
     }
 
-    /// Looks for a block in local storage, starting with verified, then notarized.
-    async fn search_notarized(
+    /// Looks for a block in local storage excluding the finalized archive.
+    async fn find_block_up_to_notarized(
         &mut self,
         buffer: &mut buffered::Mailbox<P, B>,
         commitment: B::Commitment,
     ) -> Option<B> {
-        // Check verified.
-        if let Some(block) = self.search_verified(buffer, commitment).await {
+        // Check up-to-verified.
+        if let Some(block) = self.find_block_up_to_verified(buffer, commitment).await {
             return Some(block);
         }
-
-        // Check notarized.
+        // Check notarized blocks.
         if let Some((_, block)) = self.get_notarized_block(Identifier::Key(&commitment)).await {
             return Some(block);
         }
-
-        // Not found.
         None
     }
 
-    /// Looks for a block in local storage, starting with notarized, then finalized.
-    async fn search_finalized(
+    /// Looks for a block anywhere in local storage, including in the finalized archive.
+    async fn find_block_up_to_finalized(
         &mut self,
         buffer: &mut buffered::Mailbox<P, B>,
         commitment: B::Commitment,
     ) -> Option<B> {
-        // Check notarized.
-        if let Some(block) = self.search_notarized(buffer, commitment).await {
+        // Check up-to-notarized.
+        if let Some(block) = self.find_block_up_to_notarized(buffer, commitment).await {
             return Some(block);
         }
-
-        // Check blocks.
+        // Check finalized blocks.
         if let Some(block) = self.get_finalized_block(Identifier::Key(&commitment)).await {
             return Some(block);
         }
-
-        // Not found.
         None
     }
 
