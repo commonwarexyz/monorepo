@@ -98,7 +98,7 @@ where
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::marker::PhantomData;
 

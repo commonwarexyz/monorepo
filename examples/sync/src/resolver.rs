@@ -8,9 +8,12 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_storage::adb::{
-    any::sync::{resolver::Resolver as ResolverTrait, Error as SyncError},
+    any::sync::Error as SyncError,
     operation::Fixed,
-    sync::engine::{FetchResult, SyncTarget},
+    sync::{
+        engine::{FetchResult, SyncTarget},
+        resolver::Resolver as ResolverTrait,
+    },
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::{

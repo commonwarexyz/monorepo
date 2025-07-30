@@ -1,4 +1,4 @@
-use super::{resolver::Resolver, Error, SyncTargetUpdateReceiver};
+use super::{Error, SyncTargetUpdateReceiver};
 use crate::{
     adb::{
         self,
@@ -10,6 +10,7 @@ use crate::{
                 StepResult, SyncEvent, SyncTarget,
             },
             gaps,
+            resolver::Resolver,
         },
     },
     journal::fixed::{Config as JConfig, Journal},
@@ -648,9 +649,12 @@ where
 pub(crate) mod tests {
     use super::*;
     use crate::{
-        adb::any::{
-            sync::{resolver::tests::FailResolver, sync},
-            test::{apply_ops, create_test_db, create_test_ops},
+        adb::{
+            any::{
+                sync::sync,
+                test::{apply_ops, create_test_db, create_test_ops},
+            },
+            sync::resolver::tests::FailResolver,
         },
         translator,
     };

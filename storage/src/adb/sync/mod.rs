@@ -2,3 +2,4 @@
 
 pub mod engine;
 pub mod gaps;
+pub mod resolver;

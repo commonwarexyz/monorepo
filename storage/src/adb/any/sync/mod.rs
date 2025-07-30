@@ -1,13 +1,10 @@
 use crate::{
     adb::{
         any::{
-            sync::{
-                client::{Client, Config},
-                resolver::Resolver,
-            },
+            sync::client::{Client, Config},
             Any,
         },
-        sync::engine::SyncTarget,
+        sync::{engine::SyncTarget, resolver::Resolver},
     },
     mmr,
     translator::Translator,
@@ -20,7 +17,6 @@ use std::fmt;
 
 pub mod client;
 mod metrics;
-pub mod resolver;
 
 /// Channel for sending sync target updates
 pub type SyncTargetUpdateSender<D> = mpsc::Sender<SyncTarget<D>>;
