@@ -281,6 +281,7 @@ pub fn validate_target_update<D: Digest>(
 mod tests {
     use super::*;
     use commonware_cryptography::sha256;
+    use std::io::Cursor;
     use test_case::test_case;
 
     #[test]
@@ -368,9 +369,35 @@ mod tests {
     ) {
         let result = validate_target_update(&old_target, &new_target);
         if should_succeed {
-            assert!(result.is_ok(),);
+            assert!(result.is_ok());
         } else {
-            assert!(result.is_err(),);
+            assert!(result.is_err());
         }
+    }
+
+    #[test]
+    fn test_sync_target_serialization() {
+        let target = SyncTarget {
+            root: sha256::Digest::from([42; 32]),
+            lower_bound_ops: 100,
+            upper_bound_ops: 500,
+        };
+
+        // Serialize
+        let mut buffer = Vec::new();
+        target.write(&mut buffer);
+
+        // Verify encoded size matches actual size
+        assert_eq!(buffer.len(), target.encode_size());
+
+        // Deserialize
+        let mut cursor = Cursor::new(buffer);
+        let deserialized = SyncTarget::read(&mut cursor).unwrap();
+
+        // Verify
+        assert_eq!(target, deserialized);
+        assert_eq!(target.root, deserialized.root);
+        assert_eq!(target.lower_bound_ops, deserialized.lower_bound_ops);
+        assert_eq!(target.upper_bound_ops, deserialized.upper_bound_ops);
     }
 }
