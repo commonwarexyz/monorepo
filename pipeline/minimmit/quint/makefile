@@ -15,6 +15,7 @@ typecheck:
 test:
 	cd tests && quint test tests_n6f0.qnt
 	cd tests && quint test tests_n6f1.qnt
+	cd tests && quint test tests_n7f1.qnt
 
 repl:
 	echo "init\n step\n step\n step" | quint -r main_n6f0.qnt::main
