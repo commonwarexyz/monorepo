@@ -37,6 +37,7 @@ mod tests {
     use commonware_resolver::p2p as resolver;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use governor::Quota;
+    use rand::{seq::SliceRandom, Rng};
     use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
     type D = Sha256Digest;
@@ -56,7 +57,7 @@ mod tests {
 
     #[test]
     fn basic_finalization() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             // Initialize network
             let (network, mut oracle) = Network::new(
@@ -132,7 +133,8 @@ mod tests {
                 blocks.push(block);
             }
 
-            // Broadcast and finalize blocks // TODO: make the order random
+            // Broadcast and finalize blocks in random order
+            blocks.shuffle(&mut context);
             for block in blocks.iter() {
                 // Skip genesis block
                 let height = block.height();
@@ -162,12 +164,15 @@ mod tests {
                 // Finalize block by all validators
                 let fin = make_finalization(proposal, &shares, QUORUM);
                 for actor in actors.iter_mut() {
-                    actor.report(Activity::Finalization(fin.clone())).await;
+                    // Always finalize the last block. Otherwise, finalize randomly.
+                    if height == NUM_BLOCKS || context.gen_bool(0.2) {
+                        actor.report(Activity::Finalization(fin.clone())).await;
+                    }
                 }
             }
 
             // Wait for things to complete
-            context.sleep(Duration::from_secs(5)).await;
+            context.sleep(Duration::from_secs(30)).await;
 
             // Check that all applications received all blocks.
             assert_eq!(applications.len(), NUM_VALIDATORS as usize);
