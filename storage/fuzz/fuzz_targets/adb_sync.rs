@@ -4,9 +4,12 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
-    adb::any::{
-        sync::{self, resolver::Resolver},
-        Any, Config,
+    adb::{
+        any::{
+            sync::{self, resolver::Resolver},
+            Any, Config,
+        },
+        sync::engine::SyncTarget,
     },
     mmr::hasher::Standard,
     translator::TwoCap,
@@ -56,7 +59,7 @@ fn test_config(test_name: &str, pruning_delay: u64) -> Config<TwoCap> {
 async fn test_sync<R: Resolver<Digest = commonware_cryptography::sha256::Digest>>(
     context: deterministic::Context,
     resolver: R,
-    target: sync::SyncTarget<commonware_cryptography::sha256::Digest>,
+    target: SyncTarget<commonware_cryptography::sha256::Digest>,
     fetch_batch_size: u64,
     test_name: &str,
     pruning_delay: u64,
@@ -130,7 +133,7 @@ fn fuzz(input: FuzzInput) {
                         .expect("Commit before sync should not fail");
 
                     let mut hasher = Standard::<Sha256>::new();
-                    let target = sync::SyncTarget {
+                    let target = SyncTarget {
                         root: src.root(&mut hasher),
                         lower_bound_ops: src.inactivity_floor_loc(),
                         upper_bound_ops: src.op_count() - 1,

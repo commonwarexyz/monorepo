@@ -337,7 +337,7 @@ mod tests {
 
         // Invalid: same root
         let same_root_target = SyncTarget {
-            root: sha256::Digest::from([4; 32]),
+            root: sha256::Digest::from([0; 32]),
             lower_bound_ops: 50,
             upper_bound_ops: 200,
         };

@@ -1,134 +1,28 @@
-use super::{
-    resolver::{GetOperationsResult, Resolver},
-    Error, SyncTarget, SyncTargetUpdateReceiver,
-};
+use super::{resolver::Resolver, Error, SyncTargetUpdateReceiver};
 use crate::{
     adb::{
         self,
         any::{sync::metrics::Metrics, SyncConfig},
         operation::Fixed,
-        sync::gaps,
+        sync::{
+            engine::{
+                validate_target_update, FetchResult, IndexedFetchResult, OutstandingRequests,
+                StepResult, SyncEvent, SyncTarget,
+            },
+            gaps,
+        },
     },
     journal::fixed::{Config as JConfig, Journal},
     mmr::{self, iterator::leaf_num_to_pos, verification::Proof},
     translator::Translator,
 };
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Metrics as MetricsTrait, Storage};
 use commonware_utils::{Array, NZU64};
-use futures::{future::Either, stream::FuturesUnordered, StreamExt};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    future::Future,
-    num::NonZeroU64,
-    pin::Pin,
-};
+use futures::{future::Either, StreamExt};
+use std::{collections::BTreeMap, num::NonZeroU64};
 use tracing::{debug, info, warn};
-
-/// Result of executing one sync step
-enum StepResult<C, D> {
-    /// Sync should continue with the updated client
-    Continue(C),
-    /// Sync is complete with the final database
-    Complete(D),
-}
-
-/// Events that can occur during synchronization
-enum SyncEvent<H, K, V>
-where
-    H: Digest,
-    K: Array,
-    V: Array,
-{
-    /// A target update was received
-    TargetUpdate(SyncTarget<H>),
-    /// A batch of operations was received
-    BatchReceived(IndexedFetchResult<H, K, V>),
-    /// The target update channel was closed
-    UpdateChannelClosed,
-}
-
-struct IndexedFetchResult<D, K, V>
-where
-    D: Digest,
-    K: Array,
-    V: Array,
-{
-    /// The location of the first operation in the batch
-    start_loc: u64,
-    /// The result of the fetch operation
-    result: Result<GetOperationsResult<D, K, V>, Error>,
-}
-
-/// Manages outstanding fetch requests.
-struct OutstandingRequests<D, K, V>
-where
-    D: Digest,
-    K: Array,
-    V: Array,
-{
-    /// Futures that will resolve to batches of operations.
-    #[allow(clippy::type_complexity)]
-    futures: FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<D, K, V>> + Send>>>,
-    /// Start locations of outstanding requests.
-    /// Each element corresponds to an element in `futures` and vice versa.
-    locations: BTreeSet<u64>,
-}
-
-impl<D, K, V> OutstandingRequests<D, K, V>
-where
-    D: Digest,
-    K: Array,
-    V: Array,
-{
-    fn new() -> Self {
-        Self {
-            futures: FuturesUnordered::new(),
-            locations: BTreeSet::new(),
-        }
-    }
-
-    /// Add a new outstanding request.
-    fn add(
-        &mut self,
-        start_loc: u64,
-        future: Pin<Box<dyn Future<Output = IndexedFetchResult<D, K, V>> + Send>>,
-    ) {
-        self.locations.insert(start_loc);
-        self.futures.push(future);
-    }
-
-    /// Get a mutable reference to the underlying futures.
-    #[allow(clippy::type_complexity)]
-    fn futures_mut(
-        &mut self,
-    ) -> &mut FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<D, K, V>> + Send>>>
-    {
-        &mut self.futures
-    }
-
-    /// Remove a request from location tracking.
-    fn remove(&mut self, start_loc: u64) {
-        self.locations.remove(&start_loc);
-    }
-
-    /// Clear all outstanding requests.
-    fn clear(&mut self) {
-        self.futures.clear();
-        self.locations.clear();
-    }
-
-    /// Get the number of outstanding requests.
-    fn len(&self) -> usize {
-        self.locations.len()
-    }
-
-    /// Get a view of the outstanding request locations.
-    fn locations(&self) -> &BTreeSet<u64> {
-        &self.locations
-    }
-}
 
 /// Configuration for the sync client
 pub struct Config<E, K, V, H, T, R>
@@ -209,7 +103,7 @@ where
     fetched_operations: BTreeMap<u64, Vec<Fixed<K, V>>>,
 
     /// Outstanding fetch requests.
-    outstanding_requests: OutstandingRequests<H::Digest, K, V>,
+    outstanding_requests: OutstandingRequests<Fixed<K, V>, H::Digest, Error>,
 
     /// Pinned nodes extracted from the batch of operations at the lower sync bound.
     pinned_nodes: Option<Vec<H::Digest>>,
@@ -289,14 +183,14 @@ where
     /// Handle the result of a fetch operation.
     fn handle_fetch_result(
         &mut self,
-        fetch_result: IndexedFetchResult<H::Digest, K, V>,
+        fetch_result: IndexedFetchResult<Fixed<K, V>, H::Digest, Error>,
     ) -> Result<(), Error> {
         // Mark request as complete
         self.outstanding_requests.remove(fetch_result.start_loc);
 
         let start_loc = fetch_result.start_loc;
         match fetch_result.result {
-            Ok(GetOperationsResult {
+            Ok(FetchResult {
                 proof,
                 operations,
                 success_tx,
@@ -311,7 +205,7 @@ where
                         "received invalid batch size from resolver"
                     );
                     self.metrics.invalid_batches_received.inc();
-                    let _ = success_tx.send(false);
+                    success_tx(false);
                 } else {
                     // Verify the proof
                     let proof_valid = {
@@ -325,7 +219,7 @@ where
                         )
                     };
                     // Report success or failure to the resolver
-                    let _ = success_tx.send(proof_valid);
+                    success_tx(proof_valid);
                     if proof_valid {
                         // Extract pinned nodes if needed
                         self.set_pinned_nodes(&proof, start_loc, operations_len)?;
@@ -348,7 +242,7 @@ where
     }
 
     /// Wait for the next synchronization event.
-    async fn wait_for_event(&mut self) -> Result<SyncEvent<H::Digest, K, V>, Error> {
+    async fn wait_for_event(&mut self) -> Result<SyncEvent<Fixed<K, V>, H::Digest, Error>, Error> {
         let target_update_fut = match &mut self.config.update_receiver {
             Some(update_rx) => Either::Left(update_rx.next()),
             None => Either::Right(futures::future::pending()),
@@ -422,7 +316,17 @@ where
                 Box::pin(async move {
                     let result = resolver
                         .get_operations(target_size, start_loc, NZU64!(1))
-                        .await;
+                        .await
+                        .map(|ops_result| FetchResult {
+                            proof: ops_result.proof,
+                            operations: ops_result.operations,
+                            success_tx: {
+                                let sender = ops_result.success_tx;
+                                Box::new(move |success: bool| {
+                                    let _ = sender.send(success);
+                                })
+                            },
+                        });
                     IndexedFetchResult { start_loc, result }
                 }),
             );
@@ -468,7 +372,17 @@ where
                 Box::pin(async move {
                     let result = resolver
                         .get_operations(target_size, start_loc, batch_size)
-                        .await;
+                        .await
+                        .map(|ops_result| FetchResult {
+                            proof: ops_result.proof,
+                            operations: ops_result.operations,
+                            success_tx: {
+                                let sender = ops_result.success_tx;
+                                Box::new(move |success: bool| {
+                                    let _ = sender.send(success);
+                                })
+                            },
+                        });
                     IndexedFetchResult { start_loc, result }
                 }),
             );
@@ -576,7 +490,29 @@ where
         mut self,
         new_target: SyncTarget<H::Digest>,
     ) -> Result<Self, Error> {
-        validate_target_update::<H>(&self.config.target, &new_target)?;
+        validate_target_update(&self.config.target, &new_target).map_err(|msg| {
+            if msg.contains("lower_bound")
+                && msg.contains("upper_bound")
+                && msg.contains("Invalid target")
+            {
+                Error::InvalidTarget {
+                    lower_bound_pos: new_target.lower_bound_ops,
+                    upper_bound_pos: new_target.upper_bound_ops,
+                }
+            } else if msg.contains("moved backward") {
+                Error::SyncTargetMovedBackward {
+                    old: Box::new(self.config.target.clone()),
+                    new: Box::new(new_target.clone()),
+                }
+            } else if msg.contains("root unchanged") {
+                Error::SyncTargetRootUnchanged
+            } else {
+                Error::SyncTargetMovedBackward {
+                    old: Box::new(self.config.target.clone()),
+                    new: Box::new(new_target.clone()),
+                }
+            }
+        })?;
 
         info!(
             old_target = ?self.config.target,
@@ -630,31 +566,6 @@ where
 
         Ok(false)
     }
-}
-
-/// Validate a target update against the current target.
-fn validate_target_update<H: Hasher>(
-    old_target: &SyncTarget<H::Digest>,
-    new_target: &SyncTarget<H::Digest>,
-) -> Result<(), Error> {
-    if new_target.lower_bound_ops > new_target.upper_bound_ops {
-        return Err(Error::InvalidTarget {
-            lower_bound_pos: new_target.lower_bound_ops,
-            upper_bound_pos: new_target.upper_bound_ops,
-        });
-    }
-    if new_target.lower_bound_ops < old_target.lower_bound_ops
-        || new_target.upper_bound_ops < old_target.upper_bound_ops
-    {
-        return Err(Error::SyncTargetMovedBackward {
-            old: Box::new(old_target.clone()),
-            new: Box::new(new_target.clone()),
-        });
-    }
-    if new_target.root == old_target.root {
-        return Err(Error::SyncTargetRootUnchanged);
-    }
-    Ok(())
 }
 
 /// Reinitialize the log for a target update.

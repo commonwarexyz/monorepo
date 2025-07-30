@@ -16,7 +16,7 @@ use commonware_codec::{
     EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, ReadRangeExt as _, Write,
 };
 use commonware_cryptography::sha256::Digest;
-use commonware_storage::{adb::any::sync::SyncTarget, mmr::verification::Proof};
+use commonware_storage::{adb::sync::engine::SyncTarget, mmr::verification::Proof};
 use std::{
     mem::size_of,
     num::NonZeroU64,

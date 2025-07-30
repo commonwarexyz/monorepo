@@ -1,10 +1,13 @@
 use crate::{
-    adb::any::{
-        sync::{
-            client::{Client, Config},
-            resolver::Resolver,
+    adb::{
+        any::{
+            sync::{
+                client::{Client, Config},
+                resolver::Resolver,
+            },
+            Any,
         },
-        Any,
+        sync::engine::SyncTarget,
     },
     mmr,
     translator::Translator,
@@ -20,18 +23,6 @@ use std::fmt;
 pub mod client;
 mod metrics;
 pub mod resolver;
-
-/// The target state to sync to.
-#[derive(Debug, Clone)]
-pub struct SyncTarget<D: Digest> {
-    /// Root digest of the target database
-    pub root: D,
-    /// Lower bound of operations to sync (inclusive)
-    /// This will be the pruning boundary of the synced database.
-    pub lower_bound_ops: u64,
-    /// Upper bound of operations to sync (inclusive)
-    pub upper_bound_ops: u64,
-}
 
 /// Channel for sending sync target updates
 pub type SyncTargetUpdateSender<D> = mpsc::Sender<SyncTarget<D>>;
