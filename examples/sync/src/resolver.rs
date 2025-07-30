@@ -7,9 +7,12 @@ use crate::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
-use commonware_storage::adb::any::sync::{
-    resolver::{GetOperationsResult, Resolver as ResolverTrait},
-    Error as SyncError,
+use commonware_storage::adb::{
+    any::sync::{
+        resolver::{GetOperationsResult, Resolver as ResolverTrait},
+        Error as SyncError,
+    },
+    sync::engine::SyncTarget,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::{

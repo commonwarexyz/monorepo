@@ -7,7 +7,7 @@ use commonware_macros::select;
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Listener, Metrics as _, Network, Runner, RwLock, Spawner as _,
 };
-use commonware_storage::{adb::any::sync::SyncTarget, mmr::hasher::Standard};
+use commonware_storage::{adb::sync::engine::SyncTarget, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     crate_version, create_adb_config, create_test_operations, Database, Error, ErrorCode,

@@ -7,7 +7,10 @@ use clap::{Arg, Command};
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
 use commonware_storage::{
-    adb::any::sync::{self, client::Config as SyncConfig, SyncTarget},
+    adb::{
+        any::sync::{self, client::Config as SyncConfig},
+        sync::engine::SyncTarget,
+    },
     mmr::hasher::Standard,
 };
 use commonware_sync::{crate_version, create_adb_config, Error, Resolver};

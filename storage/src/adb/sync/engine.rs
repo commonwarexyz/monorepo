@@ -248,6 +248,7 @@ pub fn validate_target_update<D: Digest>(
 mod tests {
     use super::*;
     use commonware_cryptography::sha256;
+    use test_case::test_case;
 
     #[test]
     fn test_outstanding_requests() {
@@ -303,44 +304,40 @@ mod tests {
         assert!(state.fetched_operations.is_empty());
     }
 
-    #[test]
-    fn test_validate_target_update() {
-        let old_target = SyncTarget {
-            root: sha256::Digest::from([0; 32]),
-            lower_bound_ops: 0,
-            upper_bound_ops: 100,
-        };
-
-        // Valid update
-        let new_target = SyncTarget {
-            root: sha256::Digest::from([1; 32]),
-            lower_bound_ops: 50,
-            upper_bound_ops: 200,
-        };
-        assert!(validate_target_update(&old_target, &new_target).is_ok());
-
-        // Invalid: lower > upper
-        let invalid_target = SyncTarget {
-            root: sha256::Digest::from([2; 32]),
-            lower_bound_ops: 200,
-            upper_bound_ops: 100,
-        };
-        assert!(validate_target_update(&old_target, &invalid_target).is_err());
-
-        // Invalid: moves backward
-        let backward_target = SyncTarget {
-            root: sha256::Digest::from([3; 32]),
-            lower_bound_ops: 0,
-            upper_bound_ops: 50,
-        };
-        assert!(validate_target_update(&old_target, &backward_target).is_err());
-
-        // Invalid: same root
-        let same_root_target = SyncTarget {
-            root: sha256::Digest::from([0; 32]),
-            lower_bound_ops: 50,
-            upper_bound_ops: 200,
-        };
-        assert!(validate_target_update(&old_target, &same_root_target).is_err());
+    #[test_case(
+        SyncTarget { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
+        SyncTarget { root: sha256::Digest::from([1; 32]), lower_bound_ops: 50, upper_bound_ops: 200 },
+        true;
+        "valid update"
+    )]
+    #[test_case(
+        SyncTarget { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
+        SyncTarget { root: sha256::Digest::from([1; 32]), lower_bound_ops: 200, upper_bound_ops: 100 },
+        false;
+        "invalid bounds - lower > upper"
+    )]
+    #[test_case(
+        SyncTarget { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
+        SyncTarget { root: sha256::Digest::from([1; 32]), lower_bound_ops: 0, upper_bound_ops: 50 },
+        false;
+        "moves backward"
+    )]
+    #[test_case(
+        SyncTarget { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
+        SyncTarget { root: sha256::Digest::from([0; 32]), lower_bound_ops: 50, upper_bound_ops: 200 },
+        false;
+        "same root"
+    )]
+    fn test_validate_target_update(
+        old_target: SyncTarget<sha256::Digest>,
+        new_target: SyncTarget<sha256::Digest>,
+        should_succeed: bool,
+    ) {
+        let result = validate_target_update(&old_target, &new_target);
+        if should_succeed {
+            assert!(result.is_ok(),);
+        } else {
+            assert!(result.is_err(),);
+        }
     }
 }
