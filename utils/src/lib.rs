@@ -5,7 +5,7 @@ use commonware_codec::{EncodeSize, Write};
 use std::time::Duration;
 
 pub mod sequence;
-pub use sequence::Array;
+pub use sequence::{Array, Span};
 mod bitvec;
 pub use bitvec::{BitIterator, BitVec};
 mod time;
