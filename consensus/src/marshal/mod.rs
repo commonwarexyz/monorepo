@@ -120,7 +120,7 @@ mod tests {
     const QUORUM: u32 = 3;
     const NUM_BLOCKS: u64 = 100;
 
-    #[test_traced]
+    #[test_traced("WARN")]
     fn test_basic_finalization() {
         for seed in 0..5 {
             let result1 = basic_finalization(seed);
@@ -281,7 +281,7 @@ mod tests {
             identity,
             coordinator,
             mailbox_size: 100,
-            backfill_quota: Quota::per_second(NonZeroU32::new(1).unwrap()),
+            backfill_quota: Quota::per_second(NonZeroU32::new(5).unwrap()),
             namespace: NAMESPACE.to_vec(),
             view_retention_timeout: 10,
             max_repair: 10,
