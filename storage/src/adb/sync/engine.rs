@@ -1,6 +1,9 @@
 //! Core sync engine components that are shared across sync clients.
 
-use crate::{adb::sync::error::SyncError, mmr::verification::Proof};
+use crate::{
+    adb::sync::{error::SyncError, resolver::Resolver},
+    mmr::verification::Proof,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
@@ -397,14 +400,10 @@ pub type SyncTargetUpdateReceiver<D> = mpsc::Receiver<SyncTarget<D>>;
 
 /// Wait for the next synchronization event from either target updates or fetch results.
 /// Returns `None` if the sync is stalled (there are no outstanding requests).
-pub async fn wait_for_event<Op, D, E>(
+pub async fn wait_for_event<Op, D: Digest, E>(
     update_receiver: &mut Option<SyncTargetUpdateReceiver<D>>,
     outstanding_requests: &mut OutstandingRequests<Op, D, E>,
-) -> Option<SyncEvent<Op, D, E>>
-where
-    D: Digest,
-    E: std::error::Error + Send + 'static,
-{
+) -> Option<SyncEvent<Op, D, E>> {
     let target_update_fut = match update_receiver {
         Some(update_rx) => Either::Left(update_rx.next()),
         None => Either::Right(futures::future::pending()),
@@ -424,13 +423,7 @@ where
 }
 
 /// A shared sync engine that manages the core synchronization state and operations.
-///
-/// This engine handles the common sync logic that can be reused across different
-/// ADB implementations (Any, Immutable, Current).
-pub struct SyncEngine<
-    DB: SyncDatabase,
-    R: crate::adb::sync::resolver::Resolver<Op = DB::Op, Digest = DB::Digest>,
-> {
+pub struct SyncEngine<DB: SyncDatabase, R: Resolver<Op = DB::Op, Digest = DB::Digest>> {
     /// Tracks outstanding fetch requests and their futures
     pub outstanding_requests: OutstandingRequests<DB::Op, DB::Digest, R::Error>,
 
@@ -466,10 +459,7 @@ pub struct SyncEngine<
 }
 
 /// Configuration for creating a new SyncEngine
-pub struct SyncEngineConfig<
-    DB: SyncDatabase,
-    R: crate::adb::sync::resolver::Resolver<Op = DB::Op, Digest = DB::Digest>,
-> {
+pub struct SyncEngineConfig<DB: SyncDatabase, R: Resolver<Op = DB::Op, Digest = DB::Digest>> {
     /// Runtime context for creating database components
     pub context: DB::Context,
     /// Network resolver for fetching operations and proofs
@@ -489,12 +479,8 @@ pub struct SyncEngineConfig<
 impl<DB, R> SyncEngine<DB, R>
 where
     DB: SyncDatabase,
-    DB::Error: From<<DB::Journal as Journal>::Error>, // TODO: review this
-    // DB::Error: From<crate::adb::any::sync::Error>,    // TODO: review this
-    DB::Op: Clone + Send + 'static,
-    DB::Digest: Clone,
-    DB::Config: Clone,
-    R: crate::adb::sync::resolver::Resolver<Op = DB::Op, Digest = DB::Digest>,
+    DB::Error: From<<DB::Journal as Journal>::Error>,
+    R: Resolver<Op = DB::Op, Digest = DB::Digest>,
 {
     /// Create a new sync engine with the given configuration
     pub async fn new(
@@ -790,7 +776,7 @@ where
         if self.is_complete().await? {
             // Build the database from the completed sync
             let database = DB::from_sync_result(
-                self.config.clone(),
+                self.config,
                 self.journal,
                 self.pinned_nodes,
                 self.target.clone(),
