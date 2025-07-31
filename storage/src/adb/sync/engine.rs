@@ -5,6 +5,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
 use commonware_macros::select;
+use commonware_utils::NZU64;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
@@ -15,8 +16,21 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
     future::Future,
+    num::NonZeroU64,
     pin::Pin,
 };
+
+/// Trait for journals that support sync operations
+pub trait SyncJournal {
+    type Op;
+    type Error: Send + 'static;
+
+    /// Get the current size (number of operations) in the journal
+    fn size(&self) -> impl Future<Output = Result<u64, Self::Error>>;
+
+    /// Append an operation to the journal
+    fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>>;
+}
 
 /// Result of executing one sync step
 #[derive(Debug)]
@@ -310,6 +324,163 @@ where
             let fetch_result = result.ok_or(crate::adb::sync::error::SyncError::SyncStalled)?;
             Ok(SyncEvent::BatchReceived(fetch_result))
         },
+    }
+}
+
+/// A shared sync engine that manages the core synchronization state and operations.
+///
+/// This engine handles the common sync logic that can be reused across different
+/// ADB implementations (Any, Immutable, Current).
+pub struct SyncEngine<J, R, D, E>
+where
+    J: SyncJournal,
+    D: Digest,
+{
+    /// Tracks outstanding fetch requests and their futures
+    pub outstanding_requests: OutstandingRequests<J::Op, D, E>,
+
+    /// Operations that have been fetched but not yet applied to the log
+    pub fetched_operations: BTreeMap<u64, Vec<J::Op>>,
+
+    /// Pinned MMR nodes extracted from proofs, used for database construction
+    pub pinned_nodes: Option<Vec<D>>,
+
+    /// The current sync target (root digest and operation bounds)
+    pub target: SyncTarget<D>,
+
+    /// Maximum number of parallel outstanding requests
+    pub max_outstanding_requests: usize,
+
+    /// Maximum operations to fetch in a single batch
+    pub fetch_batch_size: NonZeroU64,
+
+    /// Journal that operations are applied to during sync
+    pub journal: J,
+
+    /// Resolver for fetching operations and proofs from the sync source
+    pub resolver: R,
+}
+
+impl<J, R, D, E> SyncEngine<J, R, D, E>
+where
+    J: SyncJournal<Error = E>,
+    J::Op: Clone + Send + 'static,
+    R: crate::adb::sync::resolver::Resolver<Digest = D, Op = J::Op>,
+    D: Digest + Clone,
+    E: Send + 'static + From<crate::adb::any::sync::Error>,
+{
+    /// Create a new sync engine with the given configuration
+    pub fn new(
+        journal: J,
+        resolver: R,
+        target: SyncTarget<D>,
+        max_outstanding_requests: usize,
+        fetch_batch_size: NonZeroU64,
+    ) -> Self {
+        Self {
+            outstanding_requests: OutstandingRequests::new(),
+            fetched_operations: BTreeMap::new(),
+            pinned_nodes: None,
+            target,
+            max_outstanding_requests,
+            fetch_batch_size,
+            journal,
+            resolver,
+        }
+    }
+
+    /// Schedule new fetch requests based on gap analysis and request limits.
+    ///
+    /// This method implements the core request scheduling logic that can be used
+    /// across different ADB sync implementations.
+    pub async fn schedule_requests(&mut self) -> Result<(), E> {
+        let target_size = self.target.upper_bound_ops + 1;
+
+        // Special case: If we don't have pinned nodes, we need to extract them from a proof
+        // for the lower sync bound.
+        if self.pinned_nodes.is_none() {
+            let start_loc = self.target.lower_bound_ops;
+            let resolver = self.resolver.clone();
+            self.outstanding_requests.add(
+                start_loc,
+                Box::pin(async move {
+                    let result = resolver
+                        .get_operations(target_size, start_loc, NZU64!(1))
+                        .await
+                        .map_err(E::from);
+                    IndexedFetchResult { start_loc, result }
+                }),
+            );
+        }
+
+        // Calculate the maximum number of requests to make
+        let num_requests = self
+            .max_outstanding_requests
+            .saturating_sub(self.outstanding_requests.len());
+
+        let log_size = self.journal.size().await?;
+
+        for _ in 0..num_requests {
+            // Convert fetched operations to operation counts for shared gap detection
+            let operation_counts: BTreeMap<u64, u64> = self
+                .fetched_operations
+                .iter()
+                .map(|(&start_loc, operations)| (start_loc, operations.len() as u64))
+                .collect();
+
+            // Find the next gap in the sync range that needs to be fetched.
+            let Some((start_loc, end_loc)) = crate::adb::sync::gaps::find_next_gap(
+                log_size,
+                self.target.upper_bound_ops,
+                &operation_counts,
+                self.outstanding_requests.locations(),
+                self.fetch_batch_size.get(),
+            ) else {
+                break; // No more gaps to fill
+            };
+
+            // Calculate batch size for this gap
+            let gap_size = NZU64!(end_loc - start_loc + 1);
+            let batch_size = self.fetch_batch_size.min(gap_size);
+
+            // Schedule the request
+            let resolver = self.resolver.clone();
+            self.outstanding_requests.add(
+                start_loc,
+                Box::pin(async move {
+                    let result = resolver
+                        .get_operations(target_size, start_loc, batch_size)
+                        .await
+                        .map_err(E::from);
+                    IndexedFetchResult { start_loc, result }
+                }),
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Clear all sync state for a target update
+    pub fn reset_for_target_update(&mut self, new_target: SyncTarget<D>) {
+        self.target = new_target;
+        self.fetched_operations.clear();
+        self.outstanding_requests.clear();
+        self.pinned_nodes = None;
+    }
+
+    /// Store a batch of fetched operations
+    pub fn store_operations(&mut self, start_loc: u64, operations: Vec<J::Op>) {
+        self.fetched_operations.insert(start_loc, operations);
+    }
+
+    /// Check if we have pinned nodes
+    pub fn has_pinned_nodes(&self) -> bool {
+        self.pinned_nodes.is_some()
+    }
+
+    /// Set pinned nodes from a proof
+    pub fn set_pinned_nodes(&mut self, nodes: Vec<D>) {
+        self.pinned_nodes = Some(nodes);
     }
 }
 
