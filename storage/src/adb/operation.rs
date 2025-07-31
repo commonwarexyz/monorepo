@@ -241,7 +241,7 @@ impl<K: Array, V: Array> Display for Variable<K, V> {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_utils::array::U64;
+    use commonware_utils::sequence::U64;
 
     #[test]
     fn test_to_key() {

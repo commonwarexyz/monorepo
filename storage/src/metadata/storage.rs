@@ -1,6 +1,6 @@
 use super::{Config, Error};
 use bytes::BufMut;
-use commonware_codec::{Codec, EncodeSize, FixedSize, ReadExt};
+use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_runtime::{Blob, Clock, Error as RError, Metrics, Storage};
 use commonware_utils::Array;
 use futures::future::try_join_all;

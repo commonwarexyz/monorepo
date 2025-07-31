@@ -1,4 +1,4 @@
-use commonware_codec::{Decode, EncodeFixed};
+use commonware_codec::{Codec, EncodeFixed};
 use std::{
     cmp::{Ord, PartialOrd},
     error::Error as StdError,
@@ -25,14 +25,12 @@ pub enum Error<E: StdError + Send + Sync + 'static> {
     Other(E),
 }
 
-/// Types that can be fallibly read from a fixed-size byte sequence.
+/// Types that can be read from a variable-size byte sequence.
 ///
-/// `Array` is typically used to parse things like `PublicKeys` and `Signatures`
-/// from an untrusted network connection. Once parsed, these types are assumed
-/// to be well-formed (which prevents duplicate validation).
-///
-/// If a byte sequencer is not properly formatted, `TryFrom` must return an error.
-pub trait Array:
+/// `Span` is typically used to parse things like requests from an untrusted
+/// network connection (with variable-length fields). Once parsed, these types
+/// are assumed to be well-formed (which prevents duplicate validation).
+pub trait Span:
     Clone
     + Send
     + Sync
@@ -46,7 +44,13 @@ pub trait Array:
     + Display
     + AsRef<[u8]>
     + Deref<Target = [u8]>
-    + Decode<Cfg = ()>
-    + EncodeFixed
+    + Codec<Cfg = ()>
 {
 }
+
+/// Types that can be fallibly read from a fixed-size byte sequence.
+///
+/// `Array` is typically used to parse things like `PublicKeys` and `Signatures`
+/// from an untrusted network connection. Once parsed, these types are assumed
+/// to be well-formed (which prevents duplicate validation).
+pub trait Array: Span + EncodeFixed {}

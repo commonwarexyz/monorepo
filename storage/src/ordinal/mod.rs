@@ -61,7 +61,7 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_storage::ordinal::{Ordinal, Config};
-//! use commonware_utils::array::FixedBytes;
+//! use commonware_utils::sequence::FixedBytes;
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -134,7 +134,7 @@ mod tests {
     use super::*;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{array::FixedBytes, BitVec};
+    use commonware_utils::{sequence::FixedBytes, BitVec};
     use rand::RngCore;
     use std::collections::BTreeMap;
 

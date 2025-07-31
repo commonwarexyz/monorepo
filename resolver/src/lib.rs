@@ -1,6 +1,6 @@
 //! Resolve data identified by a fixed-length key.
 
-use commonware_utils::Array;
+use commonware_utils::Span;
 use std::future::Future;
 
 pub mod p2p;
@@ -8,7 +8,7 @@ pub mod p2p;
 /// Notified when data is available, and must validate it.
 pub trait Consumer: Clone + Send + 'static {
     /// Type used to uniquely identify data.
-    type Key: Array;
+    type Key: Span;
 
     /// Type of data to retrieve.
     type Value;
@@ -31,7 +31,7 @@ pub trait Consumer: Clone + Send + 'static {
 /// Responsible for fetching data and notifying a `Consumer`.
 pub trait Resolver: Clone + Send + 'static {
     /// Type used to uniquely identify data.
-    type Key: Array;
+    type Key: Span;
 
     /// Initiate a fetch request.
     fn fetch(&mut self, key: Self::Key) -> impl Future<Output = ()> + Send;

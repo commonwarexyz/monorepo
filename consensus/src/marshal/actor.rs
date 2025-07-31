@@ -25,7 +25,7 @@ use commonware_storage::{
     archive::{self, immutable, prunable, Archive as _, Identifier},
     translator::TwoCap,
 };
-use commonware_utils::{array::U64, Array};
+use commonware_utils::{sequence::U64, Array};
 use futures::{
     channel::{mpsc, oneshot},
     try_join, StreamExt,

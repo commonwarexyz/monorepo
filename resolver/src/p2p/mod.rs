@@ -30,7 +30,7 @@
 
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_utils::Array;
+use commonware_utils::Span;
 use futures::channel::oneshot;
 use std::future::Future;
 
@@ -50,7 +50,7 @@ pub mod mocks;
 /// Serves data requested by the network.
 pub trait Producer: Clone + Send + 'static {
     /// Type used to uniquely identify data.
-    type Key: Array;
+    type Key: Span;
 
     /// Serve a request received from the network.
     fn produce(&mut self, key: Self::Key) -> impl Future<Output = oneshot::Receiver<Bytes>> + Send;
