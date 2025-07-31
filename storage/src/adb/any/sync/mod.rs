@@ -1,9 +1,6 @@
 use crate::{
     adb::{
-        any::{
-            sync::client::{Client, Config},
-            Any,
-        },
+        any::Any,
         operation::Fixed,
         sync::{
             engine::{SyncTarget, SyncVerifier},
@@ -19,7 +16,6 @@ use commonware_utils::Array;
 use futures::channel::mpsc;
 
 pub mod client;
-mod metrics;
 
 /// Channel for sending sync target updates
 pub type SyncTargetUpdateSender<D> = mpsc::Sender<SyncTarget<D>>;
@@ -113,6 +109,7 @@ where
 }
 
 /// Configuration for building Any database from completed sync
+#[derive(Clone)]
 pub struct AnySyncConfig<E, T>
 where
     E: Storage + Clock + Metrics,
@@ -123,12 +120,44 @@ where
     pub apply_batch_size: usize,
 }
 
+/// Wrapper around Journal that converts errors to sync errors
+struct JournalWrapper<E, K, V>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Array,
+{
+    journal: crate::journal::fixed::Journal<E, Fixed<K, V>>,
+}
+
+impl<E, K, V> crate::adb::sync::engine::SyncJournal for JournalWrapper<E, K, V>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Array,
+{
+    type Op = Fixed<K, V>;
+    type Error = Error;
+
+    async fn size(&self) -> Result<u64, Self::Error> {
+        self.journal
+            .size()
+            .await
+            .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))
+    }
+
+    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
+        self.journal
+            .append(op)
+            .await
+            .map(|_| ())
+            .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))
+    }
+}
+
 /// Implementation of SyncDatabase for Any database
-impl<E, K, V, H, T>
-    crate::adb::sync::engine::SyncDatabase<
-        crate::journal::fixed::Journal<E, Fixed<K, V>>,
-        H::Digest,
-    > for Any<E, K, V, H, T>
+impl<E, K, V, H, T> crate::adb::sync::engine::SyncDatabase<JournalWrapper<E, K, V>, H::Digest>
+    for Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -137,32 +166,37 @@ where
     T: Translator,
 {
     type Config = AnySyncConfig<E, T>;
-    type Error = crate::adb::sync::error::SyncError<crate::adb::Error>;
+    type Error = Error;
 
-    async fn from_sync_result(
+    fn from_sync_result(
         config: Self::Config,
-        journal: crate::journal::fixed::Journal<E, Fixed<K, V>>,
+        journal_wrapper: JournalWrapper<E, K, V>,
         pinned_nodes: Option<Vec<H::Digest>>,
         target: crate::adb::sync::engine::SyncTarget<H::Digest>,
-    ) -> Result<Self, Self::Error> {
-        use crate::adb::any::SyncConfig;
+    ) -> impl std::future::Future<Output = Result<Self, Self::Error>> {
+        async move {
+            use crate::adb::any::SyncConfig;
 
-        // Build the complete database from the journal
-        let db = Any::init_synced(
-            config.context,
-            SyncConfig {
-                db_config: config.db_config,
-                log: journal,
-                lower_bound: target.lower_bound_ops,
-                upper_bound: target.upper_bound_ops,
-                pinned_nodes,
-                apply_batch_size: config.apply_batch_size,
-            },
-        )
-        .await
-        .map_err(crate::adb::sync::error::SyncError::database)?;
+            // Extract the journal from the wrapper
+            let journal = journal_wrapper.journal;
 
-        Ok(db)
+            // Build the complete database from the journal
+            let db = Any::init_synced(
+                config.context,
+                SyncConfig {
+                    db_config: config.db_config,
+                    log: journal,
+                    lower_bound: target.lower_bound_ops,
+                    upper_bound: target.upper_bound_ops,
+                    pinned_nodes,
+                    apply_batch_size: config.apply_batch_size,
+                },
+            )
+            .await
+            .map_err(Error::adb)?;
+
+            Ok(db)
+        }
     }
 
     fn root(
@@ -184,7 +218,7 @@ where
 ///
 /// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
 pub async fn sync<E, K, V, H, T, R>(
-    config: Config<E, K, V, H, T, R>,
+    mut config: client::Config<E, K, V, H, T, R>,
 ) -> Result<Any<E, K, V, H, T>, Error>
 where
     E: Storage + Clock + Metrics,
@@ -194,6 +228,65 @@ where
     T: Translator,
     R: Resolver<Digest = H::Digest, Op = Fixed<K, V>>,
 {
-    let client = Client::new(config).await?;
-    client.sync().await
+    use crate::{
+        adb::sync::engine::SyncEngine,
+        journal::fixed::{Config as JConfig, Journal},
+    };
+
+    // Validate configuration
+    config.validate()?;
+
+    // Initialize the operations journal
+    let journal = Journal::<E, Fixed<K, V>>::init_sync(
+        config.context.clone().with_label("log"),
+        JConfig {
+            partition: config.db_config.log_journal_partition.clone(),
+            items_per_blob: config.db_config.log_items_per_blob,
+            write_buffer: config.db_config.log_write_buffer,
+            buffer_pool: config.db_config.buffer_pool.clone(),
+        },
+        config.target.lower_bound_ops,
+        config.target.upper_bound_ops,
+    )
+    .await
+    .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))?;
+
+    // Validate journal size
+    let log_size = journal
+        .size()
+        .await
+        .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))?;
+    assert!(log_size <= config.target.upper_bound_ops + 1);
+
+    // Create a journal wrapper that converts errors to sync errors
+    let wrapped_journal = JournalWrapper { journal };
+
+    // Create verifier
+    let verifier = AnyVerifier::<E, K, V, H, T>::new(config.hasher);
+
+    // Create sync engine
+    let engine = SyncEngine::new(
+        wrapped_journal,
+        config.resolver,
+        verifier,
+        config.target.clone(),
+        config.max_outstanding_requests,
+        config.fetch_batch_size,
+    );
+
+    // Create database configuration for final build step
+    let db_config = AnySyncConfig {
+        context: config.context,
+        db_config: config.db_config,
+        apply_batch_size: config.apply_batch_size,
+    };
+
+    // Run sync to completion using generic engine
+    // Extract the underlying hasher from the Standard wrapper
+    let hasher = H::new();
+    let database = engine
+        .sync(db_config, &mut config.update_receiver, hasher)
+        .await?;
+
+    Ok(database)
 }
