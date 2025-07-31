@@ -690,10 +690,10 @@ where
                     }
                 }
             }
-            Err(_e) => {
-                // We couldn't get the operations we requested. When we scan for gaps
-                // in the sync range, we will request them again if we haven't already
-                // requested or received these operations.
+            Err(e) => {
+                // Resolver error - propagate it up to fail the sync.
+                // TODO: How should we handle a resolver error?
+                return Err(e);
             }
         }
         Ok(())
