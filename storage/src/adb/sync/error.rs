@@ -48,11 +48,6 @@ pub enum SyncError<E> {
 }
 
 impl<E> SyncError<E> {
-    /// Convert a database-specific error into a sync error
-    pub fn database(err: E) -> Self {
-        Self::Database(err)
-    }
-
     /// Create a resolver error
     pub fn resolver(err: impl fmt::Debug + Send + Sync + 'static) -> Self {
         Self::Resolver(Box::new(err))
@@ -62,16 +57,15 @@ impl<E> SyncError<E> {
     pub fn pinned_nodes(msg: impl Into<String>) -> Self {
         Self::PinnedNodes(msg.into())
     }
-}
 
-/// Automatic conversion from database errors to sync errors
-// TODO: Try to find a way to rewrite this to reduce probability of misuse
-// with errors that aren't actually database errors.
-impl<E> From<E> for SyncError<E>
-where
-    E: std::error::Error + Send + 'static,
-{
-    fn from(err: E) -> Self {
+    pub fn database(err: E) -> Self {
         Self::Database(err)
+    }
+
+    pub fn journal<J>(err: J) -> Self
+    where
+        E: From<J>,
+    {
+        Self::Database(E::from(err))
     }
 }
