@@ -3,7 +3,7 @@ use crate::{
         any::Any,
         operation::Fixed,
         sync::{
-            engine::{SyncTarget, SyncVerifier},
+            engine::{SyncEngine, SyncTarget, SyncVerifier},
             resolver::Resolver,
         },
     },
@@ -121,7 +121,7 @@ where
 }
 
 /// Wrapper around Journal that converts errors to sync errors
-struct JournalWrapper<E, K, V>
+pub struct JournalWrapper<E, K, V>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -209,17 +209,20 @@ where
     }
 }
 
-/// Synchronizes a database by fetching, verifying, and applying operations from a remote source.
+/// Creates a new sync client (SyncEngine) for Any database synchronization.
 ///
-/// We repeatedly:
-/// 1. Fetch operations in batches from a Resolver (i.e. a server of operations)
-/// 2. Verify cryptographic proofs for each batch to ensure correctness
-/// 3. Apply operations to reconstruct the database's operation log.
+/// This sets up all the necessary components for syncing:
+/// - Validates configuration
+/// - Initializes the operations journal
+/// - Creates the journal wrapper, verifier, and sync engine
 ///
-/// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
-pub async fn sync<E, K, V, H, T, R>(
-    mut config: client::Config<E, K, V, H, T, R>,
-) -> Result<Any<E, K, V, H, T>, Error>
+/// Returns a SyncEngine ready to start syncing operations.
+pub async fn new_client<E, K, V, H, T, R>(
+    config: client::Config<E, K, V, H, T, R>,
+) -> Result<
+    SyncEngine<JournalWrapper<E, K, V>, R, AnyVerifier<E, K, V, H, T>, H::Digest, Error>,
+    Error,
+>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -228,10 +231,7 @@ where
     T: Translator,
     R: Resolver<Digest = H::Digest, Op = Fixed<K, V>>,
 {
-    use crate::{
-        adb::sync::engine::SyncEngine,
-        journal::fixed::{Config as JConfig, Journal},
-    };
+    use crate::journal::fixed::{Config as JConfig, Journal};
 
     // Validate configuration
     config.validate()?;
@@ -265,31 +265,58 @@ where
     let verifier = AnyVerifier::<E, K, V, H, T>::new(config.hasher);
 
     // Create sync engine
-    let mut engine = SyncEngine::new(
+    Ok(SyncEngine::new(
         wrapped_journal,
         config.resolver,
         verifier,
         config.target.clone(),
         config.max_outstanding_requests,
         config.fetch_batch_size,
-    );
+    ))
+}
+
+/// Synchronizes a database by fetching, verifying, and applying operations from a remote source.
+///
+/// We repeatedly:
+/// 1. Fetch operations in batches from a Resolver (i.e. a server of operations)
+/// 2. Verify cryptographic proofs for each batch to ensure correctness
+/// 3. Apply operations to reconstruct the database's operation log.
+///
+/// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
+pub async fn sync<E, K, V, H, T, R>(
+    mut config: client::Config<E, K, V, H, T, R>,
+) -> Result<Any<E, K, V, H, T>, Error>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Op = Fixed<K, V>>,
+{
+    // Store fields we'll need after creating the engine
+    let context = config.context.clone();
+    let db_config = config.db_config.clone();
+    let apply_batch_size = config.apply_batch_size;
+    let mut update_receiver = config.update_receiver.take();
+
+    // Create sync engine using the new_client function
+    let mut engine = new_client(config).await?;
 
     // Make initial requests to start the sync process
     engine.schedule_requests().await?;
 
     // Create database configuration for final build step
     let db_config = AnySyncConfig {
-        context: config.context,
-        db_config: config.db_config,
-        apply_batch_size: config.apply_batch_size,
+        context,
+        db_config,
+        apply_batch_size,
     };
 
     // Run sync to completion using generic engine
     // Extract the underlying hasher from the Standard wrapper
     let hasher = H::new();
-    let database = engine
-        .sync(db_config, &mut config.update_receiver, hasher)
-        .await?;
+    let database = engine.sync(db_config, &mut update_receiver, hasher).await?;
 
     Ok(database)
 }

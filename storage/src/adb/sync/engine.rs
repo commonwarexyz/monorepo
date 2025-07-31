@@ -758,6 +758,9 @@ where
                     })?;
 
                 self.reset_for_target_update(new_target);
+
+                // Schedule new requests for the updated target
+                self.schedule_requests().await?;
             }
             SyncEvent::UpdateChannelClosed => {
                 *update_receiver = None;
