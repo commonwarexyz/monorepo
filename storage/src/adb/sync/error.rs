@@ -3,7 +3,6 @@
 use std::fmt;
 
 /// Errors that can occur during database synchronization.
-/// Generic over the database-specific error type `E`.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError<T, U>
 where
@@ -56,14 +55,8 @@ where
     T: std::error::Error + Send + 'static,
     U: std::error::Error + Send + 'static,
 {
-    /// Create a resolver error
     pub fn resolver(err: U) -> Self {
         Self::Resolver(err)
-    }
-
-    /// Create a pinned nodes error
-    pub fn pinned_nodes(msg: impl Into<String>) -> Self {
-        Self::PinnedNodes(msg.into())
     }
 
     pub fn database(err: T) -> Self {
