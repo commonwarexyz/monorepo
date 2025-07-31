@@ -1,6 +1,6 @@
 use crate::{
     adb::{
-        any::Any,
+        any::{Any, SyncConfig},
         operation::Fixed,
         sync::{
             engine::{SyncEngine, SyncTarget, SyncVerifier},
@@ -168,35 +168,31 @@ where
     type Config = AnySyncConfig<E, T>;
     type Error = Error;
 
-    fn from_sync_result(
+    async fn from_sync_result(
         config: Self::Config,
         journal_wrapper: JournalWrapper<E, K, V>,
         pinned_nodes: Option<Vec<H::Digest>>,
         target: crate::adb::sync::engine::SyncTarget<H::Digest>,
-    ) -> impl std::future::Future<Output = Result<Self, Self::Error>> {
-        async move {
-            use crate::adb::any::SyncConfig;
+    ) -> Result<Self, Self::Error> {
+        // Extract the journal from the wrapper
+        let journal = journal_wrapper.journal;
 
-            // Extract the journal from the wrapper
-            let journal = journal_wrapper.journal;
+        // Build the complete database from the journal
+        let db = Any::init_synced(
+            config.context,
+            SyncConfig {
+                db_config: config.db_config,
+                log: journal,
+                lower_bound: target.lower_bound_ops,
+                upper_bound: target.upper_bound_ops,
+                pinned_nodes,
+                apply_batch_size: config.apply_batch_size,
+            },
+        )
+        .await
+        .map_err(Error::adb)?;
 
-            // Build the complete database from the journal
-            let db = Any::init_synced(
-                config.context,
-                SyncConfig {
-                    db_config: config.db_config,
-                    log: journal,
-                    lower_bound: target.lower_bound_ops,
-                    upper_bound: target.upper_bound_ops,
-                    pinned_nodes,
-                    apply_batch_size: config.apply_batch_size,
-                },
-            )
-            .await
-            .map_err(Error::adb)?;
-
-            Ok(db)
-        }
+        Ok(db)
     }
 
     fn root(
@@ -316,7 +312,5 @@ where
     // Run sync to completion using generic engine
     // Extract the underlying hasher from the Standard wrapper
     let hasher = H::new();
-    let database = engine.sync(db_config, &mut update_receiver, hasher).await?;
-
-    Ok(database)
+    engine.sync(db_config, &mut update_receiver, hasher).await
 }

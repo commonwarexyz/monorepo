@@ -795,8 +795,6 @@ where
         DB::Config: Clone,
         H: commonware_cryptography::Hasher<Digest = D>,
     {
-        let target_root = self.target.root;
-
         // Run sync loop until completion
         let completion_result = loop {
             match self.step(update_receiver).await? {
@@ -810,15 +808,16 @@ where
             config.clone(),
             completion_result.journal,
             completion_result.pinned_nodes,
-            completion_result.target,
+            completion_result.target.clone(),
         )
         .await?;
 
-        // Verify the final root digest matches the target
+        // Verify the final root digest matches the final target (after any updates)
         let got_root = database.root(&mut root_hasher);
-        if got_root != target_root {
+        let expected_root = completion_result.target.root;
+        if got_root != expected_root {
             return Err(E::from(crate::adb::sync::error::SyncError::RootMismatch {
-                expected: Box::new(target_root),
+                expected: Box::new(expected_root),
                 actual: Box::new(got_root),
             }));
         }

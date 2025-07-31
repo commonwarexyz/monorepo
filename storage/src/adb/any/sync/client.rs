@@ -251,7 +251,7 @@ pub(crate) mod tests {
             if let Err(error) = result {
                 match error {
                     super::super::Error::InvalidTarget { .. } => {}
-                    other => panic!("Expected InvalidTarget error, got: {:?}", other),
+                    other => panic!("Expected InvalidTarget error, got: {other:?}"),
                 }
             }
         });
@@ -596,15 +596,15 @@ pub(crate) mod tests {
 
             for target_op in &original_ops {
                 if let Some(key) = target_op.to_key() {
-                    let target_value = target_db.read().await.get(&key).await.unwrap();
-                    let synced_value = sync_db.get(&key).await.unwrap();
+                    let target_value = target_db.read().await.get(key).await.unwrap();
+                    let synced_value = sync_db.get(key).await.unwrap();
                     assert_eq!(target_value, synced_value);
                 }
             }
             // Verify the last operation is present
             let last_key = last_op[0].to_key().unwrap();
             let last_value = *last_op[0].to_value().unwrap();
-            assert_eq!(sync_db.get(&last_key).await.unwrap(), Some(last_value));
+            assert_eq!(sync_db.get(last_key).await.unwrap(), Some(last_value));
 
             sync_db.destroy().await.unwrap();
             Arc::try_unwrap(target_db)
@@ -677,8 +677,8 @@ pub(crate) mod tests {
             // Verify that key-value operations work correctly by checking a few operations
             for op in target_db_ops.iter().take(10) {
                 if let Some(key) = op.to_key() {
-                    let target_value = target_db.read().await.get(&key).await.unwrap();
-                    let synced_value = got_db.get(&key).await.unwrap();
+                    let target_value = target_db.read().await.get(key).await.unwrap();
+                    let synced_value = got_db.get(key).await.unwrap();
                     assert_eq!(target_value, synced_value);
                 }
             }
@@ -859,13 +859,14 @@ pub(crate) mod tests {
             };
 
             // Send target update with increased bounds
-            let _ = update_sender
+            update_sender
                 .send(SyncTarget {
                     root: final_root,
                     lower_bound_ops: final_lower_bound,
                     upper_bound_ops: final_upper_bound,
                 })
-                .await;
+                .await
+                .unwrap();
 
             let synced_db = sync(config).await.unwrap();
 
