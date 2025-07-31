@@ -265,7 +265,7 @@ where
     let verifier = AnyVerifier::<E, K, V, H, T>::new(config.hasher);
 
     // Create sync engine
-    let engine = SyncEngine::new(
+    let mut engine = SyncEngine::new(
         wrapped_journal,
         config.resolver,
         verifier,
@@ -273,6 +273,9 @@ where
         config.max_outstanding_requests,
         config.fetch_batch_size,
     );
+
+    // Make initial requests to start the sync process
+    engine.schedule_requests().await?;
 
     // Create database configuration for final build step
     let db_config = AnySyncConfig {
