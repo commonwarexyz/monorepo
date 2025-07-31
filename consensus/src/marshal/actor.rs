@@ -524,7 +524,7 @@ impl<
                             // Iterate backwards, repairing blocks as we go.
                             while cursor.height() > height {
                                 let commitment = cursor.parent();
-                                if let Some(block) = self.find_pending_block(&mut buffer, commitment).await {
+                                if let Some(block) = self.find_block(&mut buffer, commitment).await {
                                     self.put_finalized_block(block.height(), commitment, block.clone(), &mut notifier_tx).await;
                                     debug!(height = block.height(), "repaired block");
                                     cursor = block;
@@ -882,8 +882,8 @@ impl<
         let _ = notifier.try_send(());
     }
 
-    /// Looks for a block in local storage excluding the finalized archive.
-    async fn find_pending_block(
+    /// Looks for a block anywhere in local storage.
+    async fn find_block(
         &mut self,
         buffer: &mut buffered::Mailbox<P, B>,
         commitment: B::Commitment,
@@ -898,19 +898,6 @@ impl<
         }
         // Check notarized blocks.
         if let Some(block) = self.get_notarized_block(Identifier::Key(&commitment)).await {
-            return Some(block);
-        }
-        None
-    }
-
-    /// Looks for a block anywhere in local storage, including in the finalized archive.
-    async fn find_block(
-        &mut self,
-        buffer: &mut buffered::Mailbox<P, B>,
-        commitment: B::Commitment,
-    ) -> Option<B> {
-        // Check up-to-notarized.
-        if let Some(block) = self.find_pending_block(buffer, commitment).await {
             return Some(block);
         }
         // Check finalized blocks.
