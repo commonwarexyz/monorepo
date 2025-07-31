@@ -61,7 +61,7 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_storage::ordinal::{Ordinal, Config};
-//! use commonware_utils::array::FixedBytes;
+//! use commonware_utils::sequence::FixedBytes;
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {

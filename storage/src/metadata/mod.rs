@@ -40,7 +40,7 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_storage::metadata::{Metadata, Config};
-//! use commonware_utils::array::U64;
+//! use commonware_utils::sequence::U64;
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
