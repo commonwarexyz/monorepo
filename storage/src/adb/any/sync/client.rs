@@ -292,168 +292,81 @@ pub(crate) mod tests {
         });
     }
 
-    /// Test demonstrating that a synced database can be reopened and retain its state.
+    /// Comprehensive sync test with various batch sizes
+    #[test_case(1, NZU64!(1); "singleton db with batch size == 1")]
+    #[test_case(1, NZU64!(2); "singleton db with batch size > db size")]
+    #[test_case(100, NZU64!(1); "db with batch size 1")]
+    #[test_case(100, NZU64!(3); "db size not evenly divided by batch size")]
+    #[test_case(100, NZU64!(99); "db size not evenly divided by batch size; different batch size")]
+    #[test_case(100, NZU64!(50); "db size divided by batch size")]
+    #[test_case(100, NZU64!(100); "db size == batch size")]
+    #[test_case(100, NZU64!(101); "batch size > db size")]
     #[test_traced]
-    fn test_sync_database_persistence() {
+    fn test_sync(target_db_ops: usize, fetch_batch_size: NonZeroU64) {
         let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            // Create and populate a simple target database
+        runner.start(|mut context| async move {
             let mut target_db = create_test_db(context.clone()).await;
-            let target_ops = create_test_ops(10);
-            apply_ops(&mut target_db, target_ops.clone()).await;
+            let target_db_ops = create_test_ops(target_db_ops);
+            apply_ops(&mut target_db, target_db_ops.clone()).await;
             target_db.commit().await.unwrap();
-
-            // Capture target state
+            let target_op_count = target_db.op_count();
+            let target_inactivity_floor = target_db.inactivity_floor_loc;
+            let target_log_size = target_db.log.size().await.unwrap();
             let mut hasher = create_test_hasher();
             let target_root = target_db.root(&mut hasher);
-            let lower_bound = target_db.inactivity_floor_loc;
-            let upper_bound = target_db.op_count() - 1;
 
-            // Perform sync
-            let db_config = create_test_config(42);
-            let context_clone = context.clone();
+            // After commit, the database may have pruned early operations
+            // Start syncing from the inactivity floor, not 0
+            let lower_bound_ops = target_db.inactivity_floor_loc;
+
             let target_db = Arc::new(RwLock::new(target_db));
             let config = Config {
-                db_config: db_config.clone(),
-                fetch_batch_size: NZU64!(5),
+                db_config: create_test_config(context.next_u64()),
+                fetch_batch_size,
                 target: SyncTarget {
                     root: target_root,
-                    lower_bound_ops: lower_bound,
-                    upper_bound_ops: upper_bound,
+                    lower_bound_ops,
+                    upper_bound_ops: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
                 },
-                context,
+                context: context.clone(),
                 resolver: target_db.clone(),
-                hasher: create_test_hasher(),
+                hasher,
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_receiver: None,
             };
-            let synced_db = sync(config).await.unwrap();
+            let got_db = sync(config).await.unwrap();
 
-            // Verify initial sync worked
+            // Verify database state
             let mut hasher = create_test_hasher();
-            assert_eq!(synced_db.root(&mut hasher), target_root);
-
-            // Save state before closing
-            let expected_root = synced_db.root(&mut hasher);
-            let expected_op_count = synced_db.op_count();
-            let expected_inactivity_floor_loc = synced_db.inactivity_floor_loc;
-            let expected_oldest_retained_loc = synced_db.oldest_retained_loc();
-            let expected_pruned_to_pos = synced_db.ops.pruned_to_pos();
-
-            // Close the database
-            synced_db.close().await.unwrap();
-
-            // Re-open the database
-            let reopened_db = AnyTest::init(context_clone, db_config).await.unwrap();
-
-            // Verify the state is unchanged
-            assert_eq!(reopened_db.root(&mut hasher), expected_root);
-            assert_eq!(reopened_db.op_count(), expected_op_count);
+            assert_eq!(got_db.op_count(), target_op_count);
+            assert_eq!(got_db.inactivity_floor_loc, target_inactivity_floor);
+            assert_eq!(got_db.log.size().await.unwrap(), target_log_size);
             assert_eq!(
-                reopened_db.inactivity_floor_loc,
-                expected_inactivity_floor_loc
+                got_db.ops.pruned_to_pos(),
+                leaf_num_to_pos(target_inactivity_floor)
             );
-            assert_eq!(
-                reopened_db.oldest_retained_loc(),
-                expected_oldest_retained_loc
-            );
-            assert_eq!(reopened_db.ops.pruned_to_pos(), expected_pruned_to_pos);
+
+            // Verify the root digest matches the target
+            assert_eq!(got_db.root(&mut hasher), target_root);
+
+            // Verify that key-value operations work correctly by checking a few operations
+            for op in target_db_ops.iter().take(10) {
+                if let Some(key) = op.to_key() {
+                    let target_value = target_db.read().await.get(key).await.unwrap();
+                    let synced_value = got_db.get(key).await.unwrap();
+                    assert_eq!(target_value, synced_value);
+                }
+            }
 
             // Cleanup
+            got_db.destroy().await.unwrap();
             Arc::try_unwrap(target_db)
                 .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
                 .into_inner()
                 .destroy()
                 .await
                 .unwrap();
-            reopened_db.destroy().await.unwrap();
-        });
-    }
-
-    /// Test case where existing database on disk exactly matches the sync target
-    #[test_traced]
-    fn test_sync_use_existing_db_exact_match() {
-        const NUM_OPS: usize = 1_000;
-
-        let runner = deterministic::Runner::default();
-        runner.start(|mut context| async move {
-            let target_ops = create_test_ops(NUM_OPS);
-
-            // Create two databases
-            let target_config = create_test_config(context.next_u64());
-            let mut target_db = AnyTest::init(context.clone(), target_config).await.unwrap();
-            let sync_config = create_test_config(context.next_u64());
-            let mut sync_db = AnyTest::init(context.clone(), sync_config.clone())
-                .await
-                .unwrap();
-
-            // Apply the same operations to both databases
-            apply_ops(&mut target_db, target_ops.clone()).await;
-            apply_ops(&mut sync_db, target_ops.clone()).await;
-            target_db.commit().await.unwrap();
-            sync_db.commit().await.unwrap();
-
-            target_db.sync().await.unwrap();
-            sync_db.sync().await.unwrap();
-
-            // Close sync_db
-            sync_db.close().await.unwrap();
-
-            // Reopen sync_db
-            let mut hasher = create_test_hasher();
-            let root = target_db.root(&mut hasher);
-            let lower_bound_ops = target_db.inactivity_floor_loc;
-            let upper_bound_ops = target_db.op_count() - 1;
-
-            // sync_db should never ask the resolver for operations
-            // because it is already complete. Use a resolver that always fails
-            // to ensure that it's not being used.
-            let resolver = FailResolver::<Digest, Digest, Digest>::new();
-            let config = Config {
-                db_config: sync_config, // Use same config to access same partitions
-                fetch_batch_size: NZU64!(10),
-                target: SyncTarget {
-                    root,
-                    lower_bound_ops,
-                    upper_bound_ops,
-                },
-                context: context.clone(),
-                resolver,
-                hasher: create_test_hasher(),
-                apply_batch_size: 1024,
-                max_outstanding_requests: 1,
-                update_receiver: None,
-            };
-            let sync_db = sync(config).await.unwrap();
-
-            // Verify database state
-            assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
-            assert_eq!(sync_db.op_count(), target_db.op_count());
-            assert_eq!(sync_db.oldest_retained_loc().unwrap(), lower_bound_ops);
-            assert_eq!(
-                sync_db.log.size().await.unwrap(),
-                target_db.log.size().await.unwrap()
-            );
-            assert_eq!(
-                sync_db.ops.pruned_to_pos(),
-                leaf_num_to_pos(lower_bound_ops)
-            );
-
-            // Verify the root digest matches the target
-            assert_eq!(sync_db.root(&mut hasher), root);
-
-            // Verify state matches for sample operations
-            for target_op in &target_ops {
-                if let Some(key) = target_op.to_key() {
-                    let target_value = target_db.get(key).await.unwrap();
-                    let synced_value = sync_db.get(key).await.unwrap();
-                    assert_eq!(target_value, synced_value);
-                }
-            }
-
-            sync_db.destroy().await.unwrap();
-            target_db.destroy().await.unwrap();
         });
     }
 
@@ -622,81 +535,89 @@ pub(crate) mod tests {
         });
     }
 
-    /// Comprehensive sync test with various batch sizes
-    #[test_case(1, NZU64!(1); "singleton db with batch size == 1")]
-    #[test_case(1, NZU64!(2); "singleton db with batch size > db size")]
-    #[test_case(100, NZU64!(1); "db with batch size 1")]
-    #[test_case(100, NZU64!(3); "db size not evenly divided by batch size")]
-    #[test_case(100, NZU64!(99); "db size not evenly divided by batch size; different batch size")]
-    #[test_case(100, NZU64!(50); "db size divided by batch size")]
-    #[test_case(100, NZU64!(100); "db size == batch size")]
-    #[test_case(100, NZU64!(101); "batch size > db size")]
+    /// Test case where existing database on disk exactly matches the sync target
     #[test_traced]
-    fn test_sync(target_db_ops: usize, fetch_batch_size: NonZeroU64) {
+    fn test_sync_use_existing_db_exact_match() {
+        const NUM_OPS: usize = 1_000;
+
         let runner = deterministic::Runner::default();
         runner.start(|mut context| async move {
-            let mut target_db = create_test_db(context.clone()).await;
-            let target_db_ops = create_test_ops(target_db_ops);
-            apply_ops(&mut target_db, target_db_ops.clone()).await;
+            let target_ops = create_test_ops(NUM_OPS);
+
+            // Create two databases
+            let target_config = create_test_config(context.next_u64());
+            let mut target_db = AnyTest::init(context.clone(), target_config).await.unwrap();
+            let sync_config = create_test_config(context.next_u64());
+            let mut sync_db = AnyTest::init(context.clone(), sync_config.clone())
+                .await
+                .unwrap();
+
+            // Apply the same operations to both databases
+            apply_ops(&mut target_db, target_ops.clone()).await;
+            apply_ops(&mut sync_db, target_ops.clone()).await;
             target_db.commit().await.unwrap();
-            let target_op_count = target_db.op_count();
-            let target_inactivity_floor = target_db.inactivity_floor_loc;
-            let target_log_size = target_db.log.size().await.unwrap();
+            sync_db.commit().await.unwrap();
+
+            target_db.sync().await.unwrap();
+            sync_db.sync().await.unwrap();
+
+            // Close sync_db
+            sync_db.close().await.unwrap();
+
+            // Reopen sync_db
             let mut hasher = create_test_hasher();
-            let target_root = target_db.root(&mut hasher);
-
-            // After commit, the database may have pruned early operations
-            // Start syncing from the inactivity floor, not 0
+            let root = target_db.root(&mut hasher);
             let lower_bound_ops = target_db.inactivity_floor_loc;
+            let upper_bound_ops = target_db.op_count() - 1;
 
-            let target_db = Arc::new(RwLock::new(target_db));
+            // sync_db should never ask the resolver for operations
+            // because it is already complete. Use a resolver that always fails
+            // to ensure that it's not being used.
+            let resolver = FailResolver::<Digest, Digest, Digest>::new();
             let config = Config {
-                db_config: create_test_config(context.next_u64()),
-                fetch_batch_size,
+                db_config: sync_config, // Use same config to access same partitions
+                fetch_batch_size: NZU64!(10),
                 target: SyncTarget {
-                    root: target_root,
+                    root,
                     lower_bound_ops,
-                    upper_bound_ops: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
+                    upper_bound_ops,
                 },
                 context: context.clone(),
-                resolver: target_db.clone(),
-                hasher,
+                resolver,
+                hasher: create_test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_receiver: None,
             };
-            let got_db = sync(config).await.unwrap();
+            let sync_db = sync(config).await.unwrap();
 
             // Verify database state
-            let mut hasher = create_test_hasher();
-            assert_eq!(got_db.op_count(), target_op_count);
-            assert_eq!(got_db.inactivity_floor_loc, target_inactivity_floor);
-            assert_eq!(got_db.log.size().await.unwrap(), target_log_size);
+            assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
+            assert_eq!(sync_db.op_count(), target_db.op_count());
+            assert_eq!(sync_db.oldest_retained_loc().unwrap(), lower_bound_ops);
             assert_eq!(
-                got_db.ops.pruned_to_pos(),
-                leaf_num_to_pos(target_inactivity_floor)
+                sync_db.log.size().await.unwrap(),
+                target_db.log.size().await.unwrap()
+            );
+            assert_eq!(
+                sync_db.ops.pruned_to_pos(),
+                leaf_num_to_pos(lower_bound_ops)
             );
 
             // Verify the root digest matches the target
-            assert_eq!(got_db.root(&mut hasher), target_root);
+            assert_eq!(sync_db.root(&mut hasher), root);
 
-            // Verify that key-value operations work correctly by checking a few operations
-            for op in target_db_ops.iter().take(10) {
-                if let Some(key) = op.to_key() {
-                    let target_value = target_db.read().await.get(key).await.unwrap();
-                    let synced_value = got_db.get(key).await.unwrap();
+            // Verify state matches for sample operations
+            for target_op in &target_ops {
+                if let Some(key) = target_op.to_key() {
+                    let target_value = target_db.get(key).await.unwrap();
+                    let synced_value = sync_db.get(key).await.unwrap();
                     assert_eq!(target_value, synced_value);
                 }
             }
 
-            // Cleanup
-            got_db.destroy().await.unwrap();
-            Arc::try_unwrap(target_db)
-                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
-                .into_inner()
-                .destroy()
-                .await
-                .unwrap();
+            sync_db.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
         });
     }
 
@@ -1154,6 +1075,204 @@ pub(crate) mod tests {
 
             synced_db.destroy().await.unwrap();
             target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test target update with same lower bound but higher upper bound
+    #[test_traced("WARN")]
+    fn test_target_same_lower_bound() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate a larger target database to ensure pruning occurs
+            let mut target_db = create_test_db(context.clone()).await;
+            let initial_ops = create_test_ops(100);
+            apply_ops(&mut target_db, initial_ops.clone()).await;
+            target_db.commit().await.unwrap();
+
+            // Capture the state after first commit (this will have a non-zero inactivity floor)
+            let mut hasher = create_test_hasher();
+            let initial_lower_bound = target_db.inactivity_floor_loc;
+            let initial_upper_bound = target_db.op_count() - 1;
+            let initial_root = target_db.root(&mut hasher);
+
+            // Add more operations to create the extended target
+            let additional_ops = create_test_ops(50);
+            apply_ops(&mut target_db, additional_ops).await;
+            target_db.commit().await.unwrap();
+            let final_upper_bound = target_db.op_count() - 1;
+            let final_root = target_db.root(&mut hasher);
+
+            // Wrap target database for shared mutable access
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+
+            // Create client with initial smaller target and very small batch size
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let config = Config {
+                context: context.clone(),
+                db_config: create_test_config(context.next_u64()),
+                fetch_batch_size: NZU64!(2), // Very small batch size to ensure multiple batches needed
+                target: SyncTarget {
+                    root: initial_root,
+                    lower_bound_ops: initial_lower_bound,
+                    upper_bound_ops: initial_upper_bound,
+                },
+                resolver: target_db.clone(),
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 10,
+                update_receiver: Some(update_receiver),
+            };
+
+            // Step the client to process a batch
+            let client = {
+                let mut client = new_client(config).await.unwrap();
+                client.schedule_requests().await.unwrap();
+                loop {
+                    // Step the client until we have processed a batch of operations
+                    client = match client.step().await.unwrap() {
+                        StepResult::Continue(new_client) => new_client,
+                        StepResult::Complete(_) => panic!("client should not be complete"),
+                    };
+                    let log_size = client.journal.size().await.unwrap();
+                    if log_size > initial_lower_bound {
+                        break client;
+                    }
+                }
+            };
+
+            // Send target update with SAME lower bound but higher upper bound
+            update_sender
+                .send(SyncTarget {
+                    root: final_root,
+                    lower_bound_ops: initial_lower_bound,
+                    upper_bound_ops: final_upper_bound,
+                })
+                .await
+                .unwrap();
+
+            // Complete the sync
+            let mut client = client;
+            let synced_db: Any<_, _, _, _, _> = loop {
+                match client.step().await.unwrap() {
+                    StepResult::Continue(new_client) => client = new_client,
+                    StepResult::Complete(database) => break database,
+                }
+            };
+
+            // Verify the synced database has the expected final state
+            let mut hasher = create_test_hasher();
+            assert_eq!(synced_db.root(&mut hasher), final_root);
+
+            // Verify the target database matches the synced database
+            let target_db = match Arc::try_unwrap(target_db) {
+                Ok(rw_lock) => rw_lock.into_inner(),
+                Err(_) => panic!("Failed to unwrap Arc - still has references"),
+            };
+
+            assert_eq!(synced_db.op_count(), target_db.op_count());
+            assert_eq!(
+                synced_db.inactivity_floor_loc,
+                target_db.inactivity_floor_loc
+            );
+            assert_eq!(
+                synced_db.oldest_retained_loc().unwrap(),
+                initial_lower_bound
+            );
+            assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
+
+            // Verify the expected operations are present in the synced database.
+            for i in synced_db.inactivity_floor_loc..synced_db.op_count() {
+                let got = synced_db.log.read(i).await.unwrap();
+                let expected = target_db.log.read(i).await.unwrap();
+                assert_eq!(got, expected);
+            }
+            for i in synced_db.ops.oldest_retained_pos().unwrap()..synced_db.ops.size() {
+                let got = synced_db.ops.get_node(i).await.unwrap();
+                let expected = target_db.ops.get_node(i).await.unwrap();
+                assert_eq!(got, expected);
+            }
+
+            synced_db.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test demonstrating that a synced database can be reopened and retain its state.
+    #[test_traced]
+    fn test_sync_database_persistence() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            // Create and populate a simple target database
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(10);
+            apply_ops(&mut target_db, target_ops.clone()).await;
+            target_db.commit().await.unwrap();
+
+            // Capture target state
+            let mut hasher = create_test_hasher();
+            let target_root = target_db.root(&mut hasher);
+            let lower_bound = target_db.inactivity_floor_loc;
+            let upper_bound = target_db.op_count() - 1;
+
+            // Perform sync
+            let db_config = create_test_config(42);
+            let context_clone = context.clone();
+            let target_db = Arc::new(RwLock::new(target_db));
+            let config = Config {
+                db_config: db_config.clone(),
+                fetch_batch_size: NZU64!(5),
+                target: SyncTarget {
+                    root: target_root,
+                    lower_bound_ops: lower_bound,
+                    upper_bound_ops: upper_bound,
+                },
+                context,
+                resolver: target_db.clone(),
+                hasher: create_test_hasher(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 1,
+                update_receiver: None,
+            };
+            let synced_db = sync(config).await.unwrap();
+
+            // Verify initial sync worked
+            let mut hasher = create_test_hasher();
+            assert_eq!(synced_db.root(&mut hasher), target_root);
+
+            // Save state before closing
+            let expected_root = synced_db.root(&mut hasher);
+            let expected_op_count = synced_db.op_count();
+            let expected_inactivity_floor_loc = synced_db.inactivity_floor_loc;
+            let expected_oldest_retained_loc = synced_db.oldest_retained_loc();
+            let expected_pruned_to_pos = synced_db.ops.pruned_to_pos();
+
+            // Close the database
+            synced_db.close().await.unwrap();
+
+            // Re-open the database
+            let reopened_db = AnyTest::init(context_clone, db_config).await.unwrap();
+
+            // Verify the state is unchanged
+            assert_eq!(reopened_db.root(&mut hasher), expected_root);
+            assert_eq!(reopened_db.op_count(), expected_op_count);
+            assert_eq!(
+                reopened_db.inactivity_floor_loc,
+                expected_inactivity_floor_loc
+            );
+            assert_eq!(
+                reopened_db.oldest_retained_loc(),
+                expected_oldest_retained_loc
+            );
+            assert_eq!(reopened_db.ops.pruned_to_pos(), expected_pruned_to_pos);
+
+            // Cleanup
+            Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+                .into_inner()
+                .destroy()
+                .await
+                .unwrap();
+            reopened_db.destroy().await.unwrap();
         });
     }
 }
