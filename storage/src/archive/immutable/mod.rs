@@ -106,3 +106,72 @@ pub struct Config<C> {
     /// The [commonware_codec::Codec] configuration to use for the value stored in the archive.
     pub codec_config: C,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::archive::Archive as ArchiveTrait;
+    use commonware_cryptography::{hash, sha256::Digest};
+    use commonware_runtime::{deterministic, Runner};
+
+    #[test]
+    fn test_unclean_shutdown() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                metadata_partition: "test_metadata2".into(),
+                freezer_table_partition: "test_table2".into(),
+                freezer_table_initial_size: 8192, // Must be power of 2
+                freezer_table_resize_frequency: 4,
+                freezer_table_resize_chunk_size: 8192,
+                freezer_journal_partition: "test_journal2".into(),
+                freezer_journal_target_size: 1024 * 1024,
+                freezer_journal_compression: Some(3),
+                ordinal_partition: "test_ordinal2".into(),
+                items_per_section: 512,
+                write_buffer: 1024,
+                replay_buffer: 1024,
+                codec_config: (),
+            };
+
+            // First initialization
+            let archive: Archive<_, Digest, i32> =
+                Archive::init(context.clone(), cfg.clone()).await.unwrap();
+            drop(archive);
+
+            // Second initialization
+            let mut archive = Archive::init(context.clone(), cfg.clone()).await.unwrap();
+
+            // Add some data
+            let key1 = hash(b"key1");
+            let key2 = hash(b"key2");
+            archive.put(1, key1, 2000).await.unwrap();
+            archive.put(2, key2, 2001).await.unwrap();
+
+            // Close archive (this should save the checkpoint)
+            archive.close().await.unwrap();
+
+            // Re-initialize archive (should load from checkpoint)
+            let archive = Archive::init(context, cfg).await.unwrap();
+
+            // Verify data persisted
+            assert_eq!(
+                archive
+                    .get(crate::archive::Identifier::Key(&key1))
+                    .await
+                    .unwrap(),
+                Some(2000)
+            );
+            assert_eq!(
+                archive
+                    .get(crate::archive::Identifier::Key(&key2))
+                    .await
+                    .unwrap(),
+                Some(2001)
+            );
+
+            // Close the archive
+            archive.close().await.unwrap();
+        });
+    }
+}

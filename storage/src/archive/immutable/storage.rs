@@ -106,7 +106,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
     /// Initialize a new [Archive] with the given [Config].
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metadata
-        let mut metadata = Metadata::<E, U64, Record>::init(
+        let metadata = Metadata::<E, U64, Record>::init(
             context.with_label("metadata"),
             metadata::Config {
                 partition: cfg.metadata_partition,
@@ -117,13 +117,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
 
         // Get checkpoint
         let freezer_key = U64::new(FREEZER_PREFIX, 0);
-        let checkpoint = match metadata.get(&freezer_key) {
-            Some(freezer) => *freezer.freezer(),
-            None => {
-                metadata.put(freezer_key.clone(), Record::Freezer(Checkpoint::default()));
-                *metadata.get(&freezer_key).unwrap().freezer()
-            }
-        };
+        let checkpoint = metadata.get(&freezer_key).map(|freezer| *freezer.freezer());
 
         // Initialize table
         //
@@ -142,7 +136,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
                 table_replay_buffer: cfg.replay_buffer,
                 codec_config: cfg.codec_config,
             },
-            Some(checkpoint),
+            checkpoint,
         )
         .await?;
 

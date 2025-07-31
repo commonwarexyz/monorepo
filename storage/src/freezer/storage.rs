@@ -100,7 +100,7 @@ impl std::fmt::Display for Cursor {
 ///
 /// This can be used to restore the [Freezer] to a consistent
 /// state after shutdown.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Copy, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Copy)]
 pub struct Checkpoint {
     /// The epoch of the last committed operation.
     epoch: u64,
@@ -110,6 +110,18 @@ pub struct Checkpoint {
     size: u64,
     /// The size of the table.
     table_size: u32,
+}
+
+impl Checkpoint {
+    /// Initialize a new [Checkpoint].
+    fn init(table_size: u32) -> Self {
+        Self {
+            table_size,
+            epoch: 0,
+            section: 0,
+            size: 0,
+        }
+    }
 }
 
 impl Read for Checkpoint {
@@ -538,13 +550,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             // New table with no data
             (0, None) => {
                 Self::init_table(&table, config.table_initial_size).await?;
-                (
-                    Checkpoint {
-                        table_size: config.table_initial_size,
-                        ..Default::default()
-                    },
-                    0,
-                )
+                (Checkpoint::init(config.table_initial_size), 0)
             }
 
             // New table with explicit checkpoint (must be empty)
@@ -555,13 +561,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 assert_eq!(checkpoint.table_size, 0);
 
                 Self::init_table(&table, config.table_initial_size).await?;
-                (
-                    Checkpoint {
-                        table_size: config.table_initial_size,
-                        ..Default::default()
-                    },
-                    0,
-                )
+                (Checkpoint::init(config.table_initial_size), 0)
             }
 
             // Existing table with checkpoint
