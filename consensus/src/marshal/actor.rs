@@ -38,7 +38,10 @@ use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 use std::{
     collections::{btree_map::Entry, BTreeMap},
+    fmt::{Debug, Display},
+    hash::{Hash, Hasher},
     marker::PhantomData,
+    ops::Deref,
     time::{Duration, Instant},
 };
 use tracing::{debug, info, warn};
@@ -66,6 +69,7 @@ impl<B: Block> Waiter<B> {
     }
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
 enum Request<B: Block> {
     Block(B::Commitment),
     Finalization { height: u64 },
@@ -118,6 +122,44 @@ impl<B: Block> EncodeSize for Request<B> {
             Self::Finalization { height } => height.encode_size(),
             Self::Notarization { view } => view.encode_size(),
         }
+    }
+}
+
+impl<B: Block> AsRef<[u8]> for Request<B> {
+    fn as_ref(&self) -> &[u8] {
+        let mut buf = Vec::new();
+        self.write(&mut buf);
+        buf.as_slice()
+    }
+}
+
+impl<B: Block> Deref for Request<B> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.as_ref()
+    }
+}
+
+impl<B: Block> Debug for Request<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl<B: Block> Display for Request<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Block(commitment) => write!(f, "Block({})", commitment),
+            Self::Finalization { height } => write!(f, "Finalization({})", height),
+            Self::Notarization { view } => write!(f, "Notarization({})", view),
+        }
+    }
+}
+
+impl<B: Block> Hash for Request<B> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_ref().hash(state);
     }
 }
 
