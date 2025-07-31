@@ -7,15 +7,9 @@ use crate::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
-use commonware_storage::{
-    adb::{
-        any::sync::Error as SyncError,
-        sync::{
-            engine::{FetchResult, SyncTarget},
-            resolver::Resolver as ResolverTrait,
-        },
-    },
-    journal,
+use commonware_storage::adb::sync::{
+    engine::{FetchResult, SyncTarget},
+    resolver::Resolver as ResolverTrait,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::{
@@ -171,7 +165,9 @@ where
         }
     }
 
-    pub async fn get_sync_target(&self) -> Result<SyncTarget<Digest>, Error> {
+    pub async fn get_sync_target(
+        &self,
+    ) -> Result<SyncTarget<Digest>, <Self as ResolverTrait>::Error> {
         let request = GetSyncTargetRequest {
             request_id: RequestId::new(),
         };
@@ -198,7 +194,10 @@ where
         }
     }
 
-    async fn send_request(&self, message: Message) -> Result<Message, Error> {
+    async fn send_request(
+        &self,
+        message: Message,
+    ) -> Result<Message, <Self as ResolverTrait>::Error> {
         let (response_sender, response_receiver) = oneshot::channel();
 
         let request_id = message.request_id();
@@ -228,16 +227,16 @@ where
         + commonware_runtime::Clock
         + Clone,
 {
-    // TODO should we have an associated type for the error type?
     type Digest = Digest;
     type Op = crate::Operation;
+    type Error = Error;
 
     async fn get_operations(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, SyncError> {
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
         let request = GetOperationsRequest {
             request_id: RequestId::new(),
             size,
@@ -250,7 +249,7 @@ where
         let response = self
             .send_request(Message::GetOperationsRequest(request))
             .await
-            .map_err(|_e| SyncError::JournalError(journal::Error::InvalidSyncRange(0, 0)))?;
+            .map_err(|_e| Error::InvalidConfig("Invalid sync range".to_string()))?; // TODO put a better error here
 
         match response {
             Message::GetOperationsResponse(response) => {
@@ -261,13 +260,11 @@ where
                     success_tx,
                 })
             }
-            Message::Error(err) => Err(SyncError::JournalError(journal::Error::InvalidSyncRange(
-                err.error_code as u64,
-                0,
-            ))),
-            _ => Err(SyncError::JournalError(journal::Error::InvalidSyncRange(
-                request_id, 0,
-            ))),
+            Message::Error(err) => Err(Error::ServerError {
+                code: err.error_code,
+                message: err.message,
+            }),
+            _ => Err(Error::UnexpectedResponse { request_id }),
         }
     }
 }

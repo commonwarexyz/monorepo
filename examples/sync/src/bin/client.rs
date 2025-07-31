@@ -9,7 +9,7 @@ use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
 use commonware_storage::{
     adb::{
         any::sync::{self, client::Config as SyncConfig},
-        sync::engine::SyncTarget,
+        sync::{engine::SyncTarget, error::SyncError},
     },
     mmr::hasher::Standard,
 };
@@ -108,7 +108,11 @@ where
 }
 
 /// Perform a single sync by opening the database, syncing, and closing it.
-async fn sync<E>(context: &E, config: &Config, sync_iteration: u32) -> Result<(), Error>
+async fn sync<E>(
+    context: &E,
+    config: &Config,
+    sync_iteration: u32,
+) -> Result<(), SyncError<commonware_storage::adb::Error, Error>>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
@@ -119,7 +123,10 @@ where
 {
     // Get initial sync target
     let resolver = Resolver::new(context.clone(), config.server);
-    let initial_target = resolver.get_sync_target().await?;
+    let initial_target = resolver
+        .get_sync_target()
+        .await
+        .map_err(SyncError::resolver)?;
     info!(
         sync_iteration,
         target = ?initial_target,
@@ -193,13 +200,16 @@ where
         database.op_count(),
         got_root
     );
-    database.close().await?;
+    database.close().await.map_err(SyncError::database)?;
 
     Ok(())
 }
 
 /// Continuously sync the database to the server's state.
-async fn run<E>(context: E, config: Config) -> Result<(), Error>
+async fn run<E>(
+    context: E,
+    config: Config,
+) -> Result<(), SyncError<commonware_storage::adb::Error, Error>>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock

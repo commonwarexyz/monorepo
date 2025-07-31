@@ -16,6 +16,7 @@ use std::{future::Future, num::NonZeroU64, sync::Arc};
 pub trait Resolver: Send + Sync + Clone + 'static {
     type Digest: Digest;
     type Op;
+    type Error: std::error::Error + Send + 'static;
 
     /// Get the operations starting at `start_loc` in the database, up to `max_ops` operations.
     /// Returns the operations and a proof that they were present in the database when it had
@@ -26,7 +27,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<FetchResult<Self::Op, Self::Digest>, Error>> + Send + 'a;
+    ) -> impl Future<Output = Result<FetchResult<Self::Op, Self::Digest>, Self::Error>> + Send + 'a;
 }
 
 impl<E, K, V, H, T> Resolver for Arc<Any<E, K, V, H, T>>
@@ -40,13 +41,14 @@ where
 {
     type Digest = H::Digest;
     type Op = Fixed<K, V>;
+    type Error = Error;
 
     async fn get_operations(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Error> {
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
         self.historical_proof(size, start_loc, max_ops.get())
             .await
             .map(|(proof, operations)| FetchResult {
@@ -71,6 +73,7 @@ where
 {
     type Digest = H::Digest;
     type Op = Fixed<K, V>;
+    type Error = Error;
 
     async fn get_operations(
         &self,
@@ -110,6 +113,7 @@ pub(crate) mod tests {
     {
         type Digest = D;
         type Op = Fixed<K, V>;
+        type Error = Error;
 
         async fn get_operations(
             &self,

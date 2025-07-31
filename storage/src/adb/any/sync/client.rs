@@ -67,7 +67,7 @@ where
     R: Resolver<Digest = H::Digest, Op = Fixed<K, V>>,
 {
     /// Validate the configuration parameters
-    pub fn validate(&self) -> Result<(), crate::adb::sync::error::SyncError<Error>> {
+    pub fn validate(&self) -> Result<(), crate::adb::sync::error::SyncError<Error, R::Error>> {
         // Validate bounds (inclusive)
         if self.target.lower_bound_ops > self.target.upper_bound_ops {
             return Err(SyncError::InvalidTarget {

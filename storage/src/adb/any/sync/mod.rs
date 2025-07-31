@@ -3,10 +3,11 @@ use crate::{
         any::{Any, SyncConfig},
         operation::Fixed,
         sync::{
-            engine::{SyncEngine, SyncEngineConfig, SyncTarget, SyncVerifier},
+            engine::{Journal, SyncEngine, SyncEngineConfig, SyncTarget, SyncVerifier},
             resolver::Resolver,
         },
     },
+    journal::fixed,
     mmr::{hasher::Standard, iterator::leaf_num_to_pos, verification::Proof},
     translator::Translator,
 };
@@ -130,24 +131,21 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, Self::Error> {
-        use crate::journal::fixed::{Config as JConfig, Journal};
-
-        let journal_config = JConfig {
+    ) -> Result<Self::Journal, <Self::Journal as Journal>::Error> {
+        let journal_config = fixed::Config {
             partition: config.db_config.log_journal_partition.clone(),
             items_per_blob: config.db_config.log_items_per_blob,
             write_buffer: config.db_config.log_write_buffer,
             buffer_pool: config.db_config.buffer_pool.clone(),
         };
 
-        Journal::<E, Fixed<K, V>>::init_sync(
+        fixed::Journal::<E, Fixed<K, V>>::init_sync(
             context.with_label("log"),
             journal_config,
             lower_bound,
             upper_bound,
         )
         .await
-        .map_err(crate::adb::Error::from)
     }
 
     /// Create a verifier for proof validation  
@@ -194,7 +192,7 @@ where
 /// Returns a SyncEngine ready to start syncing operations.
 pub async fn new_client<E, K, V, H, T, R>(
     mut config: client::Config<E, K, V, H, T, R>,
-) -> Result<SyncEngine<Any<E, K, V, H, T>, R>, crate::adb::sync::error::SyncError<Error>>
+) -> Result<SyncEngine<Any<E, K, V, H, T>, R>, crate::adb::sync::error::SyncError<Error, R::Error>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -236,7 +234,7 @@ where
 /// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
 pub async fn sync<E, K, V, H, T, R>(
     config: client::Config<E, K, V, H, T, R>,
-) -> Result<Any<E, K, V, H, T>, crate::adb::sync::error::SyncError<Error>>
+) -> Result<Any<E, K, V, H, T>, crate::adb::sync::error::SyncError<Error, R::Error>>
 where
     E: Storage + Clock + Metrics,
     K: Array,

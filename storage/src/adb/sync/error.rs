@@ -5,7 +5,11 @@ use std::fmt;
 /// Errors that can occur during database synchronization.
 /// Generic over the database-specific error type `E`.
 #[derive(Debug, thiserror::Error)]
-pub enum SyncError<E> {
+pub enum SyncError<T, U>
+where
+    T: std::error::Error + Send + 'static,
+    U: std::error::Error + Send + 'static,
+{
     /// Hash mismatch after sync
     #[error("root digest mismatch - expected {expected:?}, got {actual:?}")]
     RootMismatch {
@@ -35,10 +39,10 @@ pub enum SyncError<E> {
     AlreadyComplete,
     /// Error from the underlying database
     #[error("database error: {0}")]
-    Database(E),
+    Database(T),
     /// Resolver error
     #[error("resolver error: {0:?}")]
-    Resolver(Box<dyn fmt::Debug + Send + Sync>),
+    Resolver(U),
     /// Sync stalled - no pending fetches
     #[error("sync stalled - no pending fetches")]
     SyncStalled,
@@ -47,10 +51,14 @@ pub enum SyncError<E> {
     PinnedNodes(String),
 }
 
-impl<E> SyncError<E> {
+impl<T, U> SyncError<T, U>
+where
+    T: std::error::Error + Send + 'static,
+    U: std::error::Error + Send + 'static,
+{
     /// Create a resolver error
-    pub fn resolver(err: impl fmt::Debug + Send + Sync + 'static) -> Self {
-        Self::Resolver(Box::new(err))
+    pub fn resolver(err: U) -> Self {
+        Self::Resolver(err)
     }
 
     /// Create a pinned nodes error
@@ -58,14 +66,14 @@ impl<E> SyncError<E> {
         Self::PinnedNodes(msg.into())
     }
 
-    pub fn database(err: E) -> Self {
+    pub fn database(err: T) -> Self {
         Self::Database(err)
     }
 
     pub fn journal<J>(err: J) -> Self
     where
-        E: From<J>,
+        T: From<J>,
     {
-        Self::Database(E::from(err))
+        Self::Database(T::from(err))
     }
 }

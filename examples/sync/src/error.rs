@@ -1,35 +1,13 @@
 //! Error types for the sync example.
 
-use commonware_storage::adb::any::sync::Error as SyncError;
-use std::net::SocketAddr;
 use thiserror::Error;
 
 /// Errors that can occur in the sync example.
 #[derive(Debug, Error)]
 pub enum Error {
-    /// Failed to establish connection to server
-    #[error("failed to connect to server at {addr}: {source}")]
-    ConnectionFailed {
-        addr: SocketAddr,
-        #[source]
-        source: commonware_runtime::Error,
-    },
-
-    /// Network runtime error
-    #[error("runtime network error")]
-    RuntimeNetwork(#[from] commonware_runtime::Error),
-
     /// Stream error during communication
     #[error("stream error")]
     Stream(#[from] commonware_stream::Error),
-
-    /// Failed to encode message for transmission
-    #[error("failed to encode message")]
-    Encode(#[from] commonware_codec::Error),
-
-    /// Failed to decode received message
-    #[error("failed to decode message")]
-    Decode(#[source] commonware_codec::Error),
 
     /// Received unexpected response type for a request
     #[error("unexpected response type for request {request_id}")]
@@ -65,10 +43,6 @@ pub enum Error {
     /// Configuration error
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
-
-    /// Sync operation failed  
-    #[error("sync failed: {0}")]
-    SyncFailed(SyncError), // TODO remove and have some functions return SyncError directly
 }
 
 impl Error {
@@ -77,9 +51,7 @@ impl Error {
         match self {
             Error::InvalidRequest(_) => crate::ErrorCode::InvalidRequest,
             Error::Database(_) => crate::ErrorCode::DatabaseError,
-            Error::RuntimeNetwork(_) | Error::Stream(_) | Error::ConnectionFailed { .. } => {
-                crate::ErrorCode::NetworkError
-            }
+            Error::Stream(_) => crate::ErrorCode::NetworkError,
             Error::RequestChannelClosed | Error::ResponseChannelClosed { .. } => {
                 crate::ErrorCode::InternalError
             }
@@ -89,17 +61,17 @@ impl Error {
 }
 
 // Convert sync errors (which are now SyncError<crate::adb::Error>) to our Error type
-impl From<commonware_storage::adb::sync::error::SyncError<commonware_storage::adb::Error>>
-    for Error
-{
-    fn from(
-        err: commonware_storage::adb::sync::error::SyncError<commonware_storage::adb::Error>,
-    ) -> Self {
-        match err {
-            commonware_storage::adb::sync::error::SyncError::Database(db_err) => {
-                Error::Database(db_err)
-            }
-            other => Error::InvalidConfig(other.to_string()),
-        }
-    }
-}
+// impl From<commonware_storage::adb::sync::error::SyncError<commonware_storage::adb::Error>>
+//     for Error
+// {
+//     fn from(
+//         err: commonware_storage::adb::sync::error::SyncError<commonware_storage::adb::Error>,
+//     ) -> Self {
+//         match err {
+//             commonware_storage::adb::sync::error::SyncError::Database(db_err) => {
+//                 Error::Database(db_err)
+//             }
+//             other => Error::InvalidConfig(other.to_string()),
+//         }
+//     }
+// }
