@@ -8,7 +8,7 @@ use super::{
     },
 };
 use crate::{
-    marshal::request::Request,
+    marshal::request::{Request, Subject},
     threshold_simplex::types::{Finalization, Notarization},
     Block, Reporter,
 };
@@ -541,12 +541,47 @@ impl<
                         return;
                     };
                     match message {
-                        handler::Message::Produce { key: commitment, response } => {
-                            // If found, send block
-                            if let Some(block) = self.find_block(&mut buffer, commitment).await {
-                                let _ = response.send(block.encode().into());
-                            } else {
-                                debug!(?commitment, "block missing on request");
+                        handler::Message::Produce { key, response } => {
+                            match key.subject() {
+                                Subject::Block(commitment) => {
+                                    // Check for block locally
+                                    let Some(block) = self.find_block(&mut buffer, commitment).await else {
+                                        debug!(?commitment, "block missing on request");
+                                        continue;
+                                    };
+                                    let _ = response.send(block.encode().into());
+                                }
+                                Subject::Finalized { height } => {
+                                    // Get finalization
+                                    let Some(finalization) = self.get_finalization_by_height(Identifier::Index(height)).await else {
+                                        debug!(height, "finalization missing on request");
+                                        continue;
+                                    };
+
+                                    // Get block
+                                    let Some(block) = self.get_finalized_block(Identifier::Index(height)).await else {
+                                        debug!(height, "finalized block missing on request");
+                                        continue;
+                                    };
+
+                                    // Send finalization
+                                    let _ = response.send((finalization, block).encode().into());
+                                }
+                                Subject::Notarized { view } => {
+                                    // Get notarization
+                                    let Some(notarization) = self.get_notarization_by_view(Identifier::Index(view)).await else {
+                                        debug!(view, "notarization missing on request");
+                                        continue;
+                                    };
+
+                                    // Get block
+                                    let commitment = notarization.proposal.payload;
+                                    let Some(block) = self.find_block(&mut buffer, commitment).await else {
+                                        debug!(?commitment, "block missing on request");
+                                        continue;
+                                    };
+                                    let _ = response.send((notarization, block).encode().into());
+                                }
                             }
                         },
                         handler::Message::Deliver { key: commitment, value, response } => {

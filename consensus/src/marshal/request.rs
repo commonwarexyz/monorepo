@@ -9,7 +9,7 @@ use std::{
 };
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
-enum Subject<B: Block> {
+pub enum Subject<B: Block> {
     Block(B::Commitment),
     Finalized { height: u64 },
     Notarized { view: u64 },
@@ -93,8 +93,8 @@ impl<B: Block> Request<B> {
     }
 
     /// Get the [Subject] of the request.
-    pub fn subject(&self) -> &Subject<B> {
-        &self.inner
+    pub fn subject(self) -> Subject<B> {
+        self.inner
     }
 }
 
