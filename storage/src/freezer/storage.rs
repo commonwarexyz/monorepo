@@ -100,7 +100,7 @@ impl std::fmt::Display for Cursor {
 ///
 /// This can be used to restore the [Freezer] to a consistent
 /// state after shutdown.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Copy, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Copy)]
 pub struct Checkpoint {
     /// The epoch of the last committed operation.
     epoch: u64,
@@ -541,7 +541,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 (
                     Checkpoint {
                         table_size: config.table_initial_size,
-                        ..Default::default()
+                        epoch: 0,
+                        section: 0,
+                        size: 0,
                     },
                     0,
                 )
@@ -558,7 +560,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 (
                     Checkpoint {
                         table_size: config.table_initial_size,
-                        ..Default::default()
+                        epoch: 0,
+                        section: 0,
+                        size: 0,
                     },
                     0,
                 )
