@@ -112,6 +112,18 @@ pub struct Checkpoint {
     table_size: u32,
 }
 
+impl Checkpoint {
+    /// Initialize a new [Checkpoint].
+    fn init(table_size: u32) -> Self {
+        Self {
+            table_size,
+            epoch: 0,
+            section: 0,
+            size: 0,
+        }
+    }
+}
+
 impl Read for Checkpoint {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
@@ -538,15 +550,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             // New table with no data
             (0, None) => {
                 Self::init_table(&table, config.table_initial_size).await?;
-                (
-                    Checkpoint {
-                        table_size: config.table_initial_size,
-                        epoch: 0,
-                        section: 0,
-                        size: 0,
-                    },
-                    0,
-                )
+                (Checkpoint::init(config.table_initial_size), 0)
             }
 
             // New table with explicit checkpoint (must be empty)
@@ -557,15 +561,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
                 assert_eq!(checkpoint.table_size, 0);
 
                 Self::init_table(&table, config.table_initial_size).await?;
-                (
-                    Checkpoint {
-                        table_size: config.table_initial_size,
-                        epoch: 0,
-                        section: 0,
-                        size: 0,
-                    },
-                    0,
-                )
+                (Checkpoint::init(config.table_initial_size), 0)
             }
 
             // Existing table with checkpoint
