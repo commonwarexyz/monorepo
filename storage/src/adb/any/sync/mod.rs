@@ -128,6 +128,8 @@ where
     V: Array,
 {
     journal: crate::journal::fixed::Journal<E, Fixed<K, V>>,
+    context: E,
+    config: crate::journal::fixed::Config,
 }
 
 impl<E, K, V> crate::adb::sync::engine::SyncJournal for JournalWrapper<E, K, V>
@@ -152,6 +154,43 @@ where
             .await
             .map(|_| ())
             .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))
+    }
+
+    async fn resize(&mut self, lower_bound: u64, upper_bound: u64) -> Result<(), Self::Error> {
+        use crate::journal::fixed::Journal;
+
+        let log_size = self
+            .journal
+            .size()
+            .await
+            .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))?;
+
+        if log_size <= lower_bound {
+            // Create new journal first
+            let new_journal = Journal::<E, Fixed<K, V>>::init_sync(
+                self.context.clone().with_label("log"),
+                self.config.clone(),
+                lower_bound,
+                upper_bound,
+            )
+            .await
+            .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))?;
+
+            // Close old journal and replace with new one
+            let old_journal = std::mem::replace(&mut self.journal, new_journal);
+            old_journal
+                .close()
+                .await
+                .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))?;
+        } else {
+            // Prune the journal to the new lower bound
+            self.journal
+                .prune(lower_bound)
+                .await
+                .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))?;
+        }
+
+        Ok(())
     }
 }
 
@@ -241,14 +280,16 @@ where
     config.validate()?;
 
     // Initialize the operations journal
+    let journal_config = JConfig {
+        partition: config.db_config.log_journal_partition.clone(),
+        items_per_blob: config.db_config.log_items_per_blob,
+        write_buffer: config.db_config.log_write_buffer,
+        buffer_pool: config.db_config.buffer_pool.clone(),
+    };
+
     let journal = Journal::<E, Fixed<K, V>>::init_sync(
         config.context.clone().with_label("log"),
-        JConfig {
-            partition: config.db_config.log_journal_partition.clone(),
-            items_per_blob: config.db_config.log_items_per_blob,
-            write_buffer: config.db_config.log_write_buffer,
-            buffer_pool: config.db_config.buffer_pool.clone(),
-        },
+        journal_config.clone(),
         config.target.lower_bound_ops,
         config.target.upper_bound_ops,
     )
@@ -263,7 +304,11 @@ where
     assert!(log_size <= config.target.upper_bound_ops + 1);
 
     // Create a journal wrapper that converts errors to sync errors
-    let wrapped_journal = JournalWrapper { journal };
+    let wrapped_journal = JournalWrapper {
+        journal,
+        context: config.context.clone(),
+        config: journal_config,
+    };
 
     // Create verifier
     let verifier = AnyVerifier::<E, K, V, H, T>::new(config.hasher);

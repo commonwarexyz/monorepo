@@ -31,6 +31,13 @@ pub trait SyncJournal {
 
     /// Append an operation to the journal
     fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>>;
+
+    /// Reinitialize the journal for new sync bounds
+    fn resize(
+        &mut self,
+        lower_bound: u64,
+        upper_bound: u64,
+    ) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
 /// Trait for verifying proofs of operation batches
@@ -572,11 +579,15 @@ where
     }
 
     /// Clear all sync state for a target update
-    pub fn reset_for_target_update(&mut self, new_target: SyncTarget<D>) {
+    pub async fn reset_for_target_update(&mut self, new_target: SyncTarget<D>) -> Result<(), E> {
+        self.journal
+            .resize(new_target.lower_bound_ops, new_target.upper_bound_ops)
+            .await?;
         self.target = new_target;
         self.fetched_operations.clear();
         self.outstanding_requests.clear();
         self.pinned_nodes = None;
+        Ok(())
     }
 
     /// Store a batch of fetched operations
@@ -810,7 +821,7 @@ where
                         }
                     })?;
 
-                self.reset_for_target_update(new_target);
+                self.reset_for_target_update(new_target).await?;
 
                 // Schedule new requests for the updated target
                 self.schedule_requests().await?;

@@ -10,23 +10,31 @@ use thiserror::Error;
 pub mod fixed;
 pub mod variable;
 
-// Implementation of SyncJournal for existing journal types
-impl<E, A> crate::adb::sync::engine::SyncJournal for fixed::Journal<E, A>
-where
-    E: commonware_runtime::Storage + commonware_runtime::Metrics,
-    A: commonware_codec::Codec<Cfg = ()> + commonware_codec::FixedSize + Send + 'static,
-{
-    type Op = A;
-    type Error = Error;
+// // Implementation of SyncJournal for existing journal types
+// impl<E, A> crate::adb::sync::engine::SyncJournal for fixed::Journal<E, A>
+// where
+//     E: commonware_runtime::Storage + commonware_runtime::Metrics,
+//     A: commonware_codec::Codec<Cfg = ()> + commonware_codec::FixedSize + Send + 'static,
+// {
+//     type Op = A;
+//     type Error = Error;
 
-    async fn size(&self) -> Result<u64, Self::Error> {
-        fixed::Journal::size(self).await
-    }
+//     async fn size(&self) -> Result<u64, Self::Error> {
+//         fixed::Journal::size(self).await
+//     }
 
-    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        fixed::Journal::append(self, op).await.map(|_| ())
-    }
-}
+//     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
+//         fixed::Journal::append(self, op).await.map(|_| ())
+//     }
+
+//     async fn reinitialize_for_sync(
+//         &mut self,
+//         _lower_bound: u64,
+//         _upper_bound: u64,
+//     ) -> Result<(), Self::Error> {
+//         Ok(())
+//     }
+// }
 
 /// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]
