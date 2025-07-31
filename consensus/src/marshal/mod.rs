@@ -59,6 +59,8 @@ pub mod actor;
 pub mod config;
 pub mod finalizer;
 pub mod ingress;
+
+#[cfg(test)]
 pub mod mocks;
 
 #[cfg(test)]
