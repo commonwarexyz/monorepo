@@ -11,8 +11,11 @@ use crate::{
     threshold_simplex::types::{Finalization, Notarization},
     Block, Reporter,
 };
+use bytes::{Buf, BufMut};
 use commonware_broadcast::{buffered, Broadcaster};
-use commonware_codec::{Codec, Decode, Encode};
+use commonware_codec::{
+    Codec, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
@@ -25,7 +28,7 @@ use commonware_storage::{
     archive::{self, immutable, prunable, Archive as _, Identifier},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::U64, Array};
+use commonware_utils::{sequence::U64, Array, Span};
 use futures::{
     channel::{mpsc, oneshot},
     try_join, StreamExt,
@@ -60,6 +63,61 @@ impl<B: Block> Waiter<B> {
     /// Add a responder to the waiter.
     fn add_responder(&mut self, responder: oneshot::Sender<B>) {
         self.responders.push(responder);
+    }
+}
+
+enum Request<B: Block> {
+    Block(B::Commitment),
+    Finalization { height: u64 },
+    Notarization { view: u64 },
+}
+
+impl<B: Block> Span for Request<B> {}
+
+impl<B: Block> Write for Request<B> {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Block(commitment) => {
+                0u8.write(buf);
+                commitment.write(buf)
+            }
+            Self::Finalization { height } => {
+                1u8.write(buf);
+                height.write(buf)
+            }
+            Self::Notarization { view } => {
+                2u8.write(buf);
+                view.write(buf)
+            }
+        }
+    }
+}
+
+impl<B: Block> Read for Request<B> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let request = match u8::read(buf)? {
+            0 => Self::Block(B::Commitment::read(buf)?),
+            1 => Self::Finalization {
+                height: u64::read(buf)?,
+            },
+            2 => Self::Notarization {
+                view: u64::read(buf)?,
+            },
+            i => return Err(CodecError::InvalidEnum(i)),
+        };
+        Ok(request)
+    }
+}
+
+impl<B: Block> EncodeSize for Request<B> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Block(block) => block.encode_size(),
+            Self::Finalization { height } => height.encode_size(),
+            Self::Notarization { view } => view.encode_size(),
+        }
     }
 }
 
@@ -303,17 +361,9 @@ impl<
         mut self,
         application: impl Reporter<Activity = B>,
         buffer: buffered::Mailbox<P, B>,
-        backfill_by_digest: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        backfill_by_height: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        backfill_by_view: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(
-            application,
-            buffer,
-            backfill_by_digest,
-            backfill_by_height,
-            backfill_by_view,
-        ))
+        self.context.spawn_ref()(self.run(application, buffer, backfill))
     }
 
     /// Run the application actor.
@@ -321,17 +371,10 @@ impl<
         mut self,
         application: impl Reporter<Activity = B>,
         mut buffer: buffered::Mailbox<P, B>,
-        backfill_by_digest: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        backfill_by_height: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        backfill_by_view: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
         // Initialize resolvers
-        let (mut block_resolver_by_digest_rx, mut block_resolver_by_digest) =
-            self.init_resolver::<B::Commitment>(backfill_by_digest);
-        let (mut finalization_resolver_by_height_rx, mut finalization_resolver_by_height) =
-            self.init_resolver::<U64>(backfill_by_height);
-        let (mut notarization_resolver_by_view_rx, mut notarization_resolver_by_view) =
-            self.init_resolver::<U64>(backfill_by_view);
+        let (mut resolver_rx, mut resolver) = self.init_resolver::<B::Commitment>(backfill);
 
         // Process all finalized blocks in order (fetching any that are missing)
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
