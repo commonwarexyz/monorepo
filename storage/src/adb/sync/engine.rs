@@ -792,7 +792,6 @@ where
     ) -> Result<DB, E>
     where
         DB: SyncDatabase<J, D, Error = E>,
-        DB::Config: Clone,
         H: commonware_cryptography::Hasher<Digest = D>,
     {
         // Run sync loop until completion
@@ -805,7 +804,7 @@ where
 
         // Build the database from the completed sync
         let database = DB::from_sync_result(
-            config.clone(),
+            config,
             completion_result.journal,
             completion_result.pinned_nodes,
             completion_result.target.clone(),
