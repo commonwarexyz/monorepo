@@ -223,6 +223,28 @@ impl<
                                 self.consumer.failed(key.clone(), ()).await;
                             }
                         }
+                        Message::Retain { predicate } => {
+                            trace!("mailbox: retain");
+                            let before = self.fetcher.len();
+                            self.fetcher.retain(predicate);
+                            let after = self.fetcher.len();
+                            if before == after {
+                                self.metrics.cancel.inc(Status::Dropped);
+                            } else {
+                                self.metrics.cancel.inc_by(Status::Success, before.checked_sub(after).unwrap() as u64);
+                            }
+                        }
+                        Message::Clear => {
+                            trace!("mailbox: clear");
+                            let before = self.fetcher.len();
+                            self.fetcher.clear();
+                            let after = self.fetcher.len();
+                            if before == after {
+                                self.metrics.cancel.inc(Status::Dropped);
+                            } else {
+                                self.metrics.cancel.inc_by(Status::Success, before.checked_sub(after).unwrap() as u64);
+                            }
+                        }
                     }
                 },
 

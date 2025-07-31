@@ -23,7 +23,7 @@ pub struct FixedBytes<const N: usize>([u8; N]);
 
 impl<const N: usize> FixedBytes<N> {
     /// Creates a new `FixedBytes` instance from an array of length `N`.
-    pub fn new(value: [u8; N]) -> Self {
+    pub const fn new(value: [u8; N]) -> Self {
         Self(value)
     }
 }

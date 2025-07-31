@@ -32,3 +32,6 @@ tracing-subscriber = { workspace = true }
 
 [lib]
 bench = false
+
+[features]
+mocks = []

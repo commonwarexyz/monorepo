@@ -44,7 +44,7 @@ pub use ingress::Mailbox;
 mod metrics;
 mod wire;
 
-#[cfg(test)]
+#[cfg(feature = "mocks")]
 pub mod mocks;
 
 /// Serves data requested by the network.

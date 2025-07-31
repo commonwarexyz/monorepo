@@ -1105,10 +1105,12 @@ version = "0.0.56"
 dependencies = [
  "bytes",
  "cfg-if",
+ "commonware-broadcast",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
+ "commonware-resolver",
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",

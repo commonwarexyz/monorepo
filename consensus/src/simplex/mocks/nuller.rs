@@ -1,8 +1,8 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
 use crate::{
-    simplex::types::{Finalize, Nullify, View, Viewable, Voter},
-    Supervisor,
+    simplex::types::{Finalize, Nullify, View, Voter},
+    Supervisor, Viewable,
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Hasher, Signer};
