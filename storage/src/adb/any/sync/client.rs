@@ -1,6 +1,7 @@
 use super::Error;
 use crate::{
     adb::{
+        any,
         operation::Fixed,
         sync::{
             engine::{SyncTarget, SyncTargetUpdateReceiver},
@@ -33,7 +34,7 @@ where
     pub update_receiver: Option<SyncTargetUpdateReceiver<H::Digest>>,
 
     /// Database configuration.
-    pub db_config: crate::adb::any::Config<T>,
+    pub db_config: any::Config<T>,
 
     /// Maximum operations to fetch per batch.
     pub fetch_batch_size: NonZeroU64,
@@ -67,7 +68,7 @@ where
     R: Resolver<Digest = H::Digest, Op = Fixed<K, V>>,
 {
     /// Validate the configuration parameters
-    pub fn validate(&self) -> Result<(), crate::adb::sync::error::SyncError<Error, R::Error>> {
+    pub fn validate(&self) -> Result<(), SyncError<Error, R::Error>> {
         // Validate bounds (inclusive)
         if self.target.lower_bound_ops > self.target.upper_bound_ops {
             return Err(SyncError::InvalidTarget {
@@ -108,11 +109,11 @@ pub(crate) mod tests {
 
     type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
-    fn create_test_config(seed: u64) -> crate::adb::any::Config<TwoCap> {
+    fn create_test_config(seed: u64) -> any::Config<TwoCap> {
         const PAGE_SIZE: usize = 128;
         const PAGE_CACHE_SIZE: usize = 1024 * 1024;
 
-        crate::adb::any::Config {
+        any::Config {
             mmr_journal_partition: format!("mmr_journal_{seed}"),
             mmr_metadata_partition: format!("mmr_metadata_{seed}"),
             mmr_items_per_blob: 1024,
