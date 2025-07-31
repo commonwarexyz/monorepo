@@ -9,7 +9,7 @@ use commonware_p2p::{
     Recipients, Sender,
 };
 use commonware_runtime::{Clock, Metrics};
-use commonware_utils::{Array, PrioritySet};
+use commonware_utils::{PrioritySet, Span};
 use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::{
@@ -39,7 +39,7 @@ enum SendError<S: Sender> {
 pub struct Fetcher<
     E: Clock + GClock + Rng + Metrics,
     P: PublicKey,
-    Key: Array,
+    Key: Span,
     NetS: Sender<PublicKey = P>,
 > {
     context: E,
@@ -64,7 +64,7 @@ pub struct Fetcher<
     _s: PhantomData<NetS>,
 }
 
-impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Array, NetS: Sender<PublicKey = P>>
+impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<PublicKey = P>>
     Fetcher<E, P, Key, NetS>
 {
     /// Creates a new fetcher.

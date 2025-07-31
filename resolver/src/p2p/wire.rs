@@ -1,10 +1,10 @@
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
-use commonware_utils::Array;
+use commonware_utils::Span;
 
 /// Represents a message sent between peers.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Message<Key: Array> {
+pub struct Message<Key: Span> {
     /// Unique identifier for the message.
     /// Responses should have the same ID as the request they are responding to.
     pub id: u64,
@@ -13,20 +13,20 @@ pub struct Message<Key: Array> {
     pub payload: Payload<Key>,
 }
 
-impl<Key: Array> Write for Message<Key> {
+impl<Key: Span> Write for Message<Key> {
     fn write(&self, buf: &mut impl BufMut) {
         buf.put_u64(self.id);
         self.payload.write(buf);
     }
 }
 
-impl<Key: Array> EncodeSize for Message<Key> {
+impl<Key: Span> EncodeSize for Message<Key> {
     fn encode_size(&self) -> usize {
         self.id.encode_size() + self.payload.encode_size()
     }
 }
 
-impl<Key: Array> Read for Message<Key> {
+impl<Key: Span> Read for Message<Key> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -38,7 +38,7 @@ impl<Key: Array> Read for Message<Key> {
 
 /// Represents the contents of a message sent between peers.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Payload<Key: Array> {
+pub enum Payload<Key: Span> {
     // Request is a request for a response.
     Request(Key),
 
@@ -51,7 +51,7 @@ pub enum Payload<Key: Array> {
     ErrorResponse,
 }
 
-impl<Key: Array> Write for Payload<Key> {
+impl<Key: Span> Write for Payload<Key> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Payload::Request(key) => {
@@ -69,17 +69,17 @@ impl<Key: Array> Write for Payload<Key> {
     }
 }
 
-impl<Key: Array> EncodeSize for Payload<Key> {
+impl<Key: Span> EncodeSize for Payload<Key> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Payload::Request(_) => Key::SIZE,
+            Payload::Request(key) => key.encode_size(),
             Payload::Response(data) => data.encode_size(),
             Payload::ErrorResponse => 0,
         }
     }
 }
 
-impl<Key: Array> Read for Payload<Key> {
+impl<Key: Span> Read for Payload<Key> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
