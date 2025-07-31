@@ -7,7 +7,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{array::prefixed_u64::U64, Array, BitVec};
+use commonware_utils::{sequence::prefixed_u64::U64, Array, BitVec};
 use futures::join;
 use prometheus_client::metrics::counter::Counter;
 use std::collections::BTreeMap;

@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, EncodeFixed, FixedSize};
-use commonware_utils::array::{prefixed_u64::U64 as PrefixedU64, FixedBytes, U64};
+use commonware_utils::sequence::{prefixed_u64::U64 as PrefixedU64, FixedBytes, U64};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]

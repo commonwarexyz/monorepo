@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::freezer::{Config, Freezer, Identifier};
-use commonware_utils::array::FixedBytes;
+use commonware_utils::sequence::FixedBytes;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 

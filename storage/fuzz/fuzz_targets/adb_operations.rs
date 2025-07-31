@@ -8,7 +8,7 @@ use commonware_storage::{
     mmr::hasher::Standard,
     translator::EightCap,
 };
-use commonware_utils::array::FixedBytes;
+use commonware_utils::sequence::FixedBytes;
 use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet};
 

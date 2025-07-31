@@ -93,7 +93,7 @@ mod tests {
     use super::*;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::array::U64;
+    use commonware_utils::sequence::U64;
     use rand::{Rng, RngCore};
 
     #[test_traced]

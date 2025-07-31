@@ -1,4 +1,4 @@
-use crate::VarArray;
+use crate::Span;
 use futures::{channel::mpsc, SinkExt};
 use std::collections::HashMap;
 
@@ -14,7 +14,7 @@ pub enum Event<K, V> {
 
 /// A consumer that can be used for testing
 #[derive(Clone)]
-pub struct Consumer<K: VarArray, V> {
+pub struct Consumer<K: Span, V> {
     /// The sender to send events to
     sender: mpsc::UnboundedSender<Event<K, V>>,
 
@@ -24,7 +24,7 @@ pub struct Consumer<K: VarArray, V> {
     expected: HashMap<K, V>,
 }
 
-impl<K: VarArray, V: Clone + PartialEq> Consumer<K, V> {
+impl<K: Span, V: Clone + PartialEq> Consumer<K, V> {
     /// Create a new consumer
     ///
     /// Returns the consumer and a receiver that can be used to get the events
@@ -59,7 +59,7 @@ impl<K: VarArray, V: Clone + PartialEq> Consumer<K, V> {
     }
 }
 
-impl<K: VarArray, V: Clone + PartialEq + Send + 'static> crate::Consumer for Consumer<K, V> {
+impl<K: Span, V: Clone + PartialEq + Send + 'static> crate::Consumer for Consumer<K, V> {
     type Key = K;
     type Value = V;
     type Failure = ();

@@ -1,4 +1,4 @@
-use crate::{array::VarArray, Array};
+use crate::{sequence::Span, Array};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use std::{
@@ -49,7 +49,7 @@ impl FixedSize for U32 {
     const SIZE: usize = u32::SIZE;
 }
 
-impl VarArray for U32 {}
+impl Span for U32 {}
 impl Array for U32 {}
 
 impl From<[u8; U32::SIZE]> for U32 {

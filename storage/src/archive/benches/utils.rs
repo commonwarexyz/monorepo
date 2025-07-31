@@ -5,7 +5,7 @@ use commonware_storage::{
     archive::{immutable, prunable, Archive as ArchiveTrait, Identifier},
     translator::TwoCap,
 };
-use commonware_utils::array::FixedBytes;
+use commonware_utils::sequence::FixedBytes;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 /// Number of bytes that can be buffered in a section before being written to a

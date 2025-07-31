@@ -1,4 +1,4 @@
-use crate::{array::VarArray, hex, Array};
+use crate::{hex, sequence::Span, Array};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use std::{
@@ -46,7 +46,7 @@ impl<const N: usize> FixedSize for FixedBytes<N> {
     const SIZE: usize = N;
 }
 
-impl<const N: usize> VarArray for FixedBytes<N> {}
+impl<const N: usize> Span for FixedBytes<N> {}
 
 impl<const N: usize> Array for FixedBytes<N> {}
 

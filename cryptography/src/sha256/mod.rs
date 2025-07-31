@@ -23,7 +23,7 @@
 use crate::Hasher;
 use bytes::{Buf, BufMut};
 use commonware_codec::{DecodeExt, Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_utils::{array::VarArray, hex, Array};
+use commonware_utils::{sequence::Span, hex, Array};
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
 use std::{
@@ -122,7 +122,7 @@ impl FixedSize for Digest {
     const SIZE: usize = DIGEST_LENGTH;
 }
 
-impl VarArray for Digest {}
+impl Span for Digest {}
 
 impl Array for Digest {}
 

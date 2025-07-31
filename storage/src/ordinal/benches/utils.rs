@@ -1,6 +1,6 @@
 use commonware_runtime::tokio::Context;
 use commonware_storage::ordinal;
-use commonware_utils::array::FixedBytes;
+use commonware_utils::sequence::FixedBytes;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 /// Number of bytes that can be buffered before being written to disk.

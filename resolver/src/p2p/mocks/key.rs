@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_utils::{array::VarArray, Array};
+use commonware_utils::{sequence::Span, Array};
 use std::{fmt, ops::Deref};
 
 /// A key that can be used for testing
@@ -44,6 +44,6 @@ impl FixedSize for Key {
     const SIZE: usize = u8::SIZE;
 }
 
-impl VarArray for Key {}
+impl Span for Key {}
 
 impl Array for Key {}
