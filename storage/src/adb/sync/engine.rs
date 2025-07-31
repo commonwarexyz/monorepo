@@ -707,19 +707,37 @@ where
     /// 3. Handles different event types (target updates, fetch results)
     /// 4. Coordinates request scheduling and operation application
     ///
-    /// Returns `StepResult::Complete(())` when sync is finished, or
+    /// Returns `StepResult::Complete(database)` when sync is finished, or
     /// `StepResult::Continue(self)` when more work remains.
-    pub async fn step(
+    pub async fn step<DB, H>(
         mut self,
+        config: DB::Config,
         update_receiver: &mut Option<crate::adb::sync::engine::SyncTargetUpdateReceiver<D>>,
-    ) -> Result<StepResult<Self, SyncCompletionResult<J, D>>, E> {
+        mut root_hasher: H,
+    ) -> Result<StepResult<Self, DB>, E>
+    where
+        DB: SyncDatabase<J, D, Error = E>,
+        DB::Config: Clone,
+        H: commonware_cryptography::Hasher<Digest = D>,
+    {
         // Check if sync is complete
         if self.is_complete().await? {
-            return Ok(StepResult::Complete(SyncCompletionResult {
-                journal: self.journal,
-                pinned_nodes: self.pinned_nodes,
-                target: self.target,
-            }));
+            // Build the database from the completed sync
+            let database =
+                DB::from_sync_result(config, self.journal, self.pinned_nodes, self.target.clone())
+                    .await?;
+
+            // Verify the final root digest matches the final target
+            let got_root = database.root(&mut root_hasher);
+            let expected_root = self.target.root;
+            if got_root != expected_root {
+                return Err(E::from(crate::adb::sync::error::SyncError::RootMismatch {
+                    expected: Box::new(expected_root),
+                    actual: Box::new(got_root),
+                }));
+            }
+
+            return Ok(StepResult::Complete(database));
         }
 
         // Wait for the next synchronization event
@@ -788,40 +806,23 @@ where
         mut self,
         config: DB::Config,
         update_receiver: &mut Option<SyncTargetUpdateReceiver<D>>,
-        mut root_hasher: H,
+        root_hasher: H,
     ) -> Result<DB, E>
     where
         DB: SyncDatabase<J, D, Error = E>,
-        H: commonware_cryptography::Hasher<Digest = D>,
+        DB::Config: Clone,
+        H: commonware_cryptography::Hasher<Digest = D> + Clone,
     {
         // Run sync loop until completion
-        let completion_result = loop {
-            match self.step(update_receiver).await? {
+        loop {
+            match self
+                .step(config.clone(), update_receiver, root_hasher.clone())
+                .await?
+            {
                 StepResult::Continue(new_engine) => self = new_engine,
-                StepResult::Complete(result) => break result,
+                StepResult::Complete(database) => return Ok(database),
             }
-        };
-
-        // Build the database from the completed sync
-        let database = DB::from_sync_result(
-            config,
-            completion_result.journal,
-            completion_result.pinned_nodes,
-            completion_result.target.clone(),
-        )
-        .await?;
-
-        // Verify the final root digest matches the final target (after any updates)
-        let got_root = database.root(&mut root_hasher);
-        let expected_root = completion_result.target.root;
-        if got_root != expected_root {
-            return Err(E::from(crate::adb::sync::error::SyncError::RootMismatch {
-                expected: Box::new(expected_root),
-                actual: Box::new(got_root),
-            }));
         }
-
-        Ok(database)
     }
 }
 
