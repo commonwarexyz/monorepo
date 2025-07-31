@@ -109,3 +109,10 @@ path = "fuzz_targets/bls12381_tle.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "metamorph_lthash"
+path = "fuzz_targets/metamorph_lthash.rs"
+test = false
+doc = false
+bench = false
