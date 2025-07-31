@@ -15,6 +15,22 @@ pub enum Subject<B: Block> {
     Notarized { view: u64 },
 }
 
+impl<B: Block> Subject<B> {
+    pub fn predicate(&self) -> impl Fn(&Self) -> bool + Send + 'static {
+        match self {
+            Self::Block(_) => |_| unreachable!("we should never prune by block"),
+            Self::Finalized { height } => |s| match s {
+                Self::Finalized { height: h } => h > *height,
+                _ => true,
+            },
+            Self::Notarized { view } => |s| match s {
+                Self::Notarized { view: v } => v > *view,
+                _ => true,
+            },
+        }
+    }
+}
+
 impl<B: Block> Write for Subject<B> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
