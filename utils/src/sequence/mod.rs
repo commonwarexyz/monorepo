@@ -30,8 +30,6 @@ pub enum Error<E: StdError + Send + Sync + 'static> {
 /// `Span` is typically used to parse things like requests from an untrusted
 /// network connection (with variable-length fields). Once parsed, these types
 /// are assumed to be well-formed (which prevents duplicate validation).
-///
-/// If a byte sequence is not properly formatted, `TryFrom` must return an error.
 pub trait Span:
     Clone
     + Send
@@ -55,6 +53,4 @@ pub trait Span:
 /// `Array` is typically used to parse things like `PublicKeys` and `Signatures`
 /// from an untrusted network connection. Once parsed, these types are assumed
 /// to be well-formed (which prevents duplicate validation).
-///
-/// If a byte sequence is not properly formatted, `TryFrom` must return an error.
 pub trait Array: Span + EncodeFixed {}
