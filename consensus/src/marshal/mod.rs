@@ -312,16 +312,8 @@ mod tests {
         broadcast_engine.start(network);
 
         // Start the actor
-        let backfill_by_digest = oracle.register(secret.public_key(), 2).await.unwrap();
-        let backfill_by_height = oracle.register(secret.public_key(), 3).await.unwrap();
-        let backfill_by_view = oracle.register(secret.public_key(), 4).await.unwrap();
-        actor.start(
-            application.clone(),
-            buffer,
-            backfill_by_digest,
-            backfill_by_height,
-            backfill_by_view,
-        );
+        let backfill = oracle.register(secret.public_key(), 2).await.unwrap();
+        actor.start(application.clone(), buffer, backfill);
 
         (application, mailbox)
     }
