@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use commonware_resolver::{p2p::Producer, Consumer};
-use commonware_utils::Array;
+use commonware_utils::Span;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -9,7 +9,7 @@ use tracing::error;
 
 /// Messages sent from the resolver's [Consumer]/[Producer] implementation
 /// to the marshal [Actor](super::super::actor::Actor).
-pub enum Message<K: Array> {
+pub enum Message<K: Span> {
     /// A request to deliver a value for a given key.
     Deliver {
         /// The key of the value being delivered.
@@ -33,18 +33,18 @@ pub enum Message<K: Array> {
 /// This struct implements the [Consumer] and [Producer] traits from the
 /// resolver, and acts as a bridge to the main actor loop.
 #[derive(Clone)]
-pub struct Handler<K: Array> {
+pub struct Handler<K: Span> {
     sender: mpsc::Sender<Message<K>>,
 }
 
-impl<K: Array> Handler<K> {
+impl<K: Span> Handler<K> {
     /// Creates a new handler.
     pub fn new(sender: mpsc::Sender<Message<K>>) -> Self {
         Self { sender }
     }
 }
 
-impl<K: Array> Consumer for Handler<K> {
+impl<K: Span> Consumer for Handler<K> {
     type Key = K;
     type Value = Bytes;
     type Failure = ();
@@ -72,7 +72,7 @@ impl<K: Array> Consumer for Handler<K> {
     }
 }
 
-impl<K: Array> Producer for Handler<K> {
+impl<K: Span> Producer for Handler<K> {
     type Key = K;
 
     async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {

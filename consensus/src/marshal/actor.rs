@@ -8,14 +8,12 @@ use super::{
     },
 };
 use crate::{
+    marshal::request::Request,
     threshold_simplex::types::{Finalization, Notarization},
     Block, Reporter,
 };
-use bytes::{Buf, BufMut};
 use commonware_broadcast::{buffered, Broadcaster};
-use commonware_codec::{
-    Codec, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
-};
+use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
@@ -28,7 +26,7 @@ use commonware_storage::{
     archive::{self, immutable, prunable, Archive as _, Identifier},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::U64, Array, Span};
+use commonware_utils::Span;
 use futures::{
     channel::{mpsc, oneshot},
     try_join, StreamExt,
@@ -38,10 +36,7 @@ use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 use std::{
     collections::{btree_map::Entry, BTreeMap},
-    fmt::{Debug, Display},
-    hash::{Hash, Hasher},
     marker::PhantomData,
-    ops::Deref,
     time::{Duration, Instant},
 };
 use tracing::{debug, info, warn};
@@ -322,7 +317,7 @@ impl<
         backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
         // Initialize resolvers
-        let (mut resolver_rx, mut resolver) = self.init_resolver::<B::Commitment>(backfill);
+        let (mut resolver_rx, mut resolver) = self.init_resolver::<Request<B>>(backfill);
 
         // Process all finalized blocks in order (fetching any that are missing)
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
@@ -393,7 +388,7 @@ impl<
                                 continue;
                             } else {
                                 debug!(view, "notarized block missing");
-                                notarization_resolver_by_view.fetch(view.into()).await;
+                                resolver.fetch(Request::notarized(view)).await;
                             }
                         }
                         Message::Finalization { finalization } => {
@@ -411,11 +406,11 @@ impl<
                                 self.finalized_height.set(height as i64);
 
                                 // Cancel useless requests
-                                notarization_resolver_by_view.retain(move|k| k > &view.into()).await;
+                                resolver.retain(move|k| k > &view.into()).await;
                             } else {
                                 // Otherwise, fetch the block from the network
                                 debug!(view, ?commitment, "finalized block missing");
-                                block_resolver_by_digest.fetch(commitment).await;
+                                resolver.fetch(Request::finalized(view)).await;
                             }
                         }
                         Message::Get { commitment, response } => {
@@ -440,7 +435,7 @@ impl<
                                 // If this is a valid view, this request should be fine to "keep
                                 // open" even if the oneshot is cancelled.
                                 debug!(view, ?commitment, "requested block missing");
-                                notarization_resolver_by_view.fetch(view.into()).await;
+                                resolver.fetch(Request::notarized(view)).await;
                             }
 
                             // Register waiter
@@ -475,8 +470,8 @@ impl<
                             self.processed_height.set(height as i64);
 
                             // Cancel any outstanding requests (by height and by digest)
-                            block_resolver_by_digest.cancel(digest).await;
-                            finalization_resolver_by_height.retain(move |k| k > &height.into()).await;
+                            resolver.cancel(Request::block(digest)).await;
+                            resolver.retain(move |k| k > &height.into()).await;
 
                             // If finalization exists, prune the archives
                             if let Some(finalization) = self.get_finalization_by_height(Identifier::Index(height)).await {
@@ -521,7 +516,7 @@ impl<
                                     cursor = block;
                                 } else {
                                     // Request the next missing block digest
-                                    block_resolver_by_digest.fetch(commitment).await;
+                                    resolver.fetch(Request::block(commitment)).await;
                                     break;
                                 }
                             }
@@ -534,13 +529,13 @@ impl<
                             let gap_end = std::cmp::min(cursor.height(), gap_start.saturating_add(self.max_repair));
                             debug!(gap_start, gap_end, "requesting any finalized blocks");
                             for height in gap_start..gap_end {
-                                finalization_resolver_by_height.fetch(height.into()).await;
+                                resolver.fetch(Request::finalized(height)).await;
                             }
                         }
                     }
                 },
                 // Handle resolver messages last
-                message = block_resolver_by_digest_rx.next() => {
+                message = resolver_rx.next() => {
                     let Some(message) = message else {
                         info!("handler closed, shutting down");
                         return;
@@ -702,7 +697,7 @@ impl<
     }
 
     /// Helper to initialize a resolver.
-    fn init_resolver<K: Array>(
+    fn init_resolver<K: Span>(
         &self,
         backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> (mpsc::Receiver<handler::Message<K>>, p2p::Mailbox<K>) {
