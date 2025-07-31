@@ -3,7 +3,7 @@ use crate::{
         any::{Any, SyncConfig},
         operation::Fixed,
         sync::{
-            engine::{SyncEngine, SyncTarget, SyncVerifier},
+            engine::{SyncEngine, SyncEngineConfig, SyncTarget, SyncVerifier},
             resolver::Resolver,
         },
     },
@@ -214,9 +214,17 @@ where
 ///
 /// Returns a SyncEngine ready to start syncing operations.
 pub async fn new_client<E, K, V, H, T, R>(
-    config: client::Config<E, K, V, H, T, R>,
+    mut config: client::Config<E, K, V, H, T, R>,
 ) -> Result<
-    SyncEngine<JournalWrapper<E, K, V>, R, AnyVerifier<E, K, V, H, T>, H::Digest, Error>,
+    SyncEngine<
+        JournalWrapper<E, K, V>,
+        R,
+        AnyVerifier<E, K, V, H, T>,
+        H::Digest,
+        Error,
+        Any<E, K, V, H, T>,
+        H,
+    >,
     Error,
 >
 where
@@ -261,14 +269,23 @@ where
     let verifier = AnyVerifier::<E, K, V, H, T>::new(config.hasher);
 
     // Create sync engine
-    Ok(SyncEngine::new(
-        wrapped_journal,
-        config.resolver,
+    let db_config = AnySyncConfig::<E, T> {
+        context: config.context.clone(),
+        db_config: config.db_config.clone(),
+        apply_batch_size: config.apply_batch_size,
+    };
+
+    Ok(SyncEngine::new(SyncEngineConfig {
+        journal: wrapped_journal,
+        resolver: config.resolver,
         verifier,
-        config.target.clone(),
-        config.max_outstanding_requests,
-        config.fetch_batch_size,
-    ))
+        target: config.target.clone(),
+        max_outstanding_requests: config.max_outstanding_requests,
+        fetch_batch_size: config.fetch_batch_size,
+        db_config,
+        update_receiver: config.update_receiver.take(),
+        root_hasher: H::new(),
+    }))
 }
 
 /// Synchronizes a database by fetching, verifying, and applying operations from a remote source.
@@ -280,7 +297,7 @@ where
 ///
 /// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
 pub async fn sync<E, K, V, H, T, R>(
-    mut config: client::Config<E, K, V, H, T, R>,
+    config: client::Config<E, K, V, H, T, R>,
 ) -> Result<Any<E, K, V, H, T>, Error>
 where
     E: Storage + Clock + Metrics,
@@ -290,27 +307,12 @@ where
     T: Translator,
     R: Resolver<Digest = H::Digest, Op = Fixed<K, V>>,
 {
-    // Store fields we'll need after creating the engine
-    let context = config.context.clone();
-    let db_config = config.db_config.clone();
-    let apply_batch_size = config.apply_batch_size;
-    let mut update_receiver = config.update_receiver.take();
-
     // Create sync engine using the new_client function
     let mut engine = new_client(config).await?;
 
     // Make initial requests to start the sync process
     engine.schedule_requests().await?;
 
-    // Create database configuration for final build step
-    let db_config = AnySyncConfig {
-        context,
-        db_config,
-        apply_batch_size,
-    };
-
     // Run sync to completion using generic engine
-    // Extract the underlying hasher from the Standard wrapper
-    let hasher = H::new();
-    engine.sync(db_config, &mut update_receiver, hasher).await
+    engine.sync().await
 }

@@ -396,10 +396,12 @@ where
 ///
 /// This engine handles the common sync logic that can be reused across different
 /// ADB implementations (Any, Immutable, Current).
-pub struct SyncEngine<J, R, V, D, E>
+pub struct SyncEngine<J, R, V, D, E, DB, H>
 where
     J: SyncJournal,
     D: Digest,
+    DB: SyncDatabase<J, D, Error = E>,
+    H: commonware_cryptography::Hasher<Digest = D>,
 {
     /// Tracks outstanding fetch requests and their futures
     pub outstanding_requests: OutstandingRequests<J::Op, D, E>,
@@ -427,9 +429,48 @@ where
 
     /// Verifier for validating proofs and extracting pinned nodes
     pub verifier: V,
+
+    /// Configuration for building the final database
+    pub config: DB::Config,
+
+    /// Optional receiver for target updates during sync
+    pub update_receiver: Option<SyncTargetUpdateReceiver<D>>,
+
+    /// Hasher for computing root digests
+    pub root_hasher: H,
 }
 
-impl<J, R, V, D, E> SyncEngine<J, R, V, D, E>
+/// Configuration for creating a new SyncEngine
+pub struct SyncEngineConfig<J, R, V, D, E, DB, H>
+where
+    J: SyncJournal,
+    R: crate::adb::sync::resolver::Resolver<Digest = D, Op = J::Op>,
+    V: SyncVerifier<J::Op, D>,
+    D: Digest,
+    DB: SyncDatabase<J, D, Error = E>,
+    H: commonware_cryptography::Hasher<Digest = D>,
+{
+    /// The operations journal
+    pub journal: J,
+    /// Network resolver for fetching operations and proofs
+    pub resolver: R,
+    /// Cryptographic verifier for operation proofs
+    pub verifier: V,
+    /// Sync target (root digest and operation bounds)
+    pub target: SyncTarget<D>,
+    /// Maximum number of outstanding requests for operation batches
+    pub max_outstanding_requests: usize,
+    /// Maximum operations to fetch per batch
+    pub fetch_batch_size: NonZeroU64,
+    /// Database-specific configuration
+    pub db_config: DB::Config,
+    /// Channel for receiving sync target updates
+    pub update_receiver: Option<SyncTargetUpdateReceiver<D>>,
+    /// Cryptographic hasher for root verification
+    pub root_hasher: H,
+}
+
+impl<J, R, V, D, E, DB, H> SyncEngine<J, R, V, D, E, DB, H>
 where
     J: SyncJournal<Error = E>,
     J::Op: Clone + Send + 'static,
@@ -437,26 +478,25 @@ where
     V: SyncVerifier<J::Op, D>,
     D: Digest + Clone,
     E: Send + 'static + From<crate::adb::any::sync::Error> + std::fmt::Debug + std::fmt::Display,
+    DB: SyncDatabase<J, D, Error = E>,
+    DB::Config: Clone,
+    H: commonware_cryptography::Hasher<Digest = D> + Clone,
 {
     /// Create a new sync engine with the given configuration
-    pub fn new(
-        journal: J,
-        resolver: R,
-        verifier: V,
-        target: SyncTarget<D>,
-        max_outstanding_requests: usize,
-        fetch_batch_size: NonZeroU64,
-    ) -> Self {
+    pub fn new(config: SyncEngineConfig<J, R, V, D, E, DB, H>) -> Self {
         Self {
             outstanding_requests: OutstandingRequests::new(),
             fetched_operations: BTreeMap::new(),
             pinned_nodes: None,
-            target,
-            max_outstanding_requests,
-            fetch_batch_size,
-            journal,
-            resolver,
-            verifier,
+            target: config.target,
+            max_outstanding_requests: config.max_outstanding_requests,
+            fetch_batch_size: config.fetch_batch_size,
+            journal: config.journal,
+            resolver: config.resolver,
+            verifier: config.verifier,
+            config: config.db_config,
+            update_receiver: config.update_receiver,
+            root_hasher: config.root_hasher,
         }
     }
 
@@ -709,25 +749,20 @@ where
     ///
     /// Returns `StepResult::Complete(database)` when sync is finished, or
     /// `StepResult::Continue(self)` when more work remains.
-    pub async fn step<DB, H>(
-        mut self,
-        config: DB::Config,
-        update_receiver: &mut Option<crate::adb::sync::engine::SyncTargetUpdateReceiver<D>>,
-        mut root_hasher: H,
-    ) -> Result<StepResult<Self, DB>, E>
-    where
-        DB: SyncDatabase<J, D, Error = E>,
-        DB::Config: Clone,
-        H: commonware_cryptography::Hasher<Digest = D>,
-    {
+    pub async fn step(mut self) -> Result<StepResult<Self, DB>, E> {
         // Check if sync is complete
         if self.is_complete().await? {
             // Build the database from the completed sync
-            let database =
-                DB::from_sync_result(config, self.journal, self.pinned_nodes, self.target.clone())
-                    .await?;
+            let database = DB::from_sync_result(
+                self.config.clone(),
+                self.journal,
+                self.pinned_nodes,
+                self.target.clone(),
+            )
+            .await?;
 
             // Verify the final root digest matches the final target
+            let mut root_hasher = self.root_hasher.clone();
             let got_root = database.root(&mut root_hasher);
             let expected_root = self.target.root;
             if got_root != expected_root {
@@ -741,7 +776,7 @@ where
         }
 
         // Wait for the next synchronization event
-        match wait_for_event(update_receiver, &mut self.outstanding_requests)
+        match wait_for_event(&mut self.update_receiver, &mut self.outstanding_requests)
             .await
             .map_err(|sync_err| match sync_err {
                 crate::adb::sync::error::SyncError::SyncStalled => {
@@ -781,7 +816,7 @@ where
                 self.schedule_requests().await?;
             }
             SyncEvent::UpdateChannelClosed => {
-                *update_receiver = None;
+                self.update_receiver = None;
             }
             SyncEvent::BatchReceived(fetch_result) => {
                 // Process the fetch result
@@ -798,27 +833,14 @@ where
         Ok(StepResult::Continue(self))
     }
 
-    /// Run sync to completion, building the final database when done.
+    /// Run sync to completion, returning the final database when done.
     ///
-    /// This method repeatedly calls `step()` until sync is complete, then builds
-    /// the final database using the provided configuration and verifies the root digest.
-    pub async fn sync<DB, H>(
-        mut self,
-        config: DB::Config,
-        update_receiver: &mut Option<SyncTargetUpdateReceiver<D>>,
-        root_hasher: H,
-    ) -> Result<DB, E>
-    where
-        DB: SyncDatabase<J, D, Error = E>,
-        DB::Config: Clone,
-        H: commonware_cryptography::Hasher<Digest = D> + Clone,
-    {
+    /// This method repeatedly calls `step()` until sync is complete. The `step()` method
+    /// handles building the final database and verifying the root digest.
+    pub async fn sync(mut self) -> Result<DB, E> {
         // Run sync loop until completion
         loop {
-            match self
-                .step(config.clone(), update_receiver, root_hasher.clone())
-                .await?
-            {
+            match self.step().await? {
                 StepResult::Continue(new_engine) => self = new_engine,
                 StepResult::Complete(database) => return Ok(database),
             }
