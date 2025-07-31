@@ -89,7 +89,7 @@ pub(crate) mod tests {
             },
             operation::Fixed,
             sync::{
-                engine::{StepResult, SyncJournal, SyncTarget},
+                engine::{StepResult, SyncTarget},
                 resolver::tests::FailResolver,
             },
         },

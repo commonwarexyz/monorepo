@@ -120,83 +120,8 @@ where
     pub apply_batch_size: usize,
 }
 
-/// Wrapper around Journal that converts errors to sync errors
-pub struct JournalWrapper<E, K, V>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: Array,
-{
-    journal: crate::journal::fixed::Journal<E, Fixed<K, V>>,
-    context: E,
-    config: crate::journal::fixed::Config,
-}
-
-impl<E, K, V> crate::adb::sync::engine::SyncJournal for JournalWrapper<E, K, V>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: Array,
-{
-    type Op = Fixed<K, V>;
-    type Error = Error;
-
-    async fn size(&self) -> Result<u64, Self::Error> {
-        self.journal
-            .size()
-            .await
-            .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))
-    }
-
-    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        self.journal
-            .append(op)
-            .await
-            .map(|_| ())
-            .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))
-    }
-
-    async fn resize(&mut self, lower_bound: u64, upper_bound: u64) -> Result<(), Self::Error> {
-        use crate::journal::fixed::Journal;
-
-        let log_size = self
-            .journal
-            .size()
-            .await
-            .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))?;
-
-        if log_size <= lower_bound {
-            // Create new journal first
-            let new_journal = Journal::<E, Fixed<K, V>>::init_sync(
-                self.context.clone().with_label("log"),
-                self.config.clone(),
-                lower_bound,
-                upper_bound,
-            )
-            .await
-            .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))?;
-
-            // Close old journal and replace with new one
-            let old_journal = std::mem::replace(&mut self.journal, new_journal);
-            old_journal
-                .close()
-                .await
-                .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))?;
-        } else {
-            // Prune the journal to the new lower bound
-            self.journal
-                .prune(lower_bound)
-                .await
-                .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))?;
-        }
-
-        Ok(())
-    }
-}
-
 /// Implementation of SyncDatabase for Any database
-impl<E, K, V, H, T> crate::adb::sync::engine::SyncDatabase<JournalWrapper<E, K, V>, H::Digest>
-    for Any<E, K, V, H, T>
+impl<E, K, V, H, T> crate::adb::sync::engine::SyncDatabase for Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -204,18 +129,57 @@ where
     H: Hasher,
     T: Translator,
 {
+    // Core associated types
+    type Op = Fixed<K, V>;
+    type DatabaseError = crate::adb::Error;
+    type Journal = crate::journal::fixed::Journal<E, Fixed<K, V>>;
+    type Verifier = AnyVerifier<E, K, V, H, T>;
+    type Error = crate::adb::sync::error::SyncError<Self::DatabaseError>;
     type Config = AnySyncConfig<E, T>;
-    type Error = Error;
+    type Digest = H::Digest;
+    type Context = E;
+
+    /// Create a journal for syncing with the given bounds
+    fn create_journal(
+        context: Self::Context,
+        config: &Self::Config,
+        lower_bound: u64,
+        upper_bound: u64,
+    ) -> impl std::future::Future<Output = Result<Self::Journal, Self::Error>> {
+        async move {
+            use crate::journal::fixed::{Config as JConfig, Journal};
+
+            let journal_config = JConfig {
+                partition: config.db_config.log_journal_partition.clone(),
+                items_per_blob: config.db_config.log_items_per_blob,
+                write_buffer: config.db_config.log_write_buffer,
+                buffer_pool: config.db_config.buffer_pool.clone(),
+            };
+
+            Journal::<E, Fixed<K, V>>::init_sync(
+                context.with_label("log"),
+                journal_config,
+                lower_bound,
+                upper_bound,
+            )
+            .await
+            .map_err(|e| {
+                crate::adb::sync::error::SyncError::Database(crate::adb::Error::JournalError(e))
+            })
+        }
+    }
+
+    /// Create a verifier for proof validation  
+    fn create_verifier() -> Self::Verifier {
+        AnyVerifier::new(Standard::<H>::new())
+    }
 
     async fn from_sync_result(
         config: Self::Config,
-        journal_wrapper: JournalWrapper<E, K, V>,
-        pinned_nodes: Option<Vec<H::Digest>>,
-        target: crate::adb::sync::engine::SyncTarget<H::Digest>,
+        journal: Self::Journal,
+        pinned_nodes: Option<Vec<Self::Digest>>,
+        target: crate::adb::sync::engine::SyncTarget<Self::Digest>,
     ) -> Result<Self, Self::Error> {
-        // Extract the journal from the wrapper
-        let journal = journal_wrapper.journal;
-
         // Build the complete database from the journal
         let db = Any::init_synced(
             config.context,
@@ -229,16 +193,12 @@ where
             },
         )
         .await
-        .map_err(Error::adb)?;
+        .map_err(|e| crate::adb::sync::error::SyncError::Database(e))?;
 
         Ok(db)
     }
 
-    fn root(
-        &self,
-        _hasher: &mut impl commonware_cryptography::Hasher<Digest = H::Digest>,
-    ) -> H::Digest {
-        // Any database requires its own Standard hasher, so we ignore the passed hasher
+    fn root(&self) -> Self::Digest {
         let mut standard_hasher = Standard::<H>::new();
         Any::root(self, &mut standard_hasher)
     }
@@ -254,18 +214,7 @@ where
 /// Returns a SyncEngine ready to start syncing operations.
 pub async fn new_client<E, K, V, H, T, R>(
     mut config: client::Config<E, K, V, H, T, R>,
-) -> Result<
-    SyncEngine<
-        JournalWrapper<E, K, V>,
-        R,
-        AnyVerifier<E, K, V, H, T>,
-        H::Digest,
-        Error,
-        Any<E, K, V, H, T>,
-        H,
-    >,
-    Error,
->
+) -> Result<SyncEngine<Any<E, K, V, H, T>, R>, Error>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -274,63 +223,27 @@ where
     T: Translator,
     R: Resolver<Digest = H::Digest, Op = Fixed<K, V>>,
 {
-    use crate::journal::fixed::{Config as JConfig, Journal};
-
     // Validate configuration
     config.validate()?;
 
-    // Initialize the operations journal
-    let journal_config = JConfig {
-        partition: config.db_config.log_journal_partition.clone(),
-        items_per_blob: config.db_config.log_items_per_blob,
-        write_buffer: config.db_config.log_write_buffer,
-        buffer_pool: config.db_config.buffer_pool.clone(),
-    };
-
-    let journal = Journal::<E, Fixed<K, V>>::init_sync(
-        config.context.clone().with_label("log"),
-        journal_config.clone(),
-        config.target.lower_bound_ops,
-        config.target.upper_bound_ops,
-    )
-    .await
-    .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))?;
-
-    // Validate journal size
-    let log_size = journal
-        .size()
-        .await
-        .map_err(|e| Error::adb(crate::adb::Error::JournalError(e)))?;
-    assert!(log_size <= config.target.upper_bound_ops + 1);
-
-    // Create a journal wrapper that converts errors to sync errors
-    let wrapped_journal = JournalWrapper {
-        journal,
-        context: config.context.clone(),
-        config: journal_config,
-    };
-
-    // Create verifier
-    let verifier = AnyVerifier::<E, K, V, H, T>::new(config.hasher);
-
-    // Create sync engine
+    // Create sync engine using the simplified configuration
     let db_config = AnySyncConfig::<E, T> {
         context: config.context.clone(),
         db_config: config.db_config.clone(),
         apply_batch_size: config.apply_batch_size,
     };
 
-    Ok(SyncEngine::new(SyncEngineConfig {
-        journal: wrapped_journal,
+    let engine_config = SyncEngineConfig {
+        context: config.context,
         resolver: config.resolver,
-        verifier,
         target: config.target.clone(),
         max_outstanding_requests: config.max_outstanding_requests,
         fetch_batch_size: config.fetch_batch_size,
         db_config,
         update_receiver: config.update_receiver.take(),
-        root_hasher: H::new(),
-    }))
+    };
+
+    SyncEngine::new(engine_config).await
 }
 
 /// Synchronizes a database by fetching, verifying, and applying operations from a remote source.

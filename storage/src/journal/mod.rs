@@ -7,34 +7,55 @@
 
 use thiserror::Error;
 
+use crate::adb::sync::error::SyncError;
+
 pub mod fixed;
 pub mod variable;
 
-// // Implementation of SyncJournal for existing journal types
-// impl<E, A> crate::adb::sync::engine::SyncJournal for fixed::Journal<E, A>
-// where
-//     E: commonware_runtime::Storage + commonware_runtime::Metrics,
-//     A: commonware_codec::Codec<Cfg = ()> + commonware_codec::FixedSize + Send + 'static,
-// {
-//     type Op = A;
-//     type Error = Error;
+impl<E, Op> crate::adb::sync::engine::Journal for fixed::Journal<E, Op>
+where
+    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    Op: commonware_codec::Codec<Cfg = ()> + commonware_codec::FixedSize + Send + 'static,
+{
+    type Op = Op;
+    type Error = SyncError<crate::adb::Error>;
 
-//     async fn size(&self) -> Result<u64, Self::Error> {
-//         fixed::Journal::size(self).await
-//     }
+    async fn size(&self) -> Result<u64, Self::Error> {
+        fixed::Journal::size(self)
+            .await
+            .map_err(|e| SyncError::Database(crate::adb::Error::JournalError(e)))
+    }
 
-//     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-//         fixed::Journal::append(self, op).await.map(|_| ())
-//     }
+    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
+        fixed::Journal::append(self, op)
+            .await
+            .map(|_| ())
+            .map_err(|e| SyncError::Database(crate::adb::Error::JournalError(e)))
+    }
 
-//     async fn reinitialize_for_sync(
-//         &mut self,
-//         _lower_bound: u64,
-//         _upper_bound: u64,
-//     ) -> Result<(), Self::Error> {
-//         Ok(())
-//     }
-// }
+    async fn resize(&mut self, lower_bound: u64, upper_bound: u64) -> Result<(), Self::Error> {
+        let log_size = self
+            .size()
+            .await
+            .map_err(|e| SyncError::Database(crate::adb::Error::JournalError(e)))?;
+
+        if log_size <= lower_bound {
+            // Would need to create new journal first, but we don't have access to context/config here
+            // This is a limitation of implementing SyncJournal directly on Journal
+            // For now, just fail with an appropriate error using InvalidSyncRange from journal errors
+            return Err(SyncError::Database(crate::adb::Error::JournalError(
+                Error::InvalidSyncRange(lower_bound, upper_bound),
+            )));
+        } else {
+            // Prune the journal to the new lower bound
+            self.prune(lower_bound)
+                .await
+                .map_err(|e| SyncError::Database(crate::adb::Error::JournalError(e)))?;
+        }
+
+        Ok(())
+    }
+}
 
 /// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]
