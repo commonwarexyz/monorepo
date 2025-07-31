@@ -24,7 +24,7 @@ use crate::Hasher;
 use blake3::Hash;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_utils::{sequence::Span, hex, Array};
+use commonware_utils::{hex, sequence::Span, Array};
 use rand::{CryptoRng, Rng};
 use std::{
     fmt::{Debug, Display},

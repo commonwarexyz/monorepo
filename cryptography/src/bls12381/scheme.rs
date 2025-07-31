@@ -34,7 +34,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
-use commonware_utils::{sequence::Span, hex, union_unique};
+use commonware_utils::{hex, sequence::Span, union_unique};
 use rand::{CryptoRng, Rng};
 use std::{
     borrow::Cow,

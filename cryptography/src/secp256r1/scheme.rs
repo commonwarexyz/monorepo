@@ -1,7 +1,7 @@
 use crate::{Array, PrivateKeyExt};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_utils::{sequence::Span, hex, union_unique};
+use commonware_utils::{hex, sequence::Span, union_unique};
 use p256::{
     ecdsa::{
         signature::{Signer, Verifier},
