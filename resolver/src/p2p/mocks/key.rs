@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_utils::{sequence::Span, Array};
+use commonware_utils::{Array, Span};
 use std::{fmt, ops::Deref};
 
 /// A key that can be used for testing

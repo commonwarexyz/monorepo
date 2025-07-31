@@ -1,6 +1,6 @@
 //! Resolve data identified by a fixed-length key.
 
-use commonware_utils::sequence::Span;
+use commonware_utils::Span;
 use std::future::Future;
 
 pub mod p2p;

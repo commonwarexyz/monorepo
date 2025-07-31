@@ -1,6 +1,6 @@
 //! A `u64` array type with a prefix byte to allow for multiple key contexts.
 
-use crate::{sequence::Span, Array};
+use crate::{Array, Span};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use std::{

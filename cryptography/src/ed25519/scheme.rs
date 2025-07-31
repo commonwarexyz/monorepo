@@ -1,7 +1,7 @@
 use crate::{Array, BatchVerifier, PrivateKeyExt};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_utils::{hex, sequence::Span, union_unique};
+use commonware_utils::{hex, union_unique, Span};
 use ed25519_consensus::{self, VerificationKey};
 use rand::{CryptoRng, Rng, RngCore};
 use std::{

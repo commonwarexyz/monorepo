@@ -1,4 +1,4 @@
-use crate::{hex, sequence::Span, Array};
+use crate::{hex, Array, Span};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use std::{

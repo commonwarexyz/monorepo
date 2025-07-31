@@ -30,7 +30,7 @@
 
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_utils::sequence::Span;
+use commonware_utils::Span;
 use futures::channel::oneshot;
 use std::future::Future;
 
