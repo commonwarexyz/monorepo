@@ -177,15 +177,19 @@ impl<B: Block> Hash for Request<B> {
 impl<B: Block> Display for Request<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.inner {
-            Subject::Block(commitment) => write!(f, "Block({:?})", commitment),
-            Subject::Finalized { height } => write!(f, "Finalized({:?})", height),
-            Subject::Notarized { view } => write!(f, "Notarized({:?})", view),
+            Subject::Block(commitment) => write!(f, "Block({commitment:?})"),
+            Subject::Finalized { height } => write!(f, "Finalized({height:?})"),
+            Subject::Notarized { view } => write!(f, "Notarized({view:?})"),
         }
     }
 }
 
 impl<B: Block> Debug for Request<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        match &self.inner {
+            Subject::Block(commitment) => write!(f, "Block({commitment:?})"),
+            Subject::Finalized { height } => write!(f, "Finalized({height:?})"),
+            Subject::Notarized { view } => write!(f, "Notarized({view:?})"),
+        }
     }
 }
