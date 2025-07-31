@@ -113,8 +113,21 @@ mod tests {
     const NUM_BLOCKS: u64 = 100;
 
     #[test]
-    fn basic_finalization() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    fn test_basic_finalization() {
+        for seed in 0..5 {
+            let result1 = basic_finalization(seed);
+            let result2 = basic_finalization(seed);
+            // Ensure determinism
+            assert_eq!(result1, result2);
+        }
+    }
+
+    fn basic_finalization(seed: u64) -> String {
+        let runner = deterministic::Runner::new(
+            deterministic::Config::new()
+                .with_seed(seed)
+                .with_timeout(Some(Duration::from_secs(60))),
+        );
         runner.start(|mut context| async move {
             // Initialize network
             let (network, mut oracle) = Network::new(
@@ -233,14 +246,15 @@ mod tests {
 
             // Check that all applications received all blocks.
             assert_eq!(applications.len(), NUM_VALIDATORS as usize);
-            for (i, app) in applications {
+            for (i, app) in &applications {
                 assert!(
                     app.blocks().len() == NUM_BLOCKS as usize,
                     "validator {i} has {:?} blocks",
                     app.blocks().keys().collect::<Vec<_>>(),
                 );
             }
-        });
+            context.auditor().state()
+        })
     }
 
     async fn setup_validator(
