@@ -69,16 +69,14 @@ impl<B: Block> Waiter<B> {
     }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
-enum Request<B: Block> {
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+enum RequestInner<B: Block> {
     Block(B::Commitment),
     Finalization { height: u64 },
     Notarization { view: u64 },
 }
 
-impl<B: Block> Span for Request<B> {}
-
-impl<B: Block> Write for Request<B> {
+impl<B: Block> Write for RequestInner<B> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::Block(commitment) => {
@@ -97,7 +95,7 @@ impl<B: Block> Write for Request<B> {
     }
 }
 
-impl<B: Block> Read for Request<B> {
+impl<B: Block> Read for RequestInner<B> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -115,7 +113,7 @@ impl<B: Block> Read for Request<B> {
     }
 }
 
-impl<B: Block> EncodeSize for Request<B> {
+impl<B: Block> EncodeSize for RequestInner<B> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Block(block) => block.encode_size(),
@@ -125,11 +123,88 @@ impl<B: Block> EncodeSize for Request<B> {
     }
 }
 
+/// A request wrapper that holds the serialized bytes of the inner request.
+#[derive(Clone)]
+pub struct Request<B: Block> {
+    inner: RequestInner<B>,
+    raw: Vec<u8>,
+}
+
+impl<B: Block> Request<B> {
+    /// Create a new request from an inner request.
+    pub fn new(inner: RequestInner<B>) -> Self {
+        let mut raw = Vec::with_capacity(inner.encode_size());
+        inner.write(&mut raw);
+        Self { inner, raw }
+    }
+
+    /// Create a request for a block.
+    pub fn block(commitment: B::Commitment) -> Self {
+        Self::new(RequestInner::Block(commitment))
+    }
+
+    /// Create a request for a finalization.
+    pub fn finalization(height: u64) -> Self {
+        Self::new(RequestInner::Finalization { height })
+    }
+
+    /// Create a request for a notarization.
+    pub fn notarization(view: u64) -> Self {
+        Self::new(RequestInner::Notarization { view })
+    }
+
+    /// Get the inner request.
+    pub fn inner(&self) -> &RequestInner<B> {
+        &self.inner
+    }
+}
+
+impl<B: Block> Span for Request<B> {}
+
+impl<B: Block> Write for Request<B> {
+    fn write(&self, buf: &mut impl BufMut) {
+        buf.put_slice(&self.raw);
+    }
+}
+
+impl<B: Block> Read for Request<B> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let inner = RequestInner::read_cfg(buf, &())?;
+        Ok(Self::new(inner))
+    }
+}
+
+impl<B: Block> EncodeSize for Request<B> {
+    fn encode_size(&self) -> usize {
+        self.raw.len()
+    }
+}
+
+impl<B: Block> PartialEq for Request<B> {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+
+impl<B: Block> Eq for Request<B> {}
+
+impl<B: Block> Ord for Request<B> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+
+impl<B: Block> PartialOrd for Request<B> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl<B: Block> AsRef<[u8]> for Request<B> {
     fn as_ref(&self) -> &[u8] {
-        let mut buf = Vec::new();
-        self.write(&mut buf);
-        buf.as_slice()
+        &self.raw
     }
 }
 
@@ -137,7 +212,7 @@ impl<B: Block> Deref for Request<B> {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
-        self.as_ref()
+        &self.raw
     }
 }
 
@@ -147,19 +222,19 @@ impl<B: Block> Debug for Request<B> {
     }
 }
 
-impl<B: Block> Display for Request<B> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Block(commitment) => write!(f, "Block({})", commitment),
-            Self::Finalization { height } => write!(f, "Finalization({})", height),
-            Self::Notarization { view } => write!(f, "Notarization({})", view),
-        }
+impl<B: Block> Hash for Request<B> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
     }
 }
 
-impl<B: Block> Hash for Request<B> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.as_ref().hash(state);
+impl<B: Block> Display for Request<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.inner {
+            RequestInner::Block(commitment) => write!(f, "Block({})", commitment),
+            RequestInner::Finalization { height } => write!(f, "Finalization({})", height),
+            RequestInner::Notarization { view } => write!(f, "Notarization({})", view),
+        }
     }
 }
 
