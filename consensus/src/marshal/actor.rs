@@ -584,120 +584,76 @@ impl<
                                 }
                             }
                         },
-                        handler::Message::Deliver { key: commitment, value, response } => {
-                            // Parse block
-                            let Ok(block) = B::decode_cfg(value.as_ref(), &self.codec_config) else {
-                                let _ = response.send(false);
-                                continue;
-                            };
-
-                            // Validation
-                            if block.commitment() != commitment {
-                                let _ = response.send(false);
-                                continue;
-                            }
-
-                            // Persist the block, also persisting the finalization if we have it
-                            let height = block.height();
-                            if let Some(finalization) = self.get_finalization_from_view(Identifier::Key(&commitment)).await {
-                                self.put_finalization_and_finalized_block(height, commitment, finalization, block, &mut notifier_tx).await;
-                            } else {
-                                self.put_finalized_block(height, commitment, block, &mut notifier_tx).await;
-                            }
-                            debug!(?commitment, height, "received block");
-                            let _ = response.send(true);
-                        }
-                    }
-                },
-                message = finalization_resolver_by_height_rx.next() => {
-                    let Some(message) = message else {
-                        info!("handler closed, shutting down");
-                        return;
-                    };
-                    match message {
-                        handler::Message::Produce { key, response } => {
-                            let height = key.to_u64();
-                            // Get finalization
-                            let Some(finalization) = self.get_finalization_by_height(Identifier::Index(height)).await else {
-                                debug!(height, "finalization missing on request");
-                                continue;
-                            };
-
-                            // Get block
-                            let Some(block) = self.get_finalized_block(Identifier::Index(height)).await else {
-                                debug!(height, "finalized block missing on request");
-                                continue;
-                            };
-
-                            // Send finalization
-                            let _ = response.send((finalization, block).encode().into());
-                        },
                         handler::Message::Deliver { key, value, response } => {
-                            let height = key.to_u64();
-                            // Parse finalization
-                            let Ok((finalization, block)) = <(Finalization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
-                                let _ = response.send(false);
-                                continue;
-                            };
+                            match key.subject() {
+                                Subject::Block(commitment) => {
+                                    // Parse block
+                                    let Ok(block) = B::decode_cfg(value.as_ref(), &self.codec_config) else {
+                                        let _ = response.send(false);
+                                        continue;
+                                    };
 
-                            // Validation
-                            if block.height() != height
-                                || finalization.proposal.payload != block.commitment()
-                                || !finalization.verify(&self.namespace, &self.identity)
-                            {
-                                let _ = response.send(false);
-                                continue;
+                                    // Validation
+                                    if block.commitment() != commitment {
+                                        let _ = response.send(false);
+                                        continue;
+                                    }
+
+                                    // Persist the block, also persisting the finalization if we have it
+                                    let height = block.height();
+                                    if let Some(finalization) = self.get_finalization_from_view(Identifier::Key(&commitment)).await {
+                                        self.put_finalization_and_finalized_block(height, commitment, finalization, block, &mut notifier_tx).await;
+                                    } else {
+                                        self.put_finalized_block(height, commitment, block, &mut notifier_tx).await;
+                                    }
+                                    debug!(?commitment, height, "received block");
+                                    let _ = response.send(true);
+                                },
+                                Subject::Finalized { height } => {
+                                    // Parse finalization
+                                    let Ok((finalization, block)) = <(Finalization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
+                                        let _ = response.send(false);
+                                        continue;
+                                    };
+
+                                    // Validation
+                                    if block.height() != height
+                                        || finalization.proposal.payload != block.commitment()
+                                        || !finalization.verify(&self.namespace, &self.identity)
+                                    {
+                                        let _ = response.send(false);
+                                        continue;
+                                    }
+
+                                    // Valid finalization received
+                                    debug!(height, "received finalization");
+                                    let _ = response.send(true);
+                                    self.put_finalization_and_finalized_block(height, block.commitment(), finalization, block, &mut notifier_tx).await;
+                                },
+                                Subject::Notarized { view } => {
+                                    // Parse notarization
+                                    let Ok((notarization, block)) = <(Notarization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
+                                        let _ = response.send(false);
+                                        continue;
+                                    };
+
+                                    // Validation
+                                    if notarization.proposal.view != view
+                                        || notarization.proposal.payload != block.commitment()
+                                        || !notarization.verify(&self.namespace, &self.identity)
+                                    {
+                                        let _ = response.send(false);
+                                        continue;
+                                    }
+
+                                    // Valid notarization received
+                                    let commitment = block.commitment();
+                                    debug!(view, ?commitment, "received notarization");
+                                    self.put_notarized_block(view, commitment, block).await;
+                                    self.put_notarization_by_view(view, commitment, notarization).await;
+                                    let _ = response.send(true);
+                                },
                             }
-
-                            // Valid finalization received
-                            debug!(height, "received finalization");
-                            let _ = response.send(true);
-                            self.put_finalization_and_finalized_block(height, block.commitment(), finalization, block, &mut notifier_tx).await;
-                        },
-                    }
-                },
-                message = notarization_resolver_by_view_rx.next() => {
-                    let Some(message) = message else {
-                        info!("handler closed, shutting down");
-                        return;
-                    };
-                    match message {
-                        handler::Message::Produce { key, response } => {
-                            let view = key.to_u64();
-                            let Some(notarization) = self.get_notarization_by_view(Identifier::Index(view)).await else {
-                                debug!(view, "notarization missing on request");
-                                continue;
-                            };
-                            let commitment = notarization.proposal.payload;
-                            let Some(block) = self.find_block(&mut buffer, commitment).await else {
-                                debug!(?commitment, "block missing on request");
-                                continue;
-                            };
-                            let _ = response.send((notarization, block).encode().into());
-                        },
-                        handler::Message::Deliver { key, value, response } => {
-                            let view = key.to_u64();
-                            // Parse notarization
-                            let Ok((notarization, block)) = <(Notarization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
-                                let _ = response.send(false);
-                                continue;
-                            };
-
-                            // Validation
-                            if notarization.proposal.view != view
-                                || notarization.proposal.payload != block.commitment()
-                                || !notarization.verify(&self.namespace, &self.identity)
-                            {
-                                let _ = response.send(false);
-                                continue;
-                            }
-
-                            // Valid notarization received
-                            let commitment = block.commitment();
-                            debug!(view, ?commitment, "received notarization");
-                            self.put_notarized_block(view, commitment, block).await;
-                            self.put_notarization_by_view(view, commitment, notarization).await;
-                            let _ = response.send(true);
                         },
                     }
                 },
