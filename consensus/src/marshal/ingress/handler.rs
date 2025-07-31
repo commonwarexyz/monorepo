@@ -61,7 +61,7 @@ impl<K: Array> Consumer for Handler<K> {
             .await
             .is_err()
         {
-            error!("Failed to send deliver message to actor: receiver dropped");
+            error!("failed to send deliver message to actor: receiver dropped");
             return false;
         }
         receiver.await.unwrap_or(false)
@@ -83,7 +83,7 @@ impl<K: Array> Producer for Handler<K> {
             .await
             .is_err()
         {
-            error!("Failed to send produce message to actor: receiver dropped");
+            error!("failed to send produce message to actor: receiver dropped");
         }
         receiver
     }

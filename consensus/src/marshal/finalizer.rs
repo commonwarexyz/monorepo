@@ -47,7 +47,7 @@ impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>
             },
         )
         .await
-        .expect("Failed to initialize metadata");
+        .expect("failed to initialize metadata");
 
         Self {
             application,
@@ -86,7 +86,7 @@ impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>
                 // Record that we have processed up through this height.
                 latest = height;
                 if let Err(e) = self.metadata.put_sync(LATEST_KEY.clone(), latest).await {
-                    error!("Failed to update metadata: {e}");
+                    error!("failed to update metadata: {e}");
                     return;
                 }
 

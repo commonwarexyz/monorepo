@@ -83,7 +83,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
             .await
             .is_err()
         {
-            error!("Failed to send get message to actor: receiver dropped");
+            error!("failed to send get message to actor: receiver dropped");
         }
         rx
     }
@@ -113,7 +113,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
             .await
             .is_err()
         {
-            error!("Failed to send subscribe message to actor: receiver dropped");
+            error!("failed to send subscribe message to actor: receiver dropped");
         }
         rx
     }
@@ -126,7 +126,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
             .await
             .is_err()
         {
-            error!("Failed to send broadcast message to actor: receiver dropped");
+            error!("failed to send broadcast message to actor: receiver dropped");
         }
     }
 
@@ -138,7 +138,7 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
             .await
             .is_err()
         {
-            error!("Failed to send verified message to actor: receiver dropped");
+            error!("failed to send verified message to actor: receiver dropped");
         }
     }
 }
@@ -156,7 +156,7 @@ impl<V: Variant, B: Block> Reporter for Mailbox<V, B> {
             }
         };
         if self.sender.send(message).await.is_err() {
-            error!("Failed to report activity to actor: receiver dropped");
+            error!("failed to report activity to actor: receiver dropped");
         }
     }
 }

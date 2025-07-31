@@ -174,7 +174,7 @@ impl<
             },
         )
         .await
-        .expect("Failed to initialize verified blocks archive");
+        .expect("failed to initialize verified blocks archive");
         info!(elapsed = ?start.elapsed(), "restored verified blocks archive");
 
         // Initialize notarized blocks
@@ -192,7 +192,7 @@ impl<
             },
         )
         .await
-        .expect("Failed to initialize notarized blocks archive");
+        .expect("failed to initialize notarized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored notarized blocks archive");
 
         // Initialize finalizations by view
@@ -210,7 +210,7 @@ impl<
             },
         )
         .await
-        .expect("Failed to initialize finalizations by view archive");
+        .expect("failed to initialize finalizations by view archive");
         info!(elapsed = ?start.elapsed(), "restored finalizations by view archive");
 
         // Initialize finalizations by height
@@ -246,7 +246,7 @@ impl<
             },
         )
         .await
-        .expect("Failed to initialize finalizations by height archive");
+        .expect("failed to initialize finalizations by height archive");
         info!(elapsed = ?start.elapsed(), "restored finalizations by height archive");
 
         // Initialize finalized blocks
@@ -279,7 +279,7 @@ impl<
             },
         )
         .await
-        .expect("Failed to initialize finalized blocks archive");
+        .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
         // Create metrics
@@ -412,7 +412,7 @@ impl<
                 // Handle consensus before finalizer or backfiller
                 mailbox_message = self.mailbox.next() => {
                     let Some(message) = mailbox_message else {
-                        info!("Mailbox closed, shutting down");
+                        info!("mailbox closed, shutting down");
                         return;
                     };
                     match message {
@@ -511,7 +511,7 @@ impl<
                 // Handle finalizer messages next
                 message = orchestrator_receiver.next() => {
                     let Some(message) = message else {
-                        info!("Orchestrator closed, shutting down");
+                        info!("orchestrator closed, shutting down");
                         return;
                     };
                     match message {
@@ -540,7 +540,7 @@ impl<
                                     self.finalizations_by_view.prune(min_view),
                                 ) {
                                     Ok(_) => debug!(min_view, "pruned archives"),
-                                    Err(e) => panic!("Failed to prune archives: {e}"),
+                                    Err(e) => panic!("failed to prune archives: {e}"),
                                 }
 
                                 // Update the last processed height and view
@@ -558,7 +558,7 @@ impl<
                             // Attempt to repair the gap backwards from the end of the gap, using
                             // blocks from our local storage.
                             let Some(mut cursor) = self.get_finalized_block(Identifier::Index(gap_end)).await else {
-                                panic!("Gapped block missing that should exist: {gap_end}");
+                                panic!("gapped block missing that should exist: {gap_end}");
                             };
 
                             // Iterate backwards, repairing blocks as we go.
@@ -590,7 +590,7 @@ impl<
                 // Handle resolver messages last
                 message = block_resolver_by_digest_rx.next() => {
                     let Some(message) = message else {
-                        info!("Handler closed, shutting down");
+                        info!("handler closed, shutting down");
                         return;
                     };
                     match message {
@@ -629,7 +629,7 @@ impl<
                 },
                 message = finalization_resolver_by_height_rx.next() => {
                     let Some(message) = message else {
-                        info!("Handler closed, shutting down");
+                        info!("handler closed, shutting down");
                         return;
                     };
                     match message {
@@ -676,7 +676,7 @@ impl<
                 },
                 message = notarization_resolver_by_view_rx.next() => {
                     let Some(message) = message else {
-                        info!("Handler closed, shutting down");
+                        info!("handler closed, shutting down");
                         return;
                     };
                     match message {
@@ -772,7 +772,7 @@ impl<
                 debug!(view, "verified already pruned");
             }
             Err(e) => {
-                panic!("Failed to insert verified block: {e}");
+                panic!("failed to insert verified block: {e}");
             }
         }
     }
@@ -796,7 +796,7 @@ impl<
                 debug!(view, "finalization by view already pruned");
             }
             Err(e) => {
-                panic!("Failed to insert finalization by view: {e}");
+                panic!("failed to insert finalization by view: {e}");
             }
         }
     }
@@ -823,7 +823,7 @@ impl<
                 debug!(view, "notarized already pruned");
             }
             Err(e) => {
-                panic!("Failed to insert notarization: {e}");
+                panic!("failed to insert notarization: {e}");
             }
         }
     }
@@ -846,7 +846,7 @@ impl<
             .put_sync(height, commitment, block)
             .await
         {
-            panic!("Failed to insert block: {e}");
+            panic!("failed to insert block: {e}");
         }
         let _ = notifier.try_send(());
     }
@@ -867,7 +867,7 @@ impl<
                 .put_sync(height, commitment, finalization),
             self.finalized_blocks.put_sync(height, commitment, block),
         ) {
-            panic!("Failed to insert finalization: {e}");
+            panic!("failed to insert finalization: {e}");
         }
         let _ = notifier.try_send(());
     }
@@ -928,7 +928,7 @@ impl<
     async fn get_finalized_block(&self, id: Identifier<'_, B::Commitment>) -> Option<B> {
         match self.finalized_blocks.get(id).await {
             Ok(block) => block,
-            Err(e) => panic!("Failed to get block: {e}"),
+            Err(e) => panic!("failed to get block: {e}"),
         }
     }
 
@@ -939,7 +939,7 @@ impl<
     ) -> Option<Finalization<V, B::Commitment>> {
         match self.finalizations_by_height.get(id).await {
             Ok(finalization) => finalization,
-            Err(e) => panic!("Failed to get finalization: {e}"),
+            Err(e) => panic!("failed to get finalization: {e}"),
         }
     }
 
@@ -950,7 +950,7 @@ impl<
     ) -> Option<Finalization<V, B::Commitment>> {
         match self.finalizations_by_view.get(id).await {
             Ok(finalization) => finalization,
-            Err(e) => panic!("Failed to get finalization by view: {e}"),
+            Err(e) => panic!("failed to get finalization by view: {e}"),
         }
     }
 
@@ -958,7 +958,7 @@ impl<
     async fn get_verified_block(&self, id: Identifier<'_, B::Commitment>) -> Option<B> {
         match self.verified_blocks.get(id).await {
             Ok(verified) => verified,
-            Err(e) => panic!("Failed to get verified block: {e}"),
+            Err(e) => panic!("failed to get verified block: {e}"),
         }
     }
 
@@ -969,7 +969,7 @@ impl<
     ) -> Option<(Notarization<V, B::Commitment>, B)> {
         match self.notarized_blocks.get(id).await {
             Ok(notarization) => notarization,
-            Err(e) => panic!("Failed to get notarization: {e}"),
+            Err(e) => panic!("failed to get notarization: {e}"),
         }
     }
 }

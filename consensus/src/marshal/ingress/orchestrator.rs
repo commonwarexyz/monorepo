@@ -55,7 +55,7 @@ impl<B: Block> Orchestrator<B> {
             .await
             .is_err()
         {
-            error!("Failed to send get message to actor: receiver dropped");
+            error!("failed to send get message to actor: receiver dropped");
             return None;
         }
         receiver.await.unwrap_or(None)
@@ -69,7 +69,7 @@ impl<B: Block> Orchestrator<B> {
             .await
             .is_err()
         {
-            error!("Failed to send processed message to actor: receiver dropped");
+            error!("failed to send processed message to actor: receiver dropped");
         }
     }
 
@@ -81,7 +81,7 @@ impl<B: Block> Orchestrator<B> {
             .await
             .is_err()
         {
-            error!("Failed to send repair message to actor: receiver dropped");
+            error!("failed to send repair message to actor: receiver dropped");
         }
     }
 }
