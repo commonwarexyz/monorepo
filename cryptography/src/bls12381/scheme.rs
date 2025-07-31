@@ -34,7 +34,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
-use commonware_utils::{hex, union_unique};
+use commonware_utils::{array::VarArray, hex, union_unique};
 use rand::{CryptoRng, Rng};
 use std::{
     borrow::Cow,
@@ -73,6 +73,8 @@ impl Read for PrivateKey {
 impl FixedSize for PrivateKey {
     const SIZE: usize = group::PRIVATE_KEY_LENGTH;
 }
+
+impl VarArray for PrivateKey {}
 
 impl Array for PrivateKey {}
 
@@ -200,6 +202,8 @@ impl FixedSize for PublicKey {
     const SIZE: usize = <MinPk as Variant>::Public::SIZE;
 }
 
+impl VarArray for PublicKey {}
+
 impl Array for PublicKey {}
 
 impl Hash for PublicKey {
@@ -287,6 +291,8 @@ impl Read for Signature {
 impl FixedSize for Signature {
     const SIZE: usize = <MinPk as Variant>::Signature::SIZE;
 }
+
+impl VarArray for Signature {}
 
 impl Array for Signature {}
 

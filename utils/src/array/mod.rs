@@ -32,7 +32,7 @@ pub enum Error<E: StdError + Send + Sync + 'static> {
 /// to be well-formed (which prevents duplicate validation).
 ///
 /// If a byte sequencer is not properly formatted, `TryFrom` must return an error.
-pub trait Array:
+pub trait VarArray:
     Clone
     + Send
     + Sync
@@ -47,6 +47,7 @@ pub trait Array:
     + AsRef<[u8]>
     + Deref<Target = [u8]>
     + Decode<Cfg = ()>
-    + EncodeFixed
 {
 }
+
+pub trait Array: VarArray + EncodeFixed {}

@@ -1,4 +1,4 @@
-use crate::Array;
+use crate::{array::VarArray, Array};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use std::{
@@ -48,6 +48,8 @@ impl Read for U64 {
 impl FixedSize for U64 {
     const SIZE: usize = u64::SIZE;
 }
+
+impl VarArray for U64 {}
 
 impl Array for U64 {}
 
