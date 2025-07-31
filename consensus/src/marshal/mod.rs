@@ -1,4 +1,4 @@
-//! Ordered notification of finalized blocks.
+//! Ordered delivery of finalized blocks.
 //!
 //! # Architecture
 //!
@@ -10,13 +10,18 @@
 //! - Providing a backfill mechanism for missing blocks
 //!
 //! The actor interacts with four main components:
-//! - [crate::Reporter]: Receives ordered, finalized blocks
+//! - [crate::Reporter]: Receives ordered, finalized blocks at-least-once
 //! - [crate::threshold_simplex]: Provides consensus messages
 //! - Application: Provides verified blocks
 //! - [commonware_broadcast::buffered]: Provides uncertified blocks received from the network
 //! - [commonware_resolver::p2p]: Provides a backfill mechanism for missing blocks
 //!
-//! # Design Decisions
+//! # Design
+//!
+//! ## Delivery
+//!
+//! The actor will deliver a block to the reporter at-least-once. The reporter should be prepared to
+//! handle duplicate deliveries. However the blocks will be in order.
 //!
 //! ## Finalization
 //!

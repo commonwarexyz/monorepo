@@ -104,7 +104,10 @@ impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = B>
 
             // Wait for a notification from the orchestrator that new blocks are available.
             debug!(height, "waiting to index finalized block");
-            let _ = self.notifier_rx.next().await;
+            let Some(()) = self.notifier_rx.next().await else {
+                error!("orchestrator closed, shutting down");
+                return;
+            };
         }
     }
 }
