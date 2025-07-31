@@ -25,13 +25,13 @@ pub enum Error<E: StdError + Send + Sync + 'static> {
     Other(E),
 }
 
-/// Types that can be fallibly read from a fixed-size byte sequence.
+/// Types that can be read from a variable-size byte sequence.
 ///
-/// `Array` is typically used to parse things like `PublicKeys` and `Signatures`
-/// from an untrusted network connection. Once parsed, these types are assumed
-/// to be well-formed (which prevents duplicate validation).
+/// `VarArray` is typically used to parse things like `Requests` from an untrusted
+/// network connection. Once parsed, these types are assumed to be well-formed
+/// (which prevents duplicate validation).
 ///
-/// If a byte sequencer is not properly formatted, `TryFrom` must return an error.
+/// If a byte sequence is not properly formatted, `TryFrom` must return an error.
 pub trait VarArray:
     Clone
     + Send
@@ -51,4 +51,11 @@ pub trait VarArray:
 {
 }
 
+/// Types that can be fallibly read from a fixed-size byte sequence.
+///
+/// `Array` is typically used to parse things like `PublicKeys` and `Signatures`
+/// from an untrusted network connection. Once parsed, these types are assumed
+/// to be well-formed (which prevents duplicate validation).
+///
+/// If a byte sequence is not properly formatted, `TryFrom` must return an error.
 pub trait Array: VarArray + EncodeFixed {}
