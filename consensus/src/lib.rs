@@ -41,7 +41,8 @@ cfg_if::cfg_if! {
         use std::future::Future;
 
         pub mod marshal;
-        pub mod reporter;
+        mod reporter;
+        pub use reporter::*;
 
         /// Histogram buckets for measuring consensus latency.
         const LATENCY: [f64; 36] = [

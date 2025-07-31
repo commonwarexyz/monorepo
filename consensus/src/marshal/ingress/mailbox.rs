@@ -13,7 +13,7 @@ use tracing::error;
 ///
 /// These messages are sent from the consensus engine and other parts of the
 /// system to drive the state of the marshal.
-pub enum Message<V: Variant, B: Block> {
+pub(crate) enum Message<V: Variant, B: Block> {
     // -------------------- Application Messages --------------------
     /// A request to retrieve a block by its digest.
     Get {
@@ -66,7 +66,7 @@ pub struct Mailbox<V: Variant, B: Block> {
 
 impl<V: Variant, B: Block> Mailbox<V, B> {
     /// Creates a new mailbox.
-    pub fn new(sender: mpsc::Sender<Message<V, B>>) -> Self {
+    pub(crate) fn new(sender: mpsc::Sender<Message<V, B>>) -> Self {
         Self { sender }
     }
 

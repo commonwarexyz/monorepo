@@ -56,9 +56,13 @@
 //!   uncertified blocks from the network.
 
 pub mod actor;
+pub use actor::Actor;
 pub mod config;
+pub use config::Config;
 pub mod finalizer;
+pub use finalizer::Finalizer;
 pub mod ingress;
+pub use ingress::mailbox::Mailbox;
 
 #[cfg(test)]
 pub mod mocks;
