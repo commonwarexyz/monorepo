@@ -97,6 +97,7 @@ mod tests {
         sha256::{self, Digest as Sha256Digest},
         Digestible, PrivateKeyExt as _, Signer as _,
     };
+    use commonware_macros::test_traced;
     use commonware_p2p::simulated::{self, Link, Network, Oracle};
     use commonware_resolver::p2p as resolver;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
@@ -119,7 +120,7 @@ mod tests {
     const QUORUM: u32 = 3;
     const NUM_BLOCKS: u64 = 100;
 
-    #[test]
+    #[test_traced]
     fn test_basic_finalization() {
         for seed in 0..5 {
             let result1 = basic_finalization(seed);
