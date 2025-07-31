@@ -16,17 +16,14 @@ pub enum Subject<B: Block> {
 }
 
 impl<B: Block> Subject<B> {
-    pub fn predicate(&self) -> impl Fn(&Self) -> bool + Send + 'static {
-        match self {
-            Self::Block(_) => |_| unreachable!("we should never prune by block"),
-            Self::Finalized { height } => |s| match s {
-                Self::Finalized { height: h } => h > *height,
-                _ => true,
-            },
-            Self::Notarized { view } => |s| match s {
-                Self::Notarized { view: v } => v > *view,
-                _ => true,
-            },
+    pub fn predicate(&self) -> impl Fn(&Request<B>) -> bool + Send + 'static {
+        let cloned = self.clone();
+        move |r| match (&cloned, &r.inner) {
+            (Self::Block(_), _) => unreachable!("we should never prune by block"),
+            (Self::Finalized { height }, Self::Finalized { height: h }) => h > height,
+            (Self::Finalized { .. }, _) => true,
+            (Self::Notarized { view }, Self::Notarized { view: v }) => v > view,
+            (Self::Notarized { .. }, _) => true,
         }
     }
 }

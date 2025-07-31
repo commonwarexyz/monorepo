@@ -406,7 +406,7 @@ impl<
                                 self.finalized_height.set(height as i64);
 
                                 // Cancel useless requests
-                                resolver.retain(move|k| k > &view.into()).await;
+                                resolver.retain(Subject::<B>::Notarized { view }.predicate()).await;
                             } else {
                                 // Otherwise, fetch the block from the network
                                 debug!(view, ?commitment, "finalized block missing");
@@ -471,7 +471,7 @@ impl<
 
                             // Cancel any outstanding requests (by height and by digest)
                             resolver.cancel(Request::block(digest)).await;
-                            resolver.retain(move |k| k > &height.into()).await;
+                            resolver.retain(Subject::<B>::Finalized { height }.predicate()).await;
 
                             // If finalization exists, prune the archives
                             if let Some(finalization) = self.get_finalization_by_height(Identifier::Index(height)).await {
