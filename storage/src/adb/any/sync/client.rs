@@ -888,8 +888,6 @@ pub(crate) mod tests {
         });
     }
 
-    // COMMENTED OUT - test_target_update_invalid_bounds
-    /*
     #[test_traced("WARN")]
     fn test_target_update_invalid_bounds() {
         let executor = deterministic::Runner::default();
@@ -924,18 +922,18 @@ pub(crate) mod tests {
                 max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
             };
-            let client = Client::new(config).await.unwrap();
 
             // Send target update with invalid bounds (lower > upper)
-            let _ = update_sender
+            update_sender
                 .send(SyncTarget {
                     root: initial_root,
                     lower_bound_ops: initial_upper_bound, // Greater than upper bound
                     upper_bound_ops: initial_lower_bound, // Less than lower bound
                 })
-                .await;
+                .await
+                .unwrap();
 
-            let result = client.step().await;
+            let result = sync(config).await;
             assert!(matches!(result, Err(Error::InvalidTarget { .. })));
 
             Arc::try_unwrap(target_db)
@@ -946,10 +944,7 @@ pub(crate) mod tests {
                 .unwrap();
         });
     }
-    */
 
-    // COMMENTED OUT - test_target_update_on_done_client
-    /*
     /// Test that target updates can be sent even after the client is done
     #[test_traced("WARN")]
     fn test_target_update_on_done_client() {
@@ -987,14 +982,12 @@ pub(crate) mod tests {
             };
 
             // Complete the sync
-            let client = Client::new(config).await.unwrap();
-            let synced_db = client.sync().await.unwrap();
+            let synced_db = sync(config).await.unwrap();
 
             // Attempt to apply a target update after sync is complete to verify
             // we don't panic
             let _ = update_sender
                 .send(SyncTarget {
-                    // Dummy target update
                     root: Digest::from([2u8; 32]),
                     lower_bound_ops: lower_bound + 1,
                     upper_bound_ops: upper_bound + 1,
@@ -1016,7 +1009,4 @@ pub(crate) mod tests {
                 .unwrap();
         });
     }
-    */
-
-    // Add rest of tests here...
 }
