@@ -20,21 +20,7 @@ pub mod client;
 /// Channel for sending sync target updates
 pub type SyncTargetUpdateSender<D> = mpsc::Sender<SyncTarget<D>>;
 
-/// Synchronization errors for Any database sync
-pub type Error = crate::adb::sync::error::SyncError<crate::adb::Error>;
-
-/// Helper functions for Any sync error conversion
-impl Error {
-    /// Create a database error from an ADB error
-    pub fn adb(err: crate::adb::Error) -> Self {
-        Self::Database(err)
-    }
-
-    /// Create a pinned nodes error from an MMR error
-    pub fn pinned_nodes_mmr(err: crate::mmr::Error) -> Self {
-        Self::PinnedNodes(err.to_string())
-    }
-}
+pub type Error = crate::adb::Error;
 
 /// Verifier for Any database operations using the database's built-in proof verification
 pub struct AnyVerifier<E, K, V, H, T>
@@ -131,42 +117,37 @@ where
 {
     // Core associated types
     type Op = Fixed<K, V>;
-    type DatabaseError = crate::adb::Error;
     type Journal = crate::journal::fixed::Journal<E, Fixed<K, V>>;
     type Verifier = AnyVerifier<E, K, V, H, T>;
-    type Error = crate::adb::sync::error::SyncError<Self::DatabaseError>;
+    type Error = crate::adb::Error;
     type Config = AnySyncConfig<E, T>;
     type Digest = H::Digest;
     type Context = E;
 
     /// Create a journal for syncing with the given bounds
-    fn create_journal(
+    async fn create_journal(
         context: Self::Context,
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> impl std::future::Future<Output = Result<Self::Journal, Self::Error>> {
-        async move {
-            use crate::journal::fixed::{Config as JConfig, Journal};
+    ) -> Result<Self::Journal, Self::Error> {
+        use crate::journal::fixed::{Config as JConfig, Journal};
 
-            let journal_config = JConfig {
-                partition: config.db_config.log_journal_partition.clone(),
-                items_per_blob: config.db_config.log_items_per_blob,
-                write_buffer: config.db_config.log_write_buffer,
-                buffer_pool: config.db_config.buffer_pool.clone(),
-            };
+        let journal_config = JConfig {
+            partition: config.db_config.log_journal_partition.clone(),
+            items_per_blob: config.db_config.log_items_per_blob,
+            write_buffer: config.db_config.log_write_buffer,
+            buffer_pool: config.db_config.buffer_pool.clone(),
+        };
 
-            Journal::<E, Fixed<K, V>>::init_sync(
-                context.with_label("log"),
-                journal_config,
-                lower_bound,
-                upper_bound,
-            )
-            .await
-            .map_err(|e| {
-                crate::adb::sync::error::SyncError::Database(crate::adb::Error::JournalError(e))
-            })
-        }
+        Journal::<E, Fixed<K, V>>::init_sync(
+            context.with_label("log"),
+            journal_config,
+            lower_bound,
+            upper_bound,
+        )
+        .await
+        .map_err(crate::adb::Error::from)
     }
 
     /// Create a verifier for proof validation  
@@ -192,8 +173,7 @@ where
                 apply_batch_size: config.apply_batch_size,
             },
         )
-        .await
-        .map_err(|e| crate::adb::sync::error::SyncError::Database(e))?;
+        .await?;
 
         Ok(db)
     }
@@ -214,7 +194,7 @@ where
 /// Returns a SyncEngine ready to start syncing operations.
 pub async fn new_client<E, K, V, H, T, R>(
     mut config: client::Config<E, K, V, H, T, R>,
-) -> Result<SyncEngine<Any<E, K, V, H, T>, R>, Error>
+) -> Result<SyncEngine<Any<E, K, V, H, T>, R>, crate::adb::sync::error::SyncError<Error>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -256,7 +236,7 @@ where
 /// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
 pub async fn sync<E, K, V, H, T, R>(
     config: client::Config<E, K, V, H, T, R>,
-) -> Result<Any<E, K, V, H, T>, Error>
+) -> Result<Any<E, K, V, H, T>, crate::adb::sync::error::SyncError<Error>>
 where
     E: Storage + Clock + Metrics,
     K: Array,

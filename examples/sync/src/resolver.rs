@@ -7,12 +7,15 @@ use crate::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
-use commonware_storage::adb::{
-    any::sync::Error as SyncError,
-    sync::{
-        engine::{FetchResult, SyncTarget},
-        resolver::Resolver as ResolverTrait,
+use commonware_storage::{
+    adb::{
+        any::sync::Error as SyncError,
+        sync::{
+            engine::{FetchResult, SyncTarget},
+            resolver::Resolver as ResolverTrait,
+        },
     },
+    journal,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::{
@@ -225,6 +228,7 @@ where
         + commonware_runtime::Clock
         + Clone,
 {
+    // TODO should we have an associated type for the error type?
     type Digest = Digest;
     type Op = crate::Operation;
 
@@ -245,7 +249,8 @@ where
 
         let response = self
             .send_request(Message::GetOperationsRequest(request))
-            .await?;
+            .await
+            .map_err(|_e| SyncError::JournalError(journal::Error::InvalidSyncRange(0, 0)))?;
 
         match response {
             Message::GetOperationsResponse(response) => {
@@ -256,11 +261,13 @@ where
                     success_tx,
                 })
             }
-            Message::Error(err) => Err(SyncError::from(Error::ServerError {
-                code: err.error_code,
-                message: err.message,
-            })),
-            _ => Err(SyncError::from(Error::UnexpectedResponse { request_id })),
+            Message::Error(err) => Err(SyncError::JournalError(journal::Error::InvalidSyncRange(
+                err.error_code as u64,
+                0,
+            ))),
+            _ => Err(SyncError::JournalError(journal::Error::InvalidSyncRange(
+                request_id, 0,
+            ))),
         }
     }
 }

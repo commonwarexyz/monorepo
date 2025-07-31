@@ -63,3 +63,15 @@ impl<E> SyncError<E> {
         Self::PinnedNodes(msg.into())
     }
 }
+
+/// Automatic conversion from database errors to sync errors
+// TODO: Try to find a way to rewrite this to reduce probability of misuse
+// with errors that aren't actually database errors.
+impl<E> From<E> for SyncError<E>
+where
+    E: std::error::Error + Send + 'static,
+{
+    fn from(err: E) -> Self {
+        Self::Database(err)
+    }
+}

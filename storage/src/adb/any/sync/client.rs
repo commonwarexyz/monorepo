@@ -4,6 +4,7 @@ use crate::{
         operation::Fixed,
         sync::{
             engine::{SyncTarget, SyncTargetUpdateReceiver},
+            error::SyncError,
             resolver::Resolver,
         },
     },
@@ -66,10 +67,10 @@ where
     R: Resolver<Digest = H::Digest, Op = Fixed<K, V>>,
 {
     /// Validate the configuration parameters
-    pub fn validate(&self) -> Result<(), Error> {
+    pub fn validate(&self) -> Result<(), crate::adb::sync::error::SyncError<Error>> {
         // Validate bounds (inclusive)
         if self.target.lower_bound_ops > self.target.upper_bound_ops {
-            return Err(Error::InvalidTarget {
+            return Err(SyncError::InvalidTarget {
                 lower_bound_pos: self.target.lower_bound_ops,
                 upper_bound_pos: self.target.upper_bound_ops,
             });
@@ -256,7 +257,7 @@ pub(crate) mod tests {
             assert!(result.is_err(), "Expected sync to fail with invalid bounds");
             if let Err(error) = result {
                 match error {
-                    super::super::Error::InvalidTarget { .. } => {}
+                    crate::adb::sync::error::SyncError::InvalidTarget { .. } => {}
                     other => panic!("Expected InvalidTarget error, got: {other:?}"),
                 }
             }
@@ -668,7 +669,10 @@ pub(crate) mod tests {
 
             // Start sync - it should fail when processing the target update
             let result = sync(config).await;
-            assert!(matches!(result, Err(Error::SyncTargetMovedBackward { .. })));
+            assert!(matches!(
+                result,
+                Err(crate::adb::sync::error::SyncError::SyncTargetMovedBackward { .. })
+            ));
 
             Arc::try_unwrap(target_db)
                 .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
@@ -726,7 +730,10 @@ pub(crate) mod tests {
 
             // Start sync - it should fail when processing the target update
             let result = sync(config).await;
-            assert!(matches!(result, Err(Error::SyncTargetMovedBackward { .. })));
+            assert!(matches!(
+                result,
+                Err(crate::adb::sync::error::SyncError::SyncTargetMovedBackward { .. })
+            ));
 
             Arc::try_unwrap(target_db)
                 .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
@@ -861,7 +868,10 @@ pub(crate) mod tests {
                 .unwrap();
 
             let result = sync(config).await;
-            assert!(matches!(result, Err(Error::InvalidTarget { .. })));
+            assert!(matches!(
+                result,
+                Err(crate::adb::sync::error::SyncError::InvalidTarget { .. })
+            ));
 
             Arc::try_unwrap(target_db)
                 .unwrap_or_else(|_| panic!("failed to unwrap Arc"))

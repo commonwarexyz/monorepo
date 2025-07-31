@@ -66,9 +66,9 @@ pub enum Error {
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
 
-    /// Sync operation failed
-    #[error("sync failed")]
-    Sync(#[from] SyncError),
+    /// Sync operation failed  
+    #[error("sync failed: {0}")]
+    SyncFailed(SyncError), // TODO remove and have some functions return SyncError directly
 }
 
 impl Error {
@@ -88,9 +88,18 @@ impl Error {
     }
 }
 
-// Convert our error type to sync error for trait compatibility
-impl From<Error> for SyncError {
-    fn from(err: Error) -> Self {
-        SyncError::Resolver(Box::new(err))
+// Convert sync errors (which are now SyncError<crate::adb::Error>) to our Error type
+impl From<commonware_storage::adb::sync::error::SyncError<commonware_storage::adb::Error>>
+    for Error
+{
+    fn from(
+        err: commonware_storage::adb::sync::error::SyncError<commonware_storage::adb::Error>,
+    ) -> Self {
+        match err {
+            commonware_storage::adb::sync::error::SyncError::Database(db_err) => {
+                Error::Database(db_err)
+            }
+            other => Error::InvalidConfig(other.to_string()),
+        }
     }
 }
