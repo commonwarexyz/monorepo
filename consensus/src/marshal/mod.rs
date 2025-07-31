@@ -125,6 +125,7 @@ mod tests {
         for seed in 0..5 {
             let result1 = basic_finalization(seed);
             let result2 = basic_finalization(seed);
+
             // Ensure determinism
             assert_eq!(result1, result2);
         }
