@@ -50,6 +50,7 @@ impl FixedSize for U32 {
 }
 
 impl Span for U32 {}
+
 impl Array for U32 {}
 
 impl From<[u8; U32::SIZE]> for U32 {
