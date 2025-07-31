@@ -19,6 +19,7 @@ use std::{
     num::NonZeroU64,
     pin::Pin,
 };
+use thiserror::Error;
 
 /// Trait for journals that support sync operations
 pub trait SyncJournal {
@@ -32,6 +33,45 @@ pub trait SyncJournal {
     fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
+/// Trait for verifying proofs of operation batches
+pub trait SyncVerifier<Op, D: Digest> {
+    type Error: Send + 'static;
+
+    /// Verify that a proof is valid for the given operations and target root
+    fn verify_proof(
+        &mut self,
+        proof: &Proof<D>,
+        start_loc: u64,
+        operations: &[Op],
+        target_root: &D,
+    ) -> bool;
+
+    /// Extract pinned nodes from a proof if needed for future verifications
+    fn extract_pinned_nodes(
+        &mut self,
+        proof: &Proof<D>,
+        start_loc: u64,
+        operations_len: u64,
+    ) -> Result<Option<Vec<D>>, Self::Error>;
+}
+
+/// Trait for building final databases from completed sync journals
+pub trait SyncDatabase<J: SyncJournal, D: Digest>: Sized {
+    type Config;
+    type Error: Send + 'static;
+
+    /// Build a database from a completed sync journal and configuration
+    fn from_sync_result(
+        config: Self::Config,
+        journal: J,
+        pinned_nodes: Option<Vec<D>>,
+        target: SyncTarget<D>,
+    ) -> impl Future<Output = Result<Self, Self::Error>>;
+
+    /// Get the root digest of the database for verification
+    fn root(&self, hasher: &mut impl commonware_cryptography::Hasher<Digest = D>) -> D;
+}
+
 /// Result of executing one sync step
 #[derive(Debug)]
 pub enum StepResult<C, D> {
@@ -39,6 +79,13 @@ pub enum StepResult<C, D> {
     Continue(C),
     /// Sync is complete with the final database
     Complete(D),
+}
+
+/// Result of sync completion with journal and pinned nodes
+pub struct SyncCompletionResult<J: SyncJournal, D: Digest> {
+    pub journal: J,
+    pub pinned_nodes: Option<Vec<D>>,
+    pub target: SyncTarget<D>,
 }
 
 /// Events that can occur during synchronization
@@ -265,32 +312,50 @@ impl<Op, D: Digest, E> Default for SyncState<Op, D, E> {
     }
 }
 
+/// Errors that can occur during target update validation
+#[derive(Debug, Error, Clone)]
+pub enum TargetUpdateError {
+    /// Target bounds are invalid (lower > upper)
+    #[error("invalid target bounds: lower_bound {lower_bound} > upper_bound {upper_bound}")]
+    InvalidBounds { lower_bound: u64, upper_bound: u64 },
+    /// Target moved backward (bounds decreased)
+    #[error("sync target moved backward: old bounds [{old_lower}, {old_upper}], new bounds [{new_lower}, {new_upper}]")]
+    MovedBackward {
+        old_lower: u64,
+        old_upper: u64,
+        new_lower: u64,
+        new_upper: u64,
+    },
+    /// Target root is unchanged
+    #[error("sync target root unchanged")]
+    RootUnchanged,
+}
+
 /// Validate a target update against the current target
 pub fn validate_target_update<D: Digest>(
     old_target: &SyncTarget<D>,
     new_target: &SyncTarget<D>,
-) -> Result<(), String> {
+) -> Result<(), TargetUpdateError> {
     if new_target.lower_bound_ops > new_target.upper_bound_ops {
-        return Err(format!(
-            "Invalid target: lower_bound {} > upper_bound {}",
-            new_target.lower_bound_ops, new_target.upper_bound_ops
-        ));
+        return Err(TargetUpdateError::InvalidBounds {
+            lower_bound: new_target.lower_bound_ops,
+            upper_bound: new_target.upper_bound_ops,
+        });
     }
 
     if new_target.lower_bound_ops < old_target.lower_bound_ops
         || new_target.upper_bound_ops < old_target.upper_bound_ops
     {
-        return Err(format!(
-            "Sync target moved backward: old bounds [{}, {}], new bounds [{}, {}]",
-            old_target.lower_bound_ops,
-            old_target.upper_bound_ops,
-            new_target.lower_bound_ops,
-            new_target.upper_bound_ops
-        ));
+        return Err(TargetUpdateError::MovedBackward {
+            old_lower: old_target.lower_bound_ops,
+            old_upper: old_target.upper_bound_ops,
+            new_lower: new_target.lower_bound_ops,
+            new_upper: new_target.upper_bound_ops,
+        });
     }
 
     if new_target.root == old_target.root {
-        return Err("Sync target root unchanged".to_string());
+        return Err(TargetUpdateError::RootUnchanged);
     }
 
     Ok(())
@@ -331,7 +396,7 @@ where
 ///
 /// This engine handles the common sync logic that can be reused across different
 /// ADB implementations (Any, Immutable, Current).
-pub struct SyncEngine<J, R, D, E>
+pub struct SyncEngine<J, R, V, D, E>
 where
     J: SyncJournal,
     D: Digest,
@@ -359,20 +424,25 @@ where
 
     /// Resolver for fetching operations and proofs from the sync source
     pub resolver: R,
+
+    /// Verifier for validating proofs and extracting pinned nodes
+    pub verifier: V,
 }
 
-impl<J, R, D, E> SyncEngine<J, R, D, E>
+impl<J, R, V, D, E> SyncEngine<J, R, V, D, E>
 where
     J: SyncJournal<Error = E>,
     J::Op: Clone + Send + 'static,
     R: crate::adb::sync::resolver::Resolver<Digest = D, Op = J::Op>,
+    V: SyncVerifier<J::Op, D>,
     D: Digest + Clone,
-    E: Send + 'static + From<crate::adb::any::sync::Error>,
+    E: Send + 'static + From<crate::adb::any::sync::Error> + std::fmt::Debug + std::fmt::Display,
 {
     /// Create a new sync engine with the given configuration
     pub fn new(
         journal: J,
         resolver: R,
+        verifier: V,
         target: SyncTarget<D>,
         max_outstanding_requests: usize,
         fetch_batch_size: NonZeroU64,
@@ -386,6 +456,7 @@ where
             fetch_batch_size,
             journal,
             resolver,
+            verifier,
         }
     }
 
@@ -481,6 +552,275 @@ where
     /// Set pinned nodes from a proof
     pub fn set_pinned_nodes(&mut self, nodes: Vec<D>) {
         self.pinned_nodes = Some(nodes);
+    }
+
+    /// Apply fetched operations to the journal if we have them.
+    ///
+    /// This method finds operations that are contiguous with the current journal tip
+    /// and applies them in order. It removes stale batches and handles partial
+    /// application of batches when needed.
+    pub async fn apply_operations(&mut self) -> Result<(), E> {
+        let mut next_loc = self.journal.size().await?;
+
+        // Remove any batches of operations with stale data.
+        // That is, those whose last operation is before `next_loc`.
+        self.fetched_operations.retain(|&start_loc, operations| {
+            let end_loc = start_loc + operations.len() as u64 - 1;
+            end_loc >= next_loc
+        });
+
+        loop {
+            // See if we have the next operation to apply (i.e. at the journal tip).
+            // Find the index of the range that contains the next location.
+            let range_start_loc =
+                self.fetched_operations
+                    .iter()
+                    .find_map(|(range_start, range_ops)| {
+                        let range_end = range_start + range_ops.len() as u64 - 1;
+                        if *range_start <= next_loc && next_loc <= range_end {
+                            Some(*range_start)
+                        } else {
+                            None
+                        }
+                    });
+
+            let Some(range_start_loc) = range_start_loc else {
+                // We don't have the next operation to apply (i.e. at the journal tip)
+                break;
+            };
+
+            // Remove the batch of operations that contains the next operation to apply.
+            let operations = self.fetched_operations.remove(&range_start_loc).unwrap();
+            // Skip operations that are before the next location.
+            let skip_count = (next_loc - range_start_loc) as usize;
+            let operations_count = operations.len() - skip_count;
+            let remaining_operations = operations.into_iter().skip(skip_count);
+            next_loc += operations_count as u64;
+            self.apply_operations_batch(remaining_operations).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Apply a batch of operations to the journal
+    async fn apply_operations_batch<I>(&mut self, operations: I) -> Result<(), E>
+    where
+        I: IntoIterator<Item = J::Op>,
+    {
+        for op in operations {
+            self.journal.append(op).await?;
+            // No need to sync here -- the journal will periodically sync its storage
+            // and we will also sync when we're done applying all operations.
+        }
+        Ok(())
+    }
+
+    /// Check if sync is complete based on the current journal size and target
+    pub async fn is_complete(&self) -> Result<bool, E> {
+        let journal_size = self.journal.size().await?;
+
+        // Calculate the target journal size (upper bound is inclusive)
+        let target_journal_size = self.target.upper_bound_ops + 1;
+
+        // Check if we've completed sync
+        if journal_size >= target_journal_size {
+            if journal_size > target_journal_size {
+                // This shouldn't happen in normal operation - indicates a bug
+                return Err(E::from(crate::adb::any::sync::Error::InvalidState));
+            }
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    /// Handle the result of a fetch operation.
+    ///
+    /// This method processes incoming fetch results by:
+    /// 1. Removing the request from outstanding requests
+    /// 2. Validating batch size
+    /// 3. Verifying proofs using the configured verifier
+    /// 4. Extracting pinned nodes if needed
+    /// 5. Storing valid operations for later application
+    pub fn handle_fetch_result(
+        &mut self,
+        fetch_result: IndexedFetchResult<J::Op, D, E>,
+    ) -> Result<(), E> {
+        // Mark request as complete
+        self.outstanding_requests.remove(fetch_result.start_loc);
+
+        let start_loc = fetch_result.start_loc;
+        match fetch_result.result {
+            Ok(FetchResult {
+                proof,
+                operations,
+                success_tx,
+            }) => {
+                // Validate batch size
+                let operations_len = operations.len() as u64;
+                if operations_len == 0 || operations_len > self.fetch_batch_size.get() {
+                    // Invalid batch size - notify resolver of failure
+                    let _ = success_tx.send(false);
+                } else {
+                    // Verify the proof
+                    let proof_valid = self.verifier.verify_proof(
+                        &proof,
+                        start_loc,
+                        &operations,
+                        &self.target.root,
+                    );
+
+                    // Report success or failure to the resolver
+                    let _ = success_tx.send(proof_valid);
+
+                    if proof_valid {
+                        // Extract pinned nodes if we don't have them and this is the first batch
+                        if self.pinned_nodes.is_none() && start_loc == self.target.lower_bound_ops {
+                            if let Ok(Some(nodes)) = self.verifier.extract_pinned_nodes(
+                                &proof,
+                                start_loc,
+                                operations_len,
+                            ) {
+                                self.pinned_nodes = Some(nodes);
+                            }
+                        }
+
+                        // Store operations for later application
+                        self.store_operations(start_loc, operations);
+                    }
+                }
+            }
+            Err(_e) => {
+                // We couldn't get the operations we requested. When we scan for gaps
+                // in the sync range, we will request them again if we haven't already
+                // requested or received these operations.
+            }
+        }
+        Ok(())
+    }
+
+    /// Execute one step of the synchronization process.
+    ///
+    /// This is the main coordination method that:
+    /// 1. Checks if sync is complete
+    /// 2. Waits for the next synchronization event
+    /// 3. Handles different event types (target updates, fetch results)
+    /// 4. Coordinates request scheduling and operation application
+    ///
+    /// Returns `StepResult::Complete(())` when sync is finished, or
+    /// `StepResult::Continue(self)` when more work remains.
+    pub async fn step(
+        mut self,
+        update_receiver: &mut Option<crate::adb::sync::engine::SyncTargetUpdateReceiver<D>>,
+    ) -> Result<StepResult<Self, SyncCompletionResult<J, D>>, E> {
+        // Check if sync is complete
+        if self.is_complete().await? {
+            return Ok(StepResult::Complete(SyncCompletionResult {
+                journal: self.journal,
+                pinned_nodes: self.pinned_nodes,
+                target: self.target,
+            }));
+        }
+
+        // Wait for the next synchronization event
+        match wait_for_event(update_receiver, &mut self.outstanding_requests)
+            .await
+            .map_err(|sync_err| match sync_err {
+                crate::adb::sync::error::SyncError::SyncStalled => {
+                    E::from(crate::adb::sync::error::SyncError::SyncStalled)
+                }
+                crate::adb::sync::error::SyncError::Database(e) => e,
+                crate::adb::sync::error::SyncError::Resolver(e) => {
+                    E::from(crate::adb::sync::error::SyncError::resolver(e))
+                }
+                _ => E::from(crate::adb::sync::error::SyncError::InvalidState),
+            })? {
+            SyncEvent::TargetUpdate(new_target) => {
+                // Validate and handle the target update
+                crate::adb::sync::engine::validate_target_update(&self.target, &new_target)
+                    .map_err(|e| match e {
+                        TargetUpdateError::MovedBackward { .. } => E::from(
+                            crate::adb::sync::error::SyncError::SyncTargetMovedBackward {
+                                old: Box::new(self.target.root),
+                                new: Box::new(new_target.root),
+                            },
+                        ),
+                        TargetUpdateError::InvalidBounds {
+                            lower_bound,
+                            upper_bound,
+                        } => E::from(crate::adb::sync::error::SyncError::InvalidTarget {
+                            lower_bound_pos: lower_bound,
+                            upper_bound_pos: upper_bound,
+                        }),
+                        TargetUpdateError::RootUnchanged => {
+                            E::from(crate::adb::sync::error::SyncError::SyncTargetRootUnchanged)
+                        }
+                    })?;
+
+                self.reset_for_target_update(new_target);
+            }
+            SyncEvent::UpdateChannelClosed => {
+                *update_receiver = None;
+            }
+            SyncEvent::BatchReceived(fetch_result) => {
+                // Process the fetch result
+                self.handle_fetch_result(fetch_result)?;
+
+                // Request operations in the sync range
+                self.schedule_requests().await?;
+
+                // Apply operations that are now contiguous with the current journal
+                self.apply_operations().await?;
+            }
+        }
+
+        Ok(StepResult::Continue(self))
+    }
+
+    /// Run sync to completion, building the final database when done.
+    ///
+    /// This method repeatedly calls `step()` until sync is complete, then builds
+    /// the final database using the provided configuration and verifies the root digest.
+    pub async fn sync<DB, H>(
+        mut self,
+        config: DB::Config,
+        update_receiver: &mut Option<SyncTargetUpdateReceiver<D>>,
+        mut root_hasher: H,
+    ) -> Result<DB, E>
+    where
+        DB: SyncDatabase<J, D, Error = E>,
+        DB::Config: Clone,
+        H: commonware_cryptography::Hasher<Digest = D>,
+    {
+        let target_root = self.target.root;
+
+        // Run sync loop until completion
+        let completion_result = loop {
+            match self.step(update_receiver).await? {
+                StepResult::Continue(new_engine) => self = new_engine,
+                StepResult::Complete(result) => break result,
+            }
+        };
+
+        // Build the database from the completed sync
+        let database = DB::from_sync_result(
+            config.clone(),
+            completion_result.journal,
+            completion_result.pinned_nodes,
+            completion_result.target,
+        )
+        .await?;
+
+        // Verify the final root digest matches the target
+        let got_root = database.root(&mut root_hasher);
+        if got_root != target_root {
+            return Err(E::from(crate::adb::sync::error::SyncError::RootMismatch {
+                expected: Box::new(target_root),
+                actual: Box::new(got_root),
+            }));
+        }
+
+        Ok(database)
     }
 }
 

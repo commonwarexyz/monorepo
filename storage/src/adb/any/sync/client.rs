@@ -470,27 +470,22 @@ where
         mut self,
         new_target: SyncTarget<H::Digest>,
     ) -> Result<Self, Error> {
-        validate_target_update(&self.config.target, &new_target).map_err(|msg| {
-            if msg.contains("lower_bound")
-                && msg.contains("upper_bound")
-                && msg.contains("Invalid target")
-            {
-                Error::InvalidTarget {
-                    lower_bound_pos: new_target.lower_bound_ops,
-                    upper_bound_pos: new_target.upper_bound_ops,
-                }
-            } else if msg.contains("moved backward") {
+        validate_target_update(&self.config.target, &new_target).map_err(|e| match e {
+            crate::adb::sync::engine::TargetUpdateError::InvalidBounds {
+                lower_bound,
+                upper_bound,
+            } => Error::InvalidTarget {
+                lower_bound_pos: lower_bound,
+                upper_bound_pos: upper_bound,
+            },
+            crate::adb::sync::engine::TargetUpdateError::MovedBackward { .. } => {
                 Error::SyncTargetMovedBackward {
                     old: Box::new(self.config.target.clone()),
                     new: Box::new(new_target.clone()),
                 }
-            } else if msg.contains("root unchanged") {
+            }
+            crate::adb::sync::engine::TargetUpdateError::RootUnchanged => {
                 Error::SyncTargetRootUnchanged
-            } else {
-                Error::SyncTargetMovedBackward {
-                    old: Box::new(self.config.target.clone()),
-                    new: Box::new(new_target.clone()),
-                }
             }
         })?;
 
