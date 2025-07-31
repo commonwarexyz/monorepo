@@ -134,9 +134,6 @@ mod tests {
                 codec_config: (),
             };
 
-            let key1 = hash(b"key1");
-            let key2 = hash(b"key2");
-
             // First initialization
             let archive: Archive<_, Digest, i32> =
                 Archive::init(context.clone(), cfg.clone()).await.unwrap();
@@ -146,6 +143,8 @@ mod tests {
             let mut archive = Archive::init(context.clone(), cfg.clone()).await.unwrap();
 
             // Add some data
+            let key1 = hash(b"key1");
+            let key2 = hash(b"key2");
             archive.put(1, key1, 2000).await.unwrap();
             archive.put(2, key2, 2001).await.unwrap();
 
