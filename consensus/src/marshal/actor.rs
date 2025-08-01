@@ -2,13 +2,12 @@ use super::{
     config::Config,
     finalizer::Finalizer,
     ingress::{
-        handler::{self, Handler},
+        handler::{self, Handler, Request},
         mailbox::{Mailbox, Message},
         orchestrator::{Orchestration, Orchestrator},
     },
 };
 use crate::{
-    marshal::request::{Request, Subject},
     threshold_simplex::types::{Finalization, Notarization},
     Block, Reporter,
 };
@@ -388,7 +387,7 @@ impl<
                                 continue;
                             } else {
                                 debug!(view, "notarized block missing");
-                                resolver.fetch(Request::notarized(view)).await;
+                                resolver.fetch(Request::<B>::Notarized { view }).await;
                             }
                         }
                         Message::Finalization { finalization } => {
@@ -406,11 +405,11 @@ impl<
                                 self.finalized_height.set(height as i64);
 
                                 // Cancel useless requests
-                                resolver.retain(Subject::<B>::Notarized { view }.predicate()).await;
+                                resolver.retain(Request::<B>::Notarized { view }.predicate()).await;
                             } else {
                                 // Otherwise, fetch the block from the network
                                 debug!(view, ?commitment, "finalized block missing");
-                                resolver.fetch(Request::block(commitment)).await;
+                                resolver.fetch(Request::<B>::Block(commitment)).await;
                             }
                         }
                         Message::Get { commitment, response } => {
@@ -435,7 +434,7 @@ impl<
                                 // If this is a valid view, this request should be fine to "keep
                                 // open" even if the oneshot is cancelled.
                                 debug!(view, ?commitment, "requested block missing");
-                                resolver.fetch(Request::notarized(view)).await;
+                                resolver.fetch(Request::<B>::Notarized { view }).await;
                             }
 
                             // Register waiter
@@ -470,8 +469,8 @@ impl<
                             self.processed_height.set(height as i64);
 
                             // Cancel any outstanding requests (by height and by digest)
-                            resolver.cancel(Request::block(digest)).await;
-                            resolver.retain(Subject::<B>::Finalized { height }.predicate()).await;
+                            resolver.cancel(Request::<B>::Block(digest)).await;
+                            resolver.retain(Request::<B>::Finalized { height }.predicate()).await;
 
                             // If finalization exists, prune the archives
                             if let Some(finalization) = self.get_finalization_by_height(Identifier::Index(height)).await {
@@ -516,7 +515,7 @@ impl<
                                     cursor = block;
                                 } else {
                                     // Request the next missing block digest
-                                    resolver.fetch(Request::block(commitment)).await;
+                                    resolver.fetch(Request::<B>::Block(commitment)).await;
                                     break;
                                 }
                             }
@@ -529,7 +528,7 @@ impl<
                             let gap_end = std::cmp::min(cursor.height(), gap_start.saturating_add(self.max_repair));
                             debug!(gap_start, gap_end, "requesting any finalized blocks");
                             for height in gap_start..gap_end {
-                                resolver.fetch(Request::finalized(height)).await;
+                                resolver.fetch(Request::<B>::Finalized { height }).await;
                             }
                         }
                     }
@@ -542,8 +541,8 @@ impl<
                     };
                     match message {
                         handler::Message::Produce { key, response } => {
-                            match key.subject() {
-                                Subject::Block(commitment) => {
+                            match key {
+                                Request::Block(commitment) => {
                                     // Check for block locally
                                     let Some(block) = self.find_block(&mut buffer, commitment).await else {
                                         debug!(?commitment, "block missing on request");
@@ -551,7 +550,7 @@ impl<
                                     };
                                     let _ = response.send(block.encode().into());
                                 }
-                                Subject::Finalized { height } => {
+                                Request::Finalized { height } => {
                                     // Get finalization
                                     let Some(finalization) = self.get_finalization_by_height(Identifier::Index(height)).await else {
                                         debug!(height, "finalization missing on request");
@@ -567,7 +566,7 @@ impl<
                                     // Send finalization
                                     let _ = response.send((finalization, block).encode().into());
                                 }
-                                Subject::Notarized { view } => {
+                                Request::Notarized { view } => {
                                     // Get notarization
                                     let Some(notarization) = self.get_notarization_by_view(Identifier::Index(view)).await else {
                                         debug!(view, "notarization missing on request");
@@ -585,8 +584,8 @@ impl<
                             }
                         },
                         handler::Message::Deliver { key, value, response } => {
-                            match key.subject() {
-                                Subject::Block(commitment) => {
+                            match key {
+                                Request::Block(commitment) => {
                                     // Parse block
                                     let Ok(block) = B::decode_cfg(value.as_ref(), &self.codec_config) else {
                                         let _ = response.send(false);
@@ -609,7 +608,7 @@ impl<
                                     debug!(?commitment, height, "received block");
                                     let _ = response.send(true);
                                 },
-                                Subject::Finalized { height } => {
+                                Request::Finalized { height } => {
                                     // Parse finalization
                                     let Ok((finalization, block)) = <(Finalization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
                                         let _ = response.send(false);
@@ -630,7 +629,7 @@ impl<
                                     let _ = response.send(true);
                                     self.put_finalization_and_finalized_block(height, block.commitment(), finalization, block, &mut notifier_tx).await;
                                 },
-                                Subject::Notarized { view } => {
+                                Request::Notarized { view } => {
                                     // Parse notarization
                                     let Ok((notarization, block)) = <(Notarization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
                                         let _ = response.send(false);
