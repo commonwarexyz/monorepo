@@ -24,7 +24,7 @@ impl<B: Block> Subject<B> {
     pub fn predicate(&self) -> impl Fn(&Request<B>) -> bool + Send + 'static {
         let cloned = self.clone();
         move |r| match (&cloned, &r.inner) {
-            (Self::Block(_), _) => unreachable!("we should never prune by block"),
+            (Self::Block(_), _) => unreachable!("we should never retain by block"),
             (Self::Finalized { height: mine }, Self::Finalized { height: theirs }) => {
                 *theirs > *mine
             }
