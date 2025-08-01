@@ -9,7 +9,7 @@ use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
 use commonware_storage::{
     adb::{
         any::sync::{self, client::Config as SyncConfig},
-        sync::{error::SyncError, Target},
+        sync::{Error as SyncError, Target},
     },
     mmr::hasher::Standard,
 };

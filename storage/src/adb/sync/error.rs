@@ -4,7 +4,7 @@ use std::fmt;
 
 /// Errors that can occur during database synchronization.
 #[derive(Debug, thiserror::Error)]
-pub enum SyncError<T, U>
+pub enum Error<T, U>
 where
     T: std::error::Error + Send + 'static,
     U: std::error::Error + Send + 'static,
@@ -50,7 +50,7 @@ where
     PinnedNodes(String),
 }
 
-impl<T, U> From<T> for SyncError<T, U>
+impl<T, U> From<T> for Error<T, U>
 where
     T: std::error::Error + Send + 'static,
     U: std::error::Error + Send + 'static,
@@ -60,7 +60,7 @@ where
     }
 }
 
-impl<T, U> SyncError<T, U>
+impl<T, U> Error<T, U>
 where
     T: std::error::Error + Send + 'static,
     U: std::error::Error + Send + 'static,

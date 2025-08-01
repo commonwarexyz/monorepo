@@ -3,7 +3,7 @@ use crate::{
         any::{Any, SyncConfig},
         operation::Fixed,
         sync::{
-            engine::EngineConfig, error::SyncError, resolver::Resolver, Engine, Journal, Target,
+            engine::EngineConfig, resolver::Resolver, Engine, Error as SyncError, Journal, Target,
             Verifier,
         },
     },

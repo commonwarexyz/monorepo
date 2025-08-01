@@ -2,8 +2,7 @@
 
 use crate::{
     adb::sync::{
-        error::SyncError, resolver::Resolver, target::TargetUpdateError, Database, Journal, Target,
-        Verifier,
+        resolver::Resolver, target::TargetUpdateError, Database, Error, Journal, Target, Verifier,
     },
     mmr::verification::Proof,
 };
@@ -24,9 +23,9 @@ use std::{
     pin::Pin,
 };
 
-/// Result of executing one sync step
+/// Whether sync should continue or complete
 #[derive(Debug)]
-pub(crate) enum StepResult<C, D> {
+pub(crate) enum NextStep<C, D> {
     /// Sync should continue with the updated client
     Continue(C),
     /// Sync is complete with the final database
@@ -223,7 +222,7 @@ where
     R: Resolver<Op = DB::Op, Digest = DB::Digest>,
 {
     /// Create a new sync engine with the given configuration
-    pub async fn new(config: EngineConfig<DB, R>) -> Result<Self, SyncError<DB::Error, R::Error>> {
+    pub async fn new(config: EngineConfig<DB, R>) -> Result<Self, Error<DB::Error, R::Error>> {
         // Create journal and verifier using the database's factory methods
         let journal = DB::create_journal(
             config.context.clone(),
@@ -232,7 +231,7 @@ where
             config.target.upper_bound_ops,
         )
         .await
-        .map_err(SyncError::journal)?;
+        .map_err(Error::journal)?;
 
         let verifier = DB::create_verifier();
 
@@ -256,7 +255,7 @@ where
     ///
     /// This method implements the core request scheduling logic that can be used
     /// across different ADB sync implementations.
-    pub async fn schedule_requests(&mut self) -> Result<(), SyncError<DB::Error, R::Error>> {
+    pub async fn schedule_requests(&mut self) -> Result<(), Error<DB::Error, R::Error>> {
         let target_size = self.target.upper_bound_ops + 1;
 
         // Special case: If we don't have pinned nodes, we need to extract them from a proof
@@ -280,7 +279,7 @@ where
             .max_outstanding_requests
             .saturating_sub(self.outstanding_requests.len());
 
-        let log_size = self.journal.size().await.map_err(SyncError::journal)?;
+        let log_size = self.journal.size().await.map_err(Error::journal)?;
 
         for _ in 0..num_requests {
             // Convert fetched operations to operation counts for shared gap detection
@@ -325,7 +324,7 @@ where
     pub async fn reset_for_target_update(
         self,
         new_target: Target<DB::Digest>,
-    ) -> Result<Self, SyncError<DB::Error, R::Error>> {
+    ) -> Result<Self, Error<DB::Error, R::Error>> {
         let journal = DB::resize_journal(
             self.journal,
             self.context.clone(),
@@ -334,7 +333,7 @@ where
             new_target.upper_bound_ops,
         )
         .await
-        .map_err(SyncError::database)?;
+        .map_err(Error::database)?;
 
         Ok(Self {
             outstanding_requests: OutstandingRequests::new(),
@@ -372,8 +371,8 @@ where
     /// This method finds operations that are contiguous with the current journal tip
     /// and applies them in order. It removes stale batches and handles partial
     /// application of batches when needed.
-    pub async fn apply_operations(&mut self) -> Result<(), SyncError<DB::Error, R::Error>> {
-        let mut next_loc = self.journal.size().await.map_err(SyncError::journal)?;
+    pub async fn apply_operations(&mut self) -> Result<(), Error<DB::Error, R::Error>> {
+        let mut next_loc = self.journal.size().await.map_err(Error::journal)?;
 
         // Remove any batches of operations with stale data.
         // That is, those whose last operation is before `next_loc`.
@@ -419,12 +418,12 @@ where
     async fn apply_operations_batch<I>(
         &mut self,
         operations: I,
-    ) -> Result<(), SyncError<DB::Error, R::Error>>
+    ) -> Result<(), Error<DB::Error, R::Error>>
     where
         I: IntoIterator<Item = DB::Op>,
     {
         for op in operations {
-            self.journal.append(op).await.map_err(SyncError::journal)?;
+            self.journal.append(op).await.map_err(Error::journal)?;
             // No need to sync here -- the journal will periodically sync its storage
             // and we will also sync when we're done applying all operations.
         }
@@ -432,8 +431,8 @@ where
     }
 
     /// Check if sync is complete based on the current journal size and target
-    pub async fn is_complete(&self) -> Result<bool, SyncError<DB::Error, R::Error>> {
-        let journal_size = self.journal.size().await.map_err(SyncError::journal)?;
+    pub async fn is_complete(&self) -> Result<bool, Error<DB::Error, R::Error>> {
+        let journal_size = self.journal.size().await.map_err(Error::journal)?;
 
         // Calculate the target journal size (upper bound is inclusive)
         let target_journal_size = self.target.upper_bound_ops + 1;
@@ -442,7 +441,7 @@ where
         if journal_size >= target_journal_size {
             if journal_size > target_journal_size {
                 // This shouldn't happen in normal operation - indicates a bug
-                return Err(SyncError::<DB::Error, R::Error>::InvalidState);
+                return Err(Error::<DB::Error, R::Error>::InvalidState);
             }
             return Ok(true);
         }
@@ -461,7 +460,7 @@ where
     fn handle_fetch_result(
         &mut self,
         fetch_result: IndexedFetchResult<DB::Op, DB::Digest, R::Error>,
-    ) -> Result<(), SyncError<DB::Error, R::Error>> {
+    ) -> Result<(), Error<DB::Error, R::Error>> {
         // Mark request as complete
         self.outstanding_requests.remove(fetch_result.start_loc);
 
@@ -509,7 +508,7 @@ where
             Err(e) => {
                 // Resolver error - propagate it up to fail the sync.
                 // TODO: How should we handle a resolver error?
-                return Err(SyncError::Resolver(e));
+                return Err(Error::Resolver(e));
             }
         }
         Ok(())
@@ -525,9 +524,7 @@ where
     ///
     /// Returns `StepResult::Complete(database)` when sync is finished, or
     /// `StepResult::Continue(self)` when more work remains.
-    pub(crate) async fn step(
-        mut self,
-    ) -> Result<StepResult<Self, DB>, SyncError<DB::Error, R::Error>> {
+    pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, Error<DB::Error, R::Error>> {
         // Check if sync is complete
         if self.is_complete().await? {
             // Build the database from the completed sync
@@ -538,25 +535,25 @@ where
                 self.target.clone(),
             )
             .await
-            .map_err(SyncError::database)?;
+            .map_err(Error::database)?;
 
             // Verify the final root digest matches the final target
             let got_root = database.root();
             let expected_root = self.target.root;
             if got_root != expected_root {
-                return Err(SyncError::<DB::Error, R::Error>::RootMismatch {
+                return Err(Error::<DB::Error, R::Error>::RootMismatch {
                     expected: Box::new(expected_root),
                     actual: Box::new(got_root),
                 });
             }
 
-            return Ok(StepResult::Complete(database));
+            return Ok(NextStep::Complete(database));
         }
 
         // Wait for the next synchronization event
         let event = wait_for_event(&mut self.update_receiver, &mut self.outstanding_requests)
             .await
-            .ok_or(SyncError::<DB::Error, R::Error>::SyncStalled)?;
+            .ok_or(Error::<DB::Error, R::Error>::SyncStalled)?;
 
         match event {
             Event::TargetUpdate(new_target) => {
@@ -564,7 +561,7 @@ where
                 crate::adb::sync::target::validate_target_update(&self.target, &new_target)
                     .map_err(|e| match e {
                         TargetUpdateError::MovedBackward { .. } => {
-                            SyncError::<DB::Error, R::Error>::SyncTargetMovedBackward {
+                            Error::<DB::Error, R::Error>::SyncTargetMovedBackward {
                                 old: Box::new(self.target.root),
                                 new: Box::new(new_target.root),
                             }
@@ -572,12 +569,12 @@ where
                         TargetUpdateError::InvalidBounds {
                             lower_bound,
                             upper_bound,
-                        } => SyncError::<DB::Error, R::Error>::InvalidTarget {
+                        } => Error::<DB::Error, R::Error>::InvalidTarget {
                             lower_bound_pos: lower_bound,
                             upper_bound_pos: upper_bound,
                         },
                         TargetUpdateError::RootUnchanged => {
-                            SyncError::<DB::Error, R::Error>::SyncTargetRootUnchanged
+                            Error::<DB::Error, R::Error>::SyncTargetRootUnchanged
                         }
                     })?;
 
@@ -586,7 +583,7 @@ where
                 // Schedule new requests for the updated target
                 updated_self.schedule_requests().await?;
 
-                return Ok(StepResult::Continue(updated_self));
+                return Ok(NextStep::Continue(updated_self));
             }
             Event::UpdateChannelClosed => {
                 self.update_receiver = None;
@@ -603,19 +600,19 @@ where
             }
         }
 
-        Ok(StepResult::Continue(self))
+        Ok(NextStep::Continue(self))
     }
 
     /// Run sync to completion, returning the final database when done.
     ///
     /// This method repeatedly calls `step()` until sync is complete. The `step()` method
     /// handles building the final database and verifying the root digest.
-    pub async fn sync(mut self) -> Result<DB, SyncError<DB::Error, R::Error>> {
+    pub async fn sync(mut self) -> Result<DB, Error<DB::Error, R::Error>> {
         // Run sync loop until completion
         loop {
             match self.step().await? {
-                StepResult::Continue(new_engine) => self = new_engine,
-                StepResult::Complete(database) => return Ok(database),
+                NextStep::Continue(new_engine) => self = new_engine,
+                NextStep::Complete(database) => return Ok(database),
             }
         }
     }

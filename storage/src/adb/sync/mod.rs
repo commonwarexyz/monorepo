@@ -2,7 +2,8 @@
 
 pub mod engine;
 pub use engine::Engine;
-pub mod error;
+mod error;
+pub use error::Error;
 mod gaps;
 mod journal;
 pub use journal::Journal;

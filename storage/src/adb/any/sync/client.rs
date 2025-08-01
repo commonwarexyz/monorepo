@@ -3,7 +3,7 @@ use crate::{
     adb::{
         any,
         operation::Fixed,
-        sync::{error::SyncError, resolver::Resolver, Target},
+        sync::{resolver::Resolver, Error as SyncError, Target},
     },
     mmr,
     translator::Translator,
@@ -87,7 +87,7 @@ pub(crate) mod tests {
                 Any,
             },
             operation::Fixed,
-            sync::{engine::StepResult, resolver::tests::FailResolver},
+            sync::{engine::NextStep, resolver::tests::FailResolver},
         },
         mmr::{hasher::Standard, iterator::leaf_num_to_pos},
         translator::TwoCap,
@@ -252,7 +252,7 @@ pub(crate) mod tests {
             assert!(result.is_err(), "Expected sync to fail with invalid bounds");
             if let Err(error) = result {
                 match error {
-                    crate::adb::sync::error::SyncError::InvalidTarget { .. } => {}
+                    SyncError::InvalidTarget { .. } => {}
                     other => panic!("Expected InvalidTarget error, got: {other:?}"),
                 }
             }
@@ -666,7 +666,7 @@ pub(crate) mod tests {
             let result = sync(config).await;
             assert!(matches!(
                 result,
-                Err(crate::adb::sync::error::SyncError::SyncTargetMovedBackward { .. })
+                Err(SyncError::SyncTargetMovedBackward { .. })
             ));
 
             Arc::try_unwrap(target_db)
@@ -727,7 +727,7 @@ pub(crate) mod tests {
             let result = sync(config).await;
             assert!(matches!(
                 result,
-                Err(crate::adb::sync::error::SyncError::SyncTargetMovedBackward { .. })
+                Err(SyncError::SyncTargetMovedBackward { .. })
             ));
 
             Arc::try_unwrap(target_db)
@@ -863,10 +863,7 @@ pub(crate) mod tests {
                 .unwrap();
 
             let result = sync(config).await;
-            assert!(matches!(
-                result,
-                Err(crate::adb::sync::error::SyncError::InvalidTarget { .. })
-            ));
+            assert!(matches!(result, Err(SyncError::InvalidTarget { .. })));
 
             Arc::try_unwrap(target_db)
                 .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
@@ -999,8 +996,8 @@ pub(crate) mod tests {
                 loop {
                     // Step the client until we have processed a batch of operations
                     client = match client.step().await.unwrap() {
-                        StepResult::Continue(new_client) => new_client,
-                        StepResult::Complete(_) => panic!("client should not be complete"),
+                        NextStep::Continue(new_client) => new_client,
+                        NextStep::Complete(_) => panic!("client should not be complete"),
                     };
                     let log_size = client.journal.size().await.unwrap();
                     if log_size > initial_lower_bound {
@@ -1039,8 +1036,8 @@ pub(crate) mod tests {
             let mut client = client;
             let synced_db: Any<_, _, _, _, _> = loop {
                 match client.step().await.unwrap() {
-                    StepResult::Continue(new_client) => client = new_client,
-                    StepResult::Complete(database) => break database,
+                    NextStep::Continue(new_client) => client = new_client,
+                    NextStep::Complete(database) => break database,
                 }
             };
 
@@ -1135,8 +1132,8 @@ pub(crate) mod tests {
                 loop {
                     // Step the client until we have processed a batch of operations
                     client = match client.step().await.unwrap() {
-                        StepResult::Continue(new_client) => new_client,
-                        StepResult::Complete(_) => panic!("client should not be complete"),
+                        NextStep::Continue(new_client) => new_client,
+                        NextStep::Complete(_) => panic!("client should not be complete"),
                     };
                     let log_size = client.journal.size().await.unwrap();
                     if log_size > initial_lower_bound {
@@ -1159,8 +1156,8 @@ pub(crate) mod tests {
             let mut client = client;
             let synced_db: Any<_, _, _, _, _> = loop {
                 match client.step().await.unwrap() {
-                    StepResult::Continue(new_client) => client = new_client,
-                    StepResult::Complete(database) => break database,
+                    NextStep::Continue(new_client) => client = new_client,
+                    NextStep::Complete(database) => break database,
                 }
             };
 
