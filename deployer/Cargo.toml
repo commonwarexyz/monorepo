@@ -37,3 +37,8 @@ required-features = ["aws"]
 
 [lib]
 bench = false
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+serial_test = "3.1.1"
+testcontainers = "0.21.1"

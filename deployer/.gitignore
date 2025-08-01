@@ -1,0 +1,19 @@
+# LocalStack data
+localstack-data/
+
+# Test artifacts
+*.log
+test-output/
+
+# Coverage reports
+cobertura.xml
+tarpaulin-report.html
+lcov.info
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

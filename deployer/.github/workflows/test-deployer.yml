@@ -1,0 +1,126 @@
+name: Deployer Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'deployer/**'
+      - '.github/workflows/test-deployer.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'deployer/**'
+      - '.github/workflows/test-deployer.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test Deployer with LocalStack
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+        components: rustfmt, clippy
+    
+    - name: Cache cargo dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+    
+    - name: Check formatting
+      working-directory: ./deployer
+      run: cargo fmt -- --check
+    
+    - name: Run clippy
+      working-directory: ./deployer
+      run: cargo clippy --features aws -- -D warnings
+    
+    - name: Run unit tests
+      working-directory: ./deployer
+      run: cargo test --features aws --lib
+    
+    - name: Start LocalStack
+      working-directory: ./deployer
+      run: |
+        docker compose -f docker-compose.localstack.yml up -d
+        # Wait for LocalStack to be ready
+        timeout 60s bash -c 'until curl -s http://localhost:4566/_localstack/health | grep -q "\"ec2\".*\"available\""; do sleep 2; done'
+    
+    - name: Run LocalStack integration tests
+      working-directory: ./deployer
+      env:
+        AWS_ACCESS_KEY_ID: test
+        AWS_SECRET_ACCESS_KEY: test
+        AWS_ENDPOINT_URL: http://localhost:4566
+        AWS_DEFAULT_REGION: us-east-1
+      run: cargo test --features aws -- --test-threads=1
+    
+    - name: Stop LocalStack
+      working-directory: ./deployer
+      if: always()
+      run: docker compose -f docker-compose.localstack.yml down
+    
+    - name: Show LocalStack logs on failure
+      working-directory: ./deployer
+      if: failure()
+      run: docker compose -f docker-compose.localstack.yml logs
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+    
+    - name: Install tarpaulin
+      run: cargo install cargo-tarpaulin
+    
+    - name: Start LocalStack
+      working-directory: ./deployer
+      run: |
+        docker compose -f docker-compose.localstack.yml up -d
+        timeout 60s bash -c 'until curl -s http://localhost:4566/_localstack/health | grep -q "\"ec2\".*\"available\""; do sleep 2; done'
+    
+    - name: Run tests with coverage
+      working-directory: ./deployer
+      env:
+        AWS_ACCESS_KEY_ID: test
+        AWS_SECRET_ACCESS_KEY: test
+        AWS_ENDPOINT_URL: http://localhost:4566
+        AWS_DEFAULT_REGION: us-east-1
+      run: |
+        cargo tarpaulin --features aws --out Xml --verbose --timeout 120 -- --test-threads=1
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./deployer/cobertura.xml
+        flags: deployer
+        name: deployer-coverage
+    
+    - name: Stop LocalStack
+      working-directory: ./deployer
+      if: always()
+      run: docker compose -f docker-compose.localstack.yml down

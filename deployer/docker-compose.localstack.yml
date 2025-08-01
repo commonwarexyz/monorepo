@@ -1,0 +1,28 @@
+services:
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"  # LocalStack edge port
+      - "4571:4571"  # External services port
+    environment:
+      - SERVICES=ec2,ssm,sts,iam
+      - DEBUG=1
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - HOSTNAME_EXTERNAL=localstack
+      - AWS_DEFAULT_REGION=us-east-1
+      - DISABLE_CUSTOM_CORS_S3=1
+      - PERSISTENCE=0
+      - TMPDIR=/var/lib/localstack
+      - DATA_DIR=/var/lib/localstack/data
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - localstack-data:/var/lib/localstack
+    networks:
+      - deployer-test
+
+networks:
+  deployer-test:
+    driver: bridge
+
+volumes:
+  localstack-data:
