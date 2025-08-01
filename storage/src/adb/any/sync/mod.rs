@@ -108,6 +108,23 @@ where
     pub apply_batch_size: usize,
 }
 
+impl<E, T> TryFrom<AnySyncConfig<E, T>> for crate::journal::fixed::Config
+where
+    E: Storage + Clock + Metrics,
+    T: Translator,
+{
+    type Error = ();
+
+    fn try_from(config: AnySyncConfig<E, T>) -> Result<Self, Self::Error> {
+        Ok(crate::journal::fixed::Config {
+            partition: config.db_config.log_journal_partition,
+            items_per_blob: config.db_config.log_items_per_blob,
+            write_buffer: config.db_config.log_write_buffer,
+            buffer_pool: config.db_config.buffer_pool,
+        })
+    }
+}
+
 /// Implementation of SyncDatabase for Any database
 impl<E, K, V, H, T> crate::adb::sync::engine::SyncDatabase for Any<E, K, V, H, T>
 where
@@ -180,6 +197,33 @@ where
     fn root(&self) -> Self::Digest {
         let mut standard_hasher = Standard::<H>::new();
         Any::root(self, &mut standard_hasher)
+    }
+
+    async fn resize_journal(
+        mut journal: Self::Journal,
+        context: Self::Context,
+        config: &Self::Config,
+        lower_bound: u64,
+        upper_bound: u64,
+    ) -> Result<Self::Journal, Self::Error> {
+        let log_size = journal.size().await.map_err(crate::adb::Error::from)?;
+
+        if log_size <= lower_bound {
+            // Close the existing journal before creating a new one
+            journal.close().await.map_err(crate::adb::Error::from)?;
+
+            // Create a new journal with the new bounds
+            Self::create_journal(context, config, lower_bound, upper_bound)
+                .await
+                .map_err(crate::adb::Error::from)
+        } else {
+            // Just prune to the lower bound
+            journal
+                .prune(lower_bound)
+                .await
+                .map_err(crate::adb::Error::from)?;
+            Ok(journal)
+        }
     }
 }
 

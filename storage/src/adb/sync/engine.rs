@@ -35,16 +35,8 @@ pub trait Journal {
     /// Append an operation to the journal
     fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>>;
 
-    /// Resize the journal due to a target update.
-    ///
-    /// If the last operation is before `lower_bound`, close and reinitialize.
-    /// If the last operation is at/after `lower_bound`, prune to `lower_bound`.
-    /// If the last operation is at/after `upper_bound`, rewind to `upper_bound`.
-    fn resize(
-        &mut self,
-        lower_bound: u64,
-        upper_bound: u64,
-    ) -> impl Future<Output = Result<(), Self::Error>>;
+    /// Close the journal and release resources
+    fn close(self) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
 /// Trait for verifying proofs of operation batches
@@ -104,6 +96,16 @@ pub trait SyncDatabase: Sized {
 
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
+
+    /// Resize journal for target update - close and recreate if needed, prune otherwise.
+    // TODO should this be a method on the journal?
+    fn resize_journal(
+        journal: Self::Journal,
+        context: Self::Context,
+        config: &Self::Config,
+        lower_bound: u64,
+        upper_bound: u64,
+    ) -> impl Future<Output = Result<Self::Journal, Self::Error>>;
 }
 
 /// Result of executing one sync step
@@ -451,6 +453,9 @@ pub struct SyncEngine<DB: SyncDatabase, R: Resolver<Op = DB::Op, Digest = DB::Di
     /// Verifier for validating proofs and extracting pinned nodes
     pub verifier: DB::Verifier,
 
+    /// Runtime context for database operations
+    pub context: DB::Context,
+
     /// Configuration for building the final database
     pub config: DB::Config,
 
@@ -480,6 +485,8 @@ impl<DB, R> SyncEngine<DB, R>
 where
     DB: SyncDatabase,
     DB::Error: From<<DB::Journal as Journal>::Error>,
+    DB::Config: Clone,
+    DB::Context: Clone,
     R: Resolver<Op = DB::Op, Digest = DB::Digest>,
 {
     /// Create a new sync engine with the given configuration
@@ -488,7 +495,7 @@ where
     ) -> Result<Self, SyncError<DB::Error, R::Error>> {
         // Create journal and verifier using the database's factory methods
         let journal = DB::create_journal(
-            config.context,
+            config.context.clone(),
             &config.db_config,
             config.target.lower_bound_ops,
             config.target.upper_bound_ops,
@@ -508,6 +515,7 @@ where
             journal,
             resolver: config.resolver,
             verifier,
+            context: config.context,
             config: config.db_config,
             update_receiver: config.update_receiver,
         })
@@ -584,18 +592,33 @@ where
 
     /// Clear all sync state for a target update
     pub async fn reset_for_target_update(
-        &mut self,
+        self,
         new_target: SyncTarget<DB::Digest>,
-    ) -> Result<(), SyncError<DB::Error, R::Error>> {
-        self.journal
-            .resize(new_target.lower_bound_ops, new_target.upper_bound_ops)
-            .await
-            .map_err(SyncError::journal)?;
-        self.target = new_target;
-        self.fetched_operations.clear();
-        self.outstanding_requests.clear();
-        self.pinned_nodes = None;
-        Ok(())
+    ) -> Result<Self, SyncError<DB::Error, R::Error>> {
+        let journal = DB::resize_journal(
+            self.journal,
+            self.context.clone(),
+            &self.config,
+            new_target.lower_bound_ops,
+            new_target.upper_bound_ops,
+        )
+        .await
+        .map_err(SyncError::database)?;
+
+        Ok(Self {
+            outstanding_requests: OutstandingRequests::new(),
+            fetched_operations: BTreeMap::new(),
+            pinned_nodes: None,
+            target: new_target,
+            max_outstanding_requests: self.max_outstanding_requests,
+            fetch_batch_size: self.fetch_batch_size,
+            journal,
+            resolver: self.resolver,
+            verifier: self.verifier,
+            context: self.context,
+            config: self.config,
+            update_receiver: self.update_receiver,
+        })
     }
 
     /// Store a batch of fetched operations
@@ -825,10 +848,12 @@ where
                         }
                     })?;
 
-                self.reset_for_target_update(new_target).await?;
+                let mut updated_self = self.reset_for_target_update(new_target).await?;
 
                 // Schedule new requests for the updated target
-                self.schedule_requests().await?;
+                updated_self.schedule_requests().await?;
+
+                return Ok(StepResult::Continue(updated_self));
             }
             SyncEvent::UpdateChannelClosed => {
                 self.update_receiver = None;

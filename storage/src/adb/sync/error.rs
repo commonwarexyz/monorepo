@@ -50,6 +50,16 @@ where
     PinnedNodes(String),
 }
 
+impl<T, U> From<T> for SyncError<T, U>
+where
+    T: std::error::Error + Send + 'static,
+    U: std::error::Error + Send + 'static,
+{
+    fn from(err: T) -> Self {
+        Self::Database(err)
+    }
+}
+
 impl<T, U> SyncError<T, U>
 where
     T: std::error::Error + Send + 'static,

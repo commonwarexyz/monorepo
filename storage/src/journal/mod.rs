@@ -24,16 +24,8 @@ where
         fixed::Journal::append(self, op).await.map(|_| ())
     }
 
-    async fn resize(&mut self, lower_bound: u64, upper_bound: u64) -> Result<(), Self::Error> {
-        let log_size = self.size().await?;
-
-        if log_size <= lower_bound {
-            // Would need to create new journal first, but we don't have access to context/config here
-            // This is a limitation of implementing SyncJournal directly on Journal
-            // For now, just fail with an appropriate error using InvalidSyncRange from journal errors
-            return Err(Error::InvalidSyncRange(lower_bound, upper_bound));
-        }
-        self.prune(lower_bound).await
+    async fn close(self) -> Result<(), Self::Error> {
+        fixed::Journal::close(self).await
     }
 }
 
