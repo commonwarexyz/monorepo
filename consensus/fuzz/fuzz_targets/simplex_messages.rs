@@ -54,9 +54,6 @@ pub struct FuzzInput {
     views: Vec<u64>,
     parents: Vec<u64>,
     malformed_bytes: Vec<Vec<u8>>,
-    link_latency: f64,
-    link_jitter: f64,
-    link_success_rate: f64,
 }
 
 struct FuzzingActor<E: Clock + Spawner + Rng> {
@@ -70,7 +67,6 @@ struct FuzzingActor<E: Clock + Spawner + Rng> {
     parent_offsets: Vec<u64>,
     malformed_bytes: Vec<Vec<u8>>,
     mutation_idx: usize,
-    current_mutation_strategy: Option<FuzzStep>,
 }
 
 impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
@@ -92,7 +88,6 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
             parent_offsets: input.parents,
             malformed_bytes: input.malformed_bytes,
             mutation_idx: 0,
-            current_mutation_strategy: None,
         }
     }
 
@@ -142,8 +137,6 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
         while steps < MAX_STEPS {
             match receiver.recv().await {
                 Ok((s, msg)) => {
-                    // Set mutation strategy for this message
-                    self.current_mutation_strategy = self.get_next_mutation().cloned();
                     // Received a message - mutate and resend it
                     self.handle_received_message(&mut sender, s, msg.to_vec())
                         .await;
@@ -198,7 +191,7 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
                     .is_participant(view, &self.crypto.public_key())
                 {
                     // Send mutated version based on strategy
-                    if let Some(strategy) = self.current_mutation_strategy.clone() {
+                    if let Some(strategy) = self.get_next_mutation().cloned() {
                         let mutated_proposal =
                             self.create_mutated_proposal(&notarize.proposal, &strategy);
                         let msg = Notarize::sign(
@@ -238,7 +231,7 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
                     .is_participant(view, &self.crypto.public_key())
                 {
                     // Send mutated version based on strategy
-                    if let Some(strategy) = self.current_mutation_strategy.clone() {
+                    if let Some(strategy) = self.get_next_mutation().cloned() {
                         let mutated_proposal =
                             self.create_mutated_proposal(&finalize.proposal, &strategy);
                         let msg = Finalize::sign(
@@ -384,29 +377,6 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
     }
 }
 
-fn clamp_link_params(input: &FuzzInput) -> (f64, f64, f64) {
-    // Clamp link values to specified ranges, handling NaN and infinite values
-    let latency = if input.link_latency.is_finite() {
-        0.1 + (input.link_latency.abs() % 4.9) // Range: 0.1 - 5.0
-    } else {
-        0.1
-    };
-
-    let jitter = if input.link_jitter.is_finite() {
-        0.1 + (input.link_jitter.abs() % 2.9) // Range: 0.1 - 3.0
-    } else {
-        0.2
-    };
-
-    let success_rate = if input.link_success_rate.is_finite() {
-        0.1 + (input.link_success_rate.abs() % 0.9) // Range: 0.1 - 1.0
-    } else {
-        1.0
-    };
-
-    (latency, jitter, success_rate)
-}
-
 fn fuzzer(input: FuzzInput) {
     // Create context
     let n = 4;
@@ -441,12 +411,11 @@ fn fuzzer(input: FuzzInput) {
         let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
         let mut registrations = register_validators(&mut oracle, &validators).await;
 
-        // Link all validators with clamped parameters
-        let (latency, jitter, success_rate) = clamp_link_params(&input);
+        // Link all validators
         let link = Link {
-            latency,
-            jitter,
-            success_rate,
+            latency: 0.0,
+            jitter: 0.0,
+            success_rate: 1.0,
         };
         link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
