@@ -19,7 +19,7 @@ use commonware_runtime::{
     },
     Clock, Handle, Metrics, Spawner,
 };
-use commonware_utils::{futures::Pool as FuturesPool, Array};
+use commonware_utils::{futures::Pool as FuturesPool, Span};
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, Either},
@@ -43,7 +43,7 @@ pub struct Engine<
     E: Clock + GClock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Coordinator<PublicKey = P>,
-    Key: Array,
+    Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
     NetS: Sender<PublicKey = P>,
@@ -94,7 +94,7 @@ impl<
         E: Clock + GClock + Spawner + Rng + Metrics,
         P: PublicKey,
         D: Coordinator<PublicKey = P>,
-        Key: Array,
+        Key: Span,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
         Pro: Producer<Key = Key>,
         NetS: Sender<PublicKey = P>,

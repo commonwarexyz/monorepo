@@ -76,7 +76,8 @@ mod tests {
     };
     use crate::{
         threshold_simplex::types::{
-            finalize_namespace, notarize_namespace, Activity, Finalization, Notarization, Proposal,
+            finalize_namespace, notarize_namespace, seed_namespace, view_message, Activity,
+            Finalization, Notarization, Proposal,
         },
         Block as _, Reporter,
     };
@@ -96,6 +97,7 @@ mod tests {
         sha256::{self, Digest as Sha256Digest},
         Digestible, PrivateKeyExt as _, Signer as _,
     };
+    use commonware_macros::test_traced;
     use commonware_p2p::simulated::{self, Link, Network, Oracle};
     use commonware_resolver::p2p as resolver;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
@@ -111,28 +113,47 @@ mod tests {
     type E = PrivateKey;
 
     const NAMESPACE: &[u8] = b"test";
-    const NETWORK_SPEED: Duration = Duration::from_millis(100);
-    const SUCCESS_RATE: f64 = 1.0;
-    const JITTER: f64 = NETWORK_SPEED.as_millis() as f64 / 2.0;
     const NUM_VALIDATORS: u32 = 4;
     const QUORUM: u32 = 3;
     const NUM_BLOCKS: u64 = 100;
 
-    #[test]
-    fn test_basic_finalization() {
+    #[test_traced("WARN")]
+    fn test_finalize_good_links() {
+        let link = Link {
+            latency: 100.0,
+            jitter: 1.0,
+            success_rate: 1.0,
+        };
         for seed in 0..5 {
-            let result1 = basic_finalization(seed);
-            let result2 = basic_finalization(seed);
+            let result1 = finalize(seed, link.clone());
+            let result2 = finalize(seed, link.clone());
+
             // Ensure determinism
             assert_eq!(result1, result2);
         }
     }
 
-    fn basic_finalization(seed: u64) -> String {
+    #[test_traced("WARN")]
+    fn test_finalize_bad_links() {
+        let link = Link {
+            latency: 200.0,
+            jitter: 50.0,
+            success_rate: 0.7,
+        };
+        for seed in 0..5 {
+            let result1 = finalize(seed, link.clone());
+            let result2 = finalize(seed, link.clone());
+
+            // Ensure determinism
+            assert_eq!(result1, result2);
+        }
+    }
+
+    fn finalize(seed: u64, link: Link) -> String {
         let runner = deterministic::Runner::new(
             deterministic::Config::new()
                 .with_seed(seed)
-                .with_timeout(Some(Duration::from_secs(60))),
+                .with_timeout(Some(Duration::from_secs(300))),
         );
         runner.start(|mut context| async move {
             // Initialize network
@@ -183,11 +204,6 @@ mod tests {
             }
 
             // Add links between all peers
-            let link = Link {
-                latency: NETWORK_SPEED.as_millis() as f64,
-                jitter: JITTER,
-                success_rate: SUCCESS_RATE,
-            };
             for p1 in peers.iter() {
                 for p2 in peers.iter() {
                     if p2 == p1 {
@@ -224,7 +240,9 @@ mod tests {
 
                 // Wait for the block to be broadcast, but due to jitter, we may or may not receive
                 // the block before continuing.
-                context.sleep(NETWORK_SPEED).await;
+                context
+                    .sleep(Duration::from_millis(link.latency as u64))
+                    .await;
 
                 // Notarize block by the validator that broadcasted it
                 let proposal = Proposal {
@@ -247,18 +265,26 @@ mod tests {
                 }
             }
 
-            // Wait for things to complete
-            context.sleep(Duration::from_secs(30)).await;
-
             // Check that all applications received all blocks.
-            assert_eq!(applications.len(), NUM_VALIDATORS as usize);
-            for (i, app) in &applications {
-                assert!(
-                    app.blocks().len() == NUM_BLOCKS as usize,
-                    "validator {i} has {:?} blocks",
-                    app.blocks().keys().collect::<Vec<_>>(),
-                );
+            let mut finished = false;
+            while !finished {
+                // Avoid a busy loop
+                context.sleep(Duration::from_secs(1)).await;
+
+                // If not all validators have finished, try again
+                if applications.len() != NUM_VALIDATORS as usize {
+                    continue;
+                }
+                finished = true;
+                for app in applications.values() {
+                    if app.blocks().len() != NUM_BLOCKS as usize {
+                        finished = false;
+                        break;
+                    }
+                }
             }
+
+            // Return state
             context.auditor().state()
         })
     }
@@ -278,7 +304,7 @@ mod tests {
             identity,
             coordinator,
             mailbox_size: 100,
-            backfill_quota: Quota::per_second(NonZeroU32::new(1).unwrap()),
+            backfill_quota: Quota::per_second(NonZeroU32::new(5).unwrap()),
             namespace: NAMESPACE.to_vec(),
             view_retention_timeout: 10,
             max_repair: 10,
@@ -311,51 +337,69 @@ mod tests {
         broadcast_engine.start(network);
 
         // Start the actor
-        let backfill_by_digest = oracle.register(secret.public_key(), 2).await.unwrap();
-        let backfill_by_height = oracle.register(secret.public_key(), 3).await.unwrap();
-        let backfill_by_view = oracle.register(secret.public_key(), 4).await.unwrap();
-        actor.start(
-            application.clone(),
-            buffer,
-            backfill_by_digest,
-            backfill_by_height,
-            backfill_by_view,
-        );
+        let backfill = oracle.register(secret.public_key(), 2).await.unwrap();
+        actor.start(application.clone(), buffer, backfill);
 
         (application, mailbox)
     }
 
     fn make_finalization(proposal: Proposal<D>, shares: &[Sh], quorum: u32) -> Finalization<V, D> {
         let proposal_msg = proposal.encode();
-        let partials: Vec<_> = shares
+
+        // Generate proposal signature
+        let proposal_partials: Vec<_> = shares
             .iter()
             .take(quorum as usize)
             .map(|s| {
                 partial_sign_message::<V>(s, Some(&finalize_namespace(NAMESPACE)), &proposal_msg)
             })
             .collect();
-        let signature = threshold_signature_recover::<V, _>(quorum, &partials).unwrap();
+        let proposal_signature =
+            threshold_signature_recover::<V, _>(quorum, &proposal_partials).unwrap();
+
+        // Generate seed signature (for the view number)
+        let seed_msg = view_message(proposal.view);
+        let seed_partials: Vec<_> = shares
+            .iter()
+            .take(quorum as usize)
+            .map(|s| partial_sign_message::<V>(s, Some(&seed_namespace(NAMESPACE)), &seed_msg))
+            .collect();
+        let seed_signature = threshold_signature_recover::<V, _>(quorum, &seed_partials).unwrap();
+
         Finalization {
             proposal,
-            proposal_signature: signature,
-            seed_signature: signature,
+            proposal_signature,
+            seed_signature,
         }
     }
 
     fn make_notarization(proposal: Proposal<D>, shares: &[Sh], quorum: u32) -> Notarization<V, D> {
         let proposal_msg = proposal.encode();
-        let partials: Vec<_> = shares
+
+        // Generate proposal signature
+        let proposal_partials: Vec<_> = shares
             .iter()
             .take(quorum as usize)
             .map(|s| {
                 partial_sign_message::<V>(s, Some(&notarize_namespace(NAMESPACE)), &proposal_msg)
             })
             .collect();
-        let signature = threshold_signature_recover::<V, _>(quorum, &partials).unwrap();
+        let proposal_signature =
+            threshold_signature_recover::<V, _>(quorum, &proposal_partials).unwrap();
+
+        // Generate seed signature (for the view number)
+        let seed_msg = view_message(proposal.view);
+        let seed_partials: Vec<_> = shares
+            .iter()
+            .take(quorum as usize)
+            .map(|s| partial_sign_message::<V>(s, Some(&seed_namespace(NAMESPACE)), &seed_msg))
+            .collect();
+        let seed_signature = threshold_signature_recover::<V, _>(quorum, &seed_partials).unwrap();
+
         Notarization {
             proposal,
-            proposal_signature: signature,
-            seed_signature: signature,
+            proposal_signature,
+            seed_signature,
         }
     }
 }

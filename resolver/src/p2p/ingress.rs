@@ -1,5 +1,5 @@
 use crate::Resolver;
-use commonware_utils::Array;
+use commonware_utils::Span;
 use futures::{channel::mpsc, SinkExt};
 
 type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
@@ -33,7 +33,7 @@ impl<K> Mailbox<K> {
     }
 }
 
-impl<K: Array> Resolver for Mailbox<K> {
+impl<K: Span> Resolver for Mailbox<K> {
     type Key = K;
 
     /// Send a fetch request to the peer actor.
