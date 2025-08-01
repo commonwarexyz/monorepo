@@ -56,7 +56,6 @@
 //!   uncertified blocks from the network.
 
 pub mod actor;
-mod request;
 pub use actor::Actor;
 pub mod config;
 pub use config::Config;
