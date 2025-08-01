@@ -164,9 +164,7 @@ where
         }
     }
 
-    pub async fn get_sync_target(
-        &self,
-    ) -> Result<Target<Digest>, <Self as ResolverTrait>::Error> {
+    pub async fn get_sync_target(&self) -> Result<Target<Digest>, <Self as ResolverTrait>::Error> {
         let request = GetSyncTargetRequest {
             request_id: RequestId::new(),
         };
