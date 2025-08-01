@@ -18,8 +18,14 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
     Digest, PrivateKeyExt as _, Sha256, Signer as _,
 };
-use commonware_p2p::{simulated::{Config as NetworkConfig, Link, Network}, Receiver, Recipients, Sender};
-use commonware_runtime::{deterministic::{self}, Clock, Handle, Metrics, Runner, Spawner};
+use commonware_p2p::{
+    simulated::{Config as NetworkConfig, Link, Network},
+    Receiver, Recipients, Sender,
+};
+use commonware_runtime::{
+    deterministic::{self},
+    Clock, Handle, Metrics, Runner, Spawner,
+};
 use commonware_utils::NZU32;
 use governor::Quota;
 use libfuzzer_sys::fuzz_target;
@@ -348,19 +354,19 @@ fn clamp_link_params(input: &FuzzInput) -> (f64, f64, f64) {
     } else {
         0.1
     };
-    
+
     let jitter = if input.link_jitter.is_finite() {
         0.1 + (input.link_jitter.abs() % 2.9) // Range: 0.1 - 3.0
     } else {
         0.2
     };
-    
+
     let success_rate = if input.link_success_rate.is_finite() {
         0.1 + (input.link_success_rate.abs() % 0.9) // Range: 0.1 - 1.0
     } else {
         1.0
     };
-    
+
     (latency, jitter, success_rate)
 }
 
@@ -419,8 +425,7 @@ fn fuzzer(input: FuzzInput) {
             namespace: namespace.clone(),
             participants: view_validators.clone(),
         };
-        let first_supervisor =
-            Supervisor::<PublicKey, Sha256Digest>::new(first_supervisor_config);
+        let first_supervisor = Supervisor::<PublicKey, Sha256Digest>::new(first_supervisor_config);
 
         let (voter, _) = registrations
             .remove(&first_validator)
@@ -442,8 +447,7 @@ fn fuzzer(input: FuzzInput) {
                 namespace: namespace.clone(),
                 participants: view_validators.clone(),
             };
-            let supervisor =
-                Supervisor::<PublicKey, Sha256Digest>::new(supervisor_config);
+            let supervisor = Supervisor::<PublicKey, Sha256Digest>::new(supervisor_config);
 
             supervisors.push(supervisor.clone());
             let application_cfg = mocks::application::Config {
@@ -490,7 +494,7 @@ fn fuzzer(input: FuzzInput) {
         }
 
         context.sleep(Duration::from_secs(1)).await;
-        
+
         // Explicit cleanup to prevent memory leaks
         drop(supervisors);
         drop(relay);
