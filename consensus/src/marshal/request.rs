@@ -82,7 +82,7 @@ impl<B: Block> EncodeSize for Subject<B> {
     }
 }
 
-/// A request wrapper that holds the serialized bytes of the inner request.
+/// The request sent to peers when backfilling notarizations, finalizations, and blocks.
 #[derive(Clone)]
 pub struct Request<B: Block> {
     /// The subject of the request.
