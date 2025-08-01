@@ -341,13 +341,36 @@ impl<E: Clock + Spawner + Rng + Metrics> FuzzingActor<E> {
     }
 }
 
+fn clamp_link_params(input: &FuzzInput) -> (f64, f64, f64) {
+    // Clamp link values to specified ranges, handling NaN and infinite values
+    let latency = if input.link_latency.is_finite() {
+        0.1 + (input.link_latency.abs() % 4.9) // Range: 0.1 - 5.0
+    } else {
+        0.1
+    };
+    
+    let jitter = if input.link_jitter.is_finite() {
+        0.1 + (input.link_jitter.abs() % 2.9) // Range: 0.1 - 3.0
+    } else {
+        0.2
+    };
+    
+    let success_rate = if input.link_success_rate.is_finite() {
+        0.1 + (input.link_success_rate.abs() % 0.9) // Range: 0.1 - 1.0
+    } else {
+        1.0
+    };
+    
+    (latency, jitter, success_rate)
+}
+
 fn fuzzer(input: FuzzInput) {
     // Create context
     let n = 4;
     let namespace = b"consensus_fuzz".to_vec();
     let cfg = deterministic::Config::new()
         .with_seed(input.seed)
-        .with_timeout(Some(Duration::from_secs(5)));
+        .with_timeout(Some(Duration::from_secs(2))); // Reduced timeout for faster cleanup
     let executor = deterministic::Runner::new(cfg);
     executor.start(|context| async move {
         // Create simulated network
@@ -375,12 +398,8 @@ fn fuzzer(input: FuzzInput) {
         let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
         let mut registrations = register_validators(&mut oracle, &validators).await;
 
-        // Clamp link values to specified ranges
-        let latency = 0.1 + (input.link_latency.abs() % 4.9); // Range: 0.1 - 5.0
-        let jitter = 0.1 + (input.link_jitter.abs() % 2.9); // Range: 0.1 - 3.0
-        let success_rate = 0.1 + (input.link_success_rate.abs() % 19.9); // Range: 0.1 - 20.0
-
-        // Link all validators
+        // Link all validators with clamped parameters
+        let (latency, jitter, success_rate) = clamp_link_params(&input);
         let link = Link {
             latency,
             jitter,
@@ -401,7 +420,7 @@ fn fuzzer(input: FuzzInput) {
             participants: view_validators.clone(),
         };
         let first_supervisor =
-            mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(first_supervisor_config);
+            Supervisor::<PublicKey, Sha256Digest>::new(first_supervisor_config);
 
         let (voter, _) = registrations
             .remove(&first_validator)
@@ -424,15 +443,15 @@ fn fuzzer(input: FuzzInput) {
                 participants: view_validators.clone(),
             };
             let supervisor =
-                mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(supervisor_config);
+                Supervisor::<PublicKey, Sha256Digest>::new(supervisor_config);
 
             supervisors.push(supervisor.clone());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
                 participant: validator.clone(),
-                propose_latency: (0.5, 2.0),
-                verify_latency: (0.5, 2.0),
+                propose_latency: (0.01, 0.3),
+                verify_latency: (0.01, 0.3),
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -452,10 +471,10 @@ fn fuzzer(input: FuzzInput) {
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
+                nullify_retry: Duration::from_secs(3),
                 fetch_timeout: Duration::from_secs(1),
-                activity_timeout: 10,
-                skip_timeout: 5,
+                activity_timeout: 5,
+                skip_timeout: 3,
                 max_fetch_count: 1,
                 max_participants: n as usize,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
@@ -470,7 +489,13 @@ fn fuzzer(input: FuzzInput) {
             engine.start(voter, resolver);
         }
 
-        context.sleep(Duration::from_secs(2)).await;
+        context.sleep(Duration::from_secs(1)).await;
+        
+        // Explicit cleanup to prevent memory leaks
+        drop(supervisors);
+        drop(relay);
+        drop(registrations);
+        drop(oracle);
     });
 }
 
