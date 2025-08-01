@@ -42,8 +42,6 @@ pub trait Span:
     + Debug
     + Hash
     + Display
-    + AsRef<[u8]>
-    + Deref<Target = [u8]>
     + Codec<Cfg = ()>
 {
 }
@@ -53,4 +51,4 @@ pub trait Span:
 /// `Array` is typically used to parse things like `PublicKeys` and `Signatures`
 /// from an untrusted network connection. Once parsed, these types are assumed
 /// to be well-formed (which prevents duplicate validation).
-pub trait Array: Span + EncodeFixed {}
+pub trait Array: Span + EncodeFixed + AsRef<[u8]> + Deref<Target = [u8]> {}
