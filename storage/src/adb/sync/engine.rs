@@ -1,13 +1,18 @@
 //! Core sync engine components that are shared across sync clients.
 
 use crate::{
-    adb::sync::{error::SyncError, resolver::Resolver, Target, TargetUpdateReceiver},
+    adb::sync::{error::SyncError, resolver::Resolver, Target},
     mmr::verification::Proof,
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_utils::NZU64;
-use futures::{channel::oneshot, future::Either, stream::FuturesUnordered, StreamExt};
+use futures::{
+    channel::{mpsc, oneshot},
+    future::Either,
+    stream::FuturesUnordered,
+    StreamExt,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
@@ -263,7 +268,7 @@ pub fn validate_target_update<D: Digest>(
 /// Wait for the next synchronization event from either target updates or fetch results.
 /// Returns `None` if the sync is stalled (there are no outstanding requests).
 async fn wait_for_event<Op, D: Digest, E>(
-    update_receiver: &mut Option<TargetUpdateReceiver<D>>,
+    update_receiver: &mut Option<mpsc::Receiver<Target<D>>>,
     outstanding_requests: &mut OutstandingRequests<Op, D, E>,
 ) -> Option<Event<Op, D, E>> {
     let target_update_fut = match update_receiver {
@@ -320,7 +325,7 @@ pub struct SyncEngine<DB: SyncDatabase, R: Resolver<Op = DB::Op, Digest = DB::Di
     pub config: DB::Config,
 
     /// Optional receiver for target updates during sync
-    pub update_receiver: Option<TargetUpdateReceiver<DB::Digest>>,
+    pub update_receiver: Option<mpsc::Receiver<Target<DB::Digest>>>,
 }
 
 /// Configuration for creating a new SyncEngine
@@ -338,7 +343,7 @@ pub struct SyncEngineConfig<DB: SyncDatabase, R: Resolver<Op = DB::Op, Digest = 
     /// Database-specific configuration
     pub db_config: DB::Config,
     /// Channel for receiving sync target updates
-    pub update_receiver: Option<TargetUpdateReceiver<DB::Digest>>,
+    pub update_receiver: Option<mpsc::Receiver<Target<DB::Digest>>>,
 }
 
 impl<DB, R> SyncEngine<DB, R>

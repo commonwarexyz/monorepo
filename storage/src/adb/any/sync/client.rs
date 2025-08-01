@@ -3,7 +3,7 @@ use crate::{
     adb::{
         any,
         operation::Fixed,
-        sync::{error::SyncError, resolver::Resolver, Target, TargetUpdateReceiver},
+        sync::{error::SyncError, resolver::Resolver, Target},
     },
     mmr,
     translator::Translator,
@@ -11,6 +11,7 @@ use crate::{
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics as MetricsTrait, Storage};
 use commonware_utils::Array;
+use futures::channel::mpsc;
 use std::num::NonZeroU64;
 
 /// Configuration for the sync client
@@ -27,7 +28,7 @@ where
     pub context: E,
 
     /// Channel for receiving target updates.
-    pub update_receiver: Option<TargetUpdateReceiver<H::Digest>>,
+    pub update_receiver: Option<mpsc::Receiver<Target<H::Digest>>>,
 
     /// Database configuration.
     pub db_config: any::Config<T>,

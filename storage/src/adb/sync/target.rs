@@ -1,10 +1,6 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
-use futures::channel::mpsc;
-
-/// Type alias for sync target update receivers
-pub type TargetUpdateReceiver<D> = mpsc::Receiver<Target<D>>;
 
 /// Target state to sync to
 #[derive(Debug, Clone, PartialEq, Eq)]
