@@ -77,7 +77,7 @@ mod tests {
     };
     use crate::{
         threshold_simplex::types::{
-            finalize_namespace, notarize_namespace, Activity, Finalization, Notarization, Proposal,
+            finalize_namespace, notarize_namespace, seed_namespace, view_message, Activity, Finalization, Notarization, Proposal,
         },
         Block as _, Reporter,
     };
@@ -322,35 +322,63 @@ mod tests {
 
     fn make_finalization(proposal: Proposal<D>, shares: &[Sh], quorum: u32) -> Finalization<V, D> {
         let proposal_msg = proposal.encode();
-        let partials: Vec<_> = shares
+        
+        // Generate proposal signature
+        let proposal_partials: Vec<_> = shares
             .iter()
             .take(quorum as usize)
             .map(|s| {
                 partial_sign_message::<V>(s, Some(&finalize_namespace(NAMESPACE)), &proposal_msg)
             })
             .collect();
-        let signature = threshold_signature_recover::<V, _>(quorum, &partials).unwrap();
+        let proposal_signature = threshold_signature_recover::<V, _>(quorum, &proposal_partials).unwrap();
+        
+        // Generate seed signature (for the view number)
+        let seed_msg = view_message(proposal.view);
+        let seed_partials: Vec<_> = shares
+            .iter()
+            .take(quorum as usize)
+            .map(|s| {
+                partial_sign_message::<V>(s, Some(&seed_namespace(NAMESPACE)), &seed_msg)
+            })
+            .collect();
+        let seed_signature = threshold_signature_recover::<V, _>(quorum, &seed_partials).unwrap();
+        
         Finalization {
             proposal,
-            proposal_signature: signature,
-            seed_signature: signature,
+            proposal_signature,
+            seed_signature,
         }
     }
 
     fn make_notarization(proposal: Proposal<D>, shares: &[Sh], quorum: u32) -> Notarization<V, D> {
         let proposal_msg = proposal.encode();
-        let partials: Vec<_> = shares
+        
+        // Generate proposal signature
+        let proposal_partials: Vec<_> = shares
             .iter()
             .take(quorum as usize)
             .map(|s| {
                 partial_sign_message::<V>(s, Some(&notarize_namespace(NAMESPACE)), &proposal_msg)
             })
             .collect();
-        let signature = threshold_signature_recover::<V, _>(quorum, &partials).unwrap();
+        let proposal_signature = threshold_signature_recover::<V, _>(quorum, &proposal_partials).unwrap();
+        
+        // Generate seed signature (for the view number)
+        let seed_msg = view_message(proposal.view);
+        let seed_partials: Vec<_> = shares
+            .iter()
+            .take(quorum as usize)
+            .map(|s| {
+                partial_sign_message::<V>(s, Some(&seed_namespace(NAMESPACE)), &seed_msg)
+            })
+            .collect();
+        let seed_signature = threshold_signature_recover::<V, _>(quorum, &seed_partials).unwrap();
+        
         Notarization {
             proposal,
-            proposal_signature: signature,
-            seed_signature: signature,
+            proposal_signature,
+            seed_signature,
         }
     }
 }
