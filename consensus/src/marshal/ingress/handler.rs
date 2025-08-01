@@ -13,6 +13,11 @@ use std::{
 };
 use tracing::error;
 
+/// The subject of a backfill request.
+const BLOCK_REQUEST: u8 = 0;
+const FINALIZED_REQUEST: u8 = 1;
+const NOTARIZED_REQUEST: u8 = 2;
+
 /// Messages sent from the resolver's [Consumer]/[Producer] implementation
 /// to the marshal [Actor](super::super::actor::Actor).
 pub enum Message<K: Span> {
@@ -104,6 +109,15 @@ pub enum Request<B: Block> {
 }
 
 impl<B: Block> Request<B> {
+    /// The subject of the request.
+    fn subject(&self) -> u8 {
+        match self {
+            Self::Block(_) => BLOCK_REQUEST,
+            Self::Finalized { .. } => FINALIZED_REQUEST,
+            Self::Notarized { .. } => NOTARIZED_REQUEST,
+        }
+    }
+
     /// The predicate to use when pruning subjects related to this subject.
     ///
     /// Specifically, any subjects unrelated will be left unmodified. Any related
@@ -124,19 +138,11 @@ impl<B: Block> Request<B> {
 
 impl<B: Block> Write for Request<B> {
     fn write(&self, buf: &mut impl BufMut) {
+        self.subject().write(buf);
         match self {
-            Self::Block(commitment) => {
-                0u8.write(buf);
-                commitment.write(buf)
-            }
-            Self::Finalized { height } => {
-                1u8.write(buf);
-                height.write(buf)
-            }
-            Self::Notarized { view } => {
-                2u8.write(buf);
-                view.write(buf)
-            }
+            Self::Block(commitment) => commitment.write(buf),
+            Self::Finalized { height } => height.write(buf),
+            Self::Notarized { view } => view.write(buf),
         }
     }
 }
@@ -146,11 +152,11 @@ impl<B: Block> Read for Request<B> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request = match u8::read(buf)? {
-            0 => Self::Block(B::Commitment::read(buf)?),
-            1 => Self::Finalized {
+            BLOCK_REQUEST => Self::Block(B::Commitment::read(buf)?),
+            FINALIZED_REQUEST => Self::Finalized {
                 height: u64::read(buf)?,
             },
-            2 => Self::Notarized {
+            NOTARIZED_REQUEST => Self::Notarized {
                 view: u64::read(buf)?,
             },
             i => return Err(CodecError::InvalidEnum(i)),
@@ -190,12 +196,7 @@ impl<B: Block> Ord for Request<B> {
             (Self::Block(a), Self::Block(b)) => a.cmp(b),
             (Self::Finalized { height: a }, Self::Finalized { height: b }) => a.cmp(b),
             (Self::Notarized { view: a }, Self::Notarized { view: b }) => a.cmp(b),
-            (Self::Block(_), Self::Finalized { .. }) => std::cmp::Ordering::Less,
-            (Self::Block(_), Self::Notarized { .. }) => std::cmp::Ordering::Less,
-            (Self::Finalized { .. }, Self::Notarized { .. }) => std::cmp::Ordering::Less,
-            (Self::Finalized { .. }, Self::Block(_)) => std::cmp::Ordering::Greater,
-            (Self::Notarized { .. }, Self::Block(_)) => std::cmp::Ordering::Greater,
-            (Self::Notarized { .. }, Self::Finalized { .. }) => std::cmp::Ordering::Greater,
+            (a, b) => a.subject().cmp(&b.subject()),
         }
     }
 }
