@@ -1,117 +1,271 @@
 use crate::{
-    adb::any::{
+    adb::{
+        any::{Any, SyncConfig},
+        operation::Fixed,
         sync::{
-            client::{Client, Config},
-            resolver::Resolver,
+            engine::EngineConfig, resolver::Resolver, Engine, Error as SyncError, Journal, Target,
+            Verifier,
         },
-        Any,
     },
-    mmr,
+    journal::fixed,
+    mmr::{hasher::Standard, iterator::leaf_num_to_pos, verification::Proof},
     translator::Translator,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use futures::channel::mpsc;
-use std::fmt;
 
 pub mod client;
-mod metrics;
-pub mod resolver;
-
-/// The target state to sync to.
-#[derive(Debug, Clone)]
-pub struct SyncTarget<D: Digest> {
-    /// Root digest of the target database
-    pub root: D,
-    /// Lower bound of operations to sync (inclusive)
-    /// This will be the pruning boundary of the synced database.
-    pub lower_bound_ops: u64,
-    /// Upper bound of operations to sync (inclusive)
-    pub upper_bound_ops: u64,
-}
 
 /// Channel for sending sync target updates
-pub type SyncTargetUpdateSender<D> = mpsc::Sender<SyncTarget<D>>;
+pub type SyncTargetUpdateSender<D> = mpsc::Sender<Target<D>>;
 
-/// Channel for receiving sync target updates
-pub type SyncTargetUpdateReceiver<D> = mpsc::Receiver<SyncTarget<D>>;
+pub type Error = crate::adb::Error;
 
-/// Synchronization errors
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// Hash mismatch after sync
-    #[error("root digest mismatch - expected {expected:?}, got {actual:?}")]
-    RootMismatch {
-        expected: Box<dyn fmt::Debug + Send + Sync>,
-        actual: Box<dyn fmt::Debug + Send + Sync>,
-    },
-    /// Invalid target parameters
-    #[error("invalid bounds: lower bound {lower_bound_pos} > upper bound {upper_bound_pos}")]
-    InvalidTarget {
-        lower_bound_pos: u64,
-        upper_bound_pos: u64,
-    },
-    /// Invalid client state
-    #[error("invalid client state")]
-    InvalidState,
-    /// Sync target root unchanged
-    #[error("sync target root unchanged")]
-    SyncTargetRootUnchanged,
-    /// Sync target moved backward
-    #[error("sync target moved backward: {old:?} -> {new:?}")]
-    SyncTargetMovedBackward {
-        old: Box<dyn fmt::Debug + Send + Sync>,
-        new: Box<dyn fmt::Debug + Send + Sync>,
-    },
-    /// Sync already completed
-    #[error("sync already completed")]
-    AlreadyComplete,
-    /// Error from the database
-    #[error("database error: {0}")]
-    Adb(crate::adb::Error),
-    /// Resolver error
-    #[error("resolver error: {0:?}")]
-    Resolver(Box<dyn fmt::Debug + Send + Sync>),
-    /// Sync stalled
-    #[error("sync stalled - no pending fetches")]
-    SyncStalled,
-    /// Error extracting pinned nodes
-    #[error("error extracting pinned nodes: {0}")]
-    PinnedNodes(mmr::Error),
+/// Verifier for Any database operations using the database's built-in proof verification
+pub struct AnyVerifier<E, K, V, H, T>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+{
+    hasher: Standard<H>,
+    // Phantom data to maintain type information
+    _phantom: std::marker::PhantomData<(E, K, V, T)>,
 }
 
-impl<D: Digest> Write for SyncTarget<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.root.write(buf);
-        self.lower_bound_ops.write(buf);
-        self.upper_bound_ops.write(buf);
+impl<E, K, V, H, T> AnyVerifier<E, K, V, H, T>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+{
+    /// Create a new verifier with the given hasher
+    pub fn new(hasher: Standard<H>) -> Self {
+        Self {
+            hasher,
+            _phantom: std::marker::PhantomData,
+        }
     }
 }
 
-impl<D: Digest> EncodeSize for SyncTarget<D> {
-    fn encode_size(&self) -> usize {
-        self.root.encode_size()
-            + self.lower_bound_ops.encode_size()
-            + self.upper_bound_ops.encode_size()
+impl<E, K, V, H, T> Verifier<Fixed<K, V>, H::Digest> for AnyVerifier<E, K, V, H, T>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+{
+    type Error = crate::mmr::Error;
+
+    fn verify_proof(
+        &mut self,
+        proof: &Proof<H::Digest>,
+        start_loc: u64,
+        operations: &[Fixed<K, V>],
+        target_root: &H::Digest,
+    ) -> bool {
+        Any::<E, K, V, H, T>::verify_proof(
+            &mut self.hasher,
+            proof,
+            start_loc,
+            operations,
+            target_root,
+        )
+    }
+
+    fn extract_pinned_nodes(
+        &mut self,
+        proof: &Proof<H::Digest>,
+        start_loc: u64,
+        operations_len: u64,
+    ) -> Result<Option<Vec<H::Digest>>, Self::Error> {
+        // Always try to extract pinned nodes - the engine will decide when to use them
+        let start_pos_mmr = leaf_num_to_pos(start_loc);
+        let end_pos_mmr = leaf_num_to_pos(start_loc + operations_len - 1);
+        proof
+            .extract_pinned_nodes(start_pos_mmr, end_pos_mmr)
+            .map(Some)
     }
 }
 
-impl<D: Digest> Read for SyncTarget<D> {
-    type Cfg = ();
+/// Configuration for building Any database from completed sync
+#[derive(Clone)]
+pub struct AnySyncConfig<E, T>
+where
+    E: Storage + Clock + Metrics,
+    T: Translator,
+{
+    pub context: E,
+    pub db_config: crate::adb::any::Config<T>,
+    pub apply_batch_size: usize,
+}
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let root = D::read(buf)?;
-        let lower_bound_ops = u64::read(buf)?;
-        let upper_bound_ops = u64::read(buf)?;
-        Ok(Self {
-            root,
-            lower_bound_ops,
-            upper_bound_ops,
+impl<E, T> TryFrom<AnySyncConfig<E, T>> for crate::journal::fixed::Config
+where
+    E: Storage + Clock + Metrics,
+    T: Translator,
+{
+    type Error = ();
+
+    fn try_from(config: AnySyncConfig<E, T>) -> Result<Self, Self::Error> {
+        Ok(crate::journal::fixed::Config {
+            partition: config.db_config.log_journal_partition,
+            items_per_blob: config.db_config.log_items_per_blob,
+            write_buffer: config.db_config.log_write_buffer,
+            buffer_pool: config.db_config.buffer_pool,
         })
     }
+}
+
+/// Implementation of SyncDatabase for Any database
+impl<E, K, V, H, T> crate::adb::sync::Database for Any<E, K, V, H, T>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+{
+    // Core associated types
+    type Op = Fixed<K, V>;
+    type Journal = crate::journal::fixed::Journal<E, Fixed<K, V>>;
+    type Verifier = AnyVerifier<E, K, V, H, T>;
+    type Error = crate::adb::Error;
+    type Config = AnySyncConfig<E, T>;
+    type Digest = H::Digest;
+    type Context = E;
+
+    /// Create a journal for syncing with the given bounds
+    async fn create_journal(
+        context: Self::Context,
+        config: &Self::Config,
+        lower_bound: u64,
+        upper_bound: u64,
+    ) -> Result<Self::Journal, <Self::Journal as Journal>::Error> {
+        let journal_config = fixed::Config {
+            partition: config.db_config.log_journal_partition.clone(),
+            items_per_blob: config.db_config.log_items_per_blob,
+            write_buffer: config.db_config.log_write_buffer,
+            buffer_pool: config.db_config.buffer_pool.clone(),
+        };
+
+        fixed::Journal::<E, Fixed<K, V>>::init_sync(
+            context.with_label("log"),
+            journal_config,
+            lower_bound,
+            upper_bound,
+        )
+        .await
+    }
+
+    /// Create a verifier for proof validation  
+    fn create_verifier() -> Self::Verifier {
+        AnyVerifier::new(Standard::<H>::new())
+    }
+
+    async fn from_sync_result(
+        config: Self::Config,
+        journal: Self::Journal,
+        pinned_nodes: Option<Vec<Self::Digest>>,
+        target: Target<Self::Digest>,
+    ) -> Result<Self, Self::Error> {
+        // Build the complete database from the journal
+        let db = Any::init_synced(
+            config.context,
+            SyncConfig {
+                db_config: config.db_config,
+                log: journal,
+                lower_bound: target.lower_bound_ops,
+                upper_bound: target.upper_bound_ops,
+                pinned_nodes,
+                apply_batch_size: config.apply_batch_size,
+            },
+        )
+        .await?;
+
+        Ok(db)
+    }
+
+    fn root(&self) -> Self::Digest {
+        let mut standard_hasher = Standard::<H>::new();
+        Any::root(self, &mut standard_hasher)
+    }
+
+    async fn resize_journal(
+        mut journal: Self::Journal,
+        context: Self::Context,
+        config: &Self::Config,
+        lower_bound: u64,
+        upper_bound: u64,
+    ) -> Result<Self::Journal, Self::Error> {
+        let log_size = journal.size().await.map_err(crate::adb::Error::from)?;
+
+        if log_size <= lower_bound {
+            // Close the existing journal before creating a new one
+            journal.close().await.map_err(crate::adb::Error::from)?;
+
+            // Create a new journal with the new bounds
+            Self::create_journal(context, config, lower_bound, upper_bound)
+                .await
+                .map_err(crate::adb::Error::from)
+        } else {
+            // Just prune to the lower bound
+            journal
+                .prune(lower_bound)
+                .await
+                .map_err(crate::adb::Error::from)?;
+            Ok(journal)
+        }
+    }
+}
+
+/// Creates a new sync client (SyncEngine) for Any database synchronization.
+///
+/// This sets up all the necessary components for syncing:
+/// - Validates configuration
+/// - Initializes the operations journal
+/// - Creates the journal wrapper, verifier, and sync engine
+///
+/// Returns a SyncEngine ready to start syncing operations.
+pub async fn new_client<E, K, V, H, T, R>(
+    mut config: client::Config<E, K, V, H, T, R>,
+) -> Result<Engine<Any<E, K, V, H, T>, R>, SyncError<Error, R::Error>>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Array,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Digest = H::Digest, Op = Fixed<K, V>>,
+{
+    // Validate configuration
+    config.validate()?;
+
+    // Create sync engine using the simplified configuration
+    let db_config = AnySyncConfig::<E, T> {
+        context: config.context.clone(),
+        db_config: config.db_config.clone(),
+        apply_batch_size: config.apply_batch_size,
+    };
+
+    let engine_config = EngineConfig {
+        context: config.context,
+        resolver: config.resolver,
+        target: config.target.clone(),
+        max_outstanding_requests: config.max_outstanding_requests,
+        fetch_batch_size: config.fetch_batch_size,
+        db_config,
+        update_receiver: config.update_receiver.take(),
+    };
+
+    Engine::new(engine_config).await
 }
 
 /// Synchronizes a database by fetching, verifying, and applying operations from a remote source.
@@ -123,16 +277,22 @@ impl<D: Digest> Read for SyncTarget<D> {
 ///
 /// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
 pub async fn sync<E, K, V, H, T, R>(
-    config: Config<E, K, V, H, T, R>,
-) -> Result<Any<E, K, V, H, T>, Error>
+    config: client::Config<E, K, V, H, T, R>,
+) -> Result<Any<E, K, V, H, T>, SyncError<Error, R::Error>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
     V: Array,
     H: Hasher,
     T: Translator,
-    R: Resolver<Digest = H::Digest, Key = K, Value = V>,
+    R: Resolver<Digest = H::Digest, Op = Fixed<K, V>>,
 {
-    let client = Client::new(config).await?;
-    client.sync().await
+    // Create sync engine using the new_client function
+    let mut engine = new_client(config).await?;
+
+    // Make initial requests to start the sync process
+    engine.schedule_requests().await?;
+
+    // Run sync to completion using generic engine
+    engine.sync().await
 }

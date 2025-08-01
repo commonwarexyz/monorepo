@@ -7,7 +7,10 @@ use clap::{Arg, Command};
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
 use commonware_storage::{
-    adb::any::sync::{self, client::Config as SyncConfig, SyncTarget},
+    adb::{
+        any::sync::{self, client::Config as SyncConfig},
+        sync::{Error as SyncError, Target},
+    },
     mmr::hasher::Standard,
 };
 use commonware_sync::{crate_version, create_adb_config, Error, Resolver};
@@ -54,9 +57,9 @@ struct Config {
 async fn target_update_task<E>(
     context: E,
     resolver: Resolver<E>,
-    update_sender: mpsc::Sender<SyncTarget<Digest>>,
+    update_sender: mpsc::Sender<Target<Digest>>,
     interval_duration: Duration,
-    initial_target: SyncTarget<Digest>,
+    initial_target: Target<Digest>,
 ) -> Result<(), Error>
 where
     E: commonware_runtime::Network + commonware_runtime::Clock + commonware_runtime::Spawner,
@@ -105,7 +108,11 @@ where
 }
 
 /// Perform a single sync by opening the database, syncing, and closing it.
-async fn sync<E>(context: &E, config: &Config, sync_iteration: u32) -> Result<(), Error>
+async fn sync<E>(
+    context: &E,
+    config: &Config,
+    sync_iteration: u32,
+) -> Result<(), SyncError<commonware_storage::adb::Error, Error>>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
@@ -116,7 +123,10 @@ where
 {
     // Get initial sync target
     let resolver = Resolver::new(context.clone(), config.server);
-    let initial_target = resolver.get_sync_target().await?;
+    let initial_target = resolver
+        .get_sync_target()
+        .await
+        .map_err(SyncError::resolver)?;
     info!(
         sync_iteration,
         target = ?initial_target,
@@ -190,13 +200,16 @@ where
         database.op_count(),
         got_root
     );
-    database.close().await?;
+    database.close().await.map_err(SyncError::database)?;
 
     Ok(())
 }
 
 /// Continuously sync the database to the server's state.
-async fn run<E>(context: E, config: Config) -> Result<(), Error>
+async fn run<E>(
+    context: E,
+    config: Config,
+) -> Result<(), SyncError<commonware_storage::adb::Error, Error>>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock

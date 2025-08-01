@@ -7,9 +7,8 @@ use crate::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
-use commonware_storage::adb::any::sync::{
-    resolver::{GetOperationsResult, Resolver as ResolverTrait},
-    Error as SyncError, SyncTarget,
+use commonware_storage::adb::sync::{
+    engine::FetchResult, resolver::Resolver as ResolverTrait, Target,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::{
@@ -165,7 +164,7 @@ where
         }
     }
 
-    pub async fn get_sync_target(&self) -> Result<SyncTarget<Digest>, Error> {
+    pub async fn get_sync_target(&self) -> Result<Target<Digest>, <Self as ResolverTrait>::Error> {
         let request = GetSyncTargetRequest {
             request_id: RequestId::new(),
         };
@@ -192,7 +191,10 @@ where
         }
     }
 
-    async fn send_request(&self, message: Message) -> Result<Message, Error> {
+    async fn send_request(
+        &self,
+        message: Message,
+    ) -> Result<Message, <Self as ResolverTrait>::Error> {
         let (response_sender, response_receiver) = oneshot::channel();
 
         let request_id = message.request_id();
@@ -223,15 +225,15 @@ where
         + Clone,
 {
     type Digest = Digest;
-    type Key = crate::Key;
-    type Value = crate::Value;
+    type Op = crate::Operation;
+    type Error = Error;
 
     async fn get_operations(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, SyncError> {
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
         let request = GetOperationsRequest {
             request_id: RequestId::new(),
             size,
@@ -243,22 +245,23 @@ where
 
         let response = self
             .send_request(Message::GetOperationsRequest(request))
-            .await?;
+            .await
+            .map_err(|_e| Error::InvalidConfig("Invalid sync range".to_string()))?; // TODO put a better error here
 
         match response {
             Message::GetOperationsResponse(response) => {
                 let (success_tx, _success_rx) = oneshot::channel();
-                Ok(GetOperationsResult {
+                Ok(FetchResult {
                     operations: response.operations,
                     proof: response.proof,
                     success_tx,
                 })
             }
-            Message::Error(err) => Err(SyncError::from(Error::ServerError {
+            Message::Error(err) => Err(Error::ServerError {
                 code: err.error_code,
                 message: err.message,
-            })),
-            _ => Err(SyncError::from(Error::UnexpectedResponse { request_id })),
+            }),
+            _ => Err(Error::UnexpectedResponse { request_id }),
         }
     }
 }
