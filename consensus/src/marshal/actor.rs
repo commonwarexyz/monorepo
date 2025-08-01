@@ -410,7 +410,7 @@ impl<
                             } else {
                                 // Otherwise, fetch the block from the network
                                 debug!(view, ?commitment, "finalized block missing");
-                                resolver.fetch(Request::finalized(view)).await;
+                                resolver.fetch(Request::block(commitment)).await;
                             }
                         }
                         Message::Get { commitment, response } => {
