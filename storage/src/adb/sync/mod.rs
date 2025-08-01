@@ -1,9 +1,15 @@
 //! Shared sync types and functionality for authenticated databases.
 
 pub mod engine;
-pub use engine::{Database, Engine};
+pub use engine::Engine;
 pub mod error;
-pub mod gaps;
+mod gaps;
+mod journal;
+pub use journal::Journal;
+mod verifier;
+pub use verifier::Verifier;
+mod database;
+pub use database::Database;
 pub mod resolver;
-pub mod target;
+mod target;
 pub use target::Target;

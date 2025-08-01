@@ -1,7 +1,10 @@
 //! Core sync engine components that are shared across sync clients.
 
 use crate::{
-    adb::sync::{error::SyncError, resolver::Resolver, Target},
+    adb::sync::{
+        error::SyncError, resolver::Resolver, target::TargetUpdateError, Database, Journal, Target,
+        Verifier,
+    },
     mmr::verification::Proof,
 };
 use commonware_cryptography::Digest;
@@ -20,91 +23,6 @@ use std::{
     num::NonZeroU64,
     pin::Pin,
 };
-use thiserror::Error;
-
-/// Journal of operations used by a [SyncDatabase]
-pub trait Journal {
-    type Op;
-    type Error: std::error::Error + Send + 'static;
-
-    /// Get the number of operations in the journal
-    fn size(&self) -> impl Future<Output = Result<u64, Self::Error>>;
-
-    /// Append an operation to the journal
-    fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>>;
-
-    /// Close the journal and release resources
-    fn close(self) -> impl Future<Output = Result<(), Self::Error>>;
-}
-
-/// Verifies proofs over operation batches
-pub trait Verifier<Op, D: Digest> {
-    type Error: std::error::Error + Send + 'static;
-
-    /// Verify that a proof is valid for the given operations and target root
-    fn verify_proof(
-        &mut self,
-        proof: &Proof<D>,
-        start_loc: u64,
-        operations: &[Op],
-        target_root: &D,
-    ) -> bool;
-
-    /// Extract pinned nodes from a proof if needed for future verifications
-    fn extract_pinned_nodes(
-        &mut self,
-        proof: &Proof<D>,
-        start_loc: u64,
-        operations_len: u64,
-    ) -> Result<Option<Vec<D>>, Self::Error>;
-}
-
-/// A database that can be synced
-pub trait Database: Sized {
-    // Core associated types - determined by database implementation
-    type Op;
-    type Journal: Journal<Op = Self::Op>;
-    type Verifier: Verifier<Self::Op, Self::Digest>;
-    type Error: std::error::Error + Send + 'static;
-    type Config;
-    type Digest: Digest;
-    type Context: commonware_runtime::Storage
-        + commonware_runtime::Clock
-        + commonware_runtime::Metrics
-        + Clone;
-
-    /// Create a journal for syncing with the given bounds
-    fn create_journal(
-        context: Self::Context,
-        config: &Self::Config,
-        lower_bound: u64,
-        upper_bound: u64,
-    ) -> impl Future<Output = Result<Self::Journal, <Self::Journal as Journal>::Error>>;
-
-    /// Create a verifier for proof validation  
-    fn create_verifier() -> Self::Verifier;
-
-    /// Build a database from a completed sync journal and configuration
-    fn from_sync_result(
-        config: Self::Config,
-        journal: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
-        target: Target<Self::Digest>,
-    ) -> impl Future<Output = Result<Self, Self::Error>>;
-
-    /// Get the root digest of the database for verification
-    fn root(&self) -> Self::Digest;
-
-    /// Resize journal for target update - close and recreate if needed, prune otherwise.
-    // TODO should this be a method on the journal?
-    fn resize_journal(
-        journal: Self::Journal,
-        context: Self::Context,
-        config: &Self::Config,
-        lower_bound: u64,
-        upper_bound: u64,
-    ) -> impl Future<Output = Result<Self::Journal, Self::Error>>;
-}
 
 /// Result of executing one sync step
 #[derive(Debug)]
@@ -214,55 +132,6 @@ impl<Op, D: Digest, E> Default for OutstandingRequests<Op, D, E> {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Errors that can occur during target update validation
-#[derive(Debug, Error, Clone)]
-pub enum TargetUpdateError {
-    /// Target bounds are invalid (lower > upper)
-    #[error("invalid target bounds: lower_bound {lower_bound} > upper_bound {upper_bound}")]
-    InvalidBounds { lower_bound: u64, upper_bound: u64 },
-    /// Target moved backward (bounds decreased)
-    #[error("sync target moved backward: old bounds [{old_lower}, {old_upper}], new bounds [{new_lower}, {new_upper}]")]
-    MovedBackward {
-        old_lower: u64,
-        old_upper: u64,
-        new_lower: u64,
-        new_upper: u64,
-    },
-    /// Target root is unchanged
-    #[error("sync target root unchanged")]
-    RootUnchanged,
-}
-
-/// Validate a target update against the current target
-pub fn validate_target_update<D: Digest>(
-    old_target: &Target<D>,
-    new_target: &Target<D>,
-) -> Result<(), TargetUpdateError> {
-    if new_target.lower_bound_ops > new_target.upper_bound_ops {
-        return Err(TargetUpdateError::InvalidBounds {
-            lower_bound: new_target.lower_bound_ops,
-            upper_bound: new_target.upper_bound_ops,
-        });
-    }
-
-    if new_target.lower_bound_ops < old_target.lower_bound_ops
-        || new_target.upper_bound_ops < old_target.upper_bound_ops
-    {
-        return Err(TargetUpdateError::MovedBackward {
-            old_lower: old_target.lower_bound_ops,
-            old_upper: old_target.upper_bound_ops,
-            new_lower: new_target.lower_bound_ops,
-            new_upper: new_target.upper_bound_ops,
-        });
-    }
-
-    if new_target.root == old_target.root {
-        return Err(TargetUpdateError::RootUnchanged);
-    }
-
-    Ok(())
 }
 
 /// Wait for the next synchronization event from either target updates or fetch results.
@@ -692,7 +561,7 @@ where
         match event {
             Event::TargetUpdate(new_target) => {
                 // Validate and handle the target update
-                crate::adb::sync::engine::validate_target_update(&self.target, &new_target)
+                crate::adb::sync::target::validate_target_update(&self.target, &new_target)
                     .map_err(|e| match e {
                         TargetUpdateError::MovedBackward { .. } => {
                             SyncError::<DB::Error, R::Error>::SyncTargetMovedBackward {
@@ -756,7 +625,6 @@ where
 mod tests {
     use super::*;
     use commonware_cryptography::sha256;
-    use test_case::test_case;
 
     #[test]
     fn test_outstanding_requests() {
@@ -784,42 +652,5 @@ mod tests {
         // Test removing requests
         requests.remove(10);
         assert!(!requests.locations().contains(&10));
-    }
-
-    #[test_case(
-        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
-        Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 50, upper_bound_ops: 200 },
-        true;
-        "valid update"
-    )]
-    #[test_case(
-        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
-        Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 200, upper_bound_ops: 100 },
-        false;
-        "invalid bounds - lower > upper"
-    )]
-    #[test_case(
-        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
-        Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 0, upper_bound_ops: 50 },
-        false;
-        "moves backward"
-    )]
-    #[test_case(
-        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
-        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 50, upper_bound_ops: 200 },
-        false;
-        "same root"
-    )]
-    fn test_validate_target_update(
-        old_target: Target<sha256::Digest>,
-        new_target: Target<sha256::Digest>,
-        should_succeed: bool,
-    ) {
-        let result = validate_target_update(&old_target, &new_target);
-        if should_succeed {
-            assert!(result.is_ok());
-        } else {
-            assert!(result.is_err());
-        }
     }
 }
