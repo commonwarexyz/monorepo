@@ -25,7 +25,6 @@ use commonware_storage::{
     archive::{self, immutable, prunable, Archive as _, Identifier},
     translator::TwoCap,
 };
-use commonware_utils::Span;
 use futures::{
     channel::{mpsc, oneshot},
     try_join, StreamExt,
@@ -316,7 +315,7 @@ impl<
         backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
         // Initialize resolvers
-        let (mut resolver_rx, mut resolver) = self.init_resolver::<Request<B>>(backfill);
+        let (mut resolver_rx, mut resolver) = self.init_resolver(backfill);
 
         // Process all finalized blocks in order (fetching any that are missing)
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
@@ -687,10 +686,13 @@ impl<
     }
 
     /// Helper to initialize a resolver.
-    fn init_resolver<K: Span>(
+    fn init_resolver(
         &self,
         backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-    ) -> (mpsc::Receiver<handler::Message<K>>, p2p::Mailbox<K>) {
+    ) -> (
+        mpsc::Receiver<handler::Message<B>>,
+        p2p::Mailbox<Request<B>>,
+    ) {
         let (handler, receiver) = mpsc::channel(self.mailbox_size);
         let handler = Handler::new(handler);
         let (resolver_engine, resolver) = p2p::Engine::new(

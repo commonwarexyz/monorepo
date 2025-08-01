@@ -20,11 +20,11 @@ const NOTARIZED_REQUEST: u8 = 2;
 
 /// Messages sent from the resolver's [Consumer]/[Producer] implementation
 /// to the marshal [Actor](super::super::actor::Actor).
-pub enum Message<K: Span> {
+pub enum Message<B: Block> {
     /// A request to deliver a value for a given key.
     Deliver {
         /// The key of the value being delivered.
-        key: K,
+        key: Request<B>,
         /// The value being delivered.
         value: Bytes,
         /// A channel to send the result of the delivery (true for success).
@@ -33,7 +33,7 @@ pub enum Message<K: Span> {
     /// A request to produce a value for a given key.
     Produce {
         /// The key of the value to produce.
-        key: K,
+        key: Request<B>,
         /// A channel to send the produced value.
         response: oneshot::Sender<Bytes>,
     },
@@ -44,19 +44,19 @@ pub enum Message<K: Span> {
 /// This struct implements the [Consumer] and [Producer] traits from the
 /// resolver, and acts as a bridge to the main actor loop.
 #[derive(Clone)]
-pub struct Handler<K: Span> {
-    sender: mpsc::Sender<Message<K>>,
+pub struct Handler<B: Block> {
+    sender: mpsc::Sender<Message<B>>,
 }
 
-impl<K: Span> Handler<K> {
+impl<B: Block> Handler<B> {
     /// Creates a new handler.
-    pub fn new(sender: mpsc::Sender<Message<K>>) -> Self {
+    pub fn new(sender: mpsc::Sender<Message<B>>) -> Self {
         Self { sender }
     }
 }
 
-impl<K: Span> Consumer for Handler<K> {
-    type Key = K;
+impl<B: Block> Consumer for Handler<B> {
+    type Key = Request<B>;
     type Value = Bytes;
     type Failure = ();
 
@@ -83,8 +83,8 @@ impl<K: Span> Consumer for Handler<K> {
     }
 }
 
-impl<K: Span> Producer for Handler<K> {
-    type Key = K;
+impl<B: Block> Producer for Handler<B> {
+    type Key = Request<B>;
 
     async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
