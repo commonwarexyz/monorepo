@@ -243,6 +243,7 @@ mod tests {
     use crate::marshal::mocks::block::Block as TestBlock;
     use commonware_codec::{Encode, ReadExt};
     use commonware_cryptography::sha256::{self, Digest as Sha256Digest};
+    use std::collections::BTreeSet;
 
     type B = TestBlock<Sha256Digest>;
 
@@ -334,5 +335,155 @@ mod tests {
         assert_eq!(r1.encode_size(), r1.encode().len());
         assert_eq!(r2.encode_size(), r2.encode().len());
         assert_eq!(r3.encode_size(), r3.encode().len());
+    }
+
+    #[test]
+    fn test_request_ord_same_variant() {
+        // Test ordering within the same variant
+        let commitment1 = sha256::hash(b"test1");
+        let commitment2 = sha256::hash(b"test2");
+        let block1 = Request::<B>::Block(commitment1);
+        let block2 = Request::<B>::Block(commitment2);
+
+        // Block ordering depends on commitment ordering
+        if commitment1 < commitment2 {
+            assert!(block1 < block2);
+            assert!(block2 > block1);
+        } else {
+            assert!(block1 > block2);
+            assert!(block2 < block1);
+        }
+
+        // Finalized ordering by height
+        let fin1 = Request::<B>::Finalized { height: 100 };
+        let fin2 = Request::<B>::Finalized { height: 200 };
+        let fin3 = Request::<B>::Finalized { height: 200 };
+
+        assert!(fin1 < fin2);
+        assert!(fin2 > fin1);
+        assert_eq!(fin2.cmp(&fin3), std::cmp::Ordering::Equal);
+
+        // Notarized ordering by view
+        let not1 = Request::<B>::Notarized { view: 50 };
+        let not2 = Request::<B>::Notarized { view: 150 };
+        let not3 = Request::<B>::Notarized { view: 150 };
+
+        assert!(not1 < not2);
+        assert!(not2 > not1);
+        assert_eq!(not2.cmp(&not3), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn test_request_ord_cross_variant() {
+        let commitment = sha256::hash(b"test");
+        let block = Request::<B>::Block(commitment);
+        let finalized = Request::<B>::Finalized { height: 100 };
+        let notarized = Request::<B>::Notarized { view: 200 };
+
+        // Block < Finalized < Notarized
+        assert!(block < finalized);
+        assert!(block < notarized);
+        assert!(finalized < notarized);
+
+        assert!(finalized > block);
+        assert!(notarized > block);
+        assert!(notarized > finalized);
+
+        // Test all combinations
+        assert_eq!(block.cmp(&finalized), std::cmp::Ordering::Less);
+        assert_eq!(block.cmp(&notarized), std::cmp::Ordering::Less);
+        assert_eq!(finalized.cmp(&notarized), std::cmp::Ordering::Less);
+        assert_eq!(finalized.cmp(&block), std::cmp::Ordering::Greater);
+        assert_eq!(notarized.cmp(&block), std::cmp::Ordering::Greater);
+        assert_eq!(notarized.cmp(&finalized), std::cmp::Ordering::Greater);
+    }
+
+    #[test]
+    fn test_request_partial_ord() {
+        let commitment1 = sha256::hash(b"test1");
+        let commitment2 = sha256::hash(b"test2");
+        let block1 = Request::<B>::Block(commitment1);
+        let block2 = Request::<B>::Block(commitment2);
+        let finalized = Request::<B>::Finalized { height: 100 };
+        let notarized = Request::<B>::Notarized { view: 200 };
+
+        // PartialOrd should always return Some
+        assert!(block1.partial_cmp(&block2).is_some());
+        assert!(block1.partial_cmp(&finalized).is_some());
+        assert!(finalized.partial_cmp(&notarized).is_some());
+
+        // Verify consistency with Ord
+        assert_eq!(
+            block1.partial_cmp(&finalized),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert_eq!(
+            finalized.partial_cmp(&notarized),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert_eq!(
+            notarized.partial_cmp(&block1),
+            Some(std::cmp::Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn test_request_ord_sorting() {
+        let commitment1 = sha256::hash(b"a");
+        let commitment2 = sha256::hash(b"b");
+        let commitment3 = sha256::hash(b"c");
+
+        let requests = vec![
+            Request::<B>::Notarized { view: 300 },
+            Request::<B>::Block(commitment2),
+            Request::<B>::Finalized { height: 200 },
+            Request::<B>::Block(commitment1),
+            Request::<B>::Notarized { view: 250 },
+            Request::<B>::Finalized { height: 100 },
+            Request::<B>::Block(commitment3),
+        ];
+
+        // Sort using BTreeSet (uses Ord)
+        let sorted: Vec<_> = requests
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+
+        // Verify order: all Blocks first (sorted by commitment), then Finalized (by height), then Notarized (by view)
+        assert_eq!(sorted.len(), 7);
+
+        // Check that all blocks come first
+        assert!(matches!(sorted[0], Request::<B>::Block(_)));
+        assert!(matches!(sorted[1], Request::<B>::Block(_)));
+        assert!(matches!(sorted[2], Request::<B>::Block(_)));
+
+        // Check that finalized come next
+        assert_eq!(sorted[3], Request::<B>::Finalized { height: 100 });
+        assert_eq!(sorted[4], Request::<B>::Finalized { height: 200 });
+
+        // Check that notarized come last
+        assert_eq!(sorted[5], Request::<B>::Notarized { view: 250 });
+        assert_eq!(sorted[6], Request::<B>::Notarized { view: 300 });
+    }
+
+    #[test]
+    fn test_request_ord_edge_cases() {
+        // Test with extreme values
+        let min_finalized = Request::<B>::Finalized { height: 0 };
+        let max_finalized = Request::<B>::Finalized { height: u64::MAX };
+        let min_notarized = Request::<B>::Notarized { view: 0 };
+        let max_notarized = Request::<B>::Notarized { view: u64::MAX };
+
+        assert!(min_finalized < max_finalized);
+        assert!(min_notarized < max_notarized);
+        assert!(max_finalized < min_notarized);
+
+        // Test self-comparison
+        let commitment = sha256::hash(b"self");
+        let block = Request::<B>::Block(commitment);
+        assert_eq!(block.cmp(&block), std::cmp::Ordering::Equal);
+        assert_eq!(min_finalized.cmp(&min_finalized), std::cmp::Ordering::Equal);
+        assert_eq!(max_notarized.cmp(&max_notarized), std::cmp::Ordering::Equal);
     }
 }
