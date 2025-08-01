@@ -32,6 +32,9 @@ use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+// The number of messages the actor sends before it stops.
+const MAX_MESSAGES: usize = 100;
+
 #[derive(Debug)]
 pub enum MutationType {
     MutateView,
@@ -77,13 +80,13 @@ pub struct FuzzInput {
     view_offsets: Vec<u64>,
     parent_offsets: Vec<u64>,
     payload_bytes: Vec<Vec<u8>>,
-    signature_bytes: Vec<Vec<u8>>,
+    malformed_bytes: Vec<Vec<u8>>,
     link_latency: f64,
     link_jitter: f64,
     link_success_rate: f64,
 }
 
-struct FuzzingActor<E: Clock + Spawner + Rng + Metrics> {
+struct FuzzingActor<E: Clock + Spawner + Rng> {
     context: E,
     crypto: PrivateKey,
     supervisor: Supervisor<PublicKey, Sha256Digest>,
@@ -93,11 +96,11 @@ struct FuzzingActor<E: Clock + Spawner + Rng + Metrics> {
     view_offsets: Vec<u64>,
     parent_offsets: Vec<u64>,
     payload_bytes: Vec<Vec<u8>>,
-    signature_bytes: Vec<Vec<u8>>,
+    malformed_bytes: Vec<Vec<u8>>,
     mutation_idx: usize,
 }
 
-impl<E: Clock + Spawner + Rng + Metrics> FuzzingActor<E> {
+impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
     fn new(
         context: E,
         crypto: PrivateKey,
@@ -115,7 +118,7 @@ impl<E: Clock + Spawner + Rng + Metrics> FuzzingActor<E> {
             view_offsets: input.view_offsets,
             parent_offsets: input.parent_offsets,
             payload_bytes: input.payload_bytes,
-            signature_bytes: input.signature_bytes,
+            malformed_bytes: input.malformed_bytes,
             mutation_idx: 0,
         }
     }
@@ -161,11 +164,11 @@ impl<E: Clock + Spawner + Rng + Metrics> FuzzingActor<E> {
         }
     }
 
-    fn get_signature_bytes(&mut self) -> Vec<u8> {
-        self.signature_bytes
-            .get(self.mutation_idx % self.signature_bytes.len().max(1))
+    fn get_malformed_bytes(&mut self) -> Vec<u8> {
+        self.malformed_bytes
+            .get(self.mutation_idx % self.malformed_bytes.len().max(1))
             .cloned()
-            .unwrap_or_else(|| vec![0u8; 64])
+            .unwrap_or_else(|| vec![0u8; 256])
     }
 
     pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
@@ -175,7 +178,6 @@ impl<E: Clock + Spawner + Rng + Metrics> FuzzingActor<E> {
     async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {
         let (mut sender, _receiver) = voter_network;
         let mut messages_sent = 0;
-        const MAX_MESSAGES: usize = 100;
 
         while messages_sent < MAX_MESSAGES {
             if let Some(mutation) = self.get_next_mutation() {
@@ -332,7 +334,7 @@ impl<E: Clock + Spawner + Rng + Metrics> FuzzingActor<E> {
                         }
                     }
                     MutationType::SendMalformedBytes => {
-                        let malformed_bytes = self.get_signature_bytes();
+                        let malformed_bytes = self.get_malformed_bytes();
                         let _ = sender
                             .send(Recipients::All, malformed_bytes.into(), true)
                             .await;
