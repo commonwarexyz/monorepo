@@ -20,7 +20,7 @@ jobs:
       - name: Install node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           check-latest: true
       - name: Install quint
         run: npm i @informalsystems/quint@${{ env.QUINT_VERSION }} -g
