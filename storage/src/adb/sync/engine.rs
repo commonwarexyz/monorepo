@@ -103,23 +103,16 @@ pub trait SyncDatabase: Sized {
 
 /// Result of executing one sync step
 #[derive(Debug)]
-pub enum StepResult<C, D> {
+pub(crate) enum StepResult<C, D> {
     /// Sync should continue with the updated client
     Continue(C),
     /// Sync is complete with the final database
     Complete(D),
 }
 
-/// Result of sync completion with journal and pinned nodes
-pub struct SyncCompletionResult<J: Journal, D: Digest> {
-    pub journal: J,
-    pub pinned_nodes: Option<Vec<D>>,
-    pub target: Target<D>,
-}
-
 /// Events that can occur during synchronization
 #[derive(Debug)]
-pub enum SyncEvent<Op, D: Digest, E> {
+enum Event<Op, D: Digest, E> {
     /// A target update was received
     TargetUpdate(Target<D>),
     /// A batch of operations was received
@@ -130,14 +123,14 @@ pub enum SyncEvent<Op, D: Digest, E> {
 
 /// Result from a fetch operation with its starting location
 #[derive(Debug)]
-pub struct IndexedFetchResult<Op, D: Digest, E> {
+struct IndexedFetchResult<Op, D: Digest, E> {
     /// The location of the first operation in the batch
     pub start_loc: u64,
     /// The result of the fetch operation
     pub result: Result<FetchResult<Op, D>, E>,
 }
 
-/// Generic fetch result that works with any operation type
+/// Result from a fetch operation
 pub struct FetchResult<Op, D: Digest> {
     /// The proof for the operations
     pub proof: Proof<D>,
@@ -158,7 +151,7 @@ impl<Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<Op, D> {
 }
 
 /// Manages outstanding fetch requests for any operation type
-pub struct OutstandingRequests<Op, D: Digest, E> {
+struct OutstandingRequests<Op, D: Digest, E> {
     /// Futures that will resolve to batches of operations
     #[allow(clippy::type_complexity)]
     futures: FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>>,
@@ -177,7 +170,7 @@ impl<Op, D: Digest, E> OutstandingRequests<Op, D, E> {
     }
 
     /// Add a new outstanding request
-    pub fn add(
+    fn add(
         &mut self,
         start_loc: u64,
         future: Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>,
@@ -197,24 +190,13 @@ impl<Op, D: Digest, E> OutstandingRequests<Op, D, E> {
         &self.locations
     }
 
-    /// Clear all outstanding requests
-    pub fn clear(&mut self) {
-        self.locations.clear();
-        self.futures = FuturesUnordered::new();
-    }
-
     /// Get a mutable reference to the futures stream
     #[allow(clippy::type_complexity)]
-    pub fn futures_mut(
+    fn futures_mut(
         &mut self,
     ) -> &mut FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>>
     {
         &mut self.futures
-    }
-
-    /// Check if there are any outstanding requests
-    pub fn is_empty(&self) -> bool {
-        self.locations.is_empty()
     }
 
     /// Get the number of outstanding requests
@@ -224,76 +206,6 @@ impl<Op, D: Digest, E> OutstandingRequests<Op, D, E> {
 }
 
 impl<Op, D: Digest, E> Default for OutstandingRequests<Op, D, E> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Tracks fetched operations and outstanding operation requests.
-pub struct SyncState<Op, D: Digest, E> {
-    /// Batches of operations waiting to be applied, indexed by location of first operation
-    pub fetched_operations: BTreeMap<u64, Vec<Op>>,
-    /// Outstanding fetch requests
-    pub outstanding_requests: OutstandingRequests<Op, D, E>,
-}
-
-// TODO danlaine: remove unused methods
-impl<Op, D: Digest, E> SyncState<Op, D, E> {
-    /// Create new sync state
-    pub fn new() -> Self {
-        Self {
-            fetched_operations: BTreeMap::new(),
-            outstanding_requests: OutstandingRequests::new(),
-        }
-    }
-
-    /// Store a verified batch of operations to be applied later
-    pub fn store_operations(&mut self, start_loc: u64, operations: Vec<Op>) {
-        self.fetched_operations.insert(start_loc, operations);
-    }
-
-    /// Get operation counts for gap detection
-    pub fn operation_counts(&self) -> BTreeMap<u64, u64> {
-        self.fetched_operations
-            .iter()
-            .map(|(&start_loc, operations)| (start_loc, operations.len() as u64))
-            .collect()
-    }
-
-    /// Remove stale batches whose last operation is before the given location
-    pub fn remove_stale_batches(&mut self, min_loc: u64) {
-        self.fetched_operations.retain(|&start_loc, operations| {
-            let end_loc = start_loc + operations.len() as u64 - 1;
-            end_loc >= min_loc
-        });
-    }
-
-    /// Find and remove the batch containing the given location
-    pub fn remove_batch_containing(&mut self, loc: u64) -> Option<(u64, Vec<Op>)> {
-        let range_start_loc =
-            self.fetched_operations
-                .iter()
-                .find_map(|(range_start, range_ops)| {
-                    let range_end = range_start + range_ops.len() as u64 - 1;
-                    if *range_start <= loc && loc <= range_end {
-                        Some(*range_start)
-                    } else {
-                        None
-                    }
-                })?;
-
-        let operations = self.fetched_operations.remove(&range_start_loc)?;
-        Some((range_start_loc, operations))
-    }
-
-    /// Clear all state
-    pub fn clear(&mut self) {
-        self.fetched_operations.clear();
-        self.outstanding_requests.clear();
-    }
-}
-
-impl<Op, D: Digest, E> Default for SyncState<Op, D, E> {
     fn default() -> Self {
         Self::new()
     }
@@ -350,10 +262,10 @@ pub fn validate_target_update<D: Digest>(
 
 /// Wait for the next synchronization event from either target updates or fetch results.
 /// Returns `None` if the sync is stalled (there are no outstanding requests).
-pub async fn wait_for_event<Op, D: Digest, E>(
+async fn wait_for_event<Op, D: Digest, E>(
     update_receiver: &mut Option<TargetUpdateReceiver<D>>,
     outstanding_requests: &mut OutstandingRequests<Op, D, E>,
-) -> Option<SyncEvent<Op, D, E>> {
+) -> Option<Event<Op, D, E>> {
     let target_update_fut = match update_receiver {
         Some(update_rx) => Either::Left(update_rx.next()),
         None => Either::Right(futures::future::pending()),
@@ -362,12 +274,12 @@ pub async fn wait_for_event<Op, D: Digest, E>(
     select! {
         target = target_update_fut => {
             match target {
-                Some(target) => Some(SyncEvent::TargetUpdate(target)),
-                None => Some(SyncEvent::UpdateChannelClosed),
+                Some(target) => Some(Event::TargetUpdate(target)),
+                None => Some(Event::UpdateChannelClosed),
             }
         },
         result = outstanding_requests.futures_mut().next() => {
-            result.map(|fetch_result| SyncEvent::BatchReceived(fetch_result))
+            result.map(|fetch_result| Event::BatchReceived(fetch_result))
         },
     }
 }
@@ -375,7 +287,7 @@ pub async fn wait_for_event<Op, D: Digest, E>(
 /// A shared sync engine that manages the core synchronization state and operations.
 pub struct SyncEngine<DB: SyncDatabase, R: Resolver<Op = DB::Op, Digest = DB::Digest>> {
     /// Tracks outstanding fetch requests and their futures
-    pub outstanding_requests: OutstandingRequests<DB::Op, DB::Digest, R::Error>,
+    outstanding_requests: OutstandingRequests<DB::Op, DB::Digest, R::Error>,
 
     /// Operations that have been fetched but not yet applied to the log
     pub fetched_operations: BTreeMap<u64, Vec<DB::Op>>,
@@ -675,7 +587,7 @@ where
     /// 3. Verifying proofs using the configured verifier
     /// 4. Extracting pinned nodes if needed
     /// 5. Storing valid operations for later application
-    pub fn handle_fetch_result(
+    fn handle_fetch_result(
         &mut self,
         fetch_result: IndexedFetchResult<DB::Op, DB::Digest, R::Error>,
     ) -> Result<(), SyncError<DB::Error, R::Error>> {
@@ -742,7 +654,9 @@ where
     ///
     /// Returns `StepResult::Complete(database)` when sync is finished, or
     /// `StepResult::Continue(self)` when more work remains.
-    pub async fn step(mut self) -> Result<StepResult<Self, DB>, SyncError<DB::Error, R::Error>> {
+    pub(crate) async fn step(
+        mut self,
+    ) -> Result<StepResult<Self, DB>, SyncError<DB::Error, R::Error>> {
         // Check if sync is complete
         if self.is_complete().await? {
             // Build the database from the completed sync
@@ -774,7 +688,7 @@ where
             .ok_or(SyncError::<DB::Error, R::Error>::SyncStalled)?;
 
         match event {
-            SyncEvent::TargetUpdate(new_target) => {
+            Event::TargetUpdate(new_target) => {
                 // Validate and handle the target update
                 crate::adb::sync::engine::validate_target_update(&self.target, &new_target)
                     .map_err(|e| match e {
@@ -803,10 +717,10 @@ where
 
                 return Ok(StepResult::Continue(updated_self));
             }
-            SyncEvent::UpdateChannelClosed => {
+            Event::UpdateChannelClosed => {
                 self.update_receiver = None;
             }
-            SyncEvent::BatchReceived(fetch_result) => {
+            Event::BatchReceived(fetch_result) => {
                 // Process the fetch result
                 self.handle_fetch_result(fetch_result)?;
 
@@ -845,7 +759,6 @@ mod tests {
     #[test]
     fn test_outstanding_requests() {
         let mut requests: OutstandingRequests<i32, sha256::Digest, ()> = OutstandingRequests::new();
-        assert!(requests.is_empty());
         assert_eq!(requests.len(), 0);
 
         // Test adding requests
@@ -863,37 +776,12 @@ mod tests {
             }
         });
         requests.add(10, fut);
-        assert!(!requests.is_empty());
         assert_eq!(requests.len(), 1);
         assert!(requests.locations().contains(&10));
 
         // Test removing requests
         requests.remove(10);
-        assert!(requests.is_empty());
         assert!(!requests.locations().contains(&10));
-    }
-
-    #[test]
-    fn test_sync_state() {
-        let mut state: SyncState<i32, sha256::Digest, ()> = SyncState::new();
-
-        // Test storing operations
-        state.store_operations(0, vec![1, 2, 3]);
-        state.store_operations(5, vec![4, 5]);
-
-        let counts = state.operation_counts();
-        assert_eq!(counts.get(&0), Some(&3));
-        assert_eq!(counts.get(&5), Some(&2));
-
-        // Test removing stale batches
-        state.remove_stale_batches(6);
-        assert!(!state.fetched_operations.contains_key(&0));
-        assert!(state.fetched_operations.contains_key(&5));
-
-        // Test finding batch containing location
-        let batch = state.remove_batch_containing(5);
-        assert_eq!(batch, Some((5, vec![4, 5])));
-        assert!(state.fetched_operations.is_empty());
     }
 
     #[test_case(
