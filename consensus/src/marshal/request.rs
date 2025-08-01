@@ -226,7 +226,7 @@ mod tests {
         let r2 = Subject::<B>::Finalized { height: 200 };
         let r3 = Subject::<B>::Notarized { view: 150 };
 
-        let predicate = r1.subject().predicate();
+        let predicate = r1.predicate();
         assert!(predicate(&r2)); // r2.height > r1.height
         assert!(predicate(&r3)); // Different variant (notarized)
 

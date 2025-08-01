@@ -8,7 +8,7 @@ use super::{
     },
 };
 use crate::{
-    marshal::request::{Request, Subject},
+    marshal::request::Subject,
     threshold_simplex::types::{Finalization, Notarization},
     Block, Reporter,
 };
@@ -317,7 +317,7 @@ impl<
         backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
         // Initialize resolvers
-        let (mut resolver_rx, mut resolver) = self.init_resolver::<Request<B>>(backfill);
+        let (mut resolver_rx, mut resolver) = self.init_resolver::<Subject<B>>(backfill);
 
         // Process all finalized blocks in order (fetching any that are missing)
         let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
@@ -388,7 +388,7 @@ impl<
                                 continue;
                             } else {
                                 debug!(view, "notarized block missing");
-                                resolver.fetch(Request::notarized(view)).await;
+                                resolver.fetch(Subject::<B>::Notarized { view }).await;
                             }
                         }
                         Message::Finalization { finalization } => {
@@ -410,7 +410,7 @@ impl<
                             } else {
                                 // Otherwise, fetch the block from the network
                                 debug!(view, ?commitment, "finalized block missing");
-                                resolver.fetch(Request::block(commitment)).await;
+                                resolver.fetch(Subject::<B>::Block(commitment)).await;
                             }
                         }
                         Message::Get { commitment, response } => {
@@ -435,7 +435,7 @@ impl<
                                 // If this is a valid view, this request should be fine to "keep
                                 // open" even if the oneshot is cancelled.
                                 debug!(view, ?commitment, "requested block missing");
-                                resolver.fetch(Request::notarized(view)).await;
+                                resolver.fetch(Subject::<B>::Notarized { view }).await;
                             }
 
                             // Register waiter
@@ -470,7 +470,7 @@ impl<
                             self.processed_height.set(height as i64);
 
                             // Cancel any outstanding requests (by height and by digest)
-                            resolver.cancel(Request::block(digest)).await;
+                            resolver.cancel(Subject::<B>::Block(digest)).await;
                             resolver.retain(Subject::<B>::Finalized { height }.predicate()).await;
 
                             // If finalization exists, prune the archives
@@ -516,7 +516,7 @@ impl<
                                     cursor = block;
                                 } else {
                                     // Request the next missing block digest
-                                    resolver.fetch(Request::block(commitment)).await;
+                                    resolver.fetch(Subject::<B>::Block(commitment)).await;
                                     break;
                                 }
                             }
@@ -529,7 +529,7 @@ impl<
                             let gap_end = std::cmp::min(cursor.height(), gap_start.saturating_add(self.max_repair));
                             debug!(gap_start, gap_end, "requesting any finalized blocks");
                             for height in gap_start..gap_end {
-                                resolver.fetch(Request::finalized(height)).await;
+                                resolver.fetch(Subject::<B>::Finalized { height }).await;
                             }
                         }
                     }
@@ -542,7 +542,7 @@ impl<
                     };
                     match message {
                         handler::Message::Produce { key, response } => {
-                            match key.subject() {
+                            match key {
                                 Subject::Block(commitment) => {
                                     // Check for block locally
                                     let Some(block) = self.find_block(&mut buffer, commitment).await else {
@@ -585,7 +585,7 @@ impl<
                             }
                         },
                         handler::Message::Deliver { key, value, response } => {
-                            match key.subject() {
+                            match key {
                                 Subject::Block(commitment) => {
                                     // Parse block
                                     let Ok(block) = B::decode_cfg(value.as_ref(), &self.codec_config) else {
