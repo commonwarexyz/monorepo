@@ -22,8 +22,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "array"
-path = "fuzz_targets/array.rs"
+name = "sequence"
+path = "fuzz_targets/sequence.rs"
 test = false
 doc = false
 bench = false
