@@ -18,14 +18,8 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
     Digest, PrivateKeyExt as _, Sha256, Signer as _,
 };
-use commonware_p2p::{
-    simulated::{Config as NetworkConfig, Link, Network},
-    Recipients, Sender as P2PSender,
-};
-use commonware_runtime::{
-    deterministic::{self},
-    Clock, Metrics, Runner, Spawner,
-};
+use commonware_p2p::{simulated::{Config as NetworkConfig, Link, Network}, Receiver, Recipients, Sender};
+use commonware_runtime::{deterministic::{self}, Clock, Handle, Metrics, Runner, Spawner};
 use commonware_utils::NZU32;
 use governor::Quota;
 use libfuzzer_sys::fuzz_target;
@@ -78,6 +72,9 @@ pub struct FuzzInput {
     parent_offsets: Vec<u64>,
     payload_bytes: Vec<Vec<u8>>,
     signature_bytes: Vec<Vec<u8>>,
+    link_latency: f64,
+    link_jitter: f64,
+    link_success_rate: f64,
 }
 
 struct FuzzingActor<E: Clock + Spawner + Rng + Metrics> {
@@ -165,7 +162,12 @@ impl<E: Clock + Spawner + Rng + Metrics> FuzzingActor<E> {
             .unwrap_or_else(|| vec![0u8; 64])
     }
 
-    async fn run(mut self, mut sender: impl P2PSender) {
+    pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
+        self.context.spawn_ref()(self.run(voter_network))
+    }
+
+    async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {
+        let (mut sender, _receiver) = voter_network;
         let mut messages_sent = 0;
         const MAX_MESSAGES: usize = 100;
 
@@ -373,11 +375,16 @@ fn fuzzer(input: FuzzInput) {
         let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
         let mut registrations = register_validators(&mut oracle, &validators).await;
 
+        // Clamp link values to specified ranges
+        let latency = 0.1 + (input.link_latency.abs() % 4.9); // Range: 0.1 - 5.0
+        let jitter = 0.1 + (input.link_jitter.abs() % 2.9); // Range: 0.1 - 3.0
+        let success_rate = 0.1 + (input.link_success_rate.abs() % 19.9); // Range: 0.1 - 20.0
+
         // Link all validators
         let link = Link {
-            latency: 3.0,
-            jitter: 1.0,
-            success_rate: 1.0,
+            latency,
+            jitter,
+            success_rate,
         };
         link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
@@ -396,7 +403,7 @@ fn fuzzer(input: FuzzInput) {
         let first_supervisor =
             mocks::supervisor::Supervisor::<PublicKey, Sha256Digest>::new(first_supervisor_config);
 
-        let ((voter, _), _) = registrations
+        let (voter, _) = registrations
             .remove(&first_validator)
             .expect("validator should be registered");
         let actor = FuzzingActor::new(
@@ -406,7 +413,7 @@ fn fuzzer(input: FuzzInput) {
             namespace.clone(),
             input,
         );
-        context.clone().spawn(move |_| actor.run(voter));
+        actor.start(voter);
 
         // Start regular consensus engines for the remaining validators
         for scheme in schemes.into_iter() {
