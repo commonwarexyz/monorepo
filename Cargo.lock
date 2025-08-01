@@ -1125,6 +1125,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-consensus-fuzz"
+version = "0.0.57"
+dependencies = [
+ "arbitrary",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "governor",
+ "libfuzzer-sys",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "commonware-cryptography"
 version = "0.0.57"
 dependencies = [
