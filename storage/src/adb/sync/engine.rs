@@ -22,12 +22,12 @@ use std::{
 };
 use thiserror::Error;
 
-/// Trait for journals that support sync operations
+/// Journal of operations used by a [SyncDatabase]
 pub trait Journal {
     type Op;
     type Error: std::error::Error + Send + 'static;
 
-    /// Get the current size (number of operations) in the journal
+    /// Get the number of operations in the journal
     fn size(&self) -> impl Future<Output = Result<u64, Self::Error>>;
 
     /// Append an operation to the journal
@@ -37,8 +37,8 @@ pub trait Journal {
     fn close(self) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
-/// Trait for verifying proofs of operation batches
-pub trait SyncVerifier<Op, D: Digest> {
+/// Verifies proofs over operation batches
+pub trait Verifier<Op, D: Digest> {
     type Error: std::error::Error + Send + 'static;
 
     /// Verify that a proof is valid for the given operations and target root
@@ -59,12 +59,12 @@ pub trait SyncVerifier<Op, D: Digest> {
     ) -> Result<Option<Vec<D>>, Self::Error>;
 }
 
-/// Trait for building final databases from completed sync journals
-pub trait SyncDatabase: Sized {
+/// A database that can be synced
+pub trait Database: Sized {
     // Core associated types - determined by database implementation
     type Op;
     type Journal: Journal<Op = Self::Op>;
-    type Verifier: SyncVerifier<Self::Op, Self::Digest>;
+    type Verifier: Verifier<Self::Op, Self::Digest>;
     type Error: std::error::Error + Send + 'static;
     type Config;
     type Digest: Digest;
@@ -289,8 +289,25 @@ async fn wait_for_event<Op, D: Digest, E>(
     }
 }
 
+/// Configuration for creating a new [Engine]
+pub struct EngineConfig<DB: Database, R: Resolver<Op = DB::Op, Digest = DB::Digest>> {
+    /// Runtime context for creating database components
+    pub context: DB::Context,
+    /// Network resolver for fetching operations and proofs
+    pub resolver: R,
+    /// Sync target (root digest and operation bounds)
+    pub target: Target<DB::Digest>,
+    /// Maximum number of outstanding requests for operation batches
+    pub max_outstanding_requests: usize,
+    /// Maximum operations to fetch per batch
+    pub fetch_batch_size: NonZeroU64,
+    /// Database-specific configuration
+    pub db_config: DB::Config,
+    /// Channel for receiving sync target updates
+    pub update_receiver: Option<mpsc::Receiver<Target<DB::Digest>>>,
+}
 /// A shared sync engine that manages the core synchronization state and operations.
-pub struct SyncEngine<DB: SyncDatabase, R: Resolver<Op = DB::Op, Digest = DB::Digest>> {
+pub struct Engine<DB: Database, R: Resolver<Op = DB::Op, Digest = DB::Digest>> {
     /// Tracks outstanding fetch requests and their futures
     outstanding_requests: OutstandingRequests<DB::Op, DB::Digest, R::Error>,
 
@@ -328,36 +345,16 @@ pub struct SyncEngine<DB: SyncDatabase, R: Resolver<Op = DB::Op, Digest = DB::Di
     pub update_receiver: Option<mpsc::Receiver<Target<DB::Digest>>>,
 }
 
-/// Configuration for creating a new SyncEngine
-pub struct SyncEngineConfig<DB: SyncDatabase, R: Resolver<Op = DB::Op, Digest = DB::Digest>> {
-    /// Runtime context for creating database components
-    pub context: DB::Context,
-    /// Network resolver for fetching operations and proofs
-    pub resolver: R,
-    /// Sync target (root digest and operation bounds)
-    pub target: Target<DB::Digest>,
-    /// Maximum number of outstanding requests for operation batches
-    pub max_outstanding_requests: usize,
-    /// Maximum operations to fetch per batch
-    pub fetch_batch_size: NonZeroU64,
-    /// Database-specific configuration
-    pub db_config: DB::Config,
-    /// Channel for receiving sync target updates
-    pub update_receiver: Option<mpsc::Receiver<Target<DB::Digest>>>,
-}
-
-impl<DB, R> SyncEngine<DB, R>
+impl<DB, R> Engine<DB, R>
 where
-    DB: SyncDatabase,
+    DB: Database,
     DB::Error: From<<DB::Journal as Journal>::Error>,
     DB::Config: Clone,
     DB::Context: Clone,
     R: Resolver<Op = DB::Op, Digest = DB::Digest>,
 {
     /// Create a new sync engine with the given configuration
-    pub async fn new(
-        config: SyncEngineConfig<DB, R>,
-    ) -> Result<Self, SyncError<DB::Error, R::Error>> {
+    pub async fn new(config: EngineConfig<DB, R>) -> Result<Self, SyncError<DB::Error, R::Error>> {
         // Create journal and verifier using the database's factory methods
         let journal = DB::create_journal(
             config.context.clone(),

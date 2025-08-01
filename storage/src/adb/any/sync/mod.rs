@@ -3,10 +3,10 @@ use crate::{
         any::{Any, SyncConfig},
         operation::Fixed,
         sync::{
-            engine::{Journal, SyncEngine, SyncEngineConfig, SyncVerifier},
+            engine::{EngineConfig, Journal, Verifier},
             error::SyncError,
             resolver::Resolver,
-            Target,
+            Engine, Target,
         },
     },
     journal::fixed,
@@ -56,7 +56,7 @@ where
     }
 }
 
-impl<E, K, V, H, T> SyncVerifier<Fixed<K, V>, H::Digest> for AnyVerifier<E, K, V, H, T>
+impl<E, K, V, H, T> Verifier<Fixed<K, V>, H::Digest> for AnyVerifier<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -127,7 +127,7 @@ where
 }
 
 /// Implementation of SyncDatabase for Any database
-impl<E, K, V, H, T> crate::adb::sync::engine::SyncDatabase for Any<E, K, V, H, T>
+impl<E, K, V, H, T> crate::adb::sync::Database for Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -238,7 +238,7 @@ where
 /// Returns a SyncEngine ready to start syncing operations.
 pub async fn new_client<E, K, V, H, T, R>(
     mut config: client::Config<E, K, V, H, T, R>,
-) -> Result<SyncEngine<Any<E, K, V, H, T>, R>, SyncError<Error, R::Error>>
+) -> Result<Engine<Any<E, K, V, H, T>, R>, SyncError<Error, R::Error>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -257,7 +257,7 @@ where
         apply_batch_size: config.apply_batch_size,
     };
 
-    let engine_config = SyncEngineConfig {
+    let engine_config = EngineConfig {
         context: config.context,
         resolver: config.resolver,
         target: config.target.clone(),
@@ -267,7 +267,7 @@ where
         update_receiver: config.update_receiver.take(),
     };
 
-    SyncEngine::new(engine_config).await
+    Engine::new(engine_config).await
 }
 
 /// Synchronizes a database by fetching, verifying, and applying operations from a remote source.
