@@ -1,9 +1,9 @@
 #![no_main]
 
 mod common;
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Arbitrary;
 use common::{link_validators, register_validators, Action};
-use commonware_codec::{Encode, Decode};
+use commonware_codec::{Decode, Encode};
 use commonware_consensus::{
     simplex::{
         config::Config,
@@ -11,8 +11,7 @@ use commonware_consensus::{
         types::{Finalize, Notarize, Nullify, Proposal, Voter},
         Engine,
     },
-    Supervisor as SupervisorTrait,
-    Viewable,
+    Supervisor as SupervisorTrait, Viewable,
 };
 use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
@@ -33,34 +32,19 @@ use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-// The number of steps the actor can do before it stops.
+// The number of steps the fuzzing actor can do before it stops.
 const MAX_STEPS: usize = 100;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Arbitrary)]
 pub enum FuzzStep {
     SendNotarize,
     SendFinalize,
     SendNullify,
-    SendNotarization,
-    SendFinalization,
-    SendNullification,
     SendMalformedBytes,
-}
-
-impl<'a> Arbitrary<'a> for FuzzStep {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        let val: u8 = u.arbitrary()?;
-        Ok(match val % 7 {
-            0 => FuzzStep::SendNotarize,
-            1 => FuzzStep::SendFinalize,
-            2 => FuzzStep::SendNullify,
-            3 => FuzzStep::SendNotarization,
-            4 => FuzzStep::SendFinalization,
-            5 => FuzzStep::SendNullification,
-            6 => FuzzStep::SendMalformedBytes,
-            _ => unreachable!(),
-        })
-    }
+    RespondWithMutatedPayload,
+    RespondWithMutatedView,
+    RespondWithMutatedParent,
+    RespondWithRandomMessage,
 }
 
 #[derive(Debug, Arbitrary)]
@@ -86,6 +70,7 @@ struct FuzzingActor<E: Clock + Spawner + Rng> {
     parent_offsets: Vec<u64>,
     malformed_bytes: Vec<Vec<u8>>,
     mutation_idx: usize,
+    current_mutation_strategy: Option<FuzzStep>,
 }
 
 impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
@@ -107,6 +92,7 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
             parent_offsets: input.parents,
             malformed_bytes: input.malformed_bytes,
             mutation_idx: 0,
+            current_mutation_strategy: None,
         }
     }
 
@@ -156,8 +142,11 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
         while steps < MAX_STEPS {
             match receiver.recv().await {
                 Ok((s, msg)) => {
+                    // Set mutation strategy for this message
+                    self.current_mutation_strategy = self.get_next_mutation().cloned();
                     // Received a message - mutate and resend it
-                    self.handle_received_message(&mut sender, s, msg.to_vec()).await;
+                    self.handle_received_message(&mut sender, s, msg.to_vec())
+                        .await;
                     steps += 1;
                 }
                 Err(_) => {
@@ -172,7 +161,7 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
                     }
                 }
             }
-            
+
             // Also randomly send additional messages
             if self.rng.gen_bool(0.2) && steps < MAX_STEPS {
                 if let Some(mutation) = self.get_next_mutation().cloned() {
@@ -183,32 +172,56 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
         }
     }
 
-    async fn handle_received_message(&mut self, sender: &mut impl Sender, _sender_id: impl std::fmt::Debug, msg: Vec<u8>) {
-        let msg = match Voter::<
-            commonware_cryptography::ed25519::Signature,
-            Sha256Digest,
-        >::decode_cfg(msg.as_slice(), &usize::MAX) {
-            Ok(msg) => msg,
-            Err(_) => return,
-        };
+    async fn handle_received_message(
+        &mut self,
+        sender: &mut impl Sender,
+        _sender_id: impl std::fmt::Debug,
+        msg: Vec<u8>,
+    ) {
+        // Parse message
+        let msg =
+            match Voter::<commonware_cryptography::ed25519::Signature, Sha256Digest>::decode_cfg(
+                msg.as_slice(),
+                &usize::MAX,
+            ) {
+                Ok(msg) => msg,
+                Err(_) => return, // Skip malformed messages
+            };
 
         let view = msg.view();
 
+        // Process message based on type
         match msg {
             Voter::Notarize(notarize) => {
                 if let Some(public_key_index) = self
                     .supervisor
                     .is_participant(view, &self.crypto.public_key())
                 {
-                    // Mutate the proposal (change payload)
-                    let mutated_payload = self.get_payload();
-                    let mutated_proposal = Proposal::new(view, notarize.proposal.parent, mutated_payload);
-                    
+                    // Send mutated version based on strategy
+                    if let Some(strategy) = self.current_mutation_strategy.clone() {
+                        let mutated_proposal =
+                            self.create_mutated_proposal(&notarize.proposal, &strategy);
+                        let msg = Notarize::sign(
+                            &self.namespace,
+                            &mut self.crypto,
+                            public_key_index,
+                            mutated_proposal,
+                        );
+                        let encoded_msg = Voter::<
+                            commonware_cryptography::ed25519::Signature,
+                            Sha256Digest,
+                        >::Notarize(msg)
+                        .encode()
+                        .into();
+                        let _ = sender.send(Recipients::All, encoded_msg, true).await;
+                    }
+
+                    // Also send original (like conflicter does)
                     let msg = Notarize::sign(
                         &self.namespace,
                         &mut self.crypto,
                         public_key_index,
-                        mutated_proposal,
+                        notarize.proposal,
                     );
                     let encoded_msg = Voter::<
                         commonware_cryptography::ed25519::Signature,
@@ -224,15 +237,31 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
                     .supervisor
                     .is_participant(view, &self.crypto.public_key())
                 {
-                    // Mutate the proposal (change payload)
-                    let mutated_payload = self.get_payload();
-                    let mutated_proposal = Proposal::new(view, finalize.proposal.parent, mutated_payload);
-                    
+                    // Send mutated version based on strategy
+                    if let Some(strategy) = self.current_mutation_strategy.clone() {
+                        let mutated_proposal =
+                            self.create_mutated_proposal(&finalize.proposal, &strategy);
+                        let msg = Finalize::sign(
+                            &self.namespace,
+                            &mut self.crypto,
+                            public_key_index,
+                            mutated_proposal,
+                        );
+                        let encoded_msg = Voter::<
+                            commonware_cryptography::ed25519::Signature,
+                            Sha256Digest,
+                        >::Finalize(msg)
+                        .encode()
+                        .into();
+                        let _ = sender.send(Recipients::All, encoded_msg, true).await;
+                    }
+
+                    // Also send original (like conflicter does)
                     let msg = Finalize::sign(
                         &self.namespace,
                         &mut self.crypto,
                         public_key_index,
-                        mutated_proposal,
+                        finalize.proposal,
                     );
                     let encoded_msg = Voter::<
                         commonware_cryptography::ed25519::Signature,
@@ -244,6 +273,33 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
                 }
             }
             _ => {} // Ignore other message types
+        }
+    }
+
+    fn create_mutated_proposal(
+        &mut self,
+        original: &Proposal<Sha256Digest>,
+        strategy: &FuzzStep,
+    ) -> Proposal<Sha256Digest> {
+        match strategy {
+            FuzzStep::RespondWithMutatedPayload => {
+                Proposal::new(original.view, original.parent, self.get_payload())
+            }
+            FuzzStep::RespondWithMutatedView => {
+                let mutated_view = self.get_view();
+                Proposal::new(mutated_view, original.parent, original.payload)
+            }
+            FuzzStep::RespondWithMutatedParent => {
+                let mutated_parent = self.get_parent();
+                Proposal::new(original.view, mutated_parent, original.payload)
+            }
+            FuzzStep::RespondWithRandomMessage => {
+                Proposal::new(self.get_view(), self.get_parent(), self.get_payload())
+            }
+            _ => {
+                // For other strategies, just mutate payload by default
+                Proposal::new(original.view, original.parent, self.get_payload())
+            }
         }
     }
 
@@ -306,12 +362,8 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
                     .supervisor
                     .is_participant(view, &self.crypto.public_key())
                 {
-                    let msg = Nullify::sign(
-                        &self.namespace,
-                        &mut self.crypto,
-                        public_key_index,
-                        view,
-                    );
+                    let msg =
+                        Nullify::sign(&self.namespace, &mut self.crypto, public_key_index, view);
                     let encoded_msg = Voter::<
                         commonware_cryptography::ed25519::Signature,
                         Sha256Digest,
