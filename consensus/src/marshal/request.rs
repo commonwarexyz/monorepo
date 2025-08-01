@@ -8,7 +8,8 @@ use std::{
     ops::Deref,
 };
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
+/// The subject of a [Request].
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 pub enum Subject<B: Block> {
     Block(B::Commitment),
     Finalized { height: u64 },
@@ -16,6 +17,10 @@ pub enum Subject<B: Block> {
 }
 
 impl<B: Block> Subject<B> {
+    /// The predicate to use when pruning subjects related to this subject.
+    ///
+    /// Specifically, any subjects unrelated will be left unmodified. Any related
+    /// subjects will be pruned if they are "less than" this subject.
     pub fn predicate(&self) -> impl Fn(&Request<B>) -> bool + Send + 'static {
         let cloned = self.clone();
         move |r| match (&cloned, &r.inner) {
@@ -80,34 +85,37 @@ impl<B: Block> EncodeSize for Subject<B> {
 /// A request wrapper that holds the serialized bytes of the inner request.
 #[derive(Clone)]
 pub struct Request<B: Block> {
+    /// The subject of the request.
     inner: Subject<B>,
+
+    /// The serialized bytes of the request.
     raw: Vec<u8>,
 }
 
 impl<B: Block> Request<B> {
-    /// Create a new request from an inner request.
+    /// Create a new [Request] from an inner [Subject].
     pub fn new(inner: Subject<B>) -> Self {
         let mut raw = Vec::with_capacity(inner.encode_size());
         inner.write(&mut raw);
         Self { inner, raw }
     }
 
-    /// Create a request for a block.
+    /// Create a [Request] for a block.
     pub fn block(commitment: B::Commitment) -> Self {
         Self::new(Subject::Block(commitment))
     }
 
-    /// Create a request for a finalization.
+    /// Create a [Request] for a finalization.
     pub fn finalized(height: u64) -> Self {
         Self::new(Subject::Finalized { height })
     }
 
-    /// Create a request for a notarization.
+    /// Create a [Request] for a notarization.
     pub fn notarized(view: u64) -> Self {
         Self::new(Subject::Notarized { view })
     }
 
-    /// Get the [Subject] of the request.
+    /// Get the [Subject] of the [Request].
     pub fn subject(self) -> Subject<B> {
         self.inner
     }
@@ -193,5 +201,105 @@ impl<B: Block> Debug for Request<B> {
             Subject::Finalized { height } => write!(f, "Finalized({height:?})"),
             Subject::Notarized { view } => write!(f, "Notarized({view:?})"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::marshal::mocks::block::Block as TestBlock;
+    use commonware_codec::{Encode, ReadExt};
+    use commonware_cryptography::sha256::{self, Digest as Sha256Digest};
+
+    type B = TestBlock<Sha256Digest>;
+
+    #[test]
+    fn test_request_block_encoding() {
+        let commitment = sha256::hash(b"test");
+        let request = Request::<B>::block(commitment);
+
+        // Test encoding
+        let encoded = request.encode();
+        assert_eq!(encoded.len(), 33); // 1 byte for enum variant + 32 bytes for commitment
+        assert_eq!(encoded[0], 0); // Block variant
+
+        // Test decoding
+        let mut buf = encoded.as_ref();
+        let decoded = Request::<B>::read(&mut buf).unwrap();
+        assert_eq!(request, decoded);
+        assert_eq!(decoded.subject(), Subject::Block(commitment));
+    }
+
+    #[test]
+    fn test_request_finalized_encoding() {
+        let height = 12345u64;
+        let request = Request::<B>::finalized(height);
+
+        // Test encoding
+        let encoded = request.encode();
+        assert_eq!(encoded[0], 1); // Finalized variant
+
+        // Test decoding
+        let mut buf = encoded.as_ref();
+        let decoded = Request::<B>::read(&mut buf).unwrap();
+        assert_eq!(request, decoded);
+        assert_eq!(decoded.subject(), Subject::Finalized { height });
+    }
+
+    #[test]
+    fn test_request_notarized_encoding() {
+        let view = 67890u64;
+        let request = Request::<B>::notarized(view);
+
+        // Test encoding
+        let encoded = request.encode();
+        assert_eq!(encoded[0], 2); // Notarized variant
+
+        // Test decoding
+        let mut buf = encoded.as_ref();
+        let decoded = Request::<B>::read(&mut buf).unwrap();
+        assert_eq!(request, decoded);
+        assert_eq!(decoded.subject(), Subject::Notarized { view });
+    }
+
+    #[test]
+    fn test_request_hash() {
+        use std::collections::HashSet;
+
+        let r1 = Request::<B>::finalized(100);
+        let r2 = Request::<B>::finalized(100);
+        let r3 = Request::<B>::finalized(200);
+
+        let mut set = HashSet::new();
+        set.insert(r1);
+        assert!(!set.insert(r2)); // Should not insert duplicate
+        assert!(set.insert(r3)); // Should insert different value
+    }
+
+    #[test]
+    fn test_subject_predicate() {
+        let r1 = Request::<B>::finalized(100);
+        let r2 = Request::<B>::finalized(200);
+        let r3 = Request::<B>::notarized(150);
+
+        let predicate = r1.subject().predicate();
+        assert!(predicate(&r2)); // r2.height > r1.height
+        assert!(predicate(&r3)); // Different variant (notarized)
+
+        let r1_same = Request::<B>::finalized(100);
+        assert!(!predicate(&r1_same)); // Same height, should not pass
+    }
+
+    #[test]
+    fn test_encode_size() {
+        let commitment = sha256::hash(&[0u8; 32]);
+        let r1 = Request::<B>::block(commitment);
+        let r2 = Request::<B>::finalized(u64::MAX);
+        let r3 = Request::<B>::notarized(0);
+
+        // Verify encode_size matches actual encoded length
+        assert_eq!(r1.encode_size(), r1.encode().len());
+        assert_eq!(r2.encode_size(), r2.encode().len());
+        assert_eq!(r3.encode_size(), r3.encode().len());
     }
 }
