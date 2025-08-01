@@ -107,7 +107,7 @@ impl<B: Block> Request<B> {
     /// The predicate to use when pruning subjects related to this subject.
     ///
     /// Specifically, any subjects unrelated will be left unmodified. Any related
-    /// subjects will be pruned if they are "less than" this subject.
+    /// subjects will be pruned if they are "less than or equal to" this subject.
     pub fn predicate(&self) -> impl Fn(&Request<B>) -> bool + Send + 'static {
         let cloned = self.clone();
         move |s| match (&cloned, &s) {
