@@ -11,6 +11,7 @@ cargo-fuzz = true
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-consensus = { workspace = true, features = ["fuzz"] }
+commonware-macros = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-p2p = { workspace = true }
 commonware-utils = { workspace = true }
@@ -18,6 +19,8 @@ arbitrary = { workspace = true, features = ["derive"] }
 libfuzzer-sys = { workspace = true }
 rand = { workspace = true }
 governor = { workspace = true }
+futures-timer = "3.0.3"
+futures = { workspace = true }
 
 [[bin]]
 name = "simplex_messages"
@@ -28,3 +31,4 @@ bench = false
 
 [features]
 default = []
+

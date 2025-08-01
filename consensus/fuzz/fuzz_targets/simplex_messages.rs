@@ -1,7 +1,7 @@
 #![no_main]
 
 mod common;
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use common::{link_validators, register_validators, Action};
 use commonware_codec::{Decode, Encode};
 use commonware_consensus::{
@@ -18,6 +18,7 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
     Digest, PrivateKeyExt as _, Sha256, Signer as _,
 };
+use commonware_macros::select;
 use commonware_p2p::{
     simulated::{Config as NetworkConfig, Link, Network},
     Receiver, Recipients, Sender,
@@ -27,49 +28,55 @@ use commonware_runtime::{
     Clock, Handle, Metrics, Runner, Spawner,
 };
 use commonware_utils::NZU32;
+use futures_timer::Delay;
 use governor::Quota;
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 // The number of steps the fuzzing actor can do before it stops.
 const MAX_STEPS: usize = 100;
+const DEFAULT_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Arbitrary)]
-pub enum FuzzStep {
-    SendNotarize,
-    SendFinalize,
-    SendNullify,
-    SendMalformedBytes,
-    RespondWithMutatedPayload,
-    RespondWithMutatedView,
-    RespondWithMutatedParent,
-    RespondWithRandomMessage,
+pub enum Mutation {
+    Payload,
+    View,
+    Parent,
+    All,
+}
+
+#[derive(Debug, Clone, Arbitrary)]
+pub enum Message {
+    Notarize,
+    Nullify,
+    Finalize,
+    Random,
 }
 
 #[derive(Debug, Arbitrary)]
 pub struct FuzzInput {
     seed: u64,
-    mutations: Vec<FuzzStep>,
+    mutations: Vec<Mutation>,
     views: Vec<u64>,
     parents: Vec<u64>,
     malformed_bytes: Vec<Vec<u8>>,
 }
-
-struct FuzzingActor<E: Clock + Spawner + Rng> {
+struct FuzzingActor<E: Clock + Spawner> {
     context: E,
     crypto: PrivateKey,
     supervisor: Supervisor<PublicKey, Sha256Digest>,
     namespace: Vec<u8>,
     rng: StdRng,
-    mutations: Vec<FuzzStep>,
-    view_offsets: Vec<u64>,
-    parent_offsets: Vec<u64>,
+    mutations: Vec<Mutation>,
+    views: Vec<u64>,
+    parents: Vec<u64>,
     malformed_bytes: Vec<Vec<u8>>,
     mutation_idx: usize,
+    view: u64,
 }
 
-impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
+impl<E: Clock + Spawner> FuzzingActor<E> {
     fn new(
         context: E,
         crypto: PrivateKey,
@@ -78,20 +85,21 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
         input: FuzzInput,
     ) -> Self {
         Self {
+            view: 0,
             context,
             crypto,
             supervisor,
             namespace,
             rng: StdRng::seed_from_u64(input.seed),
             mutations: input.mutations,
-            view_offsets: input.views,
-            parent_offsets: input.parents,
+            views: input.views,
+            parents: input.parents,
             malformed_bytes: input.malformed_bytes,
             mutation_idx: 0,
         }
     }
 
-    fn get_next_mutation(&mut self) -> Option<&FuzzStep> {
+    fn get_next_mutation(&mut self) -> Option<&Mutation> {
         if self.mutation_idx < self.mutations.len() {
             let mutation = &self.mutations[self.mutation_idx];
             self.mutation_idx += 1;
@@ -102,15 +110,15 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
     }
 
     fn get_view(&mut self) -> u64 {
-        self.view_offsets
-            .get(self.mutation_idx % self.view_offsets.len().max(1))
+        self.views
+            .get(self.mutation_idx % self.views.len().max(1))
             .copied()
             .unwrap_or(0)
     }
 
     fn get_parent(&mut self) -> u64 {
-        self.parent_offsets
-            .get(self.mutation_idx % self.parent_offsets.len().max(1))
+        self.parents
+            .get(self.mutation_idx % self.parents.len().max(1))
             .copied()
             .unwrap_or(0)
     }
@@ -123,7 +131,7 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
         self.malformed_bytes
             .get(self.mutation_idx % self.malformed_bytes.len().max(1))
             .cloned()
-            .unwrap_or_else(|| vec![0u8; 256])
+            .unwrap_or_else(|| vec![0u8; 32])
     }
 
     pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
@@ -135,33 +143,25 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
         let mut steps = 0;
 
         while steps < MAX_STEPS {
-            match receiver.recv().await {
-                Ok((s, msg)) => {
-                    // Received a message - mutate and resend it
-                    self.handle_received_message(&mut sender, s, msg.to_vec())
-                        .await;
-                    steps += 1;
-                }
-                Err(_) => {
-                    // No message received or error - send a random message instead
-                    if let Some(mutation) = self.get_next_mutation().cloned() {
-                        self.send_random_message(&mut sender, &mutation).await;
-                        steps += 1;
-                    } else {
-                        // No more mutations, wait a bit then break
-                        self.context.sleep(Duration::from_millis(1)).await;
-                        break;
+            select! {
+                result = receiver.recv().fuse() => {
+                    match result {
+                        Ok((s, msg)) => {
+                            // Received a message - mutate and resend it
+                            self.handle_received_message(&mut sender, s, msg.to_vec())
+                                .await;
+                        }
+                        Err(_) => {
+                            self.send_random_message(&mut sender).await;
+                        }
                     }
-                }
-            }
+                },
 
-            // Also randomly send additional messages
-            if self.rng.gen_bool(0.2) && steps < MAX_STEPS {
-                if let Some(mutation) = self.get_next_mutation().cloned() {
-                    self.send_random_message(&mut sender, &mutation).await;
-                    steps += 1;
+                _ = Delay::new(DEFAULT_TIMEOUT).fuse() => {
+                    self.send_random_message(&mut sender).await;
                 }
             }
+            steps += 1;
         }
     }
 
@@ -180,20 +180,18 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
                 Ok(msg) => msg,
                 Err(_) => return, // Skip malformed messages
             };
-
-        let view = msg.view();
+        // Store view.
+        self.view = msg.view();
 
         // Process message based on type
         match msg {
             Voter::Notarize(notarize) => {
                 if let Some(public_key_index) = self
                     .supervisor
-                    .is_participant(view, &self.crypto.public_key())
+                    .is_participant(self.view, &self.crypto.public_key())
                 {
-                    // Send mutated version based on strategy
                     if let Some(strategy) = self.get_next_mutation().cloned() {
-                        let mutated_proposal =
-                            self.create_mutated_proposal(&notarize.proposal, &strategy);
+                        let mutated_proposal = self.mutate_proposal(&notarize.proposal, &strategy);
                         let msg = Notarize::sign(
                             &self.namespace,
                             &mut self.crypto,
@@ -207,33 +205,21 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
                         .encode()
                         .into();
                         let _ = sender.send(Recipients::All, encoded_msg, true).await;
+                    } else {
+                        let malformed_bytes = self.get_malformed_bytes();
+                        let _ = sender
+                            .send(Recipients::All, malformed_bytes.into(), true)
+                            .await;
                     }
-
-                    // Also send original (like conflicter does)
-                    let msg = Notarize::sign(
-                        &self.namespace,
-                        &mut self.crypto,
-                        public_key_index,
-                        notarize.proposal,
-                    );
-                    let encoded_msg = Voter::<
-                        commonware_cryptography::ed25519::Signature,
-                        Sha256Digest,
-                    >::Notarize(msg)
-                    .encode()
-                    .into();
-                    let _ = sender.send(Recipients::All, encoded_msg, true).await;
                 }
             }
             Voter::Finalize(finalize) => {
                 if let Some(public_key_index) = self
                     .supervisor
-                    .is_participant(view, &self.crypto.public_key())
+                    .is_participant(self.view, &self.crypto.public_key())
                 {
-                    // Send mutated version based on strategy
                     if let Some(strategy) = self.get_next_mutation().cloned() {
-                        let mutated_proposal =
-                            self.create_mutated_proposal(&finalize.proposal, &strategy);
+                        let mutated_proposal = self.mutate_proposal(&finalize.proposal, &strategy);
                         let msg = Finalize::sign(
                             &self.namespace,
                             &mut self.crypto,
@@ -247,67 +233,72 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
                         .encode()
                         .into();
                         let _ = sender.send(Recipients::All, encoded_msg, true).await;
+                    } else {
+                        let malformed_bytes = self.get_malformed_bytes();
+                        let _ = sender
+                            .send(Recipients::All, malformed_bytes.into(), true)
+                            .await;
                     }
-
-                    // Also send original (like conflicter does)
-                    let msg = Finalize::sign(
-                        &self.namespace,
-                        &mut self.crypto,
-                        public_key_index,
-                        finalize.proposal,
-                    );
-                    let encoded_msg = Voter::<
-                        commonware_cryptography::ed25519::Signature,
-                        Sha256Digest,
-                    >::Finalize(msg)
-                    .encode()
-                    .into();
-                    let _ = sender.send(Recipients::All, encoded_msg, true).await;
                 }
             }
-            _ => {} // Ignore other message types
+            Voter::Nullify(nullify) => {
+                if let Some(public_key_index) = self
+                    .supervisor
+                    .is_participant(nullify.view, &self.crypto.public_key())
+                {
+                    let view = nullify.view;
+                    let msg =
+                        Nullify::sign(&self.namespace, &mut self.crypto, public_key_index, view);
+                    let encoded = Voter::<commonware_cryptography::ed25519::Signature, Sha256Digest>::Nullify(msg).encode().into();
+                    let _ = sender.send(Recipients::All, encoded, true).await;
+                }
+            }
+            _ => {
+                let malformed_bytes = self.get_malformed_bytes();
+                let _ = sender
+                    .send(Recipients::All, malformed_bytes.into(), true)
+                    .await;
+            }
         }
     }
 
-    fn create_mutated_proposal(
+    fn mutate_proposal(
         &mut self,
         original: &Proposal<Sha256Digest>,
-        strategy: &FuzzStep,
+        strategy: &Mutation,
     ) -> Proposal<Sha256Digest> {
         match strategy {
-            FuzzStep::RespondWithMutatedPayload => {
-                Proposal::new(original.view, original.parent, self.get_payload())
-            }
-            FuzzStep::RespondWithMutatedView => {
+            Mutation::Payload => Proposal::new(original.view, original.parent, self.get_payload()),
+            Mutation::View => {
                 let mutated_view = self.get_view();
                 Proposal::new(mutated_view, original.parent, original.payload)
             }
-            FuzzStep::RespondWithMutatedParent => {
+            Mutation::Parent => {
                 let mutated_parent = self.get_parent();
                 Proposal::new(original.view, mutated_parent, original.payload)
             }
-            FuzzStep::RespondWithRandomMessage => {
-                Proposal::new(self.get_view(), self.get_parent(), self.get_payload())
-            }
-            _ => {
-                // For other strategies, just mutate payload by default
-                Proposal::new(original.view, original.parent, self.get_payload())
-            }
+            Mutation::All => Proposal::new(self.get_view(), self.get_parent(), self.get_payload()),
         }
     }
 
-    async fn send_random_message(&mut self, sender: &mut impl Sender, mutation: &FuzzStep) {
-        match mutation {
-            FuzzStep::SendNotarize => {
-                let view = self.get_view();
-                let parent = self.get_parent();
-                let payload = self.get_payload();
-                let proposal = Proposal::new(view, parent, payload);
+    async fn send_random_message(&mut self, sender: &mut impl Sender) {
+        let real_view = self.view;
 
-                if let Some(public_key_index) = self
-                    .supervisor
-                    .is_participant(view, &self.crypto.public_key())
-                {
+        let proposal = Proposal::new(self.get_view(), self.get_parent(), self.get_payload());
+
+        if let Some(public_key_index) = self
+            .supervisor
+            .is_participant(real_view, &self.crypto.public_key())
+        {
+            // Use the provided step parameter or generate a random one
+            let mut buf = [0u8; 8];
+            self.rng.fill_bytes(&mut buf);
+            let mut unstructured = Unstructured::new(&buf);
+
+            let message: Message = Message::arbitrary(&mut unstructured).unwrap_or(Message::Random);
+
+            match message {
+                Message::Notarize => {
                     let msg = Notarize::sign(
                         &self.namespace,
                         &mut self.crypto,
@@ -322,17 +313,7 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
                     .into();
                     let _ = sender.send(Recipients::All, encoded_msg, true).await;
                 }
-            }
-            FuzzStep::SendFinalize => {
-                let view = self.get_view();
-                let parent = self.get_parent();
-                let payload = self.get_payload();
-                let proposal = Proposal::new(view, parent, payload);
-
-                if let Some(public_key_index) = self
-                    .supervisor
-                    .is_participant(view, &self.crypto.public_key())
-                {
+                Message::Finalize => {
                     let msg = Finalize::sign(
                         &self.namespace,
                         &mut self.crypto,
@@ -347,16 +328,13 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
                     .into();
                     let _ = sender.send(Recipients::All, encoded_msg, true).await;
                 }
-            }
-            FuzzStep::SendNullify => {
-                let view = self.get_view();
-
-                if let Some(public_key_index) = self
-                    .supervisor
-                    .is_participant(view, &self.crypto.public_key())
-                {
-                    let msg =
-                        Nullify::sign(&self.namespace, &mut self.crypto, public_key_index, view);
+                Message::Nullify => {
+                    let msg = Nullify::sign(
+                        &self.namespace,
+                        &mut self.crypto,
+                        public_key_index,
+                        real_view,
+                    );
                     let encoded_msg = Voter::<
                         commonware_cryptography::ed25519::Signature,
                         Sha256Digest,
@@ -365,14 +343,19 @@ impl<E: Clock + Spawner + Rng> FuzzingActor<E> {
                     .into();
                     let _ = sender.send(Recipients::All, encoded_msg, true).await;
                 }
+
+                Message::Random => {
+                    let malformed_bytes = self.get_malformed_bytes();
+                    let _ = sender
+                        .send(Recipients::All, malformed_bytes.into(), true)
+                        .await;
+                }
             }
-            FuzzStep::SendMalformedBytes => {
-                let malformed_bytes = self.get_malformed_bytes();
-                let _ = sender
-                    .send(Recipients::All, malformed_bytes.into(), true)
-                    .await;
-            }
-            _ => {} // Ignore unimplemented mutations
+        } else {
+            let malformed_bytes = self.get_malformed_bytes();
+            let _ = sender
+                .send(Recipients::All, malformed_bytes.into(), true)
+                .await;
         }
     }
 }
@@ -383,7 +366,7 @@ fn fuzzer(input: FuzzInput) {
     let namespace = b"consensus_fuzz".to_vec();
     let cfg = deterministic::Config::new()
         .with_seed(input.seed)
-        .with_timeout(Some(Duration::from_secs(2))); // Reduced timeout for faster cleanup
+        .with_timeout(Some(Duration::from_secs(15))); // Reduced timeout for faster cleanup
     let executor = deterministic::Runner::new(cfg);
     executor.start(|context| async move {
         // Create simulated network
@@ -501,7 +484,6 @@ fn fuzzer(input: FuzzInput) {
 
         context.sleep(Duration::from_secs(1)).await;
 
-        // Explicit cleanup to prevent memory leaks
         drop(supervisors);
         drop(relay);
         drop(registrations);
