@@ -925,11 +925,13 @@ pub(crate) mod tests {
                             deleted_keys.remove(key);
                         }
                     }
-                    Fixed::Deleted(key) => {
+                    Fixed::Delete(key) => {
                         expected_kvs.remove(key);
                         deleted_keys.insert(*key);
                     }
-                    _ => {}
+                    _ => {
+                        panic!("unexpected operation");
+                    }
                 }
             }
 
