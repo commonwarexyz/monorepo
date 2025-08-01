@@ -20,9 +20,11 @@ impl<B: Block> Subject<B> {
         let cloned = self.clone();
         move |r| match (&cloned, &r.inner) {
             (Self::Block(_), _) => unreachable!("we should never prune by block"),
-            (Self::Finalized { height }, Self::Finalized { height: h }) => h > height,
+            (Self::Finalized { height: mine }, Self::Finalized { height: theirs }) => {
+                *theirs > *mine
+            }
             (Self::Finalized { .. }, _) => true,
-            (Self::Notarized { view }, Self::Notarized { view: v }) => v > view,
+            (Self::Notarized { view: mine }, Self::Notarized { view: theirs }) => *theirs > *mine,
             (Self::Notarized { .. }, _) => true,
         }
     }
