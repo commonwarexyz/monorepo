@@ -3,9 +3,10 @@ use crate::{
         any::{Any, SyncConfig},
         operation::Fixed,
         sync::{
-            engine::{Journal, SyncEngine, SyncEngineConfig, SyncTarget, SyncVerifier},
+            engine::{Journal, SyncEngine, SyncEngineConfig, SyncVerifier},
             error::SyncError,
             resolver::Resolver,
+            Target,
         },
     },
     journal::fixed,
@@ -20,7 +21,7 @@ use futures::channel::mpsc;
 pub mod client;
 
 /// Channel for sending sync target updates
-pub type SyncTargetUpdateSender<D> = mpsc::Sender<SyncTarget<D>>;
+pub type SyncTargetUpdateSender<D> = mpsc::Sender<Target<D>>;
 
 pub type Error = crate::adb::Error;
 
@@ -175,7 +176,7 @@ where
         config: Self::Config,
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        target: crate::adb::sync::engine::SyncTarget<Self::Digest>,
+        target: Target<Self::Digest>,
     ) -> Result<Self, Self::Error> {
         // Build the complete database from the journal
         let db = Any::init_synced(

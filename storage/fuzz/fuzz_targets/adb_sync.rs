@@ -7,7 +7,7 @@ use commonware_storage::{
     adb::{
         any::{sync, Any, Config},
         operation::Fixed,
-        sync::{engine::SyncTarget, resolver::Resolver},
+        sync::{resolver::Resolver, Target},
     },
     mmr::hasher::Standard,
     translator::TwoCap,
@@ -59,7 +59,7 @@ async fn test_sync<
 >(
     context: deterministic::Context,
     resolver: R,
-    target: SyncTarget<commonware_cryptography::sha256::Digest>,
+    target: Target<commonware_cryptography::sha256::Digest>,
     fetch_batch_size: u64,
     test_name: &str,
     pruning_delay: u64,
@@ -133,7 +133,7 @@ fn fuzz(input: FuzzInput) {
                         .expect("Commit before sync should not fail");
 
                     let mut hasher = Standard::<Sha256>::new();
-                    let target = SyncTarget {
+                    let target = Target {
                         root: src.root(&mut hasher),
                         lower_bound_ops: src.inactivity_floor_loc(),
                         upper_bound_ops: src.op_count() - 1,

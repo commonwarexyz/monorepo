@@ -1,20 +1,13 @@
 //! Core sync engine components that are shared across sync clients.
 
 use crate::{
-    adb::sync::{error::SyncError, resolver::Resolver},
+    adb::sync::{error::SyncError, resolver::Resolver, Target, TargetUpdateReceiver},
     mmr::verification::Proof,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_utils::NZU64;
-use futures::{
-    channel::{mpsc, oneshot},
-    future::Either,
-    stream::FuturesUnordered,
-    StreamExt,
-};
+use futures::{channel::oneshot, future::Either, stream::FuturesUnordered, StreamExt};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
@@ -91,7 +84,7 @@ pub trait SyncDatabase: Sized {
         config: Self::Config,
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        target: SyncTarget<Self::Digest>,
+        target: Target<Self::Digest>,
     ) -> impl Future<Output = Result<Self, Self::Error>>;
 
     /// Get the root digest of the database for verification
@@ -121,60 +114,18 @@ pub enum StepResult<C, D> {
 pub struct SyncCompletionResult<J: Journal, D: Digest> {
     pub journal: J,
     pub pinned_nodes: Option<Vec<D>>,
-    pub target: SyncTarget<D>,
+    pub target: Target<D>,
 }
 
 /// Events that can occur during synchronization
 #[derive(Debug)]
 pub enum SyncEvent<Op, D: Digest, E> {
     /// A target update was received
-    TargetUpdate(SyncTarget<D>),
+    TargetUpdate(Target<D>),
     /// A batch of operations was received
     BatchReceived(IndexedFetchResult<Op, D, E>),
     /// The target update channel was closed
     UpdateChannelClosed,
-}
-
-/// Target state to sync to
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SyncTarget<D: Digest> {
-    /// The root digest we're syncing to
-    pub root: D,
-    /// Lower bound of operations to sync (inclusive)
-    pub lower_bound_ops: u64,
-    /// Upper bound of operations to sync (inclusive)
-    pub upper_bound_ops: u64,
-}
-
-impl<D: Digest> Write for SyncTarget<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.root.write(buf);
-        self.lower_bound_ops.write(buf);
-        self.upper_bound_ops.write(buf);
-    }
-}
-
-impl<D: Digest> EncodeSize for SyncTarget<D> {
-    fn encode_size(&self) -> usize {
-        self.root.encode_size()
-            + self.lower_bound_ops.encode_size()
-            + self.upper_bound_ops.encode_size()
-    }
-}
-
-impl<D: Digest> Read for SyncTarget<D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let root = D::read(buf)?;
-        let lower_bound_ops = u64::read(buf)?;
-        let upper_bound_ops = u64::read(buf)?;
-        Ok(Self {
-            root,
-            lower_bound_ops,
-            upper_bound_ops,
-        })
-    }
 }
 
 /// Result from a fetch operation with its starting location
@@ -369,8 +320,8 @@ pub enum TargetUpdateError {
 
 /// Validate a target update against the current target
 pub fn validate_target_update<D: Digest>(
-    old_target: &SyncTarget<D>,
-    new_target: &SyncTarget<D>,
+    old_target: &Target<D>,
+    new_target: &Target<D>,
 ) -> Result<(), TargetUpdateError> {
     if new_target.lower_bound_ops > new_target.upper_bound_ops {
         return Err(TargetUpdateError::InvalidBounds {
@@ -397,13 +348,10 @@ pub fn validate_target_update<D: Digest>(
     Ok(())
 }
 
-/// Type alias for sync target update receivers
-pub type SyncTargetUpdateReceiver<D> = mpsc::Receiver<SyncTarget<D>>;
-
 /// Wait for the next synchronization event from either target updates or fetch results.
 /// Returns `None` if the sync is stalled (there are no outstanding requests).
 pub async fn wait_for_event<Op, D: Digest, E>(
-    update_receiver: &mut Option<SyncTargetUpdateReceiver<D>>,
+    update_receiver: &mut Option<TargetUpdateReceiver<D>>,
     outstanding_requests: &mut OutstandingRequests<Op, D, E>,
 ) -> Option<SyncEvent<Op, D, E>> {
     let target_update_fut = match update_receiver {
@@ -436,7 +384,7 @@ pub struct SyncEngine<DB: SyncDatabase, R: Resolver<Op = DB::Op, Digest = DB::Di
     pub pinned_nodes: Option<Vec<DB::Digest>>,
 
     /// The current sync target (root digest and operation bounds)
-    pub target: SyncTarget<DB::Digest>,
+    pub target: Target<DB::Digest>,
 
     /// Maximum number of parallel outstanding requests
     pub max_outstanding_requests: usize,
@@ -460,7 +408,7 @@ pub struct SyncEngine<DB: SyncDatabase, R: Resolver<Op = DB::Op, Digest = DB::Di
     pub config: DB::Config,
 
     /// Optional receiver for target updates during sync
-    pub update_receiver: Option<SyncTargetUpdateReceiver<DB::Digest>>,
+    pub update_receiver: Option<TargetUpdateReceiver<DB::Digest>>,
 }
 
 /// Configuration for creating a new SyncEngine
@@ -470,7 +418,7 @@ pub struct SyncEngineConfig<DB: SyncDatabase, R: Resolver<Op = DB::Op, Digest = 
     /// Network resolver for fetching operations and proofs
     pub resolver: R,
     /// Sync target (root digest and operation bounds)
-    pub target: SyncTarget<DB::Digest>,
+    pub target: Target<DB::Digest>,
     /// Maximum number of outstanding requests for operation batches
     pub max_outstanding_requests: usize,
     /// Maximum operations to fetch per batch
@@ -478,7 +426,7 @@ pub struct SyncEngineConfig<DB: SyncDatabase, R: Resolver<Op = DB::Op, Digest = 
     /// Database-specific configuration
     pub db_config: DB::Config,
     /// Channel for receiving sync target updates
-    pub update_receiver: Option<SyncTargetUpdateReceiver<DB::Digest>>,
+    pub update_receiver: Option<TargetUpdateReceiver<DB::Digest>>,
 }
 
 impl<DB, R> SyncEngine<DB, R>
@@ -593,7 +541,7 @@ where
     /// Clear all sync state for a target update
     pub async fn reset_for_target_update(
         self,
-        new_target: SyncTarget<DB::Digest>,
+        new_target: Target<DB::Digest>,
     ) -> Result<Self, SyncError<DB::Error, R::Error>> {
         let journal = DB::resize_journal(
             self.journal,
@@ -892,7 +840,6 @@ where
 mod tests {
     use super::*;
     use commonware_cryptography::sha256;
-    use std::io::Cursor;
     use test_case::test_case;
 
     #[test]
@@ -950,32 +897,32 @@ mod tests {
     }
 
     #[test_case(
-        SyncTarget { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
-        SyncTarget { root: sha256::Digest::from([1; 32]), lower_bound_ops: 50, upper_bound_ops: 200 },
+        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
+        Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 50, upper_bound_ops: 200 },
         true;
         "valid update"
     )]
     #[test_case(
-        SyncTarget { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
-        SyncTarget { root: sha256::Digest::from([1; 32]), lower_bound_ops: 200, upper_bound_ops: 100 },
+        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
+        Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 200, upper_bound_ops: 100 },
         false;
         "invalid bounds - lower > upper"
     )]
     #[test_case(
-        SyncTarget { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
-        SyncTarget { root: sha256::Digest::from([1; 32]), lower_bound_ops: 0, upper_bound_ops: 50 },
+        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
+        Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 0, upper_bound_ops: 50 },
         false;
         "moves backward"
     )]
     #[test_case(
-        SyncTarget { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
-        SyncTarget { root: sha256::Digest::from([0; 32]), lower_bound_ops: 50, upper_bound_ops: 200 },
+        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
+        Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 50, upper_bound_ops: 200 },
         false;
         "same root"
     )]
     fn test_validate_target_update(
-        old_target: SyncTarget<sha256::Digest>,
-        new_target: SyncTarget<sha256::Digest>,
+        old_target: Target<sha256::Digest>,
+        new_target: Target<sha256::Digest>,
         should_succeed: bool,
     ) {
         let result = validate_target_update(&old_target, &new_target);
@@ -984,31 +931,5 @@ mod tests {
         } else {
             assert!(result.is_err());
         }
-    }
-
-    #[test]
-    fn test_sync_target_serialization() {
-        let target = SyncTarget {
-            root: sha256::Digest::from([42; 32]),
-            lower_bound_ops: 100,
-            upper_bound_ops: 500,
-        };
-
-        // Serialize
-        let mut buffer = Vec::new();
-        target.write(&mut buffer);
-
-        // Verify encoded size matches actual size
-        assert_eq!(buffer.len(), target.encode_size());
-
-        // Deserialize
-        let mut cursor = Cursor::new(buffer);
-        let deserialized = SyncTarget::read(&mut cursor).unwrap();
-
-        // Verify
-        assert_eq!(target, deserialized);
-        assert_eq!(target.root, deserialized.root);
-        assert_eq!(target.lower_bound_ops, deserialized.lower_bound_ops);
-        assert_eq!(target.upper_bound_ops, deserialized.upper_bound_ops);
     }
 }

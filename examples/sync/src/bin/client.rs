@@ -9,7 +9,7 @@ use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
 use commonware_storage::{
     adb::{
         any::sync::{self, client::Config as SyncConfig},
-        sync::{engine::SyncTarget, error::SyncError},
+        sync::{error::SyncError, Target},
     },
     mmr::hasher::Standard,
 };
@@ -57,9 +57,9 @@ struct Config {
 async fn target_update_task<E>(
     context: E,
     resolver: Resolver<E>,
-    update_sender: mpsc::Sender<SyncTarget<Digest>>,
+    update_sender: mpsc::Sender<Target<Digest>>,
     interval_duration: Duration,
-    initial_target: SyncTarget<Digest>,
+    initial_target: Target<Digest>,
 ) -> Result<(), Error>
 where
     E: commonware_runtime::Network + commonware_runtime::Clock + commonware_runtime::Spawner,

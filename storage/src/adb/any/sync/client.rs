@@ -3,11 +3,7 @@ use crate::{
     adb::{
         any,
         operation::Fixed,
-        sync::{
-            engine::{SyncTarget, SyncTargetUpdateReceiver},
-            error::SyncError,
-            resolver::Resolver,
-        },
+        sync::{error::SyncError, resolver::Resolver, Target, TargetUpdateReceiver},
     },
     mmr,
     translator::Translator,
@@ -31,7 +27,7 @@ where
     pub context: E,
 
     /// Channel for receiving target updates.
-    pub update_receiver: Option<SyncTargetUpdateReceiver<H::Digest>>,
+    pub update_receiver: Option<TargetUpdateReceiver<H::Digest>>,
 
     /// Database configuration.
     pub db_config: any::Config<T>,
@@ -40,7 +36,7 @@ where
     pub fetch_batch_size: NonZeroU64,
 
     /// Synchronization target (root digest and operation bounds).
-    pub target: SyncTarget<H::Digest>,
+    pub target: Target<H::Digest>,
 
     /// Resolves requests for proofs and operations.
     pub resolver: R,
@@ -90,10 +86,7 @@ pub(crate) mod tests {
                 Any,
             },
             operation::Fixed,
-            sync::{
-                engine::{StepResult, SyncTarget},
-                resolver::tests::FailResolver,
-            },
+            sync::{engine::StepResult, resolver::tests::FailResolver},
         },
         mmr::{hasher::Standard, iterator::leaf_num_to_pos},
         translator::TwoCap,
@@ -193,7 +186,7 @@ pub(crate) mod tests {
                 update_receiver: None,
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(2),
-                target: SyncTarget {
+                target: Target {
                     root: target_root,
                     lower_bound_ops: {
                         let db = source_db.read().await;
@@ -242,7 +235,7 @@ pub(crate) mod tests {
                 update_receiver: None,
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(2),
-                target: SyncTarget {
+                target: Target {
                     root: target_root,
                     lower_bound_ops: lower_bound,
                     upper_bound_ops: upper_bound,
@@ -277,7 +270,7 @@ pub(crate) mod tests {
                 update_receiver: None,
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(2),
-                target: SyncTarget {
+                target: Target {
                     root: target_root,
                     lower_bound_ops: 0,
                     upper_bound_ops: 4,
@@ -325,7 +318,7 @@ pub(crate) mod tests {
             let config = Config {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size,
-                target: SyncTarget {
+                target: Target {
                     root: target_root,
                     lower_bound_ops,
                     upper_bound_ops: target_op_count - 1, // target_op_count is the count, operations are 0-indexed
@@ -398,7 +391,7 @@ pub(crate) mod tests {
             let config = Config {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(10),
-                target: SyncTarget {
+                target: Target {
                     root,
                     lower_bound_ops,
                     upper_bound_ops,
@@ -476,7 +469,7 @@ pub(crate) mod tests {
             let config = Config {
                 db_config: sync_db_config, // Use same config as before
                 fetch_batch_size: NZU64!(10),
-                target: SyncTarget {
+                target: Target {
                     root,
                     lower_bound_ops,
                     upper_bound_ops,
@@ -579,7 +572,7 @@ pub(crate) mod tests {
             let config = Config {
                 db_config: sync_config, // Use same config to access same partitions
                 fetch_batch_size: NZU64!(10),
-                target: SyncTarget {
+                target: Target {
                     root,
                     lower_bound_ops,
                     upper_bound_ops,
@@ -647,7 +640,7 @@ pub(crate) mod tests {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(5),
-                target: SyncTarget {
+                target: Target {
                     root: initial_root,
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
@@ -660,7 +653,7 @@ pub(crate) mod tests {
             };
             // Send target update with decreased lower bound (before starting sync)
             update_sender
-                .send(SyncTarget {
+                .send(Target {
                     root: initial_root,
                     lower_bound_ops: initial_lower_bound.saturating_sub(1),
                     upper_bound_ops: initial_upper_bound.saturating_add(1),
@@ -708,7 +701,7 @@ pub(crate) mod tests {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(5),
-                target: SyncTarget {
+                target: Target {
                     root: initial_root,
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
@@ -721,7 +714,7 @@ pub(crate) mod tests {
             };
             // Send target update with decreased upper bound (before starting sync)
             update_sender
-                .send(SyncTarget {
+                .send(Target {
                     root: initial_root,
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound.saturating_sub(1),
@@ -781,7 +774,7 @@ pub(crate) mod tests {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(1),
-                target: SyncTarget {
+                target: Target {
                     root: initial_root,
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
@@ -795,7 +788,7 @@ pub(crate) mod tests {
 
             // Send target update with increased bounds
             update_sender
-                .send(SyncTarget {
+                .send(Target {
                     root: final_root,
                     lower_bound_ops: final_lower_bound,
                     upper_bound_ops: final_upper_bound,
@@ -846,7 +839,7 @@ pub(crate) mod tests {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(5),
-                target: SyncTarget {
+                target: Target {
                     root: initial_root,
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
@@ -860,7 +853,7 @@ pub(crate) mod tests {
 
             // Send target update with invalid bounds (lower > upper)
             update_sender
-                .send(SyncTarget {
+                .send(Target {
                     root: initial_root,
                     lower_bound_ops: initial_upper_bound, // Greater than upper bound
                     upper_bound_ops: initial_lower_bound, // Less than lower bound
@@ -907,7 +900,7 @@ pub(crate) mod tests {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(20),
-                target: SyncTarget {
+                target: Target {
                     root,
                     lower_bound_ops: lower_bound,
                     upper_bound_ops: upper_bound,
@@ -925,7 +918,7 @@ pub(crate) mod tests {
             // Attempt to apply a target update after sync is complete to verify
             // we don't panic
             let _ = update_sender
-                .send(SyncTarget {
+                .send(Target {
                     root: Digest::from([2u8; 32]),
                     lower_bound_ops: lower_bound + 1,
                     upper_bound_ops: upper_bound + 1,
@@ -986,7 +979,7 @@ pub(crate) mod tests {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(1), // Small batch size so we don't finish after one batch
-                target: SyncTarget {
+                target: Target {
                     root: initial_root,
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
@@ -1030,7 +1023,7 @@ pub(crate) mod tests {
 
                 // Send target update with new target
                 update_sender
-                    .send(SyncTarget {
+                    .send(Target {
                         root: new_root,
                         lower_bound_ops: new_lower_bound,
                         upper_bound_ops: new_upper_bound,
@@ -1122,7 +1115,7 @@ pub(crate) mod tests {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(2), // Very small batch size to ensure multiple batches needed
-                target: SyncTarget {
+                target: Target {
                     root: initial_root,
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: initial_upper_bound,
@@ -1153,7 +1146,7 @@ pub(crate) mod tests {
 
             // Send target update with SAME lower bound but higher upper bound
             update_sender
-                .send(SyncTarget {
+                .send(Target {
                     root: final_root,
                     lower_bound_ops: initial_lower_bound,
                     upper_bound_ops: final_upper_bound,
@@ -1232,7 +1225,7 @@ pub(crate) mod tests {
             let config = Config {
                 db_config: db_config.clone(),
                 fetch_batch_size: NZU64!(5),
-                target: SyncTarget {
+                target: Target {
                     root: target_root,
                     lower_bound_ops: lower_bound,
                     upper_bound_ops: upper_bound,

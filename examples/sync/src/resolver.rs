@@ -8,8 +8,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_storage::adb::sync::{
-    engine::{FetchResult, SyncTarget},
-    resolver::Resolver as ResolverTrait,
+    engine::FetchResult, resolver::Resolver as ResolverTrait, Target,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::{
@@ -167,7 +166,7 @@ where
 
     pub async fn get_sync_target(
         &self,
-    ) -> Result<SyncTarget<Digest>, <Self as ResolverTrait>::Error> {
+    ) -> Result<Target<Digest>, <Self as ResolverTrait>::Error> {
         let request = GetSyncTargetRequest {
             request_id: RequestId::new(),
         };
