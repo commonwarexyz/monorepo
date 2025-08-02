@@ -336,7 +336,7 @@ impl<
         }
 
         self.any
-            .apply_op(Fixed::Commit(self.any.inactivity_floor_loc))
+            .apply_op(Fixed::CommitFloor(self.any.inactivity_floor_loc))
             .await?;
         self.status.append(false);
 

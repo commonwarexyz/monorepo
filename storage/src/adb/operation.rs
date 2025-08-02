@@ -15,6 +15,13 @@ use std::{
 };
 use thiserror::Error;
 
+// Context byte prefixes for identifying the operation type.
+const DELETE_CONTEXT: u8 = 0;
+const UPDATE_CONTEXT: u8 = 1;
+const COMMIT_FLOOR_CONTEXT: u8 = 2;
+const SET_CONTEXT: u8 = 3;
+const COMMIT_CONTEXT: u8 = 4;
+
 /// Errors returned by operation functions.
 #[derive(Error, Debug)]
 pub enum Error {
@@ -28,29 +35,34 @@ pub enum Error {
     InvalidContextByte,
     #[error("delete operation has non-zero value")]
     InvalidDeleteOp,
-    #[error("commit operation has non-zero bytes after location")]
-    InvalidCommitOp,
+    #[error("commit floor operation has non-zero bytes after location")]
+    InvalidCommitFloorOp,
 }
 
 /// An operation applied to an authenticated database with a fixed size value.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Fixed<K: Array, V: Array> {
     /// Indicates the key no longer has a value.
-    Deleted(K),
+    Delete(K),
 
     /// Indicates the key now has the wrapped value.
     Update(K, V),
 
     /// Indicates all prior operations are no longer subject to rollback, and the floor on inactive
     /// operations has been raised to the wrapped value.
-    Commit(u64),
+    CommitFloor(u64),
 }
 
 /// An operation applied to an authenticated database with a variable size value.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Variable<K: Array, V: Codec> {
+    // Operations for immutable stores.
     Set(K, V),
     Commit(),
+    // Operations for mutable stores.
+    Delete(K),
+    Update(K, V),
+    CommitFloor(u64),
 }
 
 impl<K: Array, V: Array> FixedSize for Fixed<K, V> {
@@ -60,18 +72,14 @@ impl<K: Array, V: Array> FixedSize for Fixed<K, V> {
 impl<K: Array, V: Codec> EncodeSize for Variable<K, V> {
     fn encode_size(&self) -> usize {
         match self {
-            // 1 byte for the context + fixed key size + value’s own size
+            Variable::Delete(_) => 1 + K::SIZE,
+            Variable::Update(_, v) => 1 + K::SIZE + v.encode_size(),
+            Variable::CommitFloor(_) => 1 + u64::SIZE,
             Variable::Set(_, v) => 1 + K::SIZE + v.encode_size(),
-            // Only the context byte
             Variable::Commit() => 1,
         }
     }
 }
-
-const DELETE_CONTEXT: u8 = 0;
-const UPDATE_CONTEXT: u8 = 1;
-const COMMIT_CONTEXT: u8 = 2;
-const SET_CONTEXT: u8 = 3;
 
 impl<K: Array, V: Array> Fixed<K, V> {
     // A compile-time assertion that operation's array size is large enough to handle the commit
@@ -82,13 +90,13 @@ impl<K: Array, V: Array> Fixed<K, V> {
         "array size too small for commit op"
     );
 
-    /// If this is a [Fixed::Update] or [Fixed::Deleted] operation, returns the key.
+    /// If this is a [Fixed::Update] or [Fixed::Delete] operation, returns the key.
     /// Otherwise, returns None.
     pub fn to_key(&self) -> Option<&K> {
         match self {
-            Fixed::Deleted(key) => Some(key),
+            Fixed::Delete(key) => Some(key),
             Fixed::Update(key, _) => Some(key),
-            Fixed::Commit(_) => None,
+            Fixed::CommitFloor(_) => None,
         }
     }
 
@@ -96,19 +104,22 @@ impl<K: Array, V: Array> Fixed<K, V> {
     /// Otherwise, returns None.
     pub fn to_value(&self) -> Option<&V> {
         match self {
-            Fixed::Deleted(_) => None,
+            Fixed::Delete(_) => None,
             Fixed::Update(_, value) => Some(value),
-            Fixed::Commit(_) => None,
+            Fixed::CommitFloor(_) => None,
         }
     }
 }
 
-impl<K: Array, V: Array> Variable<K, V> {
-    /// If this is a [Variable::Set] operation, returns the key. Otherwise, returns None.
+impl<K: Array, V: Codec> Variable<K, V> {
+    /// If this is an operation involving a key, returns the key. Otherwise, returns None.
     pub fn to_key(&self) -> Option<&K> {
         match self {
             Variable::Set(key, _) => Some(key),
             Variable::Commit() => None,
+            Variable::Delete(_) => None,
+            Variable::Update(key, _) => Some(key),
+            Variable::CommitFloor(_) => None,
         }
     }
 
@@ -117,6 +128,9 @@ impl<K: Array, V: Array> Variable<K, V> {
         match self {
             Variable::Set(_, value) => Some(value),
             Variable::Commit() => None,
+            Variable::Delete(_) => None,
+            Variable::Update(_, value) => Some(value),
+            Variable::CommitFloor(_) => None,
         }
     }
 }
@@ -124,7 +138,7 @@ impl<K: Array, V: Array> Variable<K, V> {
 impl<K: Array, V: Array> Write for Fixed<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
-            Fixed::Deleted(k) => {
+            Fixed::Delete(k) => {
                 buf.put_u8(DELETE_CONTEXT);
                 k.write(buf);
                 // Pad with 0 up to [Self::SIZE]
@@ -135,8 +149,8 @@ impl<K: Array, V: Array> Write for Fixed<K, V> {
                 k.write(buf);
                 v.write(buf);
             }
-            Fixed::Commit(floor_loc) => {
-                buf.put_u8(COMMIT_CONTEXT);
+            Fixed::CommitFloor(floor_loc) => {
+                buf.put_u8(COMMIT_FLOOR_CONTEXT);
                 buf.put_slice(&floor_loc.to_be_bytes());
                 // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, Self::SIZE - 1 - u64::SIZE);
@@ -155,6 +169,19 @@ impl<K: Array, V: Codec> Write for Variable<K, V> {
             }
             Variable::Commit() => {
                 buf.put_u8(COMMIT_CONTEXT);
+            }
+            Variable::Delete(k) => {
+                buf.put_u8(DELETE_CONTEXT);
+                k.write(buf);
+            }
+            Variable::Update(k, v) => {
+                buf.put_u8(UPDATE_CONTEXT);
+                k.write(buf);
+                v.write(buf);
+            }
+            Variable::CommitFloor(floor_loc) => {
+                buf.put_u8(COMMIT_FLOOR_CONTEXT);
+                buf.put_slice(&floor_loc.to_be_bytes());
             }
         }
     }
@@ -183,9 +210,9 @@ impl<K: Array, V: Array> Read for Fixed<K, V> {
                         ));
                     }
                 }
-                Ok(Self::Deleted(key))
+                Ok(Self::Delete(key))
             }
-            COMMIT_CONTEXT => {
+            COMMIT_FLOOR_CONTEXT => {
                 let floor_loc = u64::read(buf)?;
                 for _ in 0..(Self::SIZE - 1 - u64::SIZE) {
                     if buf.get_u8() != 0 {
@@ -195,7 +222,7 @@ impl<K: Array, V: Array> Read for Fixed<K, V> {
                         ));
                     }
                 }
-                Ok(Self::Commit(floor_loc))
+                Ok(Self::CommitFloor(floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }
@@ -213,6 +240,19 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
                 Ok(Self::Set(key, value))
             }
             COMMIT_CONTEXT => Ok(Self::Commit()),
+            DELETE_CONTEXT => {
+                let key = K::read(buf)?;
+                Ok(Self::Delete(key))
+            }
+            UPDATE_CONTEXT => {
+                let key = K::read(buf)?;
+                let value = V::read_cfg(buf, cfg)?;
+                Ok(Self::Update(key, value))
+            }
+            COMMIT_FLOOR_CONTEXT => {
+                let floor_loc = u64::read(buf)?;
+                Ok(Self::CommitFloor(floor_loc))
+            }
             e => Err(CodecError::InvalidEnum(e)),
         }
     }
@@ -221,9 +261,9 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
 impl<K: Array, V: Array> Display for Fixed<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Fixed::Deleted(key) => write!(f, "[key:{key} <deleted>]"),
+            Fixed::Delete(key) => write!(f, "[key:{key} <deleted>]"),
             Fixed::Update(key, value) => write!(f, "[key:{key} value:{value}]"),
-            Fixed::Commit(loc) => write!(f, "[commit with inactivity floor: {loc}]"),
+            Fixed::CommitFloor(loc) => write!(f, "[commit with inactivity floor: {loc}]"),
         }
     }
 }
@@ -233,6 +273,9 @@ impl<K: Array, V: Array> Display for Variable<K, V> {
         match self {
             Variable::Set(key, value) => write!(f, "[key:{key} value:{value}]"),
             Variable::Commit() => write!(f, "[commit]"),
+            Variable::Delete(key) => write!(f, "[key:{key} <deleted>]"),
+            Variable::Update(key, value) => write!(f, "[key:{key} value:{value}]"),
+            Variable::CommitFloor(loc) => write!(f, "[commit with inactivity floor: {loc}]"),
         }
     }
 }
@@ -251,10 +294,10 @@ mod tests {
         let update_op = Fixed::Update(key.clone(), value.clone());
         assert_eq!(&key, update_op.to_key().unwrap());
 
-        let delete_op = Fixed::<U64, U64>::Deleted(key.clone());
+        let delete_op = Fixed::<U64, U64>::Delete(key.clone());
         assert_eq!(&key, delete_op.to_key().unwrap());
 
-        let commit_op = Fixed::<U64, U64>::Commit(42);
+        let commit_op = Fixed::<U64, U64>::CommitFloor(42);
         assert_eq!(None, commit_op.to_key());
     }
 
@@ -266,10 +309,10 @@ mod tests {
         let update_op = Fixed::Update(key.clone(), value.clone());
         assert_eq!(&value, update_op.to_value().unwrap());
 
-        let delete_op = Fixed::<U64, U64>::Deleted(key.clone());
+        let delete_op = Fixed::<U64, U64>::Delete(key.clone());
         assert_eq!(None, delete_op.to_value());
 
-        let commit_op = Fixed::<U64, U64>::Commit(42);
+        let commit_op = Fixed::<U64, U64>::CommitFloor(42);
         assert_eq!(None, commit_op.to_value());
     }
 
@@ -288,16 +331,16 @@ mod tests {
         assert_eq!(update_op, from);
 
         let key2 = U64::new(42);
-        let delete_op = Fixed::<U64, U64>::Deleted(key2.clone());
+        let delete_op = Fixed::<U64, U64>::Delete(key2.clone());
         let from = Fixed::<U64, U64>::decode(delete_op.encode()).unwrap();
         assert_eq!(&key2, from.to_key().unwrap());
         assert_eq!(None, from.to_value());
         assert_eq!(delete_op, from);
 
-        let commit_op = Fixed::<U64, U64>::Commit(42);
+        let commit_op = Fixed::<U64, U64>::CommitFloor(42);
         let from = Fixed::<U64, U64>::decode(commit_op.encode()).unwrap();
         assert_eq!(None, from.to_value());
-        assert!(matches!(from, Fixed::Commit(42)));
+        assert!(matches!(from, Fixed::CommitFloor(42)));
         assert_eq!(commit_op, from);
 
         // test non-zero byte detection in delete operation
@@ -330,7 +373,7 @@ mod tests {
         assert_eq!(format!("{update_op}"), format!("[key:{key} value:{value}]"));
 
         let key2 = U64::new(42);
-        let delete_op = Fixed::<U64, U64>::Deleted(key2.clone());
+        let delete_op = Fixed::<U64, U64>::Delete(key2.clone());
         assert_eq!(format!("{delete_op}"), format!("[key:{key2} <deleted>]"));
     }
 
