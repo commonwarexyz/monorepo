@@ -4,9 +4,10 @@
 module main {
     // A specification instance for n=7 and f=1
     import replica(
+        N = 7,
+        F = 1,
         CORRECT = Set("n0", "n1", "n2", "n3", "n4", "n5"),
         FAULTY = Set("n6"),
-        WEIGHTS = Map("n0"->1, "n1"->1, "n2"->1, "n3"->1, "n4"->1, "n5"->1, "n6"->1),
         VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
         INVALID_BLOCKS = Set("inval_0", "inval_1"),
         VIEWS = 0.to(6),

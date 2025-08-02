@@ -3,8 +3,10 @@ module replica {
     import defs.* from "./defs"
     import option.* from "./option"
 
-    // Weights of all replicas.
-    const WEIGHTS: ReplicaId -> Weight
+    // Total number of replicas.
+    const N: int
+    // Maximum number of faulty replicas.
+    const F: int
     // Identities of the correct replicas.
     const CORRECT: Set[ReplicaId]
     // Identities of the faulty replicas.
@@ -15,16 +17,10 @@ module replica {
     const VALID_BLOCKS: Set[BlockHash]
     // All replicas.
     pure val Replicas = CORRECT.union(FAULTY)
-
-    // The sum of all validator weights.
-    pure val TotalWeight: Weight = WEIGHTS.keys().fold(0, (s, id) => s + WEIGHTS.get(id));
-    // The maximum weight of faulty replicas.
-    // We want 5*FAULTY_WEIGHT + 1 = TOTAL_WEIGHT
-    pure val FaultyWeight: Weight = (TotalWeight - 1) / 5;
-    // The weight threshold needed to form a quorum certificate.
-    pure val QuorumWeight: Weight = TotalWeight - FaultyWeight;
-    // The weight threshold needed to trigger a reproposal.
-    pure val SubquorumWeight: Weight = TotalWeight - 3 * FaultyWeight;
+    
+    // Quorums:
+    pure val Q = N - F;
+    pure val L = 2*F + 1;
 
     // Produce replica's signature
     pure def sig_of(id: str): str = id
@@ -85,7 +81,7 @@ module replica {
         select_votes(view, NotarizeKind, votes)
             .filter(v => v.block_hash == block_hash)
             .map(v => v.sig)
-            .size() >= QuorumWeight
+            .size() >= Q
     }
 
     // Does a set of certificates contain nullification certificates for this view?
@@ -115,7 +111,7 @@ module replica {
         })
         val votes_count = similar_votes.size()
 
-        if (votes_count < SubquorumWeight) {
+        if (votes_count < L) {
             None
         } else {
             Some({
@@ -137,7 +133,7 @@ module replica {
         })
 
         val votes_count = similar_votes.size()
-        if (votes_count < SubquorumWeight) {
+        if (votes_count < L) {
             None
         } else {
             Some({
@@ -154,7 +150,7 @@ module replica {
     def is_block_in_view_cannot_be_notarized(b: BlockHash, view: ViewNumber, votes: Set[Vote]): bool = {
         val vs1 = votes.filter(v => v.kind == NotarizeKind and v.view == view and v.block_hash != b).map(v => v.sig)
         val vs2 = votes.filter(v => v.kind == NullifyKind and v.view == view).map(v => v.sig)
-        vs1.union(vs2).size() >= SubquorumWeight
+        vs1.union(vs2).size() >= L
     }
 
     // Is there a contradiction for the notarized block in the set of votes?
@@ -546,7 +542,7 @@ module replica {
             // verify view
             cert.view >= self.view, // not in spec
             // verify certificate: Certificate of ≥ L notarize(c, v) or nullify(v) messages
-            cert.signatures.size() >= SubquorumWeight,
+            cert.signatures.size() >= L,
             // Store the certificate if we do not have already had it.
             //not(cert.in(store_certificate.get(id))),
             _process_certificate(id, certificates, cert),
@@ -698,6 +694,22 @@ module replica {
     // Invariants
     // -------------------------------------------------
 
+    // Assumptions and thresholds:
+
+    val assumptions_valid = all {
+        2*L <= (N - F) + 1, // # Liveness guard, prevents equivocation stall
+        CORRECT.size() + FAULTY.size() == N,
+        N >= 5*F+1,
+        L + Q > N + F,
+        
+        2*F + 1 <= L,
+        L <= N - 3*F,
+
+        4*F + 1 <= Q,
+        Q <= N - F,
+        Q > L
+    } 
+
     // no two correct replicas disagree on the committed blocks
     val agreement = tuples(CORRECT, CORRECT).forall(((p1, p2)) => {
         val blocks1 = ghost_committed_blocks.get(p1)
@@ -752,7 +764,7 @@ module replica {
         val certs = store_certificate.get(id)
         certs.forall(cert => and {
             cert.view >= 0,
-            cert.signatures.size() >= SubquorumWeight,
+            cert.signatures.size() >= L,
             cert.kind == NotarizationKind or cert.kind == NullificationKind,
             (cert.block_hash == DUMMY_BLOCK_HASH) iff (cert.kind == NullificationKind),
             VALID_BLOCKS.contains(cert.block_hash) or (cert.block_hash == DUMMY_BLOCK_HASH)
@@ -767,10 +779,10 @@ module replica {
     // Suppose that a block B for some slot v is finalized, then no other block B' for slot v can be finalized.
     val validity = tuples(CORRECT, CORRECT, VIEWS).forall(((id1, id2, v)) => {
         val certs1 = store_certificate.get(id1).filter(c => and {
-            c.signatures.size() >= QuorumWeight, c.kind == NotarizationKind, c.view == v
+            c.signatures.size() >= Q, c.kind == NotarizationKind, c.view == v
         })
         val certs2 = store_certificate.get(id2).filter(c => and {
-            c.signatures.size() >= QuorumWeight, c.kind == NotarizationKind, c.view == v
+            c.signatures.size() >= Q, c.kind == NotarizationKind, c.view == v
         })
 
         or {
@@ -788,7 +800,7 @@ module replica {
             AllBlocks.forall(b => not(is_view_finalized(v, votes, b))),
             select_votes(v, NullifyKind, votes)
                 .map(vote => vote.sig)
-                .size() < SubquorumWeight
+                .size() < L
         }
     })
 
@@ -801,7 +813,7 @@ module replica {
             select_votes(v, NotarizeKind, votes)
                 .filter(vote => vote.block_hash != b)
                 .map(vote => vote.sig)
-                .size() < SubquorumWeight
+                .size() < L
         })
     })
 
@@ -827,11 +839,11 @@ module replica {
     // Test invariants:
 
     val correct_nodes_sent_certificates_valid = sent_certificate.filter(cert => cert.ghost_sender.in(CORRECT)).forall(cert => {
-        cert.signatures.size() >= SubquorumWeight
+        cert.signatures.size() >= L
     })
     val store_certificates_are_valid = CORRECT.forall(id => {
         val certs = store_certificate.get(id)
-        certs.forall(cert => cert.signatures.size() >= SubquorumWeight)
+        certs.forall(cert => cert.signatures.size() >= L)
     })
 
     val certificates_are_valid = and {
@@ -865,12 +877,12 @@ module replica {
 
     // Check this invariant to see an example of having a subquorum of votes.
     val votes_subquorum_example = CORRECT.forall(id => {
-        store_vote.get(id).size() <= SubquorumWeight
+        store_vote.get(id).size() <= L
     })
 
     // Check this invariant to see an example of having a quorum of votes.
     val votes_quorum_example = CORRECT.forall(id => {
-        store_vote.get(id).size() <= QuorumWeight
+        store_vote.get(id).size() <= Q
     })
 
     // Check this invariant to see an example of having a certificate.
