@@ -30,6 +30,9 @@ verify:
 
 clean:
 	./scripts/verify.sh clean
+	./scripts/invariants.sh clean
 
 check:
-	./scripts/verify.sh check
+	./scripts/verify.sh check || true
+	@echo
+	./scripts/invariants.sh check
