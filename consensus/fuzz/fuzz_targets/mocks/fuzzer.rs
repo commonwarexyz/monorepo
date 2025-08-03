@@ -109,7 +109,9 @@ impl<E: Clock + Spawner> Fuzzer<E> {
         let mut unstructured = Unstructured::new(&buf);
 
         let len = unstructured.int_in_range(0..=1024).unwrap_or(0);
-        (0..len).map(|_| u8::arbitrary(&mut unstructured).unwrap_or(0)).collect()
+        (0..len)
+            .map(|_| u8::arbitrary(&mut unstructured).unwrap_or(0))
+            .collect()
     }
 
     pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
