@@ -7,7 +7,7 @@ use commonware_runtime::{
     Runner as _, ThreadPool,
 };
 use commonware_storage::{
-    adb::current::{Current, Config as CConfig},
+    adb::current::{Config as CConfig, Current},
     translator::EightCap,
 };
 use criterion::{criterion_group, Criterion};
@@ -101,7 +101,14 @@ fn gen_random_current(cfg: Config, num_elements: u64, num_operations: u64) {
     });
 }
 
-type CurrentDb = Current<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap, CHUNK_SIZE>;
+type CurrentDb = Current<
+    Context,
+    <Sha256 as Hasher>::Digest,
+    <Sha256 as Hasher>::Digest,
+    Sha256,
+    EightCap,
+    CHUNK_SIZE,
+>;
 
 /// Benchmark the initialization of a large randomly generated current db.
 fn bench_current_init(c: &mut Criterion) {
@@ -127,7 +134,9 @@ fn bench_current_init(c: &mut Criterion) {
                         let current_cfg = current_cfg(pool);
                         let start = Instant::now();
                         for _ in 0..iters {
-                            let db = CurrentDb::init(ctx.clone(), current_cfg.clone()).await.unwrap();
+                            let db = CurrentDb::init(ctx.clone(), current_cfg.clone())
+                                .await
+                                .unwrap();
                             assert_ne!(db.op_count(), 0);
                             db.close().await.unwrap();
                         }
@@ -143,7 +152,9 @@ fn bench_current_init(c: &mut Criterion) {
                 let pool = commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
                 let current_cfg = current_cfg(pool);
                 // Clean up the database after the benchmark.
-                let db = CurrentDb::init(ctx.clone(), current_cfg.clone()).await.unwrap();
+                let db = CurrentDb::init(ctx.clone(), current_cfg.clone())
+                    .await
+                    .unwrap();
                 db.destroy().await.unwrap();
             });
         }
