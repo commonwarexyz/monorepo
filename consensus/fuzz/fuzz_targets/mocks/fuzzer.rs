@@ -42,10 +42,6 @@ pub enum Message {
 #[derive(Debug, Arbitrary)]
 pub struct FuzzInput {
     pub seed: u64,
-    pub mutations: Vec<Mutation>,
-    pub views: Vec<u64>,
-    pub parents: Vec<u64>,
-    pub malformed_bytes: Vec<Vec<u8>>,
 }
 pub struct Fuzzer<E: Clock + Spawner> {
     context: E,
@@ -53,11 +49,6 @@ pub struct Fuzzer<E: Clock + Spawner> {
     supervisor: Supervisor<PublicKey, Sha256Digest>,
     namespace: Vec<u8>,
     rng: StdRng,
-    mutations: Vec<Mutation>,
-    views: Vec<u64>,
-    parents: Vec<u64>,
-    malformed_bytes: Vec<Vec<u8>>,
-    mutation_idx: usize,
     view: u64,
 }
 
@@ -76,36 +67,36 @@ impl<E: Clock + Spawner> Fuzzer<E> {
             supervisor,
             namespace,
             rng: StdRng::seed_from_u64(input.seed),
-            mutations: input.mutations,
-            views: input.views,
-            parents: input.parents,
-            malformed_bytes: input.malformed_bytes,
-            mutation_idx: 0,
         }
     }
 
-    fn get_next_mutation(&mut self) -> Option<&Mutation> {
-        if self.mutation_idx < self.mutations.len() {
-            let mutation = &self.mutations[self.mutation_idx];
-            self.mutation_idx += 1;
-            Some(mutation)
-        } else {
-            None
-        }
+    fn get_mutation(&mut self) -> Mutation {
+        let mut buf = [0u8; 8];
+        self.rng.fill_bytes(&mut buf);
+        Mutation::arbitrary(&mut Unstructured::new(&buf)).unwrap_or(Mutation::All)
     }
 
-    fn get_view(&mut self) -> u64 {
-        self.views
-            .get(self.mutation_idx % self.views.len().max(1))
-            .copied()
-            .unwrap_or(0)
+    fn get_message(&mut self) -> Message {
+        let mut buf = [0u8; 8];
+        self.rng.fill_bytes(&mut buf);
+        Message::arbitrary(&mut Unstructured::new(&buf)).unwrap_or(Message::Random)
+    }
+
+    fn get_view(&mut self, current_view: u64) -> u64 {
+        let mut buf = [0u8; 8];
+        self.rng.fill_bytes(&mut buf);
+        let mut unstructured = Unstructured::new(&buf);
+
+        let min = current_view.saturating_sub(2);
+        let max = current_view.saturating_add(2);
+        unstructured.int_in_range(min..=max).unwrap_or(0)
     }
 
     fn get_parent(&mut self) -> u64 {
-        self.parents
-            .get(self.mutation_idx % self.parents.len().max(1))
-            .copied()
-            .unwrap_or(0)
+        let mut buf = [0u8; 8];
+        self.rng.fill_bytes(&mut buf);
+        let mut unstructured = Unstructured::new(&buf);
+        u64::arbitrary(&mut unstructured).unwrap_or(0)
     }
 
     fn get_payload(&mut self) -> Sha256Digest {
@@ -113,10 +104,12 @@ impl<E: Clock + Spawner> Fuzzer<E> {
     }
 
     fn get_malformed_bytes(&mut self) -> Vec<u8> {
-        self.malformed_bytes
-            .get(self.mutation_idx % self.malformed_bytes.len().max(1))
-            .cloned()
-            .unwrap_or_else(|| vec![0u8; 32])
+        let mut buf = [0u8; 8];
+        self.rng.fill_bytes(&mut buf);
+        let mut unstructured = Unstructured::new(&buf);
+
+        let len = unstructured.int_in_range(0..=1024).unwrap_or(0);
+        (0..len).map(|_| u8::arbitrary(&mut unstructured).unwrap_or(0)).collect()
     }
 
     pub fn start(mut self, voter_network: (impl Sender, impl Receiver)) -> Handle<()> {
@@ -175,27 +168,21 @@ impl<E: Clock + Spawner> Fuzzer<E> {
                     .supervisor
                     .is_participant(self.view, &self.crypto.public_key())
                 {
-                    if let Some(strategy) = self.get_next_mutation().cloned() {
-                        let mutated_proposal = self.mutate_proposal(&notarize.proposal, &strategy);
-                        let msg = Notarize::sign(
-                            &self.namespace,
-                            &mut self.crypto,
-                            public_key_index,
-                            mutated_proposal,
-                        );
-                        let encoded_msg = Voter::<
-                            commonware_cryptography::ed25519::Signature,
-                            Sha256Digest,
-                        >::Notarize(msg)
-                        .encode()
-                        .into();
-                        let _ = sender.send(Recipients::All, encoded_msg, true).await;
-                    } else {
-                        let malformed_bytes = self.get_malformed_bytes();
-                        let _ = sender
-                            .send(Recipients::All, malformed_bytes.into(), true)
-                            .await;
-                    }
+                    let mutation = self.get_mutation();
+                    let mutated_proposal = self.mutate_proposal(&notarize.proposal, &mutation);
+                    let msg = Notarize::sign(
+                        &self.namespace,
+                        &mut self.crypto,
+                        public_key_index,
+                        mutated_proposal,
+                    );
+                    let encoded_msg = Voter::<
+                        commonware_cryptography::ed25519::Signature,
+                        Sha256Digest,
+                    >::Notarize(msg)
+                    .encode()
+                    .into();
+                    let _ = sender.send(Recipients::All, encoded_msg, true).await;
                 }
             }
             Voter::Finalize(finalize) => {
@@ -203,27 +190,21 @@ impl<E: Clock + Spawner> Fuzzer<E> {
                     .supervisor
                     .is_participant(self.view, &self.crypto.public_key())
                 {
-                    if let Some(strategy) = self.get_next_mutation().cloned() {
-                        let mutated_proposal = self.mutate_proposal(&finalize.proposal, &strategy);
-                        let msg = Finalize::sign(
-                            &self.namespace,
-                            &mut self.crypto,
-                            public_key_index,
-                            mutated_proposal,
-                        );
-                        let encoded_msg = Voter::<
-                            commonware_cryptography::ed25519::Signature,
-                            Sha256Digest,
-                        >::Finalize(msg)
-                        .encode()
-                        .into();
-                        let _ = sender.send(Recipients::All, encoded_msg, true).await;
-                    } else {
-                        let malformed_bytes = self.get_malformed_bytes();
-                        let _ = sender
-                            .send(Recipients::All, malformed_bytes.into(), true)
-                            .await;
-                    }
+                    let mutation = self.get_mutation();
+                    let mutated_proposal = self.mutate_proposal(&finalize.proposal, &mutation);
+                    let msg = Finalize::sign(
+                        &self.namespace,
+                        &mut self.crypto,
+                        public_key_index,
+                        mutated_proposal,
+                    );
+                    let encoded_msg = Voter::<
+                        commonware_cryptography::ed25519::Signature,
+                        Sha256Digest,
+                    >::Finalize(msg)
+                    .encode()
+                    .into();
+                    let _ = sender.send(Recipients::All, encoded_msg, true).await;
                 }
             }
             Voter::Nullify(nullify) => {
@@ -255,32 +236,35 @@ impl<E: Clock + Spawner> Fuzzer<E> {
         match strategy {
             Mutation::Payload => Proposal::new(original.view, original.parent, self.get_payload()),
             Mutation::View => {
-                let mutated_view = self.get_view();
+                let mutated_view = self.get_view(self.view);
                 Proposal::new(mutated_view, original.parent, original.payload)
             }
             Mutation::Parent => {
                 let mutated_parent = self.get_parent();
                 Proposal::new(original.view, mutated_parent, original.payload)
             }
-            Mutation::All => Proposal::new(self.get_view(), self.get_parent(), self.get_payload()),
+            Mutation::All => Proposal::new(
+                self.get_view(self.view),
+                self.get_parent(),
+                self.get_payload(),
+            ),
         }
     }
 
     async fn send_random_message(&mut self, sender: &mut impl Sender) {
         let real_view = self.view;
 
-        let proposal = Proposal::new(self.get_view(), self.get_parent(), self.get_payload());
+        let proposal = Proposal::new(
+            self.get_view(self.view),
+            self.get_parent(),
+            self.get_payload(),
+        );
 
         if let Some(public_key_index) = self
             .supervisor
             .is_participant(real_view, &self.crypto.public_key())
         {
-            // Use the provided step parameter or generate a random one
-            let mut buf = [0u8; 8];
-            self.rng.fill_bytes(&mut buf);
-            let mut unstructured = Unstructured::new(&buf);
-
-            let message: Message = Message::arbitrary(&mut unstructured).unwrap_or(Message::Random);
+            let message = self.get_message();
 
             match message {
                 Message::Notarize => {
