@@ -268,4 +268,68 @@ mod tests {
             "open_blobs metric was not decremented to zero after dropping all blobs"
         );
     }
+
+    /// Test that cloned blobs share the same metrics and only decrement when the last clone is dropped.
+    #[tokio::test]
+    async fn test_cloned_blobs_share_metrics() {
+        let mut registry = Registry::default();
+        let inner = MemoryStorage::default();
+        let storage = Storage::new(inner, &mut registry);
+
+        // Open a blob
+        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
+
+        // Verify that the open_blobs metric is incremented
+        assert_eq!(
+            storage.metrics.open_blobs.get(), 1,
+            "open_blobs metric was not incremented after opening a blob"
+        );
+
+        // Clone the blob multiple times
+        let clone1 = blob.clone();
+        let clone2 = blob.clone();
+
+        // Verify that cloning doesn't change the open_blobs metric
+        assert_eq!(
+            storage.metrics.open_blobs.get(), 1,
+            "open_blobs metric should not change when blobs are cloned"
+        );
+
+        // Use the clones for some operations to verify they share metrics
+        blob.write_at(b"hello".to_vec(), 0).await.unwrap();
+        clone1.write_at(b"world".to_vec(), 5).await.unwrap();
+        let _ = clone1.read_at(vec![0; 10], 0).await.unwrap();
+        let _ = clone2.read_at(vec![0; 10], 0).await.unwrap();
+
+        // Verify that operations on clones update the shared metrics
+        assert_eq!(
+            storage.metrics.storage_writes.get(), 2,
+            "Operations on cloned blobs should update shared metrics"
+        );
+
+        assert_eq!(
+            storage.metrics.storage_reads.get(), 2,
+            "Operations on cloned blobs should update shared metrics"
+        );
+
+        // Drop individual clones and verify the metric doesn't change
+        drop(clone1);
+        assert_eq!(
+            storage.metrics.open_blobs.get(), 1,
+            "open_blobs metric should not change when individual clones are dropped"
+        );
+
+        drop(clone2);
+        assert_eq!(
+            storage.metrics.open_blobs.get(), 1,
+            "open_blobs metric should not change when individual clones are dropped"
+        );
+
+        // Sync and drop the original blob - this should finally decrement the counter
+        drop(blob);
+        assert_eq!(
+            storage.metrics.open_blobs.get(), 0,
+            "open_blobs metric should be decremented only when the last blob reference is dropped"
+        );
+    }
 }
