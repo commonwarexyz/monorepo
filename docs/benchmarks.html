@@ -28,6 +28,7 @@
     <meta property="twitter:creator:id" content="@commonwarexyz" />
 
     <link rel="stylesheet" type="text/css" href="style.css">
+    <style id="theme-style"></style>
 </head>
 
 <body>
@@ -154,9 +155,11 @@
         }
 
         function setupBenchmark() {
+            const theme = localStorage.getItem('theme') || 'light';
+
             // Set Chart.js default font family
             Chart.defaults.global.defaultFontFamily = 'Consolas, monospace';
-            Chart.defaults.global.defaultFontColor = "#000";
+            Chart.defaults.global.defaultFontColor = theme === 'light' ? '#000' : '#fff';
 
             // Build cases
             function init() {
@@ -245,8 +248,8 @@
                             data: dataset.map(d => {
                                 return { x: new Date(d.commit.timestamp), y: d.bench.value };
                             }),
-                            borderColor: '#000000',
-                            backgroundColor: '#000000' + '60'
+                            borderColor: theme === 'light' ? '#000' : '#fff',
+                            backgroundColor: theme === 'light' ? '#000000' + 60 : '#ffffff' - 60
                         }]
                     };
                     const options = {
