@@ -34,9 +34,7 @@ const PAGE_CACHE_SIZE: usize = 10_000;
 const THREADS: usize = 1;
 
 /// Chunk size for the current ADB bitmap - must be a power of 2 (as assumed in current::grafting_height()) and a multiple of digest size (for proof size optimization).
-/// Using 64 bytes (512 bits) which is 2x the SHA256 digest size (32 bytes).
-/// Larger chunk sizes provide smaller merkle trees.
-const CHUNK_SIZE: usize = 64;
+const CHUNK_SIZE: usize = 32;
 
 fn current_cfg(pool: ThreadPool) -> CConfig<EightCap> {
     CConfig::<EightCap> {
