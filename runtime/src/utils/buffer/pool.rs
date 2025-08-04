@@ -456,8 +456,8 @@ mod tests {
                 assert_eq!(buf, [i as u8; PAGE_SIZE]);
             }
 
-            // Cleanup.
-            blob.close().await.expect("Failed to destroy blob");
+            // Sync the blob before drop.
+            blob.sync().await.expect("Failed to sync blob");
         });
     }
 }

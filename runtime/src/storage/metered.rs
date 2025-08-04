@@ -216,14 +216,15 @@ mod tests {
             "storage_read_bytes metric was not updated correctly after read"
         );
 
-        // Close the blob
-        blob.close().await.unwrap();
+        // Sync and drop the blob
+        blob.sync().await.unwrap();
+        drop(blob);
 
         // Verify that the open_blobs metric is decremented
         let open_blobs_after_close = storage.metrics.open_blobs.get();
         assert_eq!(
             open_blobs_after_close, 0,
-            "open_blobs metric was not decremented after closing the blob"
+            "open_blobs metric was not decremented after dropping the blob"
         );
     }
 
@@ -245,24 +246,26 @@ mod tests {
             "open_blobs metric was not updated correctly after opening multiple blobs"
         );
 
-        // Close one blob
-        blob1.close().await.unwrap();
+        // Sync and drop one blob
+        blob1.sync().await.unwrap();
+        drop(blob1);
 
         // Verify that the open_blobs metric is decremented correctly
         let open_blobs_after_close_one = storage.metrics.open_blobs.get();
         assert_eq!(
             open_blobs_after_close_one, 1,
-            "open_blobs metric was not decremented correctly after closing one blob"
+            "open_blobs metric was not decremented correctly after dropping one blob"
         );
 
-        // Close the second blob
-        blob2.close().await.unwrap();
+        // Sync and drop the second blob
+        blob2.sync().await.unwrap();
+        drop(blob2);
 
         // Verify that the open_blobs metric is decremented to zero
         let open_blobs_after_close_all = storage.metrics.open_blobs.get();
         assert_eq!(
             open_blobs_after_close_all, 0,
-            "open_blobs metric was not decremented to zero after closing all blobs"
+            "open_blobs metric was not decremented to zero after dropping all blobs"
         );
     }
 }

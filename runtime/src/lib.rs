@@ -613,8 +613,8 @@ mod tests {
                 .expect("Failed to read from blob");
             assert_eq!(read.as_ref(), data);
 
-            // Close the blob
-            blob.close().await.expect("Failed to close blob");
+            // Sync the blob before drop
+            blob.sync().await.expect("Failed to sync blob");
 
             // Scan blobs in the partition
             let blobs = context
@@ -637,8 +637,8 @@ mod tests {
                 .expect("Failed to read data");
             assert_eq!(read.as_ref(), b"Storage");
 
-            // Close the blob
-            blob.close().await.expect("Failed to close blob");
+            // Sync the blob before drop
+            blob.sync().await.expect("Failed to sync blob");
 
             // Remove the blob
             context
@@ -740,9 +740,9 @@ mod tests {
                 .await
                 .expect("Failed to write");
             blob.sync().await.expect("Failed to sync after write");
-            blob.close()
+            blob.sync()
                 .await
-                .expect("Failed to close blob after writing");
+                .expect("Failed to sync blob after writing");
 
             // Re-open and check length
             let (blob, len) = context.open(partition, name).await.unwrap();
@@ -754,9 +754,9 @@ mod tests {
                 .await
                 .expect("Failed to resize to extend");
             blob.sync().await.expect("Failed to sync after resize");
-            blob.close()
+            blob.sync()
                 .await
-                .expect("Failed to close blob after resizing");
+                .expect("Failed to sync blob after resizing");
 
             // Re-open and check length again
             let (blob, len) = context.open(partition, name).await.unwrap();
@@ -776,7 +776,7 @@ mod tests {
             // Truncate the blob
             blob.resize(data.len() as u64).await.unwrap();
             blob.sync().await.unwrap();
-            blob.close().await.unwrap();
+            blob.sync().await.unwrap();
 
             // Reopen to check truncation
             let (blob, size) = context.open(partition, name).await.unwrap();
@@ -785,7 +785,7 @@ mod tests {
             // Read truncated data
             let read_buf = blob.read_at(vec![0; data.len()], 0).await.unwrap();
             assert_eq!(read_buf.as_ref(), data);
-            blob.close().await.unwrap();
+            blob.sync().await.unwrap();
         });
     }
 
@@ -814,8 +814,8 @@ mod tests {
                     .await
                     .expect("Failed to write data2");
 
-                // Close the blob
-                blob.close().await.expect("Failed to close blob");
+                // Sync the blob before drop
+                blob.sync().await.expect("Failed to sync blob");
             }
 
             for (additional, partition) in partitions.iter().enumerate() {
@@ -834,8 +834,8 @@ mod tests {
                 assert_eq!(&read.as_ref()[..5], b"Hello");
                 assert_eq!(&read.as_ref()[5 + additional..], b"World");
 
-                // Close the blob
-                blob.close().await.expect("Failed to close blob");
+                // Sync the blob before drop
+                blob.sync().await.expect("Failed to sync blob");
             }
         });
     }
@@ -927,8 +927,9 @@ mod tests {
                 .expect("Failed to read from blob");
             assert_eq!(read.as_ref(), data);
 
-            // Close the blob
-            blob.close().await.expect("Failed to close blob");
+            // Sync the blob before drop
+            blob.sync().await.expect("Failed to sync blob");
+            drop(blob);
 
             // Ensure no blobs still open
             let buffer = context.encode();

@@ -198,15 +198,6 @@ mod tests {
             "Hashes do not match after sync"
         );
 
-        // Close the blobs
-        blob1.close().await.unwrap();
-        blob2.close().await.unwrap();
-        assert_eq!(
-            auditor1.state(),
-            auditor2.state(),
-            "Hashes do not match after close"
-        );
-
         // Remove the blobs
         storage1
             .remove("partition", Some(b"test_blob"))

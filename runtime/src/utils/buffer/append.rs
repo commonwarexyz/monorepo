@@ -266,7 +266,7 @@ mod tests {
             }
             assert_eq!(blob.size().await, 11 * PAGE_SIZE as u64);
 
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Make sure blob has expected size when reopened.
             let (blob, size) = context
@@ -274,7 +274,7 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
             assert_eq!(size, 11 * PAGE_SIZE as u64);
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
         });
     }
 
@@ -371,7 +371,7 @@ mod tests {
                 assert_eq!(buf, &[i as u8; PAGE_SIZE]);
             }
 
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
         });
     }
 }
