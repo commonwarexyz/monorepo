@@ -682,7 +682,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
     /// Safely removes any previously tracked blob from underlying storage.
     async fn remove_blob(&mut self, index: u64, blob: Append<E::Blob>) -> Result<(), Error> {
-        blob.close().await?;
+        blob.sync().await?;
         self.context
             .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
             .await?;
@@ -695,26 +695,26 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     /// Closes all open sections.
     pub async fn close(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
-            blob.close().await?;
+            blob.sync().await?;
             debug!(blob = i, "closed blob");
         }
-        self.tail.close().await?;
+        self.tail.sync().await?;
         debug!(blob = self.tail_index, "closed blob");
 
         Ok(())
     }
 
-    /// Close and remove any underlying blobs created by the journal.
+    /// Sync and remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
-            blob.close().await?;
+            blob.sync().await?;
             debug!(blob = i, "destroyed blob");
             self.context
                 .remove(&self.cfg.partition, Some(&i.to_be_bytes()))
                 .await?;
         }
 
-        self.tail.close().await?;
+        self.tail.sync().await?;
         debug!(blob = self.tail_index, "destroyed blob");
         self.context
             .remove(&self.cfg.partition, Some(&self.tail_index.to_be_bytes()))
