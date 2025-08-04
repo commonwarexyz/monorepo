@@ -28,10 +28,9 @@ const PAGE_SIZE: usize = 16384;
 /// The number of pages to cache in the buffer pool.
 const PAGE_CACHE_SIZE: usize = 10_000;
 
-/// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
-/// current::init is not single threaded. While using multiple threads for parallelization may provide realistic performance measurements since
-/// current::init is designed to use parallel Merkleization, we pick 1 to keep our benchmarking consistent with any_init.
-const THREADS: usize = 1;
+/// current_init is not singlethreaded. So we benchmark with 1 and 8 threads to compare singlethreaded and multithreaded performance.
+const SINGLE_THREADED: usize = 1;
+const MULTI_THREADED: usize = 8;
 
 /// Chunk size for the current ADB bitmap - must be a power of 2 (as assumed in current::grafting_height()) and a multiple of digest size (for proof size optimization).
 const CHUNK_SIZE: usize = 32;
@@ -58,11 +57,11 @@ fn current_cfg(pool: ThreadPool) -> CConfig<EightCap> {
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `COMMIT_FREQUENCY` operations.
-fn gen_random_current(cfg: Config, num_elements: u64, num_operations: u64) {
+fn gen_random_current(cfg: Config, num_elements: u64, num_operations: u64, threads: usize) {
     let runner = Runner::new(cfg.clone());
     runner.start(|ctx| async move {
         info!("starting DB generation...");
-        let pool = create_pool(ctx.clone(), THREADS).unwrap();
+        let pool = create_pool(ctx.clone(), threads).unwrap();
         let current_cfg = current_cfg(pool);
         let mut db = Current::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
             .await
@@ -113,48 +112,54 @@ fn bench_current_init(c: &mut Criterion) {
     tracing_subscriber::fmt().try_init().ok();
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg.clone());
+
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
-            info!(elements, operations, "benchmarking current init",);
-            gen_random_current(cfg.clone(), elements, operations);
+            for (multithreaded_name, threads) in [("off", SINGLE_THREADED), ("on", MULTI_THREADED)]
+            {
+                info!(elements, operations, threads, "benchmarking current init");
+                gen_random_current(cfg.clone(), elements, operations, threads);
 
-            c.bench_function(
-                &format!(
-                    "{}/elements={} operations={}",
-                    module_path!(),
-                    elements,
-                    operations,
-                ),
-                |b| {
-                    b.to_async(&runner).iter_custom(|iters| async move {
-                        let ctx = context::get::<commonware_runtime::tokio::Context>();
-                        let pool = commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
-                        let current_cfg = current_cfg(pool);
-                        let start = Instant::now();
-                        for _ in 0..iters {
-                            let db = CurrentDb::init(ctx.clone(), current_cfg.clone())
-                                .await
-                                .unwrap();
-                            assert_ne!(db.op_count(), 0);
-                            db.close().await.unwrap();
-                        }
+                c.bench_function(
+                    &format!(
+                        "{}/elements={} operations={} multithreaded={}",
+                        module_path!(),
+                        elements,
+                        operations,
+                        multithreaded_name,
+                    ),
+                    |b| {
+                        b.to_async(&runner).iter_custom(|iters| async move {
+                            let ctx = context::get::<commonware_runtime::tokio::Context>();
+                            let pool =
+                                commonware_runtime::create_pool(ctx.clone(), threads).unwrap();
+                            let current_cfg = current_cfg(pool);
+                            let start = Instant::now();
+                            for _ in 0..iters {
+                                let db = CurrentDb::init(ctx.clone(), current_cfg.clone())
+                                    .await
+                                    .unwrap();
+                                assert_ne!(db.op_count(), 0);
+                                db.close().await.unwrap();
+                            }
 
-                        start.elapsed()
-                    });
-                },
-            );
+                            start.elapsed()
+                        });
+                    },
+                );
 
-            let runner = Runner::new(cfg.clone());
-            runner.start(|ctx| async move {
-                info!("cleaning up db...");
-                let pool = commonware_runtime::create_pool(ctx.clone(), THREADS).unwrap();
-                let current_cfg = current_cfg(pool);
-                // Clean up the database after the benchmark.
-                let db = CurrentDb::init(ctx.clone(), current_cfg.clone())
-                    .await
-                    .unwrap();
-                db.destroy().await.unwrap();
-            });
+                let runner = Runner::new(cfg.clone());
+                runner.start(|ctx| async move {
+                    info!("cleaning up db...");
+                    let pool = commonware_runtime::create_pool(ctx.clone(), threads).unwrap();
+                    let current_cfg = current_cfg(pool);
+                    // Clean up the database after the benchmark.
+                    let db = CurrentDb::init(ctx.clone(), current_cfg.clone())
+                        .await
+                        .unwrap();
+                    db.destroy().await.unwrap();
+                });
+            }
         }
     }
 }
