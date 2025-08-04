@@ -1042,7 +1042,7 @@ mod tests {
                 .open(&cfg.partition, invalid_blob_name)
                 .await
                 .expect("Failed to create blob with invalid name");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Attempt to initialize the journal
             let result = Journal::<_, u64>::init(context, cfg).await;
@@ -1080,7 +1080,7 @@ mod tests {
             blob.write_at(incomplete_data, 0)
                 .await
                 .expect("Failed to write incomplete data");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
             let journal = Journal::init(context, cfg)
@@ -1133,7 +1133,7 @@ mod tests {
             blob.write_at(buf, 0)
                 .await
                 .expect("Failed to write item size");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
             let journal = Journal::init(context, cfg)
@@ -1194,7 +1194,7 @@ mod tests {
                 .expect("Failed to write item data");
             // Do not write checksum (omit it)
 
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
             let journal = Journal::init(context, cfg)
@@ -1263,7 +1263,7 @@ mod tests {
                 .await
                 .expect("Failed to write incorrect checksum");
 
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
             let journal = Journal::init(context.clone(), cfg.clone())
@@ -1338,7 +1338,7 @@ mod tests {
             blob.resize(blob_size - 4)
                 .await
                 .expect("Failed to corrupt blob");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
             let journal = Journal::init(context.clone(), cfg.clone())
@@ -1499,7 +1499,7 @@ mod tests {
             blob.resize(blob_size - 4)
                 .await
                 .expect("Failed to corrupt blob");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
             let mut journal = Journal::init(context.clone(), cfg.clone())
@@ -1626,7 +1626,7 @@ mod tests {
             blob.write_at(vec![0u8; 16], blob_size)
                 .await
                 .expect("Failed to add extra data");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
             let journal = Journal::init(context, cfg)
@@ -1672,10 +1672,6 @@ mod tests {
         }
 
         async fn sync(&self) -> Result<(), RError> {
-            Ok(())
-        }
-
-        async fn close(self) -> Result<(), RError> {
             Ok(())
         }
     }
