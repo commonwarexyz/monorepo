@@ -17,34 +17,34 @@ struct FuzzInput {
 #[derive(Arbitrary, Debug)]
 enum BufferOperation {
     CreateRead {
-        blob_size: u8,
-        buffer_size: u8,
+        blob_size: u16,
+        buffer_size: u16,
     },
     CreateWrite {
-        initial_size: u8,
-        capacity: u8,
+        initial_size: u16,
+        capacity: u16,
     },
     CreateAppend {
-        initial_size: u8,
-        buffer_size: u8,
-        pool_page_size: u8,
-        pool_capacity: u8,
+        initial_size: u16,
+        buffer_size: u16,
+        pool_page_size: u16,
+        pool_capacity: u16,
     },
     ReadExact {
-        size: u8,
+        size: u16,
     },
     ReadSeekTo {
-        position: u8,
+        position: u16,
     },
     ReadResize {
-        new_size: u8,
+        new_size: u16,
     },
     WriteAt {
         data: Vec<u8>,
-        offset: u8,
+        offset: u16,
     },
     WriteResize {
-        new_size: u8,
+        new_size: u16,
     },
     WriteSync,
     WriteClose,
@@ -52,13 +52,17 @@ enum BufferOperation {
         data: Vec<u8>,
     },
     AppendResize {
-        new_size: u8,
+        new_size: u16,
     },
     AppendSync,
     PoolCache {
-        blob_id: u8,
+        blob_id: u16,
         data: Vec<u8>,
-        offset: u8,
+        offset: u16,
+    },
+    ExtremeSeekNearU64Max,
+    ExtremeWriteNearU64Max {
+        len: u64,
     },
 }
 
@@ -70,7 +74,7 @@ fn fuzz(input: FuzzInput) {
         let (blob, initial_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
         if rng.gen_bool(0.5) && initial_size == 0 {
-            let initial_data: Vec<u8> = (0..rng.gen_range(0..256)).map(|_| rng.gen()).collect();
+            let initial_data: Vec<u8> = (0..rng.gen_range(0..1024)).map(|_| rng.gen()).collect();
             if !initial_data.is_empty() {
                 blob.write_at(initial_data, 0).await.unwrap();
             }
@@ -105,12 +109,11 @@ fn fuzz(input: FuzzInput) {
                     initial_size,
                     capacity,
                 } => {
-                    let initial_size = initial_size as u64;
-                    let capacity = capacity.max(1) as usize;
+                    let capacity = (capacity as usize).clamp(1, 1024 * 1024);
 
                     let (blob, _) = context.open("test_partition", b"write_blob").await.unwrap();
 
-                    write_buffer = Some(Write::new(blob, initial_size, capacity));
+                    write_buffer = Some(Write::new(blob, initial_size as u64, capacity));
                 }
 
                 BufferOperation::CreateAppend {
@@ -119,10 +122,9 @@ fn fuzz(input: FuzzInput) {
                     pool_page_size: page_size,
                     pool_capacity,
                 } => {
-                    let initial_size = initial_size as u64;
-                    let buffer_size = buffer_size.max(1) as usize;
-                    pool_page_size = page_size.max(1) as usize;
-                    let pool_capacity = pool_capacity.max(1) as usize;
+                    let buffer_size = (buffer_size as usize).clamp(1, 1024 * 1024);
+                    pool_page_size = (page_size as usize).clamp(1, 1024 * 1024);
+                    let pool_capacity = (pool_capacity as usize).clamp(1, 1000);
 
                     let (blob, _) = context
                         .open("test_partition", b"append_blob")
@@ -132,15 +134,16 @@ fn fuzz(input: FuzzInput) {
                     pool_ref = Some(PoolRef::new(pool_page_size, pool_capacity));
 
                     if let Some(ref pool) = pool_ref {
-                        append_buffer = Append::new(blob, initial_size, buffer_size, pool.clone())
-                            .await
-                            .ok();
+                        append_buffer =
+                            Append::new(blob, initial_size as u64, buffer_size, pool.clone())
+                                .await
+                                .ok();
                     }
                 }
 
                 BufferOperation::ReadExact { size } => {
                     if let Some(ref mut reader) = read_buffer {
-                        let size = size as usize;
+                        let size = (size.min(10000)) as usize; // Limit to prevent OOM
                         let mut buf = vec![0u8; size];
                         let _ = reader.read_exact(&mut buf, size).await;
                     }
@@ -160,7 +163,12 @@ fn fuzz(input: FuzzInput) {
 
                 BufferOperation::WriteAt { data, offset } => {
                     if let Some(ref writer) = write_buffer {
-                        let _ = writer.write_at(data, offset as u64).await;
+                        let data = if data.len() > 10000 {
+                            &data[..10000]
+                        } else {
+                            &data
+                        };
+                        let _ = writer.write_at(data.to_vec(), offset as u64).await;
                     }
                 }
 
@@ -206,11 +214,30 @@ fn fuzz(input: FuzzInput) {
                     offset,
                 } => {
                     if let Some(ref pool) = pool_ref {
-                        // Ensure offset is page-aligned
                         let offset = offset as u64;
                         let aligned_offset =
                             (offset / pool_page_size as u64) * pool_page_size as u64;
-                        let _ = pool.cache(blob_id as u64, &data, aligned_offset).await;
+                        let data = if data.len() > 10000 {
+                            &data[..10000]
+                        } else {
+                            &data
+                        };
+                        let _ = pool.cache(blob_id as u64, data, aligned_offset).await;
+                    }
+                }
+
+                BufferOperation::ExtremeSeekNearU64Max => {
+                    if let Some(ref mut reader) = read_buffer {
+                        let near = u64::MAX - rng.gen_range(0..=1024) as u64;
+                        let _ = reader.seek_to(near);
+                    }
+                }
+
+                BufferOperation::ExtremeWriteNearU64Max { len } => {
+                    if let Some(ref writer) = write_buffer {
+                        let off = u64::MAX - (len).saturating_add(rng.gen_range(0..=1024) as u64);
+                        let data = vec![0xAA; len as usize];
+                        let _ = writer.write_at(data, off).await;
                     }
                 }
             }
