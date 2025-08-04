@@ -7,7 +7,7 @@
 //! a key assumes a value, it can no longer be deleted, only updated with a new value.
 //!
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
-//! (2) it is a set operation, and (3) it is the most recent operation for that key.
+//! (2) it is a [`Variable::Set`] operation, and (3) it is the most recent operation for that key.
 //!
 //! # Lifecycle
 //!
@@ -65,13 +65,16 @@
 use crate::{
     adb::operation::Variable,
     index::Index,
-    journal::variable::{Config as JConfig, Journal},
+    journal::{
+        fixed::{Config as FConfig, Journal as FJournal},
+        variable::{Config as VConfig, Journal as VJournal},
+    },
     translator::Translator,
 };
 use commonware_codec::Read;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
-use commonware_utils::{Array, Span};
-use futures::{pin_mut, StreamExt};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
+use commonware_utils::{sequence::U32, Array, Span};
+use futures::{pin_mut, try_join, StreamExt};
 use tracing::warn;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
@@ -96,8 +99,17 @@ pub struct Config<T: Translator, C> {
     /// The number of operations to store in each section of the [`Journal`].
     pub log_items_per_section: u64,
 
+    /// The name of the [`RStorage`] partition used for the location map.
+    pub locations_journal_partition: String,
+
+    /// The number of items to put in each blob in the location map.
+    pub locations_items_per_blob: u64,
+
     /// The [`Translator`] used by the compressed index.
     pub translator: T,
+
+    /// The buffer pool to use for caching data.
+    pub buffer_pool: PoolRef,
 }
 
 /// An unauthenticated key-value database based off of an append-only [`Journal`] of operations.
@@ -109,7 +121,7 @@ where
     T: Translator,
 {
     /// A log of all [`Variable`] operations that have been applied to the store.
-    pub(super) log: Journal<E, Variable<K, V>>,
+    log: VJournal<E, Variable<K, V>>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// section and offset within the section containing its most recent update.
@@ -117,16 +129,20 @@ where
     /// # Invariant
     ///
     /// Only references operations of type [`Variable::Set`].
-    pub(super) snapshot: Index<T, SectionAndOffset>,
+    snapshot: Index<T, u64>,
 
     /// The number of items to store in each section of the variable journal.
-    pub(super) log_items_per_section: u64,
+    log_items_per_section: u64,
+
+    /// A fixed-length journal that maps an operation's location to its offset within its respective
+    /// section of the log. (The section number is derived from location.)
+    locations: FJournal<E, U32>,
 
     /// The total numer of operations that have been applied to the store.
-    pub(super) op_count: u64,
+    op_count: u64,
 
     /// The number of operations that are pending commit.
-    pub(super) uncommitted_ops: u64,
+    uncommitted_ops: u64,
 }
 
 impl<E, K, V, T> Store<E, K, V, T>
@@ -146,16 +162,27 @@ where
         context: E,
         cfg: Config<T, <Variable<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let mut snapshot: Index<T, SectionAndOffset> =
+        let mut snapshot: Index<T, u64> =
             Index::init(context.with_label("snapshot"), cfg.translator);
 
-        let mut log = Journal::init(
+        let mut log = VJournal::init(
             context.with_label("log"),
-            JConfig {
+            VConfig {
                 partition: cfg.log_journal_partition,
                 compression: cfg.log_compression,
                 codec_config: cfg.log_codec_config,
                 write_buffer: cfg.log_write_buffer,
+            },
+        )
+        .await?;
+
+        let locations = FJournal::init(
+            context.with_label("locations"),
+            FConfig {
+                partition: cfg.locations_journal_partition,
+                items_per_blob: cfg.locations_items_per_blob,
+                write_buffer: cfg.log_write_buffer,
+                buffer_pool: cfg.buffer_pool.clone(),
             },
         )
         .await?;
@@ -167,6 +194,7 @@ where
             log,
             snapshot,
             log_items_per_section: cfg.log_items_per_section,
+            locations,
             op_count,
             uncommitted_ops: 0,
         })
@@ -177,7 +205,13 @@ where
     /// If the key does not exist, returns `Ok(None)`.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         for location in self.snapshot.get(key) {
-            let (k, v) = Self::get_update_op(&self.log, location).await?;
+            let (k, v) = Self::get_update_op(
+                &self.log,
+                &self.locations,
+                self.log_items_per_section,
+                *location,
+            )
+            .await?;
 
             if &k == key {
                 return Ok(Some(v));
@@ -195,8 +229,6 @@ where
     /// uncommitted until [`Store::commit`] is called. Uncommitted operations will be rolled back
     /// if the store is closed without committing.
     pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
-        let section = self.op_count / self.log_items_per_section;
-
         // Check if this is a no-op
         if let Some(current_value) = self.get(&key).await? {
             if current_value == value {
@@ -204,12 +236,20 @@ where
             }
         }
 
-        let offset = self
-            .apply_op(Variable::Set(key.clone(), value.clone()))
+        let new_location = self.op_count;
+        self.apply_op(Variable::Set(key.clone(), value.clone()))
             .await?;
-        let new_location = SectionAndOffset(section, offset);
 
-        Self::update_loc(&mut self.snapshot, &self.log, key, value, new_location).await
+        Self::update_loc(
+            &mut self.snapshot,
+            &self.log,
+            &self.locations,
+            self.log_items_per_section,
+            key,
+            value,
+            new_location,
+        )
+        .await
     }
 
     /// Commits all uncommitted operations to the store, making them persistent and recoverable.
@@ -239,7 +279,8 @@ where
             );
         }
 
-        self.log.close().await.map_err(Error::Journal)
+        try_join!(self.log.close(), self.locations.close())?;
+        Ok(())
     }
 
     /// Destroys the store permanently, removing all persistent data associated with it.
@@ -249,7 +290,8 @@ where
     /// This operation is irreversible. Do not call this method unless you are sure
     /// you want to delete all data associated with this store permanently!
     pub async fn destroy(self) -> Result<(), Error> {
-        self.log.destroy().await.map_err(Error::Journal)
+        try_join!(self.log.destroy(), self.locations.destroy(),)?;
+        Ok(())
     }
 
     /// Returns the number of operations that have been applied to the store.
@@ -266,14 +308,15 @@ where
     /// transaction boundary.
     async fn sync(&mut self) -> Result<(), Error> {
         let current_section = self.op_count / self.log_items_per_section;
-        self.log.sync(current_section).await.map_err(Error::Journal)
+        try_join!(self.log.sync(current_section), self.locations.sync())?;
+        Ok(())
     }
 
     /// Builds the database's snapshot from the log of operations. Any operations that sit above
     /// the latest commit operation are removed.
     async fn build_snapshot_from_log(
-        log: &mut Journal<E, Variable<K, V>>,
-        snapshot: &mut Index<T, SectionAndOffset>,
+        log: &mut VJournal<E, Variable<K, V>>,
+        snapshot: &mut Index<T, u64>,
     ) -> Result<u64, Error> {
         let mut operations = Vec::new();
 
@@ -317,9 +360,10 @@ where
             operations.truncate(rewind_pos);
         }
 
-        for (section, offset, op) in operations.iter() {
+        for (pos, (_, _, op)) in operations.iter().enumerate() {
             if let Variable::Set(key, _) = op {
-                let pos = (*section, *offset).into();
+                let pos = pos as u64;
+
                 let Some(mut cursor) = snapshot.get_mut_or_insert(key, pos) else {
                     continue;
                 };
@@ -348,8 +392,9 @@ where
 
         let section = self.op_count / self.log_items_per_section;
 
-        // Append the operation to the log.
+        // Append the operation to the entry log, and the offset to the locations log.
         let (offset, _size) = self.log.append(section, op).await?;
+        self.locations.append(offset.into()).await?;
 
         // Sync the previous section if we transitioned to a new section
         if section != old_section {
@@ -366,15 +411,17 @@ where
     /// Panics if the location does not reference a [`Variable::Set`] operation or if the
     /// section is not present in the log.
     async fn get_update_op(
-        log: &Journal<E, Variable<K, V>>,
-        location: &SectionAndOffset,
+        log: &VJournal<E, Variable<K, V>>,
+        locations: &FJournal<E, U32>,
+        log_items_per_section: u64,
+        location: u64,
     ) -> Result<(K, V), Error> {
-        let Some(Variable::Set(k, v)) = log.get(location.section(), location.offset()).await?
-        else {
+        let section = location / log_items_per_section;
+        let offset = locations.read(location).await?.to_u32();
+
+        let Some(Variable::Set(k, v)) = log.get(section, offset).await? else {
             panic!(
-                "location does not reference set operation. section={}, offset={}",
-                location.section(),
-                location.offset()
+                "location does not reference set operation. section={section}, offset={section}",
             );
         };
 
@@ -383,11 +430,13 @@ where
 
     /// Updates the snapshot with the new operation location for the given key.
     async fn update_loc(
-        snapshot: &mut Index<T, SectionAndOffset>,
-        log: &Journal<E, Variable<K, V>>,
+        snapshot: &mut Index<T, u64>,
+        log: &VJournal<E, Variable<K, V>>,
+        locations: &FJournal<E, U32>,
+        log_items_per_section: u64,
         key: K,
         value: V,
-        new_location: SectionAndOffset,
+        new_location: u64,
     ) -> Result<UpdateResult, Error> {
         // Update the snapshot with the new operation location.
         let Some(mut cursor) = snapshot.get_mut_or_insert(&key, new_location) else {
@@ -396,7 +445,8 @@ where
 
         // Iterate over conflicts in the snapshot.
         while let Some(location) = cursor.next() {
-            let (k, v) = Self::get_update_op(log, location).await?;
+            let (k, v) =
+                Self::get_update_op(log, locations, log_items_per_section, *location).await?;
             if k == key {
                 if v == value {
                     return Ok(UpdateResult::NoOp);
@@ -420,31 +470,9 @@ pub enum UpdateResult {
     /// Tried to set a key to its current value.
     NoOp,
     /// Key was not previously in the snapshot & its new loc is the wrapped value.
-    Inserted(SectionAndOffset),
+    Inserted(u64),
     /// Key was previously in the snapshot & its (old, new) loc pair is wrapped.
-    Updated(SectionAndOffset, SectionAndOffset),
-}
-
-/// A section and offset within a section pair.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SectionAndOffset(u64, u32);
-
-impl SectionAndOffset {
-    /// The section number.
-    pub fn section(&self) -> u64 {
-        self.0
-    }
-
-    /// The offset within the section.
-    pub fn offset(&self) -> u32 {
-        self.1
-    }
-}
-
-impl From<(u64, u32)> for SectionAndOffset {
-    fn from((section, position): (u64, u32)) -> Self {
-        Self(section, position)
-    }
+    Updated(u64, u64),
 }
 
 /// Errors that can occur when interacting with a [`Store`] database.
@@ -466,6 +494,9 @@ mod test {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
 
+    const PAGE_SIZE: usize = 77;
+    const PAGE_CACHE_SIZE: usize = 9;
+
     /// The type of the store used in tests.
     type TestStore = Store<deterministic::Context, Digest, Digest, TwoCap>;
 
@@ -476,7 +507,10 @@ mod test {
             log_compression: None,
             log_codec_config: (),
             log_items_per_section: 4,
+            locations_journal_partition: "locations".to_string(),
+            locations_items_per_blob: 7,
             translator: TwoCap,
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
         Store::init(context, cfg).await.unwrap()
     }
