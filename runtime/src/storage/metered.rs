@@ -4,7 +4,7 @@ use prometheus_client::{
     metrics::{counter::Counter, gauge::Gauge},
     registry::Registry,
 };
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 
 pub struct Metrics {
     pub open_blobs: Gauge,
@@ -80,7 +80,9 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         Ok((
             Blob {
                 inner,
-                metrics: self.metrics.clone(),
+                metrics: Arc::new(MetricsHandle {
+                    metrics: self.metrics.clone(),
+                }),
             },
             len,
         ))
@@ -99,7 +101,26 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 #[derive(Clone)]
 pub struct Blob<B> {
     inner: B,
+    metrics: Arc<MetricsHandle>,
+}
+
+struct MetricsHandle {
     metrics: Arc<Metrics>,
+}
+
+impl Deref for MetricsHandle {
+    type Target = Metrics;
+
+    fn deref(&self) -> &Self::Target {
+        &self.metrics
+    }
+}
+
+impl Drop for MetricsHandle {
+    fn drop(&mut self) {
+        // Only decrement when the last reference to the blob is dropped
+        self.metrics.open_blobs.dec();
+    }
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
@@ -131,14 +152,6 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.sync().await
     }
 
-    // TODO danlaine: This is error-prone because the metrics will be
-    // incorrect if the blob is dropped before it's closed. We should
-    // consider using a `Drop` implementation to decrement the metric.
-    // https://github.com/commonwarexyz/monorepo/issues/754
-    async fn close(self) -> Result<(), Error> {
-        self.metrics.open_blobs.dec();
-        self.inner.close().await
-    }
 }
 
 #[cfg(test)]

@@ -102,12 +102,15 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.sync().await
     }
 
-    async fn close(self) -> Result<(), Error> {
+}
+
+impl<B: crate::Blob> Drop for Blob<B> {
+    fn drop(&mut self) {
+        // Emit close event when blob is dropped
         self.auditor.event(b"close", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
         });
-        self.inner.close().await
     }
 }
 

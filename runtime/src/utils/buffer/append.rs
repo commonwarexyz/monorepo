@@ -212,11 +212,6 @@ impl<B: Blob> Blob for Append<B> {
 
         Ok(())
     }
-
-    async fn close(self) -> Result<(), Error> {
-        self.sync().await?;
-        self.blob.close().await
-    }
 }
 
 #[cfg(test)]
