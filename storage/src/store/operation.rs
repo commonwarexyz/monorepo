@@ -18,6 +18,7 @@ use std::{
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Operation<K: Array, V: Codec> {
     Set(K, V),
+    Delete(K),
     Commit(u64),
 }
 
@@ -26,6 +27,8 @@ impl<K: Array, V: Codec> EncodeSize for Operation<K, V> {
         match self {
             // 1 byte for the context + fixed key size + value’s own size
             Operation::Set(_, v) => 1 + K::SIZE + v.encode_size(),
+            // 1 byte for the context + fixed key size
+            Operation::Delete(_) => 1 + K::SIZE,
             // Only the context byte
             Operation::Commit(floor_num) => 1 + floor_num.encode_size(),
         }
@@ -33,13 +36,15 @@ impl<K: Array, V: Codec> EncodeSize for Operation<K, V> {
 }
 
 const SET_CONTEXT: u8 = 0;
-const COMMIT_CONTEXT: u8 = 1;
+const DELETE_CONTEXT: u8 = 1;
+const COMMIT_CONTEXT: u8 = 2;
 
 impl<K: Array, V: Codec> Operation<K, V> {
     /// If this is a [`Operation::Set`] operation, returns the key. Otherwise, returns None.
     pub fn to_key(&self) -> Option<&K> {
         match self {
             Operation::Set(key, _) => Some(key),
+            Operation::Delete(key) => Some(key),
             Operation::Commit(_) => None,
         }
     }
@@ -48,6 +53,7 @@ impl<K: Array, V: Codec> Operation<K, V> {
     pub fn to_value(&self) -> Option<&V> {
         match self {
             Operation::Set(_, value) => Some(value),
+            Operation::Delete(_) => None,
             Operation::Commit(_) => None,
         }
     }
@@ -60,6 +66,10 @@ impl<K: Array, V: Codec> Write for Operation<K, V> {
                 buf.put_u8(SET_CONTEXT);
                 k.write(buf);
                 v.write(buf);
+            }
+            Operation::Delete(k) => {
+                buf.put_u8(DELETE_CONTEXT);
+                k.write(buf);
             }
             Operation::Commit(n) => {
                 buf.put_u8(COMMIT_CONTEXT);
@@ -79,6 +89,10 @@ impl<K: Array, V: Codec> Read for Operation<K, V> {
                 let value = V::read_cfg(buf, cfg)?;
                 Ok(Self::Set(key, value))
             }
+            DELETE_CONTEXT => {
+                let key = K::read(buf)?;
+                Ok(Self::Delete(key))
+            }
             COMMIT_CONTEXT => {
                 let num = u64::read(buf)?;
                 Ok(Self::Commit(num))
@@ -92,7 +106,8 @@ impl<K: Array, V: Array> Display for Operation<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Operation::Set(key, value) => write!(f, "[key:{key} value:{value}]"),
-            Operation::Commit(num) => write!(f, "[commit floor: {num}]"),
+            Operation::Delete(key) => write!(f, "[delete key:{key}]"),
+            Operation::Commit(num) => write!(f, "[commit floor:{num}]"),
         }
     }
 }
@@ -171,7 +186,7 @@ mod tests {
         assert_eq!(format!("{set_op}"), format!("[key:{key} value:{value}]"));
 
         let delete_op = Operation::<U64, U64>::Commit(42);
-        assert_eq!(format!("{delete_op}"), format!("[commit floor: 42]"));
+        assert_eq!(format!("{delete_op}"), format!("[commit floor:42]"));
     }
 
     #[test]

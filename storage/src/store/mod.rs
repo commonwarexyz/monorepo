@@ -1,10 +1,9 @@
-//! An unauthenticated key-value database with variable-sized values.
+//! An unauthenticated key-value database supporting variable-sized values.
 //!
 //! # Terminology
 //!
 //! A _key_ in an unauthenticated database either has a _value_ or it doesn't. The _update_ operation
-//! gives a key a specific value whether it previously had no value or had a different value. After
-//! a key assumes a value, it can no longer be deleted, only updated with a new value.
+//! gives a key a specific value whether it previously had no value or had a different value.
 //!
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
 //! (2) it is a [`Operation::Set`] operation, and (3) it is the most recent operation for that key.
@@ -14,8 +13,26 @@
 //! 1. **Initialization**: Create with [`Store::init`] using a [`Config`]
 //! 2. **Insertion**: Use [`Store::update`] to set a value for a given key
 //! 3. **Queries**: Use [`Store::get`] to retrieve current values
-//! 4. **Persistence**: Call [`Store::commit`] to make changes durable
-//! 5. **Cleanup**: Call [`Store::close`] to shutdown gracefully or [`Store::destroy`] to remove all data
+//! 4. **Deletions**: Use [`Store::delete`] to remove a key's value
+//! 5. **Persistence**: Call [`Store::commit`] to make changes durable
+//! 6. **Cleanup**: Call [`Store::close`] to shutdown gracefully or [`Store::destroy`] to remove all data
+//!
+//! # Pruning
+//!
+//! The database prunes _inactive_ operations every time [`Store::commit`] is called. To achieve this,
+//! an _inactivity floor_ is maintained, which is the location at which all operations before are inactive.
+//! At commit-time, the inactivity floor is raised by the number of uncommitted operations plus 1 for the
+//! tailing commit op. During this process, any encountered active operations are re-applied to the tip of
+//! the log.
+//!
+//! |                               Log State                                | Inactivity Floor | Uncommitted Ops |
+//! |------------------------------------------------------------------------|------------------|-----------------|
+//! | [pre-commit] Set(a, v), Set(a, v')                                     |                0 |               2 |
+//! | [raise-floor] Set(a, v), Set(a, v'), Set(a, v'), Set(a, v')            |                3 |               2 |
+//! | [prune+commit] Set(a, v'), Commit(3)                                   |                3 |               0 |
+//! | [pre-commit] Set(a, v'), Commit(3), Set(b, v), Set(a, v'')             |                3 |               2 |
+//! | [raise-floor] Set(a, v'), Commit(3), Set(b, v), Set(a, v''), Set(b, v) |                6 |               2 |
+//! | [prune+commit] Set(a, v''), Set(b, v), Commit(6)                       |                6 |               0 |
 //!
 //! # Example
 //!
@@ -56,6 +73,16 @@
 //!     // Fetch the value
 //!     let fetched_value = store.get(&k).await.unwrap();
 //!     assert_eq!(fetched_value.unwrap(), v);
+//!
+//!     // Commit the operation to make it persistent
+//!     store.commit().await.unwrap();
+//!
+//!     // Delete the key's value
+//!     store.delete(k).await.unwrap();
+//!
+//!     // Fetch the value
+//!     let fetched_value = store.get(&k).await.unwrap();
+//!     assert!(fetched_value.is_none());
 //!
 //!     // Commit the operation to make it persistent
 //!     store.commit().await.unwrap();
@@ -175,10 +202,9 @@ where
         context: E,
         cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let mut snapshot: Index<T, u64> =
-            Index::init(context.with_label("snapshot"), cfg.translator);
+        let snapshot: Index<T, u64> = Index::init(context.with_label("snapshot"), cfg.translator);
 
-        let mut log = VJournal::init(
+        let log = VJournal::init(
             context.with_label("log"),
             VConfig {
                 partition: cfg.log_journal_partition,
@@ -189,7 +215,7 @@ where
         )
         .await?;
 
-        let mut locations = FJournal::init(
+        let locations = FJournal::init(
             context.with_label("locations"),
             FConfig {
                 partition: cfg.locations_journal_partition,
@@ -200,25 +226,17 @@ where
         )
         .await?;
 
-        // Build the snapshot by replaying the log of operations.
-        let (op_count, oldest_retained_loc, inactivity_floor_loc) = Self::build_snapshot_from_log(
-            &mut log,
-            &mut locations,
-            &mut snapshot,
-            cfg.log_items_per_section,
-        )
-        .await?;
-
-        Ok(Self {
+        let db = Self {
             log,
             snapshot,
             log_items_per_section: cfg.log_items_per_section,
             locations,
-            inactivity_floor_loc,
-            oldest_retained_loc,
-            op_count,
+            inactivity_floor_loc: 0,
+            oldest_retained_loc: 0,
+            op_count: 0,
             uncommitted_ops: 0,
-        })
+        };
+        db.build_snapshot_from_log().await
     }
 
     /// Gets the value associated with the given key in the store.
@@ -262,6 +280,31 @@ where
             .await?;
 
         self.update_loc(key, value, new_location).await
+    }
+
+    /// Deletes the value associated with the given key in the store. If the key has no value,
+    /// the operation is a no-op.
+    pub async fn delete(&mut self, key: K) -> Result<(), Error> {
+        let Some(old_loc) = self.get_loc(&key).await? else {
+            // Key does not exist, so this is a no-op.
+            return Ok(());
+        };
+
+        let Some(mut cursor) = self.snapshot.get_mut(&key) else {
+            return Ok(());
+        };
+
+        // Delete the old location from the snapshot.
+        while let Some(loc) = cursor.next() {
+            if *loc == old_loc {
+                cursor.delete();
+                break;
+            }
+        }
+
+        drop(cursor);
+
+        self.apply_op(Operation::Delete(key)).await.map(|_| ())
     }
 
     /// Commits all uncommitted operations to the store, making them persistent and recoverable.
@@ -322,12 +365,7 @@ where
     ///
     /// Returns the number of operations that were applied to the store, the oldest retained
     /// location, and the inactivity floor location.
-    async fn build_snapshot_from_log(
-        log: &mut VJournal<E, Operation<K, V>>,
-        locations: &mut FJournal<E, U32>,
-        snapshot: &mut Index<T, u64>,
-        log_items_per_section: u64,
-    ) -> Result<(u64, u64, u64), Error> {
+    async fn build_snapshot_from_log(mut self) -> Result<Self, Error> {
         let mut operations = Vec::new();
         let mut op_count = 0;
         let mut oldest_retained_loc = None;
@@ -335,13 +373,13 @@ where
 
         // Replay operations from the log
         {
-            let stream = log.replay(SNAPSHOT_READ_BUFFER_SIZE).await?;
+            let stream = self.log.replay(SNAPSHOT_READ_BUFFER_SIZE).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 let (section, offset, _size, op) = result?;
 
                 if oldest_retained_loc.is_none() {
-                    op_count = section * log_items_per_section;
+                    op_count = section * self.log_items_per_section;
                     oldest_retained_loc = Some(op_count);
                 }
 
@@ -350,20 +388,18 @@ where
                     inactivity_floor_loc = loc;
                 }
 
+                operations.push((op_count, section, offset, op));
                 op_count += 1;
-                operations.push((section, offset, op))
             }
         }
 
         // Find the last commit operation to determine where to rewind
-        let mut rewind_pos = 0;
-        for (i, (_section, _offset, op)) in operations.iter().enumerate().rev() {
-            if let Operation::Commit(_) = op {
-                // Everything up to and including the commit is committed
-                rewind_pos = i + 1;
-                break;
-            }
-        }
+        let rewind_pos = operations
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, (_, _, _, op))| matches!(op, Operation::Commit(_)).then_some(i + 1))
+            .unwrap_or(0);
 
         // Rewind uncommitted operations if necessary
         if rewind_pos != operations.len() {
@@ -374,46 +410,72 @@ where
             // Rewind to the appropriate position
             if rewind_pos > 0 {
                 // Rewind to just after the last committed operation
-                let (last_section, last_offset, _) = &operations[rewind_pos - 1];
-                log.rewind(*last_section, *last_offset as u64 + 1)
+                let (_, last_section, last_offset, _) = &operations[rewind_pos - 1];
+                self.log
+                    .rewind(*last_section, *last_offset as u64 + 1)
                     .await
                     .map_err(Error::Journal)?;
-                locations.rewind(op_count).await.map_err(Error::Journal)?;
+                self.locations
+                    .rewind(op_count)
+                    .await
+                    .map_err(Error::Journal)?;
             } else {
                 // No commits found, rewind to beginning (empty log)
-                log.rewind(0, 0).await.map_err(Error::Journal)?;
-                locations.rewind(0).await.map_err(Error::Journal)?;
+                self.log.rewind(0, 0).await.map_err(Error::Journal)?;
+                self.locations.rewind(0).await.map_err(Error::Journal)?;
             }
 
             operations.truncate(rewind_pos);
         }
 
-        for (pos, (_, _, op)) in operations.iter().enumerate() {
-            if let Operation::Set(key, _) = op {
-                let pos = pos as u64;
+        for (pos, _, _, op) in operations.iter() {
+            match op {
+                Operation::Set(key, _) => {
+                    let Some(old_loc) = self.get_loc(key).await? else {
+                        self.snapshot.insert(key, *pos);
+                        continue;
+                    };
 
-                let Some(mut cursor) = snapshot.get_mut_or_insert(key, pos) else {
-                    continue;
-                };
+                    let Some(mut cursor) = self.snapshot.get_mut(key) else {
+                        continue;
+                    };
 
-                // Set the cursor location to the most recent position for this key.
-                while cursor.next().is_some() {
-                    cursor.update(pos);
-                    continue;
+                    // Set the cursor location to the most recent position for this key.
+                    while let Some(loc) = cursor.next() {
+                        if *loc == old_loc {
+                            cursor.update(*pos);
+                            continue;
+                        }
+                    }
                 }
+                Operation::Delete(key) => {
+                    let Some(old_loc) = self.get_loc(key).await? else {
+                        continue;
+                    };
 
-                // Add the key to the snapshot.
-                cursor.insert(pos);
+                    let Some(mut cursor) = self.snapshot.get_mut(key) else {
+                        continue;
+                    };
+
+                    // Set the cursor location to the most recent position for this key.
+                    while let Some(loc) = cursor.next() {
+                        if *loc == old_loc {
+                            cursor.delete();
+                            continue;
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
-        assert_eq!(op_count, locations.size().await?);
+        assert_eq!(op_count, self.locations.size().await?);
 
-        Ok((
-            op_count,
-            oldest_retained_loc.unwrap_or(0),
-            inactivity_floor_loc,
-        ))
+        self.op_count = op_count;
+        self.inactivity_floor_loc = inactivity_floor_loc;
+        self.oldest_retained_loc = oldest_retained_loc.unwrap_or(0);
+
+        Ok(self)
     }
 
     /// Append the operation to the log. The `commit` method must be called to make any applied operation
@@ -436,6 +498,23 @@ where
         }
 
         Ok(offset)
+    }
+
+    /// Gets the location of the most recent [`Operation::Set`] for the key, or [`None`] if
+    /// the key does not have a value.
+    async fn get_loc(&self, key: &K) -> Result<Option<u64>, Error> {
+        for loc in self.snapshot.get(key) {
+            let section = loc / self.log_items_per_section;
+            let offset = self.locations.read(*loc).await?.to_u32();
+
+            if let Some(Operation::Set(k, _)) = self.log.get(section, offset).await? {
+                if k == *key {
+                    return Ok(Some(*loc));
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     /// Gets a [`Operation`] from the log at the given location.
@@ -495,6 +574,7 @@ where
                 *location,
             )
             .await?;
+
             if k == key {
                 if v == value {
                     return Ok(UpdateResult::NoOp);
@@ -800,11 +880,17 @@ mod test {
                 store.update(k, v).await.unwrap();
             }
 
+            let iter = store.snapshot.get(&k);
+            assert_eq!(iter.count(), 1);
+
             store.commit().await.unwrap();
             store.close().await.unwrap();
 
             // Re-open the store to ensure it replays the log correctly.
             let store = create_test_store(ctx.with_label("store")).await;
+
+            let iter = store.snapshot.get(&k);
+            assert_eq!(iter.count(), 1);
 
             // 100 operations were applied, and two were moved due to their activity, plus
             // the commit operation.
@@ -815,6 +901,88 @@ mod test {
             // is the first in the last retained blob.
             assert_eq!(store.oldest_retained_loc, UPDATES);
             assert_eq!(store.uncommitted_ops, 0);
+
+            store.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_store_build_snapshot_keys_with_shared_prefix() {
+        let executor = deterministic::Runner::default();
+
+        executor.start(|mut ctx| async move {
+            let mut store = create_test_store(ctx.with_label("store")).await;
+
+            let (k1, v1) = (Digest::random(&mut ctx), Digest::random(&mut ctx));
+            let (mut k2, v2) = (Digest::random(&mut ctx), Digest::random(&mut ctx));
+
+            // Ensure k2 shares 2 bytes with k1 (test DB uses `TwoCap` translator.)
+            k2.0[0..2].copy_from_slice(&k1.0[0..2]);
+
+            store.update(k1, v1).await.unwrap();
+            store.update(k2, v2).await.unwrap();
+
+            assert_eq!(store.get(&k1).await.unwrap().unwrap(), v1);
+            assert_eq!(store.get(&k2).await.unwrap().unwrap(), v2);
+
+            store.commit().await.unwrap();
+            store.close().await.unwrap();
+
+            // Re-open the store to ensure it builds the snapshot for the conflicting
+            // keys correctly.
+            let store = create_test_store(ctx.with_label("store")).await;
+
+            assert_eq!(store.get(&k1).await.unwrap().unwrap(), v1);
+            assert_eq!(store.get(&k2).await.unwrap().unwrap(), v2);
+
+            store.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_store_delete() {
+        let executor = deterministic::Runner::default();
+
+        executor.start(|mut ctx| async move {
+            let mut store = create_test_store(ctx.with_label("store")).await;
+
+            // Insert a key-value pair
+            let k = Digest::random(&mut ctx);
+            let v = Digest::random(&mut ctx);
+            store.update(k, v).await.unwrap();
+
+            // Fetch the value
+            let fetched_value = store.get(&k).await.unwrap();
+            assert_eq!(fetched_value.unwrap(), v);
+
+            // Delete the key
+            store.delete(k).await.unwrap();
+
+            // Ensure the key is no longer present
+            let fetched_value = store.get(&k).await.unwrap();
+            assert!(fetched_value.is_none());
+
+            // Commit the changes
+            store.commit().await.unwrap();
+
+            // Re-open the store and ensure the key is still deleted
+            let mut store = create_test_store(ctx.with_label("store")).await;
+            let fetched_value = store.get(&k).await.unwrap();
+            assert!(fetched_value.is_none());
+
+            // Re-insert the key
+            store.update(k, v).await.unwrap();
+            let fetched_value = store.get(&k).await.unwrap();
+            assert_eq!(fetched_value.unwrap(), v);
+
+            // Commit the changes
+            store.commit().await.unwrap();
+
+            // Re-open the store and ensure the snapshot restores the key, after processing
+            // the delete and the subsequent set.
+            let store = create_test_store(ctx.with_label("store")).await;
+            let fetched_value = store.get(&k).await.unwrap();
+            assert_eq!(fetched_value.unwrap(), v);
 
             store.destroy().await.unwrap();
         });

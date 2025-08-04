@@ -17,6 +17,7 @@ use tracing::info;
 const NUM_ELEMENTS: u64 = 100_000;
 const NUM_OPERATIONS: u64 = 1_000_000;
 const COMMIT_FREQUENCY: u32 = 10_000;
+const DELETE_FREQUENCY: u32 = 10; // 1/10th of the updates will be deletes.
 const ITEMS_PER_BLOB: u64 = 500_000;
 const PARTITION_SUFFIX: &str = "store_bench_partition";
 
@@ -65,6 +66,10 @@ fn gen_random_store(cfg: Config, num_elements: u64, num_operations: u64) {
         // Randomly update / delete them.
         for _ in 0u64..num_operations {
             let rand_key = hash(&(rng.next_u64() % num_elements).to_be_bytes());
+            if rng.next_u32() % DELETE_FREQUENCY == 0 {
+                db.delete(rand_key).await.unwrap();
+                continue;
+            }
             let v = hash(&rng.next_u32().to_be_bytes());
             db.update(rand_key, v).await.unwrap();
             if rng.next_u32() % COMMIT_FREQUENCY == 0 {
