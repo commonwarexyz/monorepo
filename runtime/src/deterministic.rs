@@ -37,8 +37,9 @@ use crate::{
 };
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
+    select,
     task::{waker_ref, ArcWake},
-    Future,
+    Future, FutureExt,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -226,8 +227,7 @@ pub struct Executor {
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
     partitions: Mutex<HashMap<String, Partition>>,
-    signaler: Mutex<Signaler>,
-    signal: Signal,
+    signaler: Mutex<Option<Signaler>>,
     finished: Mutex<bool>,
     recovered: Mutex<bool>,
 }
@@ -597,7 +597,7 @@ impl Context {
         let deadline = cfg
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
-        let (signaler, signal) = Signaler::new();
+        let signaler = Signaler::new();
         let auditor = Arc::new(Auditor::default());
         let storage = MeteredStorage::new(
             AuditedStorage::new(MemStorage::default(), auditor.clone()),
@@ -617,8 +617,7 @@ impl Context {
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             partitions: Mutex::new(HashMap::new()),
-            signaler: Mutex::new(signaler),
-            signal,
+            signaler: Mutex::new(Some(signaler)),
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
         });
@@ -665,7 +664,7 @@ impl Context {
 
         // Copy state
         let auditor = self.executor.auditor.clone();
-        let (signaler, signal) = Signaler::new();
+        let signaler = Signaler::new();
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
@@ -683,8 +682,7 @@ impl Context {
             metrics: metrics.clone(),
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
-            signaler: Mutex::new(signaler),
-            signal,
+            signaler: Mutex::new(Some(signaler)),
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
         });
@@ -805,16 +803,45 @@ impl crate::Spawner for Context {
         }
     }
 
-    fn stop(&self, value: i32) {
+    async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
         self.executor.auditor.event(b"stop", |hasher| {
             hasher.update(value.to_be_bytes());
         });
-        self.executor.signaler.lock().unwrap().signal(value);
+
+        let stop_resolved = {
+            let mut signaler = self.executor.signaler.lock().unwrap();
+            signaler
+                .take()
+                .expect("signaler should always be present when stop is called")
+                .resolve(value)
+        };
+
+        if let Some(timeout_duration) = timeout {
+            let timeout_future = self.sleep(timeout_duration);
+            select! {
+                result = stop_resolved.fuse() => {
+                    result.map_err(|_| Error::Closed)?;
+                }
+                _ = timeout_future.fuse() => {
+                    return Err(Error::Timeout);
+                }
+            }
+        } else {
+            stop_resolved.await.map_err(|_| Error::Closed)?;
+        }
+
+        Ok(())
     }
 
     fn stopped(&self) -> Signal {
         self.executor.auditor.event(b"stopped", |_| {});
-        self.executor.signal.clone()
+        self.executor
+            .signaler
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("signaler is only consumed on stop which consumes self")
+            .signal()
     }
 }
 

@@ -178,13 +178,20 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static;
 
-    /// Signals the runtime to stop execution and that all outstanding tasks
-    /// should perform any required cleanup and exit. This method is idempotent and
-    /// can be called multiple times.
+    /// Signals the runtime to stop execution and waits for all outstanding tasks
+    /// to perform any required cleanup and exit.
     ///
     /// This method does not actually kill any tasks but rather signals to them, using
-    /// the `Signal` returned by `stopped`, that they should exit.
-    fn stop(&self, value: i32);
+    /// the `Signal` returned by `stopped`, that they should exit. It then waits
+    /// for all `Signal` references to be dropped before returning.
+    ///
+    /// If a timeout is provided, the method will return an error if all `Signal`
+    /// references have not been dropped within the specified duration.
+    fn stop(
+        self,
+        value: i32,
+        timeout: Option<Duration>,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Returns an instance of a `Signal` that resolves when `stop` is called by
     /// any task.
@@ -971,13 +978,66 @@ mod tests {
             // Sleep for a bit before stopping
             context.sleep(Duration::from_millis(50)).await;
 
-            // Signal the task
-            context.stop(kill);
+            // Signal the tasks and wait for them to stop
+            let _ = context.stop(kill, None).await;
 
             // Ensure both tasks complete
             let result = join!(before, after);
             assert!(result.0.is_ok());
             assert!(result.1.is_ok());
+        });
+    }
+
+    fn test_shutdown_multiple_signals<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Metrics + Clock,
+    {
+        use std::sync::{
+            atomic::{AtomicU32, Ordering},
+            Arc,
+        };
+
+        let kill = 42;
+        runner.start(|context| async move {
+            let counter = Arc::new(AtomicU32::new(0));
+
+            // Spawn 3 tasks that do cleanup work after receiving stop signal
+            // and increment a shared counter
+            let task = |cleanup_duration: Duration| {
+                let context = context.clone();
+                let counter = counter.clone();
+                context.spawn(move |context| async move {
+                    let mut signal = context.stopped();
+                    loop {
+                        select! {
+                            sig = &mut signal => {
+                                assert_eq!(sig.unwrap(), kill);
+                                context.sleep(cleanup_duration).await;
+                                counter.fetch_add(1, Ordering::SeqCst);
+                                break;
+                            },
+                            _ = context.sleep(Duration::from_millis(5)) => {},
+                        }
+                    }
+                })
+            };
+
+            let task1 = task(Duration::from_millis(10));
+            let task2 = task(Duration::from_millis(20));
+            let task3 = task(Duration::from_millis(30));
+
+            // Give tasks time to start
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Stop and verify all cleanup completed
+            context.stop(kill, None).await.unwrap();
+            assert_eq!(counter.load(Ordering::SeqCst), 3);
+
+            // Ensure all tasks completed
+            let result = join!(task1, task2, task3);
+            assert!(result.0.is_ok());
+            assert!(result.1.is_ok());
+            assert!(result.2.is_ok());
         });
     }
 
@@ -1240,6 +1300,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_shutdown_multiple_signals() {
+        let executor = deterministic::Runner::default();
+        test_shutdown_multiple_signals(executor);
+    }
+
+    #[test]
     fn test_deterministic_spawn_ref() {
         let executor = deterministic::Runner::default();
         test_spawn_ref(executor);
@@ -1414,6 +1480,12 @@ mod tests {
     fn test_tokio_shutdown() {
         let executor = tokio::Runner::default();
         test_shutdown(executor);
+    }
+
+    #[test]
+    fn test_tokio_shutdown_multiple_signals() {
+        let executor = tokio::Runner::default();
+        test_shutdown_multiple_signals(executor);
     }
 
     #[test]

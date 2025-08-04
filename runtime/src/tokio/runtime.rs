@@ -210,8 +210,7 @@ pub struct Executor {
     registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
-    signaler: Mutex<Signaler>,
-    signal: Signal,
+    signaler: Mutex<Option<Signaler>>,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -252,7 +251,7 @@ impl crate::Runner for Runner {
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
-        let (signaler, signal) = Signaler::new();
+        let signaler = Signaler::new();
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
@@ -310,8 +309,7 @@ impl crate::Runner for Runner {
             registry: Mutex::new(registry),
             metrics,
             runtime,
-            signaler: Mutex::new(signaler),
-            signal,
+            signaler: Mutex::new(Some(signaler)),
         });
 
         // Get metrics
@@ -471,12 +469,35 @@ impl crate::Spawner for Context {
         }
     }
 
-    fn stop(&self, value: i32) {
-        self.executor.signaler.lock().unwrap().signal(value);
+    async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
+        let stop_resolved = {
+            let mut signaler = self.executor.signaler.lock().unwrap();
+            signaler
+                .take()
+                .expect("signaler should always be present when stop is called")
+                .resolve(value)
+        };
+
+        if let Some(timeout_duration) = timeout {
+            tokio::time::timeout(timeout_duration, stop_resolved)
+                .await
+                .map_err(|_| Error::Timeout)?
+                .map_err(|_| Error::Closed)?;
+        } else {
+            stop_resolved.await.map_err(|_| Error::Closed)?;
+        }
+
+        Ok(())
     }
 
     fn stopped(&self) -> Signal {
-        self.executor.signal.clone()
+        self.executor
+            .signaler
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("signaler is only consumed on stop which consumes self")
+            .signal()
     }
 }
 
