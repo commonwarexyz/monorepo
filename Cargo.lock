@@ -1356,6 +1356,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-runtime-fuzz"
+version = "0.0.57"
+dependencies = [
+ "arbitrary",
+ "commonware-runtime",
+ "libfuzzer-sys",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "commonware-storage"
 version = "0.0.57"
 dependencies = [
