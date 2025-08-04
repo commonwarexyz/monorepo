@@ -99,19 +99,39 @@ impl<B: Blob> Read<B> {
         // Calculate how much to read (minimum of buffer size and remaining bytes)
         let bytes_to_read = std::cmp::min(self.buffer_size as u64, blob_remaining) as usize;
 
-        // Read the data - we only need a single read operation since we know exactly how much data is available
-        // Note that the last refill may cause `self.buffer` to have length < `self.buffer_size`
-        // because `bytes_to_read` < `self.buffer_size`.
-        let mut buffer = std::mem::take(&mut self.buffer);
-        buffer.truncate(bytes_to_read);
-        self.buffer = self.blob.read_at(buffer, self.blob_position).await?;
+        // Read the data - we only need a single read operation since we know exactly how much data is available.
+        if bytes_to_read < self.buffer_size {
+            // Read into a temp buffer for the end-of-blob case to avoid truncating underlying buffer.
+            let mut tmp_buffer = vec![0u8; bytes_to_read];
+            tmp_buffer = self
+                .blob
+                .read_at(tmp_buffer, self.blob_position)
+                .await?
+                .into();
+            self.buffer.as_mut()[0..bytes_to_read].copy_from_slice(&tmp_buffer[0..bytes_to_read]);
+        } else {
+            self.buffer = self
+                .blob
+                .read_at(std::mem::take(&mut self.buffer), self.blob_position)
+                .await?;
+        }
         self.buffer_valid_len = bytes_to_read;
+
         Ok(bytes_to_read)
     }
 
-    /// Reads exactly `size` bytes into the provided buffer.
-    /// Returns an error if not enough bytes are available.
+    /// Reads exactly `size` bytes into the provided buffer. Returns an error if not enough bytes
+    /// are available.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size` is greater than the length of `buf`.
     pub async fn read_exact(&mut self, buf: &mut [u8], size: usize) -> Result<(), Error> {
+        assert!(
+            size <= buf.len(),
+            "provided buffer is too small for requested size"
+        );
+
         // Quick check if we have enough bytes total before attempting reads
         if (self.buffer_remaining() + self.blob_remaining() as usize) < size {
             return Err(Error::BlobInsufficientLength);
@@ -126,10 +146,7 @@ impl<B: Blob> Read<B> {
             }
 
             // Calculate how many bytes we can copy from the buffer
-            let bytes_to_copy = std::cmp::min(
-                size - bytes_read,
-                self.buffer_valid_len - self.buffer_position,
-            );
+            let bytes_to_copy = std::cmp::min(size - bytes_read, self.buffer_remaining());
 
             // Copy bytes from buffer to output
             buf[bytes_read..(bytes_read + bytes_to_copy)].copy_from_slice(

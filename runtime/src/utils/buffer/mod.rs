@@ -109,6 +109,41 @@ mod tests {
         });
     }
 
+    // Regression test for https://github.com/commonwarexyz/monorepo/issues/1348
+    #[test_traced]
+    fn test_read_to_end_then_rewind_and_read_again() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            let (blob, size) = context.open("partition", b"test").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(data.to_vec(), 0).await.unwrap();
+            let size = data.len() as u64;
+
+            let buffer_size = 20;
+            let mut reader = Read::new(blob, size, buffer_size);
+
+            // Read data that crosses buffer boundaries
+            let mut buf = [0u8; 21];
+            reader.read_exact(&mut buf, 21).await.unwrap();
+            assert_eq!(&buf, b"ABCDEFGHIJKLMNOPQRSTU");
+
+            // Verify position tracking
+            assert_eq!(reader.position(), 21);
+
+            // Read the remaining data
+            let mut buf = [0u8; 5];
+            reader.read_exact(&mut buf, 5).await.unwrap();
+            assert_eq!(&buf, b"VWXYZ");
+
+            // Rewind and read again
+            reader.seek_to(0).unwrap();
+            let mut buf = [0u8; 21];
+            reader.read_exact(&mut buf, 21).await.unwrap();
+            assert_eq!(&buf, b"ABCDEFGHIJKLMNOPQRSTU");
+        });
+    }
+
     #[test_traced]
     fn test_read_with_known_size() {
         let executor = deterministic::Runner::default();
