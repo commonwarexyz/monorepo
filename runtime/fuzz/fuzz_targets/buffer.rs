@@ -8,14 +8,16 @@ use commonware_runtime::{
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
+const MAX_SIZE: usize = 1024 * 1024;
+
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     seed: u64,
-    operations: Vec<BufferOperation>,
+    operations: Vec<FuzzOperation>,
 }
 
 #[derive(Arbitrary, Debug)]
-enum BufferOperation {
+enum FuzzOperation {
     CreateRead {
         blob_size: u16,
         buffer_size: u16,
@@ -71,12 +73,16 @@ fn fuzz(input: FuzzInput) {
     executor.start(|context| async move {
         let mut rng = StdRng::seed_from_u64(input.seed);
 
-        let (blob, initial_size) = context.open("test_partition", b"test_blob").await.unwrap();
+        let (blob, initial_size) = context
+            .open("test_partition", b"test_blob")
+            .await
+            .expect("cannot open context");
 
         if rng.gen_bool(0.5) && initial_size == 0 {
-            let initial_data: Vec<u8> = (0..rng.gen_range(0..1024)).map(|_| rng.gen()).collect();
+            let initial_data: Vec<u8> =
+                (0..rng.gen_range(0..MAX_SIZE)).map(|_| rng.gen()).collect();
             if !initial_data.is_empty() {
-                blob.write_at(initial_data, 0).await.unwrap();
+                blob.write_at(initial_data, 0).await.expect("cannot write");
             }
         }
 
@@ -84,52 +90,60 @@ fn fuzz(input: FuzzInput) {
         let mut write_buffer = None;
         let mut append_buffer = None;
         let mut pool_ref = None;
-        let mut pool_page_size = 1024; // Default page size
+        let mut pool_page_size = 1024;
 
         for op in input.operations {
             match op {
-                BufferOperation::CreateRead {
+                FuzzOperation::CreateRead {
                     blob_size,
                     buffer_size,
                 } => {
                     let blob_size = blob_size as u64;
-                    let buffer_size = buffer_size.max(1) as usize;
+                    // buffer size must be greater than zero
+                    let buffer_size = (buffer_size as usize).clamp(1, MAX_SIZE);
 
-                    let (blob, size) = context.open("test_partition", b"read_blob").await.unwrap();
+                    let (blob, size) = context
+                        .open("test_partition", b"read_blob")
+                        .await
+                        .expect("cannot open context");
 
                     if size == 0 && blob_size > 0 {
                         let data: Vec<u8> = (0..blob_size).map(|i| i as u8).collect();
-                        blob.write_at(data, 0).await.unwrap();
+                        blob.write_at(data, 0).await.expect("cannot write");
                     }
 
                     read_buffer = Some(Read::new(blob, blob_size.min(size), buffer_size));
                 }
 
-                BufferOperation::CreateWrite {
+                FuzzOperation::CreateWrite {
                     initial_size,
                     capacity,
                 } => {
-                    let capacity = (capacity as usize).clamp(1, 1024 * 1024);
+                    // buffer capacity must be greater than zero
+                    let capacity = (capacity as usize).clamp(1, MAX_SIZE);
 
-                    let (blob, _) = context.open("test_partition", b"write_blob").await.unwrap();
+                    let (blob, _) = context
+                        .open("test_partition", b"write_blob")
+                        .await
+                        .expect("cannot open context");
 
                     write_buffer = Some(Write::new(blob, initial_size as u64, capacity));
                 }
 
-                BufferOperation::CreateAppend {
+                FuzzOperation::CreateAppend {
                     initial_size,
                     buffer_size,
                     pool_page_size: page_size,
                     pool_capacity,
                 } => {
-                    let buffer_size = (buffer_size as usize).clamp(1, 1024 * 1024);
-                    pool_page_size = (page_size as usize).clamp(1, 1024 * 1024);
-                    let pool_capacity = (pool_capacity as usize).clamp(1, 1000);
+                    let buffer_size = (buffer_size as usize).clamp(0, MAX_SIZE);
+                    pool_page_size = (page_size as usize).clamp(0, MAX_SIZE);
+                    let pool_capacity = (pool_capacity as usize).clamp(1, MAX_SIZE);
 
                     let (blob, _) = context
                         .open("test_partition", b"append_blob")
                         .await
-                        .unwrap();
+                        .expect("cannot open write blob");
 
                     pool_ref = Some(PoolRef::new(pool_page_size, pool_capacity));
 
@@ -141,74 +155,80 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                BufferOperation::ReadExact { size } => {
+                FuzzOperation::ReadExact { size } => {
                     if let Some(ref mut reader) = read_buffer {
-                        let size = (size.min(10000)) as usize; // Limit to prevent OOM
+                        let size = (size as usize).clamp(0, MAX_SIZE);
                         let mut buf = vec![0u8; size];
-                        let _ = reader.read_exact(&mut buf, size).await;
+                        reader
+                            .read_exact(&mut buf, size)
+                            .await
+                            .expect("read reader");
                     }
                 }
 
-                BufferOperation::ReadSeekTo { position } => {
+                FuzzOperation::ReadSeekTo { position } => {
                     if let Some(ref mut reader) = read_buffer {
-                        let _ = reader.seek_to(position as u64);
+                        reader.seek_to(position as u64).expect("seek to position");
                     }
                 }
 
-                BufferOperation::ReadResize { new_size } => {
+                FuzzOperation::ReadResize { new_size } => {
                     if let Some(reader) = read_buffer.take() {
-                        let _ = reader.resize(new_size as u64).await;
+                        reader.resize(new_size as u64).await.expect("read resize");
                     }
                 }
 
-                BufferOperation::WriteAt { data, offset } => {
+                FuzzOperation::WriteAt { data, offset } => {
                     if let Some(ref writer) = write_buffer {
-                        let data = if data.len() > 10000 {
-                            &data[..10000]
+                        let data = if data.len() > MAX_SIZE {
+                            &data[..MAX_SIZE]
                         } else {
                             &data
                         };
-                        let _ = writer.write_at(data.to_vec(), offset as u64).await;
+                        writer
+                            .write_at(data.to_vec(), offset as u64)
+                            .await
+                            .expect("write writer");
                     }
                 }
 
-                BufferOperation::WriteResize { new_size } => {
+                FuzzOperation::WriteResize { new_size } => {
                     if let Some(ref writer) = write_buffer {
-                        let _ = writer.resize(new_size as u64).await;
+                        writer.resize(new_size as u64).await.expect("write resize");
                     }
                 }
 
-                BufferOperation::WriteSync => {
+                FuzzOperation::WriteSync => {
                     if let Some(ref writer) = write_buffer {
-                        let _ = writer.sync().await;
+                        writer.sync().await.expect("write sync");
                     }
                 }
 
-                BufferOperation::WriteClose => {
+                FuzzOperation::WriteClose => {
                     if let Some(writer) = write_buffer.take() {
-                        let _ = writer.close().await;
+                        writer.close().await.expect("write close");
                     }
                 }
 
-                BufferOperation::AppendData { data } => {
+                FuzzOperation::AppendData { data } => {
                     if let Some(ref append) = append_buffer {
-                        let _ = append.append(data).await;
+                        append.append(data).await.expect("append data");
                     }
                 }
 
-                BufferOperation::AppendResize { new_size } => {
+                FuzzOperation::AppendResize { new_size } => {
                     if let Some(ref append) = append_buffer {
-                        let _ = append.resize(new_size as u64).await;
+                        append.resize(new_size as u64).await.expect("append resize");
                     }
                 }
 
-                BufferOperation::AppendSync => {
+                FuzzOperation::AppendSync => {
                     if let Some(ref append) = append_buffer {
-                        let _ = append.sync().await;
+                        append.sync().await.expect("append sync");
                     }
                 }
 
-                BufferOperation::PoolCache {
+                FuzzOperation::PoolCache {
                     blob_id,
                     data,
                     offset,
@@ -217,27 +237,31 @@ fn fuzz(input: FuzzInput) {
                         let offset = offset as u64;
                         let aligned_offset =
                             (offset / pool_page_size as u64) * pool_page_size as u64;
-                        let data = if data.len() > 10000 {
-                            &data[..10000]
+                        let data = if data.len() > MAX_SIZE {
+                            &data[..MAX_SIZE]
                         } else {
                             &data
                         };
-                        let _ = pool.cache(blob_id as u64, data, aligned_offset).await;
+                        pool.cache(blob_id as u64, data, aligned_offset).await;g
                     }
                 }
 
-                BufferOperation::ExtremeSeekNearU64Max => {
+                FuzzOperation::ExtremeSeekNearU64Max => {
                     if let Some(ref mut reader) = read_buffer {
-                        let near = u64::MAX - rng.gen_range(0..=1024) as u64;
-                        let _ = reader.seek_to(near);
+                        let near = u64::MAX - rng.gen_range(0..=MAX_SIZE) as u64;
+                        reader.seek_to(near).expect("seek to near");
                     }
                 }
 
-                BufferOperation::ExtremeWriteNearU64Max { len } => {
+                FuzzOperation::ExtremeWriteNearU64Max { len } => {
                     if let Some(ref writer) = write_buffer {
-                        let off = u64::MAX - (len).saturating_add(rng.gen_range(0..=1024) as u64);
-                        let data = vec![0xAA; len as usize];
-                        let _ = writer.write_at(data, off).await;
+                        let off =
+                            u64::MAX - (len).saturating_add(rng.gen_range(0..=MAX_SIZE) as u64);
+                        let data = vec![0; len as usize];
+                        writer
+                            .write_at(data, off)
+                            .await
+                            .expect("extreme write writer");
                     }
                 }
             }
