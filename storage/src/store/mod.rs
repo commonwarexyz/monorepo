@@ -7,7 +7,7 @@
 //! a key assumes a value, it can no longer be deleted, only updated with a new value.
 //!
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
-//! (2) it is a [`Variable::Set`] operation, and (3) it is the most recent operation for that key.
+//! (2) it is a [`Operation::Set`] operation, and (3) it is the most recent operation for that key.
 //!
 //! # Lifecycle
 //!
@@ -25,7 +25,10 @@
 //!     translator::TwoCap,
 //! };
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
-//! use commonware_runtime::{deterministic::Runner, Metrics, Runner as _};
+//! use commonware_runtime::{buffer::PoolRef, deterministic::Runner, Metrics, Runner as _};
+//!
+//! const PAGE_SIZE: usize = 77;
+//! const PAGE_CACHE_SIZE: usize = 9;
 //!
 //! let executor = Runner::default();
 //! executor.start(|mut ctx| async move {
@@ -35,7 +38,10 @@
 //!         log_compression: None,
 //!         log_codec_config: (),
 //!         log_items_per_section: 4,
+//!         locations_journal_partition: "locations_partition".to_string(),
+//!         locations_items_per_blob: 4,
 //!         translator: TwoCap,
+//!         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
 //!     };
 //!     let mut store =
 //!         Store::<_, Digest, Digest, TwoCap>::init(ctx.with_label("store"), config)
@@ -58,16 +64,13 @@
 //!     store.destroy().await.unwrap();
 //! });
 //! ```
-//!
-//! # TODO
-//! - [ ] Inactivity floor for pruning the log.
 
 use crate::{
-    adb::operation::Variable,
     index::Index,
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},
         variable::{Config as VConfig, Journal as VJournal},
+        Error as JError,
     },
     translator::Translator,
 };
@@ -75,7 +78,10 @@ use commonware_codec::Read;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::{sequence::U32, Array, Span};
 use futures::{pin_mut, try_join, StreamExt};
-use tracing::warn;
+use tracing::{debug, warn};
+
+pub mod operation;
+use operation::Operation;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.
@@ -87,7 +93,7 @@ pub struct Config<T: Translator, C> {
     /// The name of the [`RStorage`] partition used to persist the log of operations.
     pub log_journal_partition: String,
 
-    /// The size of the write buffer to use for each blob in the [`Journal`].
+    /// The size of the write buffer to use for each blob in the [`VJournal`].
     pub log_write_buffer: usize,
 
     /// Optional compression level (using `zstd`) to apply to log data before storing.
@@ -96,7 +102,7 @@ pub struct Config<T: Translator, C> {
     /// The codec configuration to use for encoding and decoding log items.
     pub log_codec_config: C,
 
-    /// The number of operations to store in each section of the [`Journal`].
+    /// The number of operations to store in each section of the [`VJournal`].
     pub log_items_per_section: u64,
 
     /// The name of the [`RStorage`] partition used for the location map.
@@ -112,7 +118,7 @@ pub struct Config<T: Translator, C> {
     pub buffer_pool: PoolRef,
 }
 
-/// An unauthenticated key-value database based off of an append-only [`Journal`] of operations.
+/// An unauthenticated key-value database based off of an append-only [`VJournal`] of operations.
 pub struct Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
@@ -120,15 +126,15 @@ where
     V: Span,
     T: Translator,
 {
-    /// A log of all [`Variable`] operations that have been applied to the store.
-    log: VJournal<E, Variable<K, V>>,
+    /// A log of all [`Operation`]s that have been applied to the store.
+    log: VJournal<E, Operation<K, V>>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// section and offset within the section containing its most recent update.
     ///
     /// # Invariant
     ///
-    /// Only references operations of type [`Variable::Set`].
+    /// Only references operations of type [`Operation::Set`].
     snapshot: Index<T, u64>,
 
     /// The number of items to store in each section of the variable journal.
@@ -137,6 +143,13 @@ where
     /// A fixed-length journal that maps an operation's location to its offset within its respective
     /// section of the log. (The section number is derived from location.)
     locations: FJournal<E, U32>,
+
+    /// A location before which all operations are "inactive" (that is, operations before this point
+    /// are over keys that have been updated by some operation at or after this point).
+    inactivity_floor_loc: u64,
+
+    /// The location of the oldest operation in the log that remains readable.
+    oldest_retained_loc: u64,
 
     /// The total numer of operations that have been applied to the store.
     op_count: u64,
@@ -160,7 +173,7 @@ where
     /// committing.
     pub async fn init(
         context: E,
-        cfg: Config<T, <Variable<K, V> as Read>::Cfg>,
+        cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
         let mut snapshot: Index<T, u64> =
             Index::init(context.with_label("snapshot"), cfg.translator);
@@ -176,7 +189,7 @@ where
         )
         .await?;
 
-        let locations = FJournal::init(
+        let mut locations = FJournal::init(
             context.with_label("locations"),
             FConfig {
                 partition: cfg.locations_journal_partition,
@@ -188,13 +201,21 @@ where
         .await?;
 
         // Build the snapshot by replaying the log of operations.
-        let op_count = Self::build_snapshot_from_log(&mut log, &mut snapshot).await?;
+        let (op_count, oldest_retained_loc, inactivity_floor_loc) = Self::build_snapshot_from_log(
+            &mut log,
+            &mut locations,
+            &mut snapshot,
+            cfg.log_items_per_section,
+        )
+        .await?;
 
         Ok(Self {
             log,
             snapshot,
             log_items_per_section: cfg.log_items_per_section,
             locations,
+            inactivity_floor_loc,
+            oldest_retained_loc,
             op_count,
             uncommitted_ops: 0,
         })
@@ -205,7 +226,7 @@ where
     /// If the key does not exist, returns `Ok(None)`.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         for location in self.snapshot.get(key) {
-            let (k, v) = Self::get_update_op(
+            let (k, v) = Self::get_set_op(
                 &self.log,
                 &self.locations,
                 self.log_items_per_section,
@@ -237,36 +258,20 @@ where
         }
 
         let new_location = self.op_count;
-        self.apply_op(Variable::Set(key.clone(), value.clone()))
+        self.apply_op(Operation::Set(key.clone(), value.clone()))
             .await?;
 
-        Self::update_loc(
-            &mut self.snapshot,
-            &self.log,
-            &self.locations,
-            self.log_items_per_section,
-            key,
-            value,
-            new_location,
-        )
-        .await
+        self.update_loc(key, value, new_location).await
     }
 
     /// Commits all uncommitted operations to the store, making them persistent and recoverable.
     pub async fn commit(&mut self) -> Result<(), Error> {
-        if self.uncommitted_ops == 0 {
-            warn!("No operations to commit");
-            return Ok(());
-        }
-
-        // Apply a commit operation to mark the transaction boundary
-        self.apply_op(Variable::Commit()).await?;
-
-        // Sync all data to disk
-        self.sync().await?;
-
+        self.raise_inactivity_floor(self.uncommitted_ops + 1)
+            .await?;
         self.uncommitted_ops = 0;
-        Ok(())
+
+        self.sync().await?;
+        self.prune_inactive().await
     }
 
     /// Closes the store. Any uncommitted operations will be lost if they have not been committed
@@ -290,7 +295,7 @@ where
     /// This operation is irreversible. Do not call this method unless you are sure
     /// you want to delete all data associated with this store permanently!
     pub async fn destroy(self) -> Result<(), Error> {
-        try_join!(self.log.destroy(), self.locations.destroy(),)?;
+        try_join!(self.log.destroy(), self.locations.destroy())?;
         Ok(())
     }
 
@@ -314,11 +319,19 @@ where
 
     /// Builds the database's snapshot from the log of operations. Any operations that sit above
     /// the latest commit operation are removed.
+    ///
+    /// Returns the number of operations that were applied to the store, the oldest retained
+    /// location, and the inactivity floor location.
     async fn build_snapshot_from_log(
-        log: &mut VJournal<E, Variable<K, V>>,
+        log: &mut VJournal<E, Operation<K, V>>,
+        locations: &mut FJournal<E, U32>,
         snapshot: &mut Index<T, u64>,
-    ) -> Result<u64, Error> {
+        log_items_per_section: u64,
+    ) -> Result<(u64, u64, u64), Error> {
         let mut operations = Vec::new();
+        let mut op_count = 0;
+        let mut oldest_retained_loc = None;
+        let mut inactivity_floor_loc = 0;
 
         // Replay operations from the log
         {
@@ -326,6 +339,18 @@ where
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 let (section, offset, _size, op) = result?;
+
+                if oldest_retained_loc.is_none() {
+                    op_count = section * log_items_per_section;
+                    oldest_retained_loc = Some(op_count);
+                }
+
+                if let Operation::Commit(loc) = op {
+                    // Update the inactivity floor location
+                    inactivity_floor_loc = loc;
+                }
+
+                op_count += 1;
                 operations.push((section, offset, op))
             }
         }
@@ -333,7 +358,7 @@ where
         // Find the last commit operation to determine where to rewind
         let mut rewind_pos = 0;
         for (i, (_section, _offset, op)) in operations.iter().enumerate().rev() {
-            if let Variable::Commit() = op {
+            if let Operation::Commit(_) = op {
                 // Everything up to and including the commit is committed
                 rewind_pos = i + 1;
                 break;
@@ -342,8 +367,9 @@ where
 
         // Rewind uncommitted operations if necessary
         if rewind_pos != operations.len() {
-            let op_count = operations.len() - rewind_pos;
-            warn!(op_count, "rewinding over uncommitted log operations");
+            let ops_to_rewind = operations.len() - rewind_pos;
+            warn!(ops_to_rewind, "rewinding over uncommitted log operations");
+            op_count -= ops_to_rewind as u64;
 
             // Rewind to the appropriate position
             if rewind_pos > 0 {
@@ -352,16 +378,18 @@ where
                 log.rewind(*last_section, *last_offset as u64 + 1)
                     .await
                     .map_err(Error::Journal)?;
+                locations.rewind(op_count).await.map_err(Error::Journal)?;
             } else {
                 // No commits found, rewind to beginning (empty log)
                 log.rewind(0, 0).await.map_err(Error::Journal)?;
+                locations.rewind(0).await.map_err(Error::Journal)?;
             }
 
             operations.truncate(rewind_pos);
         }
 
         for (pos, (_, _, op)) in operations.iter().enumerate() {
-            if let Variable::Set(key, _) = op {
+            if let Operation::Set(key, _) = op {
                 let pos = pos as u64;
 
                 let Some(mut cursor) = snapshot.get_mut_or_insert(key, pos) else {
@@ -379,39 +407,57 @@ where
             }
         }
 
-        Ok(operations.len() as u64)
+        assert_eq!(op_count, locations.size().await?);
+
+        Ok((
+            op_count,
+            oldest_retained_loc.unwrap_or(0),
+            inactivity_floor_loc,
+        ))
     }
 
     /// Append the operation to the log. The `commit` method must be called to make any applied operation
     /// persistent & recoverable.
-    async fn apply_op(&mut self, op: Variable<K, V>) -> Result<u32, Error> {
-        let old_section = self.op_count / self.log_items_per_section;
+    async fn apply_op(&mut self, op: Operation<K, V>) -> Result<u32, Error> {
+        let current_section = self.op_count / self.log_items_per_section;
 
         self.uncommitted_ops += 1;
-        self.op_count += 1;
-
-        let section = self.op_count / self.log_items_per_section;
 
         // Append the operation to the entry log, and the offset to the locations log.
-        let (offset, _size) = self.log.append(section, op).await?;
+        let (offset, _size) = self.log.append(current_section, op).await?;
         self.locations.append(offset.into()).await?;
 
+        self.op_count += 1;
+        let new_section = self.op_count / self.log_items_per_section;
+
         // Sync the previous section if we transitioned to a new section
-        if section != old_section {
-            self.log.sync(old_section).await?;
+        if new_section != current_section {
+            self.log.sync(current_section).await?;
         }
 
         Ok(offset)
     }
 
-    /// Gets a [`Variable::Set`] operation from the log at the given location.
+    /// Gets a [`Operation`] from the log at the given location.
+    async fn get_op(&self, location: u64) -> Result<Operation<K, V>, Error> {
+        let section = location / self.log_items_per_section;
+        let offset = self.locations.read(location).await?.to_u32();
+
+        // Get the operation from the log at the specified section and offset.
+        let Some(op) = self.log.get(section, offset).await? else {
+            return Err(Error::KeyNotFound);
+        };
+
+        Ok(op)
+    }
+
+    /// Gets a [`Operation::Set`] operation from the log at the given location.
     ///
     /// # Panics
     ///
-    /// Panics if the location does not reference a [`Variable::Set`] operation or if the
-    /// section is not present in the log.
-    async fn get_update_op(
-        log: &VJournal<E, Variable<K, V>>,
+    /// Panics if the location does not reference a [`Operation::Set`] operation.
+    async fn get_set_op(
+        log: &VJournal<E, Operation<K, V>>,
         locations: &FJournal<E, U32>,
         log_items_per_section: u64,
         location: u64,
@@ -419,9 +465,9 @@ where
         let section = location / log_items_per_section;
         let offset = locations.read(location).await?.to_u32();
 
-        let Some(Variable::Set(k, v)) = log.get(section, offset).await? else {
+        let Some(Operation::Set(k, v)) = log.get(section, offset).await? else {
             panic!(
-                "location does not reference set operation. section={section}, offset={section}",
+                "location ({location}) does not reference set operation. section={section}, offset={offset}",
             );
         };
 
@@ -430,23 +476,25 @@ where
 
     /// Updates the snapshot with the new operation location for the given key.
     async fn update_loc(
-        snapshot: &mut Index<T, u64>,
-        log: &VJournal<E, Variable<K, V>>,
-        locations: &FJournal<E, U32>,
-        log_items_per_section: u64,
+        &mut self,
         key: K,
         value: V,
         new_location: u64,
     ) -> Result<UpdateResult, Error> {
         // Update the snapshot with the new operation location.
-        let Some(mut cursor) = snapshot.get_mut_or_insert(&key, new_location) else {
+        let Some(mut cursor) = self.snapshot.get_mut_or_insert(&key, new_location) else {
             return Ok(UpdateResult::Inserted(new_location));
         };
 
         // Iterate over conflicts in the snapshot.
         while let Some(location) = cursor.next() {
-            let (k, v) =
-                Self::get_update_op(log, locations, log_items_per_section, *location).await?;
+            let (k, v) = Self::get_set_op(
+                &self.log,
+                &self.locations,
+                self.log_items_per_section,
+                *location,
+            )
+            .await?;
             if k == key {
                 if v == value {
                     return Ok(UpdateResult::NoOp);
@@ -462,6 +510,99 @@ where
         // The key wasn't in the snapshot, so add it to the cursor.
         cursor.insert(new_location);
         Ok(UpdateResult::Inserted(new_location))
+    }
+
+    // Moves the given operation to the tip of the log if it is active, rendering its old location
+    // inactive. If the operation was not active, then this is a no-op. Returns the old location
+    // of the operation if it was active.
+    async fn move_op_if_active(
+        &mut self,
+        op: Operation<K, V>,
+        old_loc: u64,
+    ) -> Result<Option<u64>, Error> {
+        // If the translated key is not in the snapshot, get a cursor to look for the key.
+        let Some(key) = op.to_key() else {
+            // `op` is not a key-related operation, so it is not active.
+            return Ok(None);
+        };
+        let new_loc = self.op_count;
+        let Some(mut cursor) = self.snapshot.get_mut(key) else {
+            return Ok(None);
+        };
+
+        // Iterate over all conflicting keys in the snapshot.
+        while let Some(&loc) = cursor.next() {
+            if loc == old_loc {
+                // Update the location of the operation in the snapshot.
+                cursor.update(new_loc);
+                drop(cursor);
+
+                self.apply_op(op).await?;
+                return Ok(Some(old_loc));
+            }
+        }
+
+        // The operation is not active, so this is a no-op.
+        Ok(None)
+    }
+
+    /// Raise the inactivity floor by exactly `max_steps` steps, followed by applying a commit
+    /// operation. Each step either advances over an inactive operation, or re-applies an active
+    /// operation to the tip and then advances over it.
+    ///
+    /// This method does not change the state of the db's snapshot.
+    async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
+        for _ in 0..max_steps {
+            if self.inactivity_floor_loc == self.op_count {
+                break;
+            }
+            let op = self.get_op(self.inactivity_floor_loc).await?;
+            self.move_op_if_active(op, self.inactivity_floor_loc)
+                .await?;
+            self.inactivity_floor_loc += 1;
+        }
+
+        self.apply_op(Operation::Commit(self.inactivity_floor_loc))
+            .await
+            .map(|_| ())
+    }
+
+    /// Prune historical operations that are behind the inactivity floor. This does not affect the
+    /// current snapshot.
+    async fn prune_inactive(&mut self) -> Result<(), Error> {
+        if self.op_count == 0 {
+            return Ok(());
+        }
+
+        // Calculate the target pruning position: inactivity_floor_loc.
+        let target_prune_loc = self.inactivity_floor_loc;
+        let ops_to_prune = target_prune_loc.saturating_sub(self.oldest_retained_loc);
+        if ops_to_prune == 0 {
+            return Ok(());
+        }
+        debug!(ops_to_prune, target_prune_loc, "pruning inactive ops");
+
+        // Prune the log up to the section containing the requested pruning location. We always
+        // prune the log first, and then prune the locations structure based on the log's
+        // actual pruning boundary. This procedure ensures all log operations always have
+        // corresponding location entries, even in the event of failures, with no need for
+        // special recovery.
+        let section = target_prune_loc / self.log_items_per_section;
+        match self.log.prune(section).await {
+            Ok(_) | Err(JError::AlreadyPrunedToSection(_)) => {
+                // Treat "already pruned to section" as a no-op.
+            }
+            Err(e) => {
+                return Err(Error::Journal(e));
+            }
+        }
+        self.oldest_retained_loc = section * self.log_items_per_section;
+
+        // Prune the locations map up to the oldest retained item in the log after pruning.
+        self.locations
+            .prune(self.oldest_retained_loc)
+            .await
+            .map_err(Error::Journal)
     }
 }
 
@@ -508,7 +649,7 @@ mod test {
             log_codec_config: (),
             log_items_per_section: 4,
             locations_journal_partition: "locations".to_string(),
-            locations_items_per_blob: 7,
+            locations_items_per_blob: 4,
             translator: TwoCap,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
@@ -516,7 +657,40 @@ mod test {
     }
 
     #[test_traced("DEBUG")]
-    fn test_store() {
+    pub fn test_store_construct_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let mut db = create_test_store(context.clone()).await;
+            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.oldest_retained_loc, 0);
+            assert!(matches!(db.prune_inactive().await, Ok(())));
+
+            // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
+            let d1 = Digest::random(&mut context);
+            let v1 = Digest::random(&mut context);
+            db.update(d1, v1).await.unwrap();
+            db.close().await.unwrap();
+            let mut db = create_test_store(context.clone()).await;
+            assert_eq!(db.op_count(), 0);
+
+            // Test calling commit on an empty db which should make it (durably) non-empty.
+            db.commit().await.unwrap();
+            assert_eq!(db.op_count(), 1);
+            assert!(matches!(db.prune_inactive().await, Ok(())));
+            let mut db = create_test_store(context.clone()).await;
+
+            // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
+            for _ in 1..100 {
+                db.commit().await.unwrap();
+                assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
+            }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_store_construct_basic() {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
@@ -525,6 +699,7 @@ mod test {
             // Ensure the store is empty
             assert_eq!(store.op_count, 0);
             assert_eq!(store.uncommitted_ops, 0);
+            assert_eq!(store.inactivity_floor_loc, 0);
 
             let key = Digest::random(&mut ctx);
             let value = Digest::random(&mut ctx);
@@ -538,6 +713,7 @@ mod test {
 
             assert_eq!(store.op_count, 1);
             assert_eq!(store.uncommitted_ops, 1);
+            assert_eq!(store.inactivity_floor_loc, 0);
 
             // Fetch the value
             let fetched_value = store.get(&key).await.unwrap();
@@ -552,29 +728,57 @@ mod test {
             // Ensure the re-opened store removed the uncommitted operations
             assert_eq!(store.op_count, 0);
             assert_eq!(store.uncommitted_ops, 0);
+            assert_eq!(store.inactivity_floor_loc, 0);
 
             // Insert a key-value pair
             store.update(key, value).await.unwrap();
 
             assert_eq!(store.op_count, 1);
             assert_eq!(store.uncommitted_ops, 1);
+            assert_eq!(store.inactivity_floor_loc, 0);
 
             // Persist the changes
             store.commit().await.unwrap();
 
-            assert_eq!(store.op_count, 2);
+            // Even though the store was pruned, the inactivity floor was raised by 2, and
+            // the old operations remain in the same blob as an active operation, so they're
+            // retained.
+            assert_eq!(store.op_count, 4);
             assert_eq!(store.uncommitted_ops, 0);
+            assert_eq!(store.inactivity_floor_loc, 2);
 
             // Re-open the store
-            let store = create_test_store(ctx.with_label("store")).await;
+            let mut store = create_test_store(ctx.with_label("store")).await;
 
             // Ensure the re-opened store retained the committed operations
-            assert_eq!(store.op_count, 2);
+            assert_eq!(store.op_count, 4);
             assert_eq!(store.uncommitted_ops, 0);
+            assert_eq!(store.inactivity_floor_loc, 2);
 
-            // Fetch the value
+            // Fetch the value, ensuring it is still present
             let fetched_value = store.get(&key).await.unwrap();
             assert_eq!(fetched_value.unwrap(), value);
+
+            // Insert two new k/v pairs to force pruning of the first section.
+            let (k1, v1) = (Digest::random(&mut ctx), Digest::random(&mut ctx));
+            let (k2, v2) = (Digest::random(&mut ctx), Digest::random(&mut ctx));
+            store.update(k1, v1).await.unwrap();
+            store.update(k2, v2).await.unwrap();
+
+            assert_eq!(store.op_count, 6);
+            assert_eq!(store.uncommitted_ops, 2);
+            assert_eq!(store.inactivity_floor_loc, 2);
+
+            store.commit().await.unwrap();
+
+            assert_eq!(store.op_count, 9);
+            assert_eq!(store.uncommitted_ops, 0);
+            assert_eq!(store.inactivity_floor_loc, 5);
+
+            // Ensure all keys can be accessed, despite the first section being pruned.
+            assert_eq!(store.get(&key).await.unwrap().unwrap(), value);
+            assert_eq!(store.get(&k1).await.unwrap().unwrap(), v1);
+            assert_eq!(store.get(&k2).await.unwrap().unwrap(), v2);
 
             // Destroy the store
             store.destroy().await.unwrap();
@@ -589,7 +793,7 @@ mod test {
             let mut store = create_test_store(ctx.with_label("store")).await;
 
             // Update the same key many times.
-            const UPDATES: usize = 100;
+            const UPDATES: u64 = 100;
             let k = Digest::random(&mut ctx);
             for _ in 0..UPDATES {
                 let v = Digest::random(&mut ctx);
@@ -601,8 +805,16 @@ mod test {
 
             // Re-open the store to ensure it replays the log correctly.
             let store = create_test_store(ctx.with_label("store")).await;
-            let iter = store.snapshot.get(&k);
-            assert_eq!(iter.count(), UPDATES);
+
+            // 100 operations were applied, and two were moved due to their activity, plus
+            // the commit operation.
+            assert_eq!(store.op_count, UPDATES + 3);
+            // Only the highest `Set` operation is active, plus the commit operation above it.
+            assert_eq!(store.inactivity_floor_loc, UPDATES + 1);
+            // All blobs prior to the inactivity floor are pruned, so the oldest retained location
+            // is the first in the last retained blob.
+            assert_eq!(store.oldest_retained_loc, UPDATES);
+            assert_eq!(store.uncommitted_ops, 0);
 
             store.destroy().await.unwrap();
         });

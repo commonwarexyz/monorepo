@@ -1,6 +1,7 @@
 use commonware_cryptography::{hash, Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
+    buffer::PoolRef,
     tokio::{Config, Context, Runner},
     Runner as _,
 };
@@ -19,6 +20,12 @@ const COMMIT_FREQUENCY: u32 = 10_000;
 const ITEMS_PER_BLOB: u64 = 500_000;
 const PARTITION_SUFFIX: &str = "store_bench_partition";
 
+/// Use a "prod sized" page size to test the performance of the journal.
+const PAGE_SIZE: usize = 16384;
+
+/// The number of pages to cache in the buffer pool.
+const PAGE_CACHE_SIZE: usize = 10_000;
+
 fn store_cfg() -> SConfig<EightCap, ()> {
     SConfig::<EightCap, ()> {
         log_journal_partition: format!("log_{PARTITION_SUFFIX}"),
@@ -26,7 +33,10 @@ fn store_cfg() -> SConfig<EightCap, ()> {
         log_compression: None,
         log_codec_config: (),
         log_items_per_section: ITEMS_PER_BLOB,
+        locations_journal_partition: format!("locations_{PARTITION_SUFFIX}"),
+        locations_items_per_blob: ITEMS_PER_BLOB,
         translator: EightCap,
+        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
