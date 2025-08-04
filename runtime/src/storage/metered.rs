@@ -151,7 +151,6 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn sync(&self) -> Result<(), Error> {
         self.inner.sync().await
     }
-
 }
 
 #[cfg(test)]
@@ -281,7 +280,8 @@ mod tests {
 
         // Verify that the open_blobs metric is incremented
         assert_eq!(
-            storage.metrics.open_blobs.get(), 1,
+            storage.metrics.open_blobs.get(),
+            1,
             "open_blobs metric was not incremented after opening a blob"
         );
 
@@ -291,7 +291,8 @@ mod tests {
 
         // Verify that cloning doesn't change the open_blobs metric
         assert_eq!(
-            storage.metrics.open_blobs.get(), 1,
+            storage.metrics.open_blobs.get(),
+            1,
             "open_blobs metric should not change when blobs are cloned"
         );
 
@@ -303,32 +304,37 @@ mod tests {
 
         // Verify that operations on clones update the shared metrics
         assert_eq!(
-            storage.metrics.storage_writes.get(), 2,
+            storage.metrics.storage_writes.get(),
+            2,
             "Operations on cloned blobs should update shared metrics"
         );
 
         assert_eq!(
-            storage.metrics.storage_reads.get(), 2,
+            storage.metrics.storage_reads.get(),
+            2,
             "Operations on cloned blobs should update shared metrics"
         );
 
         // Drop individual clones and verify the metric doesn't change
         drop(clone1);
         assert_eq!(
-            storage.metrics.open_blobs.get(), 1,
+            storage.metrics.open_blobs.get(),
+            1,
             "open_blobs metric should not change when individual clones are dropped"
         );
 
         drop(clone2);
         assert_eq!(
-            storage.metrics.open_blobs.get(), 1,
+            storage.metrics.open_blobs.get(),
+            1,
             "open_blobs metric should not change when individual clones are dropped"
         );
 
         // Sync and drop the original blob - this should finally decrement the counter
         drop(blob);
         assert_eq!(
-            storage.metrics.open_blobs.get(), 0,
+            storage.metrics.open_blobs.get(),
+            0,
             "open_blobs metric should be decremented only when the last blob reference is dropped"
         );
     }

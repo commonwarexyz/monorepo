@@ -101,7 +101,6 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         });
         self.inner.sync().await
     }
-
 }
 
 impl<B: crate::Blob> Drop for Blob<B> {
