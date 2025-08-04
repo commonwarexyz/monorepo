@@ -42,6 +42,7 @@ pub enum Message {
 #[derive(Debug, Arbitrary)]
 pub struct FuzzInput {
     pub seed: u64, // Seed for rng
+    #[arbitrary(with = |u: &mut Unstructured| u.int_in_range(32..=3000))]
     pub max_steps: u16, // The number of steps the fuzzing actor can do before it stops.
 }
 pub struct Fuzzer<E: Clock + Spawner> {
@@ -176,18 +177,19 @@ impl<E: Clock + Spawner> Fuzzer<E> {
 
                 // Notarize random digest
                 let mutation = self.get_mutation();
-                let mutated_proposal =
-                    self.mutate_proposal(&notarize.proposal, mutation);
+                let mutated_proposal = self.mutate_proposal(&notarize.proposal, mutation);
                 let msg = Notarize::sign(
                     &self.namespace,
                     &mut self.crypto,
                     public_key_index,
                     mutated_proposal,
                 );
-                let msg = Voter::<
-                    commonware_cryptography::ed25519::Signature,
-                    Sha256Digest,
-                >::Notarize(msg).encode().into();
+                let msg =
+                    Voter::<commonware_cryptography::ed25519::Signature, Sha256Digest>::Notarize(
+                        msg,
+                    )
+                    .encode()
+                    .into();
                 sender.send(Recipients::All, msg, true).await.unwrap();
             }
             Voter::Finalize(finalize) => {
@@ -199,18 +201,19 @@ impl<E: Clock + Spawner> Fuzzer<E> {
 
                 // Finalize random digest
                 let mutation = self.get_mutation();
-                let mutated_proposal =
-                    self.mutate_proposal(&finalize.proposal, mutation);
+                let mutated_proposal = self.mutate_proposal(&finalize.proposal, mutation);
                 let msg = Finalize::sign(
                     &self.namespace,
                     &mut self.crypto,
                     public_key_index,
                     mutated_proposal,
                 );
-                let msg = Voter::<
-                    commonware_cryptography::ed25519::Signature,
-                    Sha256Digest,
-                >::Finalize(msg).encode().into();
+                let msg =
+                    Voter::<commonware_cryptography::ed25519::Signature, Sha256Digest>::Finalize(
+                        msg,
+                    )
+                    .encode()
+                    .into();
                 sender.send(Recipients::All, msg, true).await.unwrap();
             }
             Voter::Nullify(nullify) => {
@@ -228,10 +231,12 @@ impl<E: Clock + Spawner> Fuzzer<E> {
                     public_key_index,
                     mutated_view,
                 );
-                let msg = Voter::<
-                    commonware_cryptography::ed25519::Signature,
-                    Sha256Digest,
-                >::Nullify(msg).encode().into();
+                let msg =
+                    Voter::<commonware_cryptography::ed25519::Signature, Sha256Digest>::Nullify(
+                        msg,
+                    )
+                    .encode()
+                    .into();
                 sender.send(Recipients::All, msg, true).await.unwrap();
             }
             _ => {
@@ -251,7 +256,9 @@ impl<E: Clock + Spawner> Fuzzer<E> {
         strategy: Mutation,
     ) -> Proposal<Sha256Digest> {
         match strategy {
-            Mutation::Payload => Proposal::new(original.view, original.parent, self.random_payload()),
+            Mutation::Payload => {
+                Proposal::new(original.view, original.parent, self.random_payload())
+            }
             Mutation::View => {
                 let mutated_view = self.random_view(self.view);
                 Proposal::new(mutated_view, original.parent, original.payload)
