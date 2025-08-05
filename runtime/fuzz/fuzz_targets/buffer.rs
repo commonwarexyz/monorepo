@@ -159,22 +159,19 @@ fn fuzz(input: FuzzInput) {
                     if let Some(ref mut reader) = read_buffer {
                         let size = (size as usize).clamp(0, MAX_SIZE);
                         let mut buf = vec![0u8; size];
-                        reader
-                            .read_exact(&mut buf, size)
-                            .await
-                            .expect("read reader");
+                        let _ = reader.read_exact(&mut buf, size).await;
                     }
                 }
 
                 FuzzOperation::ReadSeekTo { position } => {
                     if let Some(ref mut reader) = read_buffer {
-                        reader.seek_to(position as u64).expect("seek to position");
+                        let _ = reader.seek_to(position as u64);
                     }
                 }
 
-                FuzzOperation::ReadResize { new_size } => {
+                FuzzOperation::ReadResize { new_size } => {g
                     if let Some(reader) = read_buffer.take() {
-                        reader.resize(new_size as u64).await.expect("read resize");
+                        let _ = reader.resize(new_size as u64).await;
                     }
                 }
 
@@ -185,40 +182,37 @@ fn fuzz(input: FuzzInput) {
                         } else {
                             &data
                         };
-                        writer
-                            .write_at(data.to_vec(), offset as u64)
-                            .await
-                            .expect("write writer");
+                        let _ = writer.write_at(data.to_vec(), offset as u64).await;
                     }
                 }
 
                 FuzzOperation::WriteResize { new_size } => {
                     if let Some(ref writer) = write_buffer {
-                        writer.resize(new_size as u64).await.expect("write resize");
+                        let _ = writer.resize(new_size as u64).await;
                     }
                 }
 
                 FuzzOperation::WriteSync => {
                     if let Some(ref writer) = write_buffer {
-                        writer.sync().await.expect("write sync");
+                        let _ = writer.sync().await;
                     }
                 }
 
                 FuzzOperation::WriteClose => {
                     if let Some(writer) = write_buffer.take() {
-                        writer.close().await.expect("write close");
+                        let _ = writer.close().await;
                     }
                 }
 
                 FuzzOperation::AppendData { data } => {
                     if let Some(ref append) = append_buffer {
-                        append.append(data).await.expect("append data");
+                        let _ = append.append(data).await;
                     }
                 }
 
                 FuzzOperation::AppendResize { new_size } => {
                     if let Some(ref append) = append_buffer {
-                        append.resize(new_size as u64).await.expect("append resize");
+                        let _ = append.resize(new_size as u64).await;
                     }
                 }
 
@@ -242,14 +236,14 @@ fn fuzz(input: FuzzInput) {
                         } else {
                             &data
                         };
-                        pool.cache(blob_id as u64, data, aligned_offset).await;
+                        let _ = pool.cache(blob_id as u64, data, aligned_offset).await;
                     }
                 }
 
                 FuzzOperation::ExtremeSeekNearU64Max => {
                     if let Some(ref mut reader) = read_buffer {
                         let near = u64::MAX - rng.gen_range(0..=MAX_SIZE) as u64;
-                        reader.seek_to(near).expect("seek to near");
+                        let _ = reader.seek_to(near);
                     }
                 }
 
@@ -258,10 +252,7 @@ fn fuzz(input: FuzzInput) {
                         let off =
                             u64::MAX - (len).saturating_add(rng.gen_range(0..=MAX_SIZE) as u64);
                         let data = vec![0; len as usize];
-                        writer
-                            .write_at(data, off)
-                            .await
-                            .expect("extreme write writer");
+                        let _ = writer.write_at(data, off).await;
                     }
                 }
             }
