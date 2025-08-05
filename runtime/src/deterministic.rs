@@ -35,11 +35,11 @@ use crate::{
     utils::Signaler,
     Clock, Error, Handle, ListenerOf, Signal, METRICS_PREFIX,
 };
+use commonware_macros::select;
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
-    select,
     task::{waker_ref, ArcWake},
-    Future, FutureExt,
+    Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -826,10 +826,10 @@ impl crate::Spawner for Context {
         if let Some(timeout_duration) = timeout {
             let timeout_future = self.sleep(timeout_duration);
             select! {
-                result = stop_resolved.fuse() => {
+                result = stop_resolved => {
                     result.map_err(|_| Error::Closed)?;
-                }
-                _ = timeout_future.fuse() => {
+                },
+                _ = timeout_future => {
                     return Err(Error::Timeout);
                 }
             }

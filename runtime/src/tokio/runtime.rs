@@ -14,6 +14,7 @@ use crate::{
     telemetry::metrics::task::Label, utils::Signaler, Clock, Error, Handle, Signal, SinkOf,
     StreamOf, METRICS_PREFIX,
 };
+use commonware_macros::select;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::text::encode,
@@ -485,10 +486,15 @@ impl crate::Spawner for Context {
         };
 
         if let Some(timeout_duration) = timeout {
-            tokio::time::timeout(timeout_duration, stop_resolved)
-                .await
-                .map_err(|_| Error::Timeout)?
-                .map_err(|_| Error::Closed)?;
+            let timeout_future = self.sleep(timeout_duration);
+            select! {
+                result = stop_resolved => {
+                    result.map_err(|_| Error::Closed)?;
+                },
+                _ = timeout_future => {
+                    return Err(Error::Timeout);
+                }
+            }
         } else {
             stop_resolved.await.map_err(|_| Error::Closed)?;
         }
