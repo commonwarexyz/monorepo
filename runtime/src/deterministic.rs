@@ -228,6 +228,7 @@ pub struct Executor {
     sleeping: Mutex<BinaryHeap<Alarm>>,
     partitions: Mutex<HashMap<String, Partition>>,
     signaler: Mutex<Option<Signaler>>,
+    signal: Mutex<Option<Signal>>,
     finished: Mutex<bool>,
     recovered: Mutex<bool>,
 }
@@ -597,7 +598,7 @@ impl Context {
         let deadline = cfg
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
-        let signaler = Signaler::default();
+        let (signaler, signal) = Signaler::new();
         let auditor = Arc::new(Auditor::default());
         let storage = MeteredStorage::new(
             AuditedStorage::new(MemStorage::default(), auditor.clone()),
@@ -618,6 +619,7 @@ impl Context {
             sleeping: Mutex::new(BinaryHeap::new()),
             partitions: Mutex::new(HashMap::new()),
             signaler: Mutex::new(Some(signaler)),
+            signal: Mutex::new(Some(signal)),
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
         });
@@ -664,7 +666,7 @@ impl Context {
 
         // Copy state
         let auditor = self.executor.auditor.clone();
-        let signaler = Signaler::default();
+        let (signaler, signal) = Signaler::new();
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
@@ -683,6 +685,7 @@ impl Context {
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             signaler: Mutex::new(Some(signaler)),
+            signal: Mutex::new(Some(signal)),
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
         });
@@ -810,10 +813,14 @@ impl crate::Spawner for Context {
 
         let stop_resolved = {
             let mut signaler = self.executor.signaler.lock().unwrap();
-            signaler
+            let completion_rx = signaler
                 .take()
                 .expect("signaler should always be present when stop is called")
-                .resolve(value)
+                .signal(value);
+
+            self.executor.signal.lock().unwrap().take();
+
+            completion_rx
         };
 
         if let Some(timeout_duration) = timeout {
@@ -836,12 +843,12 @@ impl crate::Spawner for Context {
     fn stopped(&self) -> Signal {
         self.executor.auditor.event(b"stopped", |_| {});
         self.executor
-            .signaler
+            .signal
             .lock()
             .unwrap()
             .as_ref()
-            .expect("signaler is only consumed on stop which consumes self")
-            .signal()
+            .expect("signal should always be present until stop is called")
+            .clone()
     }
 }
 

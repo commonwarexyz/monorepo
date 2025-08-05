@@ -211,6 +211,7 @@ pub struct Executor {
     metrics: Arc<Metrics>,
     runtime: Runtime,
     signaler: Mutex<Option<Signaler>>,
+    signal: Mutex<Option<Signal>>,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -251,7 +252,7 @@ impl crate::Runner for Runner {
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
-        let signaler = Signaler::default();
+        let (signaler, signal) = Signaler::new();
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
@@ -310,6 +311,7 @@ impl crate::Runner for Runner {
             metrics,
             runtime,
             signaler: Mutex::new(Some(signaler)),
+            signal: Mutex::new(Some(signal)),
         });
 
         // Get metrics
@@ -472,10 +474,14 @@ impl crate::Spawner for Context {
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
         let stop_resolved = {
             let mut signaler = self.executor.signaler.lock().unwrap();
-            signaler
+            let completion_rx = signaler
                 .take()
                 .expect("signaler should always be present when stop is called")
-                .resolve(value)
+                .signal(value);
+
+            self.executor.signal.lock().unwrap().take();
+
+            completion_rx
         };
 
         if let Some(timeout_duration) = timeout {
@@ -492,12 +498,12 @@ impl crate::Spawner for Context {
 
     fn stopped(&self) -> Signal {
         self.executor
-            .signaler
+            .signal
             .lock()
             .unwrap()
             .as_ref()
-            .expect("signaler is only consumed on stop which consumes self")
-            .signal()
+            .expect("signal should always be present until stop is called")
+            .clone()
     }
 }
 

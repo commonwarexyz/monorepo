@@ -69,12 +69,11 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
-///     // Setup signaler and get a signal future
-///     let signaler = Signaler::default();
-///     let signal = signaler.signal();
+///     // Setup signaler and get future
+///     let (signaler, signal) = Signaler::new();
 ///
-///     // Resolve the signaler (i.e. trigger shutdown)
-///     signaler.resolve(2);
+///     // Signal shutdown
+///     signaler.signal(2);
 ///
 ///     // Wait for shutdown in task
 ///     let sig = signal.await.unwrap();
@@ -97,9 +96,8 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
-///     // Setup signaler and get a signal future
-///     let signaler = Signaler::default();
-///     let mut signal = signaler.signal();
+///     // Setup signaler and get future
+///     let (signaler, mut signal) = Signaler::new();
 ///
 ///     // Loop on the signal until resolved
 ///     let (tx, rx) = oneshot::channel();
@@ -117,13 +115,14 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
 ///         let _ = tx.send(());
 ///     });
 ///
-///     // Resolve the signaler (i.e. trigger shutdown)
-///     signaler.resolve(9);
+///     // Send signal
+///     signaler.signal(9);
 ///
 ///     // Wait for task
 ///     rx.await.expect("shutdown signaled");
 /// });
 /// ```
+#[derive(Clone)]
 pub struct Signal {
     inner: Shared<oneshot::Receiver<i32>>,
     _guard: Arc<SignalGuard>,
@@ -152,47 +151,30 @@ impl Future for Signal {
 /// Coordinates a one-time signal across many tasks.
 pub struct Signaler {
     tx: oneshot::Sender<i32>,
-    inner_signal: Shared<oneshot::Receiver<i32>>,
-    guard: Arc<SignalGuard>,
     completion_rx: oneshot::Receiver<()>,
-}
-
-impl Default for Signaler {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Signaler {
     /// Create a new `Signaler`.
     ///
-    /// Returns a `Signaler` that can create `Signal`s on demand.
-    pub fn new() -> Self {
+    /// Returns a `Signaler` and a `Signal` that will resolve when `signal` is called.
+    pub fn new() -> (Self, Signal) {
         let (tx, rx) = oneshot::channel();
         let (completion_tx, completion_rx) = oneshot::channel();
 
-        let guard = Arc::new(SignalGuard {
-            tx: Some(completion_tx),
-        });
+        let signaler = Self { tx, completion_rx };
+        let signal = Signal {
+            inner: rx.shared(),
+            _guard: Arc::new(SignalGuard {
+                tx: Some(completion_tx),
+            }),
+        };
 
-        Self {
-            tx,
-            inner_signal: rx.shared(),
-            guard,
-            completion_rx,
-        }
-    }
-
-    /// Create a new `Signal` that shares the same completion tracking.
-    pub fn signal(&self) -> Signal {
-        Signal {
-            inner: self.inner_signal.clone(),
-            _guard: self.guard.clone(),
-        }
+        (signaler, signal)
     }
 
     /// Resolve all `Signal`s associated with this `Signaler`.
-    pub fn resolve(self, value: i32) -> oneshot::Receiver<()> {
+    pub fn signal(self, value: i32) -> oneshot::Receiver<()> {
         let _ = self.tx.send(value);
         self.completion_rx
     }
