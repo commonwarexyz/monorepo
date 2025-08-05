@@ -756,6 +756,25 @@ impl crate::Spawner for Context {
         }
     }
 
+    fn spawn_child<F, Fut, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // TODO: Implement actual child tracking
+        self.spawn(f)
+    }
+
+    fn spawn_child_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // TODO: Implement actual child tracking
+        self.spawn_ref()
+    }
+
     fn spawn_blocking<F, T>(self, dedicated: bool, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> T + Send + 'static,

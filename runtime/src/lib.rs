@@ -139,6 +139,36 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static;
 
+    /// Enqueue a child task to be executed that will be automatically aborted when the
+    /// parent task completes or is aborted.
+    ///
+    /// This method has the same semantics as [Spawner::spawn], but the spawned task will
+    /// be tracked as a child of the current task. When the parent task completes (either
+    /// successfully or via abort), all child tasks will be automatically aborted.
+    ///
+    /// # Note
+    ///
+    /// Only async tasks can be spawned as children, since blocking tasks cannot be
+    /// aborted and therefore can't support parent-child relationships.
+    fn spawn_child<F, Fut, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static;
+
+    /// Enqueue a child task to be executed (without consuming the context).
+    ///
+    /// The semantics are the same as [Spawner::spawn_child].
+    ///
+    /// # Warning
+    ///
+    /// If this function is used to spawn multiple tasks from the same context, the runtime will panic
+    /// to prevent accidental misuse.
+    fn spawn_child_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static;
+
     /// Enqueue a blocking task to be executed.
     ///
     /// This method is designed for synchronous, potentially long-running operations. Tasks can either
