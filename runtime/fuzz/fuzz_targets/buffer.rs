@@ -169,7 +169,7 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                FuzzOperation::ReadResize { new_size } => {g
+                FuzzOperation::ReadResize { new_size } => {
                     if let Some(reader) = read_buffer.take() {
                         let _ = reader.resize(new_size as u64).await;
                     }
