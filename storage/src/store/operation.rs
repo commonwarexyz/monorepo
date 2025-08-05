@@ -126,6 +126,9 @@ mod tests {
         let set_op = Operation::Set(key.clone(), value.clone());
         assert_eq!(&key, set_op.to_key().unwrap());
 
+        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        assert_eq!(&key, delete_op.to_key().unwrap());
+
         let commit_op = Operation::<U64, U64>::Commit(42);
         assert_eq!(None, commit_op.to_key());
     }
@@ -137,6 +140,9 @@ mod tests {
 
         let set_op = Operation::Set(key.clone(), value.clone());
         assert_eq!(&value, set_op.to_value().unwrap());
+
+        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        assert_eq!(None, delete_op.to_value());
 
         let commit_op = Operation::<U64, U64>::Commit(42);
         assert_eq!(None, commit_op.to_value());
@@ -155,6 +161,13 @@ mod tests {
         assert_eq!(&key, from.to_key().unwrap());
         assert_eq!(&value, from.to_value().unwrap());
         assert_eq!(set_op, from);
+
+        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        let from = Operation::<U64, U64>::decode(delete_op.encode()).unwrap();
+        assert_eq!(&key, from.to_key().unwrap());
+        assert_eq!(None, from.to_value());
+        assert!(matches!(from, Operation::Delete(_)));
+        assert_eq!(delete_op, from);
 
         let commit_op = Operation::<U64, U64>::Commit(42);
         let from = Operation::<U64, U64>::decode(commit_op.encode()).unwrap();
@@ -185,8 +198,11 @@ mod tests {
         let set_op = Operation::Set(key.clone(), value.clone());
         assert_eq!(format!("{set_op}"), format!("[key:{key} value:{value}]"));
 
-        let delete_op = Operation::<U64, U64>::Commit(42);
-        assert_eq!(format!("{delete_op}"), format!("[commit floor:42]"));
+        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        assert_eq!(format!("{delete_op}"), format!("[delete key:1234]"));
+
+        let commit_op = Operation::<U64, U64>::Commit(42);
+        assert_eq!(format!("{commit_op}"), format!("[commit floor:42]"));
     }
 
     #[test]
