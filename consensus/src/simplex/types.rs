@@ -1,12 +1,13 @@
 //! Types used in [crate::simplex].
 
-use crate::Viewable;
+use crate::{Artifact, Artifactable, Collection, Viewable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_cryptography::{Digest, Signature as CSignature, Signer, Verifier};
 use commonware_utils::{quorum, union};
+use std::marker::PhantomData;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
@@ -1038,6 +1039,31 @@ pub enum Activity<S: CSignature, D: Digest> {
     ConflictingFinalize(ConflictingFinalize<S, D>),
     /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior)
     NullifyFinalize(NullifyFinalize<S, D>),
+}
+
+pub struct ActivityCollection<S: CSignature, D: Digest> {
+    _ps: PhantomData<S>,
+    _pd: PhantomData<D>,
+}
+
+impl<S: CSignature, D: Digest> Collection for ActivityCollection<S, D> {
+    type View = View;
+    type Nullification = Nullification<S>;
+    type Finalization = Finalization<S, D>;
+    type Notarization = Notarization<S, D>;
+}
+
+impl<S: CSignature, D: Digest> Artifactable for Activity<S, D> {
+    type ArtifactCollection = ActivityCollection<S, D>;
+
+    fn artifact(&self) -> Option<Artifact<Self::ArtifactCollection>> {
+        match self {
+            Activity::Notarization(v) => Some(Artifact::Notarization(v.clone())),
+            Activity::Nullification(v) => Some(Artifact::Nullification(v.clone())),
+            Activity::Finalization(v) => Some(Artifact::Finalization(v.clone())),
+            _ => None,
+        }
+    }
 }
 
 impl<S: CSignature, D: Digest> Write for Activity<S, D> {

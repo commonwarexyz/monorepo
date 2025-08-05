@@ -1,6 +1,6 @@
 //! Types used in [crate::threshold_simplex].
 
-use crate::Viewable;
+use crate::{Artifact, Artifactable, Collection, Viewable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
@@ -21,6 +21,7 @@ use commonware_utils::union;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     hash::Hash,
+    marker::PhantomData,
 };
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
@@ -1753,6 +1754,31 @@ impl<V: Variant, D: Digest> Activity<V, D> {
             Activity::ConflictingNotarize(_) => false,
             Activity::ConflictingFinalize(_) => false,
             Activity::NullifyFinalize(_) => false,
+        }
+    }
+}
+
+pub struct ActivityCollection<V: Variant, D: Digest> {
+    _pv: PhantomData<V>,
+    _pd: PhantomData<D>,
+}
+
+impl<V: Variant, D: Digest> Collection for ActivityCollection<V, D> {
+    type View = View;
+    type Nullification = Nullification<V>;
+    type Finalization = Finalization<V, D>;
+    type Notarization = Notarization<V, D>;
+}
+
+impl<V: Variant, D: Digest> Artifactable for Activity<V, D> {
+    type ArtifactCollection = ActivityCollection<V, D>;
+
+    fn artifact(&self) -> Option<Artifact<Self::ArtifactCollection>> {
+        match self {
+            Activity::Notarization(v) => Some(Artifact::Notarization(v.clone())),
+            Activity::Nullification(v) => Some(Artifact::Nullification(v.clone())),
+            Activity::Finalization(v) => Some(Artifact::Finalization(v.clone())),
+            _ => None,
         }
     }
 }

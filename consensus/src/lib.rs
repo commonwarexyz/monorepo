@@ -13,6 +13,27 @@ pub mod ordered_broadcast;
 pub mod simplex;
 pub mod threshold_simplex;
 
+pub trait Collection {
+    type View;
+    type Nullification: Viewable<View = Self::View>;
+    type Notarization: Viewable<View = Self::View>;
+    type Finalization: Viewable<View = Self::View>;
+}
+
+pub enum Artifact<C: Collection> {
+    Notarization(C::Notarization),
+    Nullification(C::Nullification),
+    Finalization(C::Finalization),
+}
+
+/// Artifactable is a trait that provides access to an artifact of the object.
+pub trait Artifactable: Clone + Send + Sync + 'static {
+    type ArtifactCollection: Collection;
+
+    /// Get the artifact from the object.
+    fn artifact(&self) -> Option<Artifact<Self::ArtifactCollection>>;
+}
+
 /// Viewable is a trait that provides access to the view (round) number.
 /// Any consensus message or object that is associated with a specific view should implement this.
 pub trait Viewable {
@@ -21,6 +42,28 @@ pub trait Viewable {
 
     /// Returns the view associated with this object.
     fn view(&self) -> Self::View;
+}
+
+/// Heightable is a trait that provides access to the height of the object.
+pub trait Heightable {
+    /// Height is the type used to indicate the height of the object.
+    type Height;
+
+    /// Returns the height associated with this object.
+    fn height(&self) -> Self::Height;
+}
+
+/// Extendable is a trait that provides access to an extension of the object.
+///
+/// This is useful for adding additional functionality to an object. For example a consensus vote
+/// can be extended to include a partial signature for a VRF seed, and the notarization can be
+/// extended to include the recovered signature constituting the seed.
+pub trait Extendable {
+    /// Extension is the type of the extension.
+    type Extension;
+
+    /// Get the extension from the object.
+    fn extension(&self) -> Self::Extension;
 }
 
 /// Block is the interface for a block in the blockchain.
@@ -109,7 +152,7 @@ cfg_if::cfg_if! {
             /// want to reward (or penalize) participation in different ways and in different places. For example,
             /// validators could be required to send multiple types of messages (i.e. vote and finalize) and rewarding
             /// both equally may better align incentives with desired behavior.
-            type Activity;
+            type Activity: Artifactable;
 
             /// Report some activity observed by the consensus implementation.
             fn report(&mut self, activity: Self::Activity) -> impl Future<Output = ()> + Send;
