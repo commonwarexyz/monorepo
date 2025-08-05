@@ -366,12 +366,11 @@ where
     /// Returns the number of operations that were applied to the store, the oldest retained
     /// location, and the inactivity floor location.
     async fn build_snapshot_from_log(mut self) -> Result<Self, Error> {
-        let mut operations = Vec::new();
-        let mut op_count = 0;
+        let mut uncommitted_updates = Vec::new();
+        let mut uncommitted_ops = 0;
+        let mut last_commit_loc = None;
         let mut oldest_retained_loc = None;
-        let mut inactivity_floor_loc = 0;
 
-        // Replay operations from the log
         {
             let stream = self.log.replay(SNAPSHOT_READ_BUFFER_SIZE).await?;
             pin_mut!(stream);
@@ -379,101 +378,98 @@ where
                 let (section, offset, _size, op) = result?;
 
                 if oldest_retained_loc.is_none() {
-                    op_count = section * self.log_items_per_section;
-                    oldest_retained_loc = Some(op_count);
+                    self.op_count = section * self.log_items_per_section;
+                    oldest_retained_loc = Some(self.op_count);
                 }
 
-                if let Operation::Commit(loc) = op {
-                    // Update the inactivity floor location
-                    inactivity_floor_loc = loc;
-                }
+                let loc = self.op_count;
+                self.op_count += 1;
 
-                operations.push((op_count, section, offset, op));
-                op_count += 1;
+                match op {
+                    Operation::Set(key, _) => {
+                        uncommitted_ops += 1;
+
+                        uncommitted_updates.push((loc, section, offset, key));
+                    }
+                    Operation::Delete(key) => {
+                        uncommitted_ops += 1;
+
+                        // If there are any pending commit operations for this key, remove them
+                        // before they are written to the snapshot.
+                        uncommitted_updates = uncommitted_updates
+                            .into_iter()
+                            .filter(|(_, _, _, k)| *k != key)
+                            .collect::<Vec<_>>();
+
+                        let Some(old_loc) = self.get_loc(&key).await? else {
+                            continue;
+                        };
+
+                        let Some(mut cursor) = self.snapshot.get_mut(&key) else {
+                            continue;
+                        };
+
+                        // Delete all positions in the cursor that point to the key's old loc
+                        while let Some(loc) = cursor.next() {
+                            if *loc == old_loc {
+                                cursor.delete();
+                                continue;
+                            }
+                        }
+                    }
+                    Operation::Commit(floor_loc) => {
+                        // Bump the inactivity floor
+                        self.inactivity_floor_loc = floor_loc;
+                        last_commit_loc = Some((section, offset));
+
+                        // Flush all uncommitted update operations to the snapshot
+                        for (pos, _, _, key) in uncommitted_updates.iter() {
+                            let Some(old_loc) = self.get_loc(key).await? else {
+                                self.snapshot.insert(key, *pos);
+                                continue;
+                            };
+
+                            let Some(mut cursor) = self.snapshot.get_mut(key) else {
+                                continue;
+                            };
+
+                            // Update all conflicts in the cursor that point to the key's old loc
+                            while let Some(loc) = cursor.next() {
+                                if *loc == old_loc {
+                                    cursor.update(*pos);
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Clear uncommitted operations
+                        uncommitted_updates.clear();
+                        uncommitted_ops = 0;
+                    }
+                }
             }
         }
 
-        // Find the last commit operation to determine where to rewind
-        let rewind_pos = operations
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(i, (_, _, _, op))| matches!(op, Operation::Commit(_)).then_some(i + 1))
-            .unwrap_or(0);
+        if uncommitted_ops > 0 {
+            if let Some((last_section, last_offset)) = last_commit_loc {
+                let last_uncommitted_loc = self.op_count - uncommitted_ops;
+                self.op_count = last_uncommitted_loc;
 
-        // Rewind uncommitted operations if necessary
-        if rewind_pos != operations.len() {
-            let ops_to_rewind = operations.len() - rewind_pos;
-            warn!(ops_to_rewind, "rewinding over uncommitted log operations");
-            op_count -= ops_to_rewind as u64;
-
-            // Rewind to the appropriate position
-            if rewind_pos > 0 {
-                // Rewind to just after the last committed operation
-                let (_, last_section, last_offset, _) = &operations[rewind_pos - 1];
-                self.log
-                    .rewind(*last_section, *last_offset as u64 + 1)
-                    .await
-                    .map_err(Error::Journal)?;
-                self.locations
-                    .rewind(op_count)
-                    .await
-                    .map_err(Error::Journal)?;
+                try_join!(
+                    self.log.rewind(last_section, last_offset as u64 + 1),
+                    self.locations.rewind(last_uncommitted_loc)
+                )?;
             } else {
-                // No commits found, rewind to beginning (empty log)
-                self.log.rewind(0, 0).await.map_err(Error::Journal)?;
-                self.locations.rewind(0).await.map_err(Error::Journal)?;
-            }
-
-            operations.truncate(rewind_pos);
-        }
-
-        for (pos, _, _, op) in operations.iter() {
-            match op {
-                Operation::Set(key, _) => {
-                    let Some(old_loc) = self.get_loc(key).await? else {
-                        self.snapshot.insert(key, *pos);
-                        continue;
-                    };
-
-                    let Some(mut cursor) = self.snapshot.get_mut(key) else {
-                        continue;
-                    };
-
-                    // Set the cursor location to the most recent position for this key.
-                    while let Some(loc) = cursor.next() {
-                        if *loc == old_loc {
-                            cursor.update(*pos);
-                            continue;
-                        }
-                    }
-                }
-                Operation::Delete(key) => {
-                    let Some(old_loc) = self.get_loc(key).await? else {
-                        continue;
-                    };
-
-                    let Some(mut cursor) = self.snapshot.get_mut(key) else {
-                        continue;
-                    };
-
-                    // Set the cursor location to the most recent position for this key.
-                    while let Some(loc) = cursor.next() {
-                        if *loc == old_loc {
-                            cursor.delete();
-                            continue;
-                        }
-                    }
-                }
-                _ => {}
+                // No commits found; Drain log entirely.
+                self.op_count = 0;
+                try_join!(self.log.rewind(0, 0), self.locations.rewind(0))?;
             }
         }
 
-        assert_eq!(op_count, self.locations.size().await?);
-
-        self.op_count = op_count;
-        self.inactivity_floor_loc = inactivity_floor_loc;
         self.oldest_retained_loc = oldest_retained_loc.unwrap_or(0);
+
+        assert_eq!(self.op_count, self.locations.size().await?);
+        assert_eq!(self.uncommitted_ops, 0);
 
         Ok(self)
     }
