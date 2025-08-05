@@ -597,7 +597,7 @@ impl Context {
         let deadline = cfg
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
-        let signaler = Signaler::new();
+        let signaler = Signaler::default();
         let auditor = Arc::new(Auditor::default());
         let storage = MeteredStorage::new(
             AuditedStorage::new(MemStorage::default(), auditor.clone()),
@@ -664,7 +664,7 @@ impl Context {
 
         // Copy state
         let auditor = self.executor.auditor.clone();
-        let signaler = Signaler::new();
+        let signaler = Signaler::default();
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 

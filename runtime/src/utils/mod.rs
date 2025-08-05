@@ -70,7 +70,7 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
 ///     // Setup signaler and get a signal future
-///     let signaler = Signaler::new();
+///     let signaler = Signaler::default();
 ///     let signal = signaler.signal();
 ///
 ///     // Resolve the signaler (i.e. trigger shutdown)
@@ -98,7 +98,7 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
 ///     // Setup signaler and get a signal future
-///     let signaler = Signaler::new();
+///     let signaler = Signaler::default();
 ///     let mut signal = signaler.signal();
 ///
 ///     // Loop on the signal until resolved
@@ -155,6 +155,12 @@ pub struct Signaler {
     inner_signal: Shared<oneshot::Receiver<i32>>,
     guard: Arc<SignalGuard>,
     completion_rx: oneshot::Receiver<()>,
+}
+
+impl Default for Signaler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Signaler {

@@ -251,7 +251,7 @@ impl crate::Runner for Runner {
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
-        let signaler = Signaler::new();
+        let signaler = Signaler::default();
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
