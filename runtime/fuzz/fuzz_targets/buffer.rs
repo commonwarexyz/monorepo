@@ -242,7 +242,7 @@ fn fuzz(input: FuzzInput) {
                         } else {
                             &data
                         };
-                        pool.cache(blob_id as u64, data, aligned_offset).await;g
+                        pool.cache(blob_id as u64, data, aligned_offset).await;
                     }
                 }
 
