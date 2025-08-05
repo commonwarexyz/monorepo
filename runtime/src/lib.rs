@@ -979,7 +979,8 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // Signal the tasks and wait for them to stop
-            let _ = context.stop(kill, None).await;
+            let result = context.stop(kill, None).await;
+            assert!(result.is_ok());
 
             // Ensure both tasks complete
             let result = join!(before, after);
