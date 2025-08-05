@@ -409,7 +409,7 @@ mod tests {
     use commonware_macros::select;
     use futures::{
         channel::{mpsc, oneshot},
-        future::ready,
+        future::{pending, ready},
         join, SinkExt, StreamExt,
     };
     use prometheus_client::metrics::counter::Counter;
@@ -1042,6 +1042,37 @@ mod tests {
         });
     }
 
+    fn test_shutdown_timeout<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Metrics + Clock,
+    {
+        let kill = 42;
+        runner.start(|context| async move {
+            // Spawn a task that never completes its cleanup
+            context.clone().spawn(move |context| async move {
+                let mut signal = context.stopped();
+                loop {
+                    select! {
+                        sig = &mut signal => {
+                            assert_eq!(sig.unwrap(), kill);
+                            pending().await
+                        },
+                        _ = context.sleep(Duration::from_millis(10)) => {},
+                    }
+                }
+            });
+
+            // Give task time to start
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Try to stop with a timeout
+            let result = context.stop(kill, Some(Duration::from_millis(100))).await;
+
+            // Assert that we got a timeout error
+            assert!(matches!(result, Err(Error::Timeout)));
+        });
+    }
+
     fn test_spawn_ref<R: Runner>(runner: R)
     where
         R::Context: Spawner,
@@ -1307,6 +1338,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_shutdown_timeout() {
+        let executor = deterministic::Runner::default();
+        test_shutdown_timeout(executor);
+    }
+
+    #[test]
     fn test_deterministic_spawn_ref() {
         let executor = deterministic::Runner::default();
         test_spawn_ref(executor);
@@ -1487,6 +1524,12 @@ mod tests {
     fn test_tokio_shutdown_multiple_signals() {
         let executor = tokio::Runner::default();
         test_shutdown_multiple_signals(executor);
+    }
+
+    #[test]
+    fn test_tokio_shutdown_timeout() {
+        let executor = tokio::Runner::default();
+        test_shutdown_timeout(executor);
     }
 
     #[test]
