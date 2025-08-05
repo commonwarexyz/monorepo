@@ -244,13 +244,9 @@ where
     /// If the key does not exist, returns `Ok(None)`.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         for location in self.snapshot.get(key) {
-            let (k, v) = Self::get_set_op(
-                &self.log,
-                &self.locations,
-                self.log_items_per_section,
-                *location,
-            )
-            .await?;
+            let Operation::Set(k, v) = self.get_op(*location).await? else {
+                panic!("location ({location}) does not reference set operation",);
+            };
 
             if &k == key {
                 return Ok(Some(v));
@@ -262,24 +258,20 @@ where
 
     /// Updates the value associated with the given key in the store.
     ///
-    /// If the key already has the same value, this is a no-op and no log entry is created.
-    ///
     /// The operation is immediately visible in the snapshot for subsequent queries, but remains
     /// uncommitted until [`Store::commit`] is called. Uncommitted operations will be rolled back
     /// if the store is closed without committing.
-    pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
-        // Check if this is a no-op
-        if let Some(current_value) = self.get(&key).await? {
-            if current_value == value {
-                return Ok(UpdateResult::NoOp);
-            }
-        }
-
+    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let new_location = self.op_count;
-        self.apply_op(Operation::Set(key.clone(), value.clone()))
-            .await?;
+        if let Some(old_location) = self.get_loc(&key).await? {
+            Self::update_loc(&mut self.snapshot, &key, old_location, new_location);
+        } else {
+            self.snapshot.insert(&key, new_location);
+        };
 
-        self.update_loc(key, value, new_location).await
+        self.apply_op(Operation::Set(key.clone(), value.clone()))
+            .await
+            .map(|_| ())
     }
 
     /// Deletes the value associated with the given key in the store. If the key has no value,
@@ -290,19 +282,7 @@ where
             return Ok(());
         };
 
-        let Some(mut cursor) = self.snapshot.get_mut(&key) else {
-            return Ok(());
-        };
-
-        // Delete the old location from the snapshot.
-        while let Some(loc) = cursor.next() {
-            if *loc == old_loc {
-                cursor.delete();
-                break;
-            }
-        }
-
-        drop(cursor);
+        Self::delete_loc(&mut self.snapshot, &key, old_loc);
 
         self.apply_op(Operation::Delete(key)).await.map(|_| ())
     }
@@ -405,17 +385,7 @@ where
                             continue;
                         };
 
-                        let Some(mut cursor) = self.snapshot.get_mut(&key) else {
-                            continue;
-                        };
-
-                        // Delete all positions in the cursor that point to the key's old loc
-                        while let Some(loc) = cursor.next() {
-                            if *loc == old_loc {
-                                cursor.delete();
-                                continue;
-                            }
-                        }
+                        Self::delete_loc(&mut self.snapshot, &key, old_loc);
                     }
                     Operation::Commit(floor_loc) => {
                         // Bump the inactivity floor
@@ -429,17 +399,7 @@ where
                                 continue;
                             };
 
-                            let Some(mut cursor) = self.snapshot.get_mut(key) else {
-                                continue;
-                            };
-
-                            // Update all conflicts in the cursor that point to the key's old loc
-                            while let Some(loc) = cursor.next() {
-                                if *loc == old_loc {
-                                    cursor.update(*pos);
-                                    continue;
-                                }
-                            }
+                            Self::update_loc(&mut self.snapshot, key, old_loc, *pos);
                         }
 
                         // Clear uncommitted operations
@@ -500,13 +460,14 @@ where
     /// the key does not have a value.
     async fn get_loc(&self, key: &K) -> Result<Option<u64>, Error> {
         for loc in self.snapshot.get(key) {
-            let section = loc / self.log_items_per_section;
-            let offset = self.locations.read(*loc).await?.to_u32();
-
-            if let Some(Operation::Set(k, _)) = self.log.get(section, offset).await? {
-                if k == *key {
-                    return Ok(Some(*loc));
+            match self.get_op(*loc).await {
+                Ok(Operation::Set(k, _)) => {
+                    if k == *key {
+                        return Ok(Some(*loc));
+                    }
                 }
+                Err(Error::KeyNotFound) => return Ok(None),
+                _ => continue,
             }
         }
 
@@ -526,66 +487,36 @@ where
         Ok(op)
     }
 
-    /// Gets a [`Operation::Set`] operation from the log at the given location.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the location does not reference a [`Operation::Set`] operation.
-    async fn get_set_op(
-        log: &VJournal<E, Operation<K, V>>,
-        locations: &FJournal<E, U32>,
-        log_items_per_section: u64,
-        location: u64,
-    ) -> Result<(K, V), Error> {
-        let section = location / log_items_per_section;
-        let offset = locations.read(location).await?.to_u32();
-
-        let Some(Operation::Set(k, v)) = log.get(section, offset).await? else {
-            panic!(
-                "location ({location}) does not reference set operation. section={section}, offset={offset}",
-            );
-        };
-
-        Ok((k, v))
-    }
-
     /// Updates the snapshot with the new operation location for the given key.
-    async fn update_loc(
-        &mut self,
-        key: K,
-        value: V,
-        new_location: u64,
-    ) -> Result<UpdateResult, Error> {
-        // Update the snapshot with the new operation location.
-        let Some(mut cursor) = self.snapshot.get_mut_or_insert(&key, new_location) else {
-            return Ok(UpdateResult::Inserted(new_location));
+    fn update_loc(snapshot: &mut Index<T, u64>, key: &K, old_location: u64, new_location: u64) {
+        let Some(mut cursor) = snapshot.get_mut(key) else {
+            return;
         };
 
         // Iterate over conflicts in the snapshot.
         while let Some(location) = cursor.next() {
-            let (k, v) = Self::get_set_op(
-                &self.log,
-                &self.locations,
-                self.log_items_per_section,
-                *location,
-            )
-            .await?;
-
-            if k == key {
-                if v == value {
-                    return Ok(UpdateResult::NoOp);
-                }
-
+            if *location == old_location {
                 // Update the cursor with the new location for this key.
-                let result = UpdateResult::Updated(*location, new_location);
                 cursor.update(new_location);
-                return Ok(result);
+                return;
             }
         }
+    }
 
-        // The key wasn't in the snapshot, so add it to the cursor.
-        cursor.insert(new_location);
-        Ok(UpdateResult::Inserted(new_location))
+    /// Deletes items in the snapshot that point to the given location.
+    fn delete_loc(snapshot: &mut Index<T, u64>, key: &K, old_location: u64) {
+        let Some(mut cursor) = snapshot.get_mut(key) else {
+            return;
+        };
+
+        // Iterate over conflicts in the snapshot.
+        while let Some(location) = cursor.next() {
+            if *location == old_location {
+                // Delete the element from the cursor.
+                cursor.delete();
+                return;
+            }
+        }
     }
 
     // Moves the given operation to the tip of the log if it is active, rendering its old location
@@ -594,27 +525,29 @@ where
     async fn move_op_if_active(
         &mut self,
         op: Operation<K, V>,
-        old_loc: u64,
+        old_location: u64,
     ) -> Result<Option<u64>, Error> {
         // If the translated key is not in the snapshot, get a cursor to look for the key.
         let Some(key) = op.to_key() else {
             // `op` is not a key-related operation, so it is not active.
             return Ok(None);
         };
-        let new_loc = self.op_count;
+
         let Some(mut cursor) = self.snapshot.get_mut(key) else {
             return Ok(None);
         };
 
+        let new_location = self.op_count;
+
         // Iterate over all conflicting keys in the snapshot.
-        while let Some(&loc) = cursor.next() {
-            if loc == old_loc {
+        while let Some(&location) = cursor.next() {
+            if location == old_location {
                 // Update the location of the operation in the snapshot.
-                cursor.update(new_loc);
+                cursor.update(new_location);
                 drop(cursor);
 
                 self.apply_op(op).await?;
-                return Ok(Some(old_loc));
+                return Ok(Some(old_location));
             }
         }
 
@@ -680,16 +613,6 @@ where
             .await
             .map_err(Error::Journal)
     }
-}
-
-/// The result of a database `update` operation.
-pub enum UpdateResult {
-    /// Tried to set a key to its current value.
-    NoOp,
-    /// Key was not previously in the snapshot & its new loc is the wrapped value.
-    Inserted(u64),
-    /// Key was previously in the snapshot & its (old, new) loc pair is wrapped.
-    Updated(u64, u64),
 }
 
 /// Errors that can occur when interacting with a [`Store`] database.
@@ -976,9 +899,19 @@ mod test {
 
             // Re-open the store and ensure the snapshot restores the key, after processing
             // the delete and the subsequent set.
-            let store = create_test_store(ctx.with_label("store")).await;
+            let mut store = create_test_store(ctx.with_label("store")).await;
             let fetched_value = store.get(&k).await.unwrap();
             assert_eq!(fetched_value.unwrap(), v);
+
+            // Delete a non-existent key (no-op)
+            let k_n = Digest::random(&mut ctx);
+            store.delete(k_n).await.unwrap();
+
+            let iter = store.snapshot.get(&k);
+            assert_eq!(iter.count(), 1);
+
+            let iter = store.snapshot.get(&k_n);
+            assert_eq!(iter.count(), 0);
 
             store.destroy().await.unwrap();
         });
