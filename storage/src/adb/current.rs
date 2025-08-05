@@ -669,18 +669,7 @@ impl<
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition
-        let metadata_cfg = crate::metadata::Config {
-            partition: self.bitmap_metadata_partition,
-            codec_config: ((0..).into(), ()),
-        };
-        let metadata = crate::metadata::Metadata::<
-            _,
-            commonware_utils::sequence::prefixed_u64::U64,
-            Vec<u8>,
-        >::init(self.context.with_label("metadata"), metadata_cfg)
-        .await
-        .map_err(Error::MetadataError)?;
-        metadata.destroy().await.map_err(Error::MetadataError)?;
+        Bitmap::<H, N>::destroy(self.context.clone(), &self.bitmap_metadata_partition).await?;
 
         // Clean up Any components (MMR and log)
         self.any.destroy().await
