@@ -108,7 +108,7 @@ mod tests {
         deterministic::{self, Context},
         Runner,
     };
-    use commonware_utils::sequence::FixedBytes;
+    use commonware_utils::{sequence::FixedBytes, NZUsize};
     use rand::Rng;
     use std::collections::BTreeMap;
 
@@ -130,8 +130,8 @@ mod tests {
             compression,
             codec_config: (),
             items_per_section: 1024,
-            write_buffer: 1024,
-            replay_buffer: 1024,
+            write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
         };
         prunable::Archive::init(context, cfg).await.unwrap()
     }
@@ -151,8 +151,8 @@ mod tests {
             freezer_journal_compression: compression,
             ordinal_partition: "test_ordinal".into(),
             items_per_section: 1024,
-            write_buffer: 1024 * 1024,
-            replay_buffer: 1024 * 1024,
+            write_buffer: NZUsize!(1024 * 1024),
+            replay_buffer: NZUsize!(1024 * 1024),
             codec_config: (),
         };
         immutable::Archive::init(context, cfg).await.unwrap()

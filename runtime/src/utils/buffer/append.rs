@@ -2,8 +2,8 @@ use crate::{
     buffer::{tip::Buffer, PoolRef},
     Blob, Error, RwLock,
 };
-use commonware_utils::StableBuf;
-use std::sync::Arc;
+use commonware_utils::{NZUsize, StableBuf};
+use std::{num::NonZeroUsize, sync::Arc};
 
 /// A [Blob] wrapper that supports appending new data that is both read and write cached, and
 /// provides buffer-pool managed read caching of older data.
@@ -36,20 +36,21 @@ impl<B: Blob> Append<B> {
     pub async fn new(
         blob: B,
         size: u64,
-        mut buffer_size: usize,
+        buffer_size: NonZeroUsize,
         pool_ref: PoolRef,
     ) -> Result<Self, Error> {
         // Set a floor on the write buffer size to make sure we always write at least 1 page of new
         // data with each flush. We multiply page_size by two here since we could be storing up to
         // page_size-1 bytes of already written data in the append buffer to maintain page
         // alignment.
+        let mut buffer_size = buffer_size.get();
         buffer_size = buffer_size.max(pool_ref.page_size * 2);
 
         // Initialize the append buffer to contain the last non-full page of bytes from the blob to
         // ensure its offset into the blob is always page aligned.
         let leftover_size = size % pool_ref.page_size as u64;
         let page_aligned_size = size - leftover_size;
-        let mut buffer = Buffer::new(page_aligned_size, buffer_size);
+        let mut buffer = Buffer::new(page_aligned_size, NZUsize!(buffer_size));
         if leftover_size != 0 {
             let page_buf = vec![0; leftover_size as usize];
             let buf = blob.read_at(page_buf, page_aligned_size).await?;
@@ -219,6 +220,7 @@ mod tests {
     use super::*;
     use crate::{deterministic, Runner, Storage as _};
     use commonware_macros::test_traced;
+    use commonware_utils::NZUsize;
 
     const PAGE_SIZE: usize = 1024;
     const BUFFER_SIZE: usize = PAGE_SIZE * 2;
@@ -235,7 +237,7 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
             let pool_ref = PoolRef::new(PAGE_SIZE, 10);
-            let blob = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone())
+            let blob = Append::new(blob, size, NZUsize!(BUFFER_SIZE), pool_ref.clone())
                 .await
                 .unwrap();
             assert_eq!(blob.size().await, 0);
@@ -257,7 +259,7 @@ mod tests {
 
             // Wrap the blob, then append 11 consecutive pages of data.
             let pool_ref = PoolRef::new(PAGE_SIZE, 10);
-            let blob = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone())
+            let blob = Append::new(blob, size, NZUsize!(BUFFER_SIZE), pool_ref.clone())
                 .await
                 .unwrap();
             for i in 0..11 {
@@ -291,7 +293,7 @@ mod tests {
             assert_eq!(size, 0);
 
             let pool_ref = PoolRef::new(PAGE_SIZE, 10);
-            let blob = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone())
+            let blob = Append::new(blob, size, NZUsize!(BUFFER_SIZE), pool_ref.clone())
                 .await
                 .unwrap();
 

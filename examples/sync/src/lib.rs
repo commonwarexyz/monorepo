@@ -14,6 +14,7 @@ use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_storage::adb::any::fixed::{Any, Config};
 
 pub mod error;
+use commonware_utils::NZUsize;
 pub use error::Error;
 pub mod protocol;
 pub use protocol::*;
@@ -49,10 +50,10 @@ pub fn create_adb_config() -> Config<Translator> {
         mmr_journal_partition: "mmr_journal".into(),
         mmr_metadata_partition: "mmr_metadata".into(),
         mmr_items_per_blob: 4096,
-        mmr_write_buffer: 1024,
+        mmr_write_buffer: NZUsize!(1024),
         log_journal_partition: "log_journal".into(),
         log_items_per_blob: 4096,
-        log_write_buffer: 1024,
+        log_write_buffer: NZUsize!(1024),
         translator: Translator::default(),
         thread_pool: None,
         buffer_pool: commonware_runtime::buffer::PoolRef::new(1024, 10),

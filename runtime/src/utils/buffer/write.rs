@@ -1,6 +1,6 @@
 use crate::{buffer::tip::Buffer, Blob, Error, RwLock};
 use commonware_utils::StableBuf;
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc};
 
 /// A writer that buffers content to a [Blob] to optimize the performance
 /// of appending or updating data.
@@ -50,9 +50,7 @@ impl<B: Blob> Write<B> {
     /// # Panics
     ///
     /// Panics if `capacity` is zero.
-    pub fn new(blob: B, size: u64, capacity: usize) -> Self {
-        assert!(capacity > 0, "buffer capacity must be greater than zero");
-
+    pub fn new(blob: B, size: u64, capacity: NonZeroUsize) -> Self {
         Self {
             blob,
             buffer: Arc::new(RwLock::new(Buffer::new(size, capacity))),

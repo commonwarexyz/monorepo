@@ -1,5 +1,6 @@
 use crate::{Blob, Error};
 use commonware_utils::StableBuf;
+use std::num::NonZeroUsize;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
 /// of a full scan of contents.
@@ -53,16 +54,15 @@ impl<B: Blob> Read<B> {
     /// # Panics
     ///
     /// Panics if `buffer_size` is zero.
-    pub fn new(blob: B, blob_size: u64, buffer_size: usize) -> Self {
-        assert!(buffer_size > 0, "buffer size must be greater than zero");
+    pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize) -> Self {
         Self {
             blob,
-            buffer: vec![0; buffer_size].into(),
+            buffer: vec![0; buffer_size.get()].into(),
             blob_position: 0,
             blob_size,
             buffer_position: 0,
             buffer_valid_len: 0,
-            buffer_size,
+            buffer_size: buffer_size.get(),
         }
     }
 
