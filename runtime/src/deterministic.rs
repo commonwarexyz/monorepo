@@ -1140,7 +1140,6 @@ mod tests {
             let (blob, _) = context.open(partition, name).await.unwrap();
             blob.write_at(Vec::from(data), 0).await.unwrap();
             blob.sync().await.unwrap();
-            drop(blob); // Ensure blob is dropped before capturing state
             let state = context.auditor().state();
             (context, state)
         });
