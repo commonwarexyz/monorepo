@@ -45,7 +45,7 @@
 //!
 //! Data written to `Journal` may not be immediately persisted to `Storage`. It is up to the caller
 //! to determine when to force pending data to be written to `Storage` using the `sync` method. When
-//! calling `close`, all pending data is automatically synced and any open blobs are closed.
+//! calling `close`, all pending data is automatically synced and any open blobs are dropped.
 //!
 //! # Pruning
 //!
@@ -750,12 +750,12 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         for (section, blob) in self.blobs.into_iter() {
             let size = blob.size().await;
             blob.sync().await?;
-            debug!(blob = section, size, "closed blob");
+            debug!(blob = section, size, "synced blob");
         }
         Ok(())
     }
 
-    /// Close and remove any underlying blobs created by the journal.
+    /// Remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
             let size = blob.size().await;

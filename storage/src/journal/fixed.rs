@@ -696,10 +696,10 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     pub async fn close(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
             blob.sync().await?;
-            debug!(blob = i, "closed blob");
+            debug!(blob = i, "synced blob");
         }
         self.tail.sync().await?;
-        debug!(blob = self.tail_index, "closed blob");
+        debug!(blob = self.tail_index, "synced tail");
 
         Ok(())
     }

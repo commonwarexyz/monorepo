@@ -216,14 +216,14 @@ mod tests {
         drop(blob);
 
         // Verify that the open_blobs metric is decremented
-        let open_blobs_after_close = storage.metrics.open_blobs.get();
+        let open_blobs_after_drop = storage.metrics.open_blobs.get();
         assert_eq!(
-            open_blobs_after_close, 0,
+            open_blobs_after_drop, 0,
             "open_blobs metric was not decremented after dropping the blob"
         );
     }
 
-    /// Test that metrics are updated correctly when multiple blobs are opened and closed.
+    /// Test that metrics are updated correctly when multiple blobs are opened and dropped.
     #[tokio::test]
     async fn test_metered_blob_multiple_blobs() {
         let mut registry = Registry::default();
@@ -257,9 +257,9 @@ mod tests {
         drop(blob2);
 
         // Verify that the open_blobs metric is decremented to zero
-        let open_blobs_after_close_all = storage.metrics.open_blobs.get();
+        let open_blobs_after_drop_all = storage.metrics.open_blobs.get();
         assert_eq!(
-            open_blobs_after_close_all, 0,
+            open_blobs_after_drop_all, 0,
             "open_blobs metric was not decremented to zero after dropping all blobs"
         );
     }

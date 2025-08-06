@@ -84,8 +84,6 @@ pub enum Error {
     BlobResizeFailed(String, String, IoError),
     #[error("blob sync failed: {0}/{1} error: {2}")]
     BlobSyncFailed(String, String, IoError),
-    #[error("blob close failed: {0}/{1} error: {2}")]
-    BlobCloseFailed(String, String, IoError),
     #[error("blob insufficient length")]
     BlobInsufficientLength,
     #[error("offset overflow")]
@@ -364,10 +362,9 @@ pub trait Storage: Clone + Send + Sync + 'static {
 /// name, they are not expected to coordinate access to underlying storage
 /// and writing to both is undefined behavior.
 ///
-/// Blobs are automatically closed when they go out of scope. Any pending
-/// changes that have not been synced may be discarded when the blob is dropped.
-/// Use the `sync` method before dropping to ensure all changes are durably
-/// persisted.
+/// When a blob is dropped, any unsynced changes may be discarded. Implementations
+/// may attempt to sync during drop but errors will go unhandled. Call `sync`
+/// before dropping to ensure all changes are durably persisted.
 #[allow(clippy::len_without_is_empty)]
 pub trait Blob: Clone + Send + Sync + 'static {
     /// Read from the blob at the given offset.
@@ -917,7 +914,7 @@ mod tests {
                 .expect("Failed to read from blob");
             assert_eq!(read.as_ref(), data);
 
-            // Close the blob
+            // Drop the blob
             drop(blob);
 
             // Ensure no blobs still open
