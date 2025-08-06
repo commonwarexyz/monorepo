@@ -194,7 +194,7 @@ mod tests {
                     &mut oracle,
                     coordinator.clone(),
                     secrets[i].clone(),
-                    identity,
+                    &identity,
                 )
                 .await;
                 applications.insert(pks[i].clone(), application);
@@ -292,14 +292,13 @@ mod tests {
         oracle: &mut Oracle<P>,
         coordinator: resolver::mocks::Coordinator<P>,
         secret: E,
-        identity: <V as Variant>::Public,
+        identity: &'static <V as Variant>::Public,
     ) -> (
         Application<B>,
-        crate::marshal::ingress::mailbox::Mailbox<V, B, Notarization<V, D>, Finalization<V, D>>,
+        crate::marshal::ingress::mailbox::Mailbox<B, Activity<V, D>>,
     ) {
         let config = Config {
-            notarization_codec_config: (),
-            finalization_codec_config: (),
+            collection_codec_config: (),
             public_key: secret.public_key(),
             identity,
             coordinator,

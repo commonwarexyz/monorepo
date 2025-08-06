@@ -147,29 +147,14 @@ impl<B: Block, A: Artifactable> Reporter for Mailbox<B, A> {
     type Activity = A;
 
     async fn report(&mut self, activity: Self::Activity) {
-        match activity.artifact() {
-            Artifact::Notarization(notarization) => {
-                if self
-                    .sender
-                    .send(Message::Notarization { notarization })
-                    .await
-                    .is_err()
-                {
-                    error!("failed to send notarization message to actor: receiver dropped");
-                }
-            }
-            Artifact::Finalization(finalization) => {
-                if self
-                    .sender
-                    .send(Message::Finalization { finalization })
-                    .await
-                    .is_err()
-                {
-                    error!("failed to send finalization message to actor: receiver dropped");
-                }
-            }
-            // Nullifications and None artifacts are dropped for this marshal implementation
-            _ => {}
+        let message = match activity.artifact() {
+            Artifact::Notarization(notarization) => Message::Notarization { notarization },
+            Artifact::Finalization(finalization) => Message::Finalization { finalization },
+            _ => return,
+        };
+
+        if let Err(e) = self.sender.send(message).await {
+            error!("failed to send message to actor: {}", e);
         }
     }
 }
