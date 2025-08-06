@@ -218,11 +218,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             .await;
 
         // Verify contents
-        let (parsed_view, parent) = match <(u64, H::Digest)>::decode(&mut contents) {
-            Ok(value) => value,
-            Err(e) => {
-                self.panic(&format!("invalid payload: {e}"));
-            }
+        let Ok((parsed_view, parent)) = <(u64, H::Digest)>::decode(&mut contents) else {
+            self.panic("invalid payload");
         };
         if parsed_view != context.view {
             self.panic(&format!(
