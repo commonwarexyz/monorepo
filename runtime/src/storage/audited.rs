@@ -103,16 +103,6 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 }
 
-impl<B: crate::Blob> Drop for Blob<B> {
-    fn drop(&mut self) {
-        // Emit close event when blob is dropped
-        self.auditor.event(b"close", |hasher| {
-            hasher.update(self.partition.as_bytes());
-            hasher.update(&self.name);
-        });
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -195,6 +185,16 @@ mod tests {
             auditor1.state(),
             auditor2.state(),
             "Hashes do not match after sync"
+        );
+
+        // Drop the blobs
+        drop(blob1);
+        drop(blob2);
+
+        assert_eq!(
+            auditor1.state(),
+            auditor2.state(),
+            "Hashes do not match after drop"
         );
 
         // Remove the blobs

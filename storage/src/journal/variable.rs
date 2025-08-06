@@ -651,7 +651,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             let blob = self.blobs.remove(index).unwrap();
 
             // Destroy the blob
-            blob.sync().await?;
+            drop(blob);
             self.context
                 .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
                 .await?;
@@ -729,7 +729,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             // Remove and sync blob
             let blob = self.blobs.remove(&section).unwrap();
             let size = blob.size().await;
-            blob.sync().await?;
+            drop(blob);
 
             // Remove blob from storage
             self.context
@@ -759,7 +759,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
             let size = blob.size().await;
-            blob.sync().await?;
+            drop(blob);
             debug!(blob = i, size, "destroyed blob");
             self.context
                 .remove(&self.cfg.partition, Some(&i.to_be_bytes()))

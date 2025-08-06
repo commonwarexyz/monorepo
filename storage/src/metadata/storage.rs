@@ -411,7 +411,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
     /// Sync and remove the underlying blobs.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, wrapper) in self.blobs.into_iter().enumerate() {
-            wrapper.blob.sync().await?;
+            drop(wrapper.blob);
             self.context
                 .remove(&self.partition, Some(BLOB_NAMES[i]))
                 .await?;

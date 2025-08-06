@@ -682,7 +682,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
     /// Safely removes any previously tracked blob from underlying storage.
     async fn remove_blob(&mut self, index: u64, blob: Append<E::Blob>) -> Result<(), Error> {
-        blob.sync().await?;
+        drop(blob);
         self.context
             .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
             .await?;
@@ -707,7 +707,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     /// Sync and remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
-            blob.sync().await?;
+            drop(blob);
             debug!(blob = i, "destroyed blob");
             self.context
                 .remove(&self.cfg.partition, Some(&i.to_be_bytes()))

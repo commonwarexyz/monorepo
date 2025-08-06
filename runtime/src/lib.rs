@@ -613,7 +613,7 @@ mod tests {
                 .expect("Failed to read from blob");
             assert_eq!(read.as_ref(), data);
 
-            // Sync the blob before drop
+            // Sync the blob
             blob.sync().await.expect("Failed to sync blob");
 
             // Scan blobs in the partition
@@ -637,7 +637,7 @@ mod tests {
                 .expect("Failed to read data");
             assert_eq!(read.as_ref(), b"Storage");
 
-            // Sync the blob before drop
+            // Sync the blob
             blob.sync().await.expect("Failed to sync blob");
 
             // Remove the blob
@@ -740,9 +740,6 @@ mod tests {
                 .await
                 .expect("Failed to write");
             blob.sync().await.expect("Failed to sync after write");
-            blob.sync()
-                .await
-                .expect("Failed to sync blob after writing");
 
             // Re-open and check length
             let (blob, len) = context.open(partition, name).await.unwrap();
@@ -754,9 +751,6 @@ mod tests {
                 .await
                 .expect("Failed to resize to extend");
             blob.sync().await.expect("Failed to sync after resize");
-            blob.sync()
-                .await
-                .expect("Failed to sync blob after resizing");
 
             // Re-open and check length again
             let (blob, len) = context.open(partition, name).await.unwrap();
@@ -775,7 +769,6 @@ mod tests {
 
             // Truncate the blob
             blob.resize(data.len() as u64).await.unwrap();
-            blob.sync().await.unwrap();
             blob.sync().await.unwrap();
 
             // Reopen to check truncation
@@ -814,7 +807,7 @@ mod tests {
                     .await
                     .expect("Failed to write data2");
 
-                // Sync the blob before drop
+                // Sync the blob
                 blob.sync().await.expect("Failed to sync blob");
             }
 
@@ -833,9 +826,6 @@ mod tests {
                     .expect("Failed to read data");
                 assert_eq!(&read.as_ref()[..5], b"Hello");
                 assert_eq!(&read.as_ref()[5 + additional..], b"World");
-
-                // Sync the blob before drop
-                blob.sync().await.expect("Failed to sync blob");
             }
         });
     }
@@ -927,8 +917,7 @@ mod tests {
                 .expect("Failed to read from blob");
             assert_eq!(read.as_ref(), data);
 
-            // Sync the blob before drop
-            blob.sync().await.expect("Failed to sync blob");
+            // Close the blob
             drop(blob);
 
             // Ensure no blobs still open
