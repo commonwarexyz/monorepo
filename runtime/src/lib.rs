@@ -182,8 +182,8 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// to perform any required cleanup and exit.
     ///
     /// This method does not actually kill any tasks but rather signals to them, using
-    /// the `Signal` returned by `stopped`, that they should exit. It then waits
-    /// for all `Signal` references to be dropped before returning.
+    /// the [signal::Signal] returned by [Spawner::stopped], that they should exit.
+    /// It then waits for all [signal::Signal] references to be dropped before returning.
     ///
     /// ## Multiple Stop Calls
     ///
@@ -193,12 +193,9 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// will wait for the same completion regardless of their `value` parameter, i.e.
     /// the original `value` from the first call is preserved.
     ///
-    /// Once all tasks complete their cleanup, subsequent `stop()` calls return
-    /// immediately without waiting.
-    ///
     /// ## Timeout
     ///
-    /// If a timeout is provided, the method will return an error if all `Signal`
+    /// If a timeout is provided, the method will return an error if all [signal::Signal]
     /// references have not been dropped within the specified duration.
     fn stop(
         self,
@@ -206,12 +203,12 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         timeout: Option<Duration>,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// Returns an instance of a `Signal` that resolves when `stop` is called by
+    /// Returns an instance of a [signal::Signal] that resolves when [Spawner::stop] is called by
     /// any task.
     ///
-    /// If `stop` has already been called, the `Signal` returned will resolve
-    /// immediately. The `Signal` returned will always resolve to the value of the
-    /// first `stop` call.
+    /// If [Spawner::stop] has already been called, the [signal::Signal] returned will resolve
+    /// immediately. The [signal::Signal] returned will always resolve to the value of the
+    /// first [Spawner::stop] call.
     fn stopped(&self) -> signal::Signal;
 }
 
