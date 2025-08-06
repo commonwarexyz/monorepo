@@ -5,7 +5,7 @@ use commonware_runtime::{
     Runner as _,
 };
 use commonware_storage::journal::fixed::Journal;
-use commonware_utils::sequence::FixedBytes;
+use commonware_utils::{sequence::FixedBytes, NZUsize};
 use criterion::{black_box, criterion_group, Criterion};
 use futures::{pin_mut, StreamExt};
 use std::time::{Duration, Instant};
@@ -22,7 +22,7 @@ const ITEM_SIZE: usize = 32;
 /// Replay all items in the given `journal`.
 async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: usize) {
     let stream = journal
-        .replay(buffer, 0)
+        .replay(NZUsize!(buffer), 0)
         .await
         .expect("failed to replay journal");
     pin_mut!(stream);

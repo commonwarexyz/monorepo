@@ -8,6 +8,7 @@ use std::num::NonZeroUsize;
 /// # Example
 ///
 /// ```
+/// use commonware_utils::NZUsize;
 /// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Storage, deterministic};
 ///
 /// let executor = deterministic::Runner::default();
@@ -20,7 +21,7 @@ use std::num::NonZeroUsize;
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
-///     let mut reader = Read::new(blob, size, buffer);
+///     let mut reader = Read::new(blob, size, NZUsize!(buffer));
 ///
 ///     // Read data sequentially
 ///     let mut header = [0u8; 16];

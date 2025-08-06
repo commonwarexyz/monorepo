@@ -58,23 +58,6 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(expected = "buffer size must be greater than zero")]
-    fn test_read_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Test that creating a reader with zero buffer size panics
-            let data = b"Hello, world! This is a test.";
-            let (blob, size) = context.open("partition", b"test").await.unwrap();
-            assert_eq!(size, 0);
-            blob.write_at(data.to_vec(), 0).await.unwrap();
-            let size = data.len() as u64;
-
-            // This should panic
-            Read::new(blob, size, NZUsize!(0));
-        });
-    }
-
-    #[test_traced]
     fn test_read_cross_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -523,18 +506,6 @@ mod tests {
             let mut buf = [0u8; 26];
             reader.read_exact(&mut buf, 26).await.unwrap();
             assert_eq!(&buf, b"abcdefghijklmnopqrstuvwxyz");
-        });
-    }
-
-    #[test_traced]
-    #[should_panic(expected = "buffer capacity must be greater than zero")]
-    fn test_write_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Test that creating a writer with zero buffer capacity panics
-            let (blob, size) = context.open("partition", b"write_empty").await.unwrap();
-            assert_eq!(size, 0);
-            Write::new(blob, size, NZUsize!(0));
         });
     }
 

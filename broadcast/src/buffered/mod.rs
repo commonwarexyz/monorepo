@@ -80,7 +80,7 @@ mod tests {
             .map(|i| PrivateKey::from_seed(i as u64))
             .collect::<Vec<_>>();
         schemes.sort_by_key(|s| s.public_key());
-        let peers: Vec<PublicKey> = schemes.iter().map(|c| (c.public_key())).collect();
+        let peers: Vec<PublicKey> = schemes.iter().map(|c| c.public_key()).collect();
 
         let mut registrations: Registrations = BTreeMap::new();
         for peer in peers.iter() {
