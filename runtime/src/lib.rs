@@ -1015,6 +1015,7 @@ mod tests {
 
         let kill = 42;
         runner.start(|context| async move {
+            let (started_tx, mut started_rx) = mpsc::channel(3);
             let counter = Arc::new(AtomicU32::new(0));
 
             // Spawn 3 tasks that do cleanup work after receiving stop signal
@@ -1022,19 +1023,17 @@ mod tests {
             let task = |cleanup_duration: Duration| {
                 let context = context.clone();
                 let counter = counter.clone();
+                let mut started_tx = started_tx.clone();
                 context.spawn(move |context| async move {
+                    started_tx.send(()).await.unwrap();
                     let mut signal = context.stopped();
-                    loop {
-                        select! {
-                            sig = &mut signal => {
-                                assert_eq!(sig.unwrap(), kill);
-                                context.sleep(cleanup_duration).await;
-                                counter.fetch_add(1, Ordering::SeqCst);
-                                break;
-                            },
-                            _ = context.sleep(Duration::from_millis(5)) => {},
-                        }
-                    }
+                    let value = (&mut signal).await.unwrap();
+                    assert_eq!(value, kill);
+                    context.sleep(cleanup_duration).await;
+                    counter.fetch_add(1, Ordering::SeqCst);
+
+                    // Wait to drop signal until work has been done
+                    drop(signal);
                 })
             };
 
@@ -1043,7 +1042,9 @@ mod tests {
             let task3 = task(Duration::from_millis(30));
 
             // Give tasks time to start
-            context.sleep(Duration::from_millis(50)).await;
+            for _ in 0..3 {
+                started_rx.next().await.unwrap();
+            }
 
             // Stop and verify all cleanup completed
             context.stop(kill, None).await.unwrap();
@@ -1063,24 +1064,19 @@ mod tests {
     {
         let kill = 42;
         runner.start(|context| async move {
+            // Setup startup coordinator
+            let (started_tx, started_rx) = oneshot::channel();
+
             // Spawn a task that never completes its cleanup
             context.clone().spawn(move |context| async move {
-                let mut signal = context.stopped();
-                loop {
-                    select! {
-                        sig = &mut signal => {
-                            assert_eq!(sig.unwrap(), kill);
-                            pending().await
-                        },
-                        _ = context.sleep(Duration::from_millis(10)) => {},
-                    }
-                }
+                let signal = context.stopped();
+                started_tx.send(()).unwrap();
+                pending::<()>().await;
+                signal.await.unwrap();
             });
 
-            // Give task time to start
-            context.sleep(Duration::from_millis(50)).await;
-
             // Try to stop with a timeout
+            started_rx.await.unwrap();
             let result = context.stop(kill, Some(Duration::from_millis(100))).await;
 
             // Assert that we got a timeout error
