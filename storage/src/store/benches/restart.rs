@@ -12,7 +12,6 @@ use commonware_storage::{
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::time::Instant;
-use tracing::info;
 
 const NUM_ELEMENTS: u64 = 100_000;
 const NUM_OPERATIONS: u64 = 1_000_000;
@@ -76,7 +75,6 @@ fn gen_random_store(cfg: Config, num_elements: u64, num_operations: u64) {
             }
         }
         db.commit().await.unwrap();
-        info!(op_count = db.op_count(), "DB generated.",);
         db.close().await.unwrap();
     });
 }
