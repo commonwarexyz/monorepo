@@ -6,12 +6,45 @@
 //! expect breaking changes and occasional instability.
 
 use commonware_codec::Codec;
-use commonware_cryptography::{Committable, Digestible};
+use commonware_cryptography::{Committable, Digestible, Verifiable};
 
 pub mod aggregation;
 pub mod ordered_broadcast;
 pub mod simplex;
 pub mod threshold_simplex;
+
+pub trait Collection {
+    type View;
+    type CodecCfg: Clone;
+    type Commitment: Digest;
+    type VerifyKey;
+
+    type Nullification: Codec<Cfg = Self::CodecCfg>
+        + Viewable<View = Self::View>
+        + Verifiable<Self::VerifyKey>;
+    type Notarization: Codec<Cfg = Self::CodecCfg>
+        + Viewable<View = Self::View>
+        + Committable<Commitment = Self::Commitment>
+        + Verifiable<Self::VerifyKey>;
+    type Finalization: Codec<Cfg = Self::CodecCfg>
+        + Viewable<View = Self::View>
+        + Committable<Commitment = Self::Commitment>
+        + Verifiable<Self::VerifyKey>;
+}
+
+pub enum Artifact<C: Collection> {
+    Notarization(C::Notarization),
+    Nullification(C::Nullification),
+    Finalization(C::Finalization),
+}
+
+/// Artifactable is a trait that provides access to an artifact of the object.
+pub trait Artifactable: Clone + Send + Sync + 'static {
+    type ArtifactCollection: Collection;
+
+    /// Get the artifact from the object.
+    fn artifact(&self) -> Option<Artifact<Self::ArtifactCollection>>;
+}
 
 /// Viewable is a trait that provides access to the view (round) number.
 /// Any consensus message or object that is associated with a specific view should implement this.

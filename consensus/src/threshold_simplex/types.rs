@@ -1,6 +1,6 @@
 //! Types used in [crate::threshold_simplex].
 
-use crate::Viewable;
+use crate::{Artifact, Artifactable, Collection, Viewable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
@@ -1263,6 +1263,12 @@ impl<V: Variant> EncodeSize for Nullification<V> {
     }
 }
 
+impl<V: Variant> Verifiable<&V::Public> for Nullification<V> {
+    fn verify(&self, namespace: &[u8], verification_key: &V::Public) -> bool {
+        self.verify(namespace, verification_key)
+    }
+}
+
 impl<V: Variant> Seedable<V> for Nullification<V> {
     fn seed(&self) -> Seed<V> {
         Seed::new(self.view(), self.seed_signature)
@@ -1811,6 +1817,25 @@ impl<V: Variant, D: Digest> Read for Response<V, D> {
     }
 }
 
+/// ThresholdSimplexCollection implements the Collection trait for threshold_simplex types.
+///
+/// This allows threshold_simplex types to work with the general consensus framework's
+/// Artifact system.
+pub struct ThresholdSimplexCollection<V: Variant, D: Digest> {
+    _phantom: std::marker::PhantomData<(V, D)>,
+}
+
+impl<V: Variant, D: Digest> Collection for ThresholdSimplexCollection<V, D> {
+    type View = View;
+    type CodecCfg = ();
+    type Commitment = D;
+    type VerifyKey = &'static V::Public;
+
+    type Nullification = Nullification<V>;
+    type Notarization = Notarization<V, D>;
+    type Finalization = Finalization<V, D>;
+}
+
 /// Activity represents all possible activities that can occur in the consensus protocol.
 /// This includes both regular consensus messages and fault evidence.
 ///
@@ -1986,6 +2011,39 @@ impl<V: Variant, D: Digest> Viewable for Activity<V, D> {
             Activity::ConflictingNotarize(v) => v.view(),
             Activity::ConflictingFinalize(v) => v.view(),
             Activity::NullifyFinalize(v) => v.view(),
+        }
+    }
+}
+
+impl<V: Variant, D: Digest> Artifactable for Activity<V, D>
+where
+    V: Clone + Send + Sync + 'static,
+    D: Clone + Send + Sync + 'static,
+{
+    type ArtifactCollection = ThresholdSimplexCollection<V, D>;
+
+    /// Returns an artifact only for verified activities (threshold signatures).
+    ///
+    /// Individual votes (Notarize, Nullify, Finalize) and fault evidence do not
+    /// produce artifacts as they are not verified consensus outputs.
+    fn artifact(&self) -> Option<Artifact<Self::ArtifactCollection>> {
+        match self {
+            Activity::Notarization(notarization) => {
+                Some(Artifact::Notarization(notarization.clone()))
+            }
+            Activity::Nullification(nullification) => {
+                Some(Artifact::Nullification(nullification.clone()))
+            }
+            Activity::Finalization(finalization) => {
+                Some(Artifact::Finalization(finalization.clone()))
+            }
+            // Individual votes and fault evidence don't produce artifacts
+            Activity::Notarize(_)
+            | Activity::Nullify(_)
+            | Activity::Finalize(_)
+            | Activity::ConflictingNotarize(_)
+            | Activity::ConflictingFinalize(_)
+            | Activity::NullifyFinalize(_) => None,
         }
     }
 }
