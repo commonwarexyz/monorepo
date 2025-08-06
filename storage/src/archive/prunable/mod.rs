@@ -179,7 +179,7 @@ mod tests {
     use commonware_codec::{varint::UInt, DecodeExt, EncodeSize, Error as CodecError};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::array::FixedBytes;
+    use commonware_utils::sequence::FixedBytes;
     use rand::Rng;
     use std::collections::BTreeMap;
 

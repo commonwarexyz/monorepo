@@ -5,16 +5,44 @@
 //! `commonware-consensus` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
+use commonware_codec::Codec;
+use commonware_cryptography::{Committable, Digestible};
+
 pub mod aggregation;
 pub mod ordered_broadcast;
 pub mod simplex;
 pub mod threshold_simplex;
+
+/// Viewable is a trait that provides access to the view (round) number.
+/// Any consensus message or object that is associated with a specific view should implement this.
+pub trait Viewable {
+    /// View is the type used to indicate the in-progress consensus decision.
+    type View;
+
+    /// Returns the view associated with this object.
+    fn view(&self) -> Self::View;
+}
+
+/// Block is the interface for a block in the blockchain.
+///
+/// Blocks are used to track the progress of the consensus engine.
+pub trait Block: Codec + Digestible + Committable + Send + Sync + 'static {
+    /// Get the height of the block.
+    fn height(&self) -> u64;
+
+    /// Get the parent block's digest.
+    fn parent(&self) -> Self::Commitment;
+}
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         use commonware_cryptography::{Digest, PublicKey};
         use futures::channel::{oneshot, mpsc};
         use std::future::Future;
+
+        pub mod marshal;
+        mod reporter;
+        pub use reporter::*;
 
         /// Histogram buckets for measuring consensus latency.
         const LATENCY: [f64; 36] = [

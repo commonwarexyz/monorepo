@@ -19,7 +19,7 @@ use crate::{
 use commonware_codec::{Codec, Encode as _, Read};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
-use commonware_utils::{array::U32, Array};
+use commonware_utils::{sequence::U32, Array};
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
 use tracing::warn;
 

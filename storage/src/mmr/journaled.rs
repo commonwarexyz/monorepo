@@ -20,7 +20,7 @@ use crate::{
 use commonware_codec::DecodeExt;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
-use commonware_utils::array::prefixed_u64::U64;
+use commonware_utils::sequence::prefixed_u64::U64;
 use std::collections::HashMap;
 use tracing::{debug, error, warn};
 

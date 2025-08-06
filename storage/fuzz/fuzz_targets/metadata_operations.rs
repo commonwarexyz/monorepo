@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::metadata::{Config, Metadata};
-use commonware_utils::array::U64;
+use commonware_utils::sequence::U64;
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
 

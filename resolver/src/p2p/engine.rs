@@ -19,7 +19,7 @@ use commonware_runtime::{
     },
     Clock, Handle, Metrics, Spawner,
 };
-use commonware_utils::{futures::Pool as FuturesPool, Array};
+use commonware_utils::{futures::Pool as FuturesPool, Span};
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, Either},
@@ -43,7 +43,7 @@ pub struct Engine<
     E: Clock + GClock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Coordinator<PublicKey = P>,
-    Key: Array,
+    Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
     NetS: Sender<PublicKey = P>,
@@ -94,7 +94,7 @@ impl<
         E: Clock + GClock + Spawner + Rng + Metrics,
         P: PublicKey,
         D: Coordinator<PublicKey = P>,
-        Key: Array,
+        Key: Span,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
         Pro: Producer<Key = Key>,
         NetS: Sender<PublicKey = P>,
@@ -221,6 +221,28 @@ impl<
                                 guard.set(Status::Success);
                                 self.fetch_timers.remove(&key).unwrap().cancel(); // must exist, don't record metric
                                 self.consumer.failed(key.clone(), ()).await;
+                            }
+                        }
+                        Message::Retain { predicate } => {
+                            trace!("mailbox: retain");
+                            let before = self.fetcher.len();
+                            self.fetcher.retain(predicate);
+                            let after = self.fetcher.len();
+                            if before == after {
+                                self.metrics.cancel.inc(Status::Dropped);
+                            } else {
+                                self.metrics.cancel.inc_by(Status::Success, before.checked_sub(after).unwrap() as u64);
+                            }
+                        }
+                        Message::Clear => {
+                            trace!("mailbox: clear");
+                            let before = self.fetcher.len();
+                            self.fetcher.clear();
+                            let after = self.fetcher.len();
+                            if before == after {
+                                self.metrics.cancel.inc(Status::Dropped);
+                            } else {
+                                self.metrics.cancel.inc_by(Status::Success, before.checked_sub(after).unwrap() as u64);
                             }
                         }
                     }

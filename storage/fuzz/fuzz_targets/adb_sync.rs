@@ -11,7 +11,7 @@ use commonware_storage::{
     mmr::hasher::Standard,
     translator::TwoCap,
 };
-use commonware_utils::{array::FixedBytes, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
 

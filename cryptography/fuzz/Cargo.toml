@@ -1,6 +1,6 @@
 [package]
 name = "commonware-cryptography-fuzz"
-version = "0.0.56"
+version = "0.0.57"
 publish = false
 edition = "2021"
 
@@ -106,6 +106,13 @@ bench = false
 [[bin]]
 name = "bls12381_tle"
 path = "fuzz_targets/bls12381_tle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metamorph_lthash"
+path = "fuzz_targets/metamorph_lthash.rs"
 test = false
 doc = false
 bench = false

@@ -1,7 +1,7 @@
 use crate::{Array, BatchVerifier, PrivateKeyExt};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_utils::{hex, union_unique};
+use commonware_utils::{hex, union_unique, Span};
 use ed25519_consensus::{self, VerificationKey};
 use rand::{CryptoRng, Rng, RngCore};
 use std::{
@@ -74,6 +74,8 @@ impl Read for PrivateKey {
 impl FixedSize for PrivateKey {
     const SIZE: usize = PRIVATE_KEY_LENGTH;
 }
+
+impl Span for PrivateKey {}
 
 impl Array for PrivateKey {}
 
@@ -189,6 +191,8 @@ impl FixedSize for PublicKey {
     const SIZE: usize = PUBLIC_KEY_LENGTH;
 }
 
+impl Span for PublicKey {}
+
 impl Array for PublicKey {}
 
 impl AsRef<[u8]> for PublicKey {
@@ -251,6 +255,8 @@ impl Read for Signature {
 impl FixedSize for Signature {
     const SIZE: usize = SIGNATURE_LENGTH;
 }
+
+impl Span for Signature {}
 
 impl Array for Signature {}
 

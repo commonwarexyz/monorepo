@@ -89,7 +89,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
-use commonware_utils::array::FixedBytes;
+use commonware_utils::sequence::FixedBytes;
 use rand::{CryptoRng, Rng};
 
 /// Domain separation tag for hashing the `h3` message to a scalar.

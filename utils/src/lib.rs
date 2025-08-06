@@ -4,8 +4,8 @@ use bytes::{BufMut, BytesMut};
 use commonware_codec::{EncodeSize, Write};
 use std::time::Duration;
 
-pub mod array;
-pub use array::Array;
+pub mod sequence;
+pub use sequence::{Array, Span};
 mod bitvec;
 pub use bitvec::{BitIterator, BitVec};
 mod time;

@@ -2,7 +2,7 @@
 name = "commonware-consensus"
 edition = "2021"
 publish = true
-version = "0.0.56"
+version = "0.0.57"
 license = "MIT OR Apache-2.0"
 description = "Order opaque messages in a Byzantine environment."
 readme = "README.md"
@@ -12,7 +12,9 @@ documentation = "https://docs.rs/commonware-consensus"
 
 [dependencies]
 commonware-codec = { workspace = true }
+commonware-broadcast = { workspace = true }
 commonware-cryptography = { workspace = true }
+commonware-resolver = { workspace = true }
 commonware-utils = { workspace = true }
 bytes = { workspace = true }
 cfg-if = { workspace = true }
@@ -31,6 +33,7 @@ rand_distr = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+commonware-resolver = { workspace = true, features = ["mocks"] }
 tracing-subscriber = { workspace = true }
 
 [lib]

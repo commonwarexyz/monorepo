@@ -6,10 +6,10 @@ use crate::{
         metrics::Inbound,
         types::{
             Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
-            Finalize, Notarize, Nullify, NullifyFinalize, View, Viewable, Voter,
+            Finalize, Notarize, Nullify, NullifyFinalize, View, Voter,
         },
     },
-    Reporter, ThresholdSupervisor,
+    Reporter, ThresholdSupervisor, Viewable,
 };
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
 use commonware_macros::select;
