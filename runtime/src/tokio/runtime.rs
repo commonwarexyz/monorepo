@@ -363,10 +363,10 @@ pub struct Context {
 
 impl Context {
     // Helper method for spawn_ref and spawn_child_ref
-    fn spawn_ref_internal<F, T>(&mut self, is_child: bool) -> impl FnOnce(F) -> Handle<T> + 'static
+    fn spawn_ref_internal<F, T>(&mut self, is_child: bool) -> impl FnOnce(F) -> Handle<T>
     where
         F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
+        T: Send,
     {
         // Ensure a context only spawns one task
         assert!(!self.spawned, "already spawned");
