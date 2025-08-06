@@ -164,7 +164,7 @@ where
         }
     }
 
-    pub async fn get_sync_target(&self) -> Result<Target<Digest>, <Self as ResolverTrait>::Error> {
+    pub async fn get_sync_target(&self) -> Result<Target<Digest>, Error> {
         let request = GetSyncTargetRequest {
             request_id: RequestId::new(),
         };
@@ -191,10 +191,7 @@ where
         }
     }
 
-    async fn send_request(
-        &self,
-        message: Message,
-    ) -> Result<Message, <Self as ResolverTrait>::Error> {
+    async fn send_request(&self, message: Message) -> Result<Message, Error> {
         let (response_sender, response_receiver) = oneshot::channel();
 
         let request_id = message.request_id();
