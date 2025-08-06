@@ -83,7 +83,6 @@ type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Di
 
 /// Benchmark the initialization of a large randomly generated store db.
 fn bench_restart(c: &mut Criterion) {
-    tracing_subscriber::fmt().try_init().ok();
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg.clone());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
