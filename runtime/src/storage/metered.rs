@@ -80,9 +80,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         Ok((
             Blob {
                 inner,
-                metrics: Arc::new(MetricsHandle {
-                    metrics: self.metrics.clone(),
-                }),
+                metrics: Arc::new(MetricsHandle(self.metrics.clone())),
             },
             len,
         ))
@@ -104,22 +102,20 @@ pub struct Blob<B> {
     metrics: Arc<MetricsHandle>,
 }
 
-struct MetricsHandle {
-    metrics: Arc<Metrics>,
-}
+struct MetricsHandle(Arc<Metrics>);
 
 impl Deref for MetricsHandle {
     type Target = Metrics;
 
     fn deref(&self) -> &Self::Target {
-        &self.metrics
+        &self.0
     }
 }
 
 impl Drop for MetricsHandle {
     fn drop(&mut self) {
         // Only decrement when the last reference to the blob is dropped
-        self.metrics.open_blobs.dec();
+        self.0.open_blobs.dec();
     }
 }
 
