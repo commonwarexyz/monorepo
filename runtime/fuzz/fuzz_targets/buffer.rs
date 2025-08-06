@@ -229,8 +229,11 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     if let Some(ref pool) = pool_ref {
                         let offset = offset as u64;
-                        let aligned_offset = if pool_page_size !=0 {
-                            (offset / pool_page_size as u64) * pool_page_size as u64} else {0u64};
+                        let aligned_offset = if pool_page_size != 0 {
+                            (offset / pool_page_size as u64) * pool_page_size as u64
+                        } else {
+                            0u64
+                        };
                         let data = if data.len() > MAX_SIZE {
                             &data[..MAX_SIZE]
                         } else {
