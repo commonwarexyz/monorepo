@@ -1,4 +1,4 @@
-//! An mutable key-value database that supports variable-sized values.
+//! A mutable key-value database that supports variable-sized values.
 //!
 //! # Terminology
 //!
