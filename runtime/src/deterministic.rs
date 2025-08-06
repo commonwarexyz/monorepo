@@ -805,27 +805,25 @@ impl crate::Spawner for Context {
         self.executor.auditor.event(b"stop", |hasher| {
             hasher.update(value.to_be_bytes());
         });
-
         let stop_resolved = {
             let mut shutdown = self.executor.shutdown.lock().unwrap();
             shutdown.stop(value)
         };
 
-        if let Some(timeout_duration) = timeout {
-            let timeout_future = self.sleep(timeout_duration);
-            select! {
-                result = stop_resolved => {
-                    result.map_err(|_| Error::Closed)?;
-                },
-                _ = timeout_future => {
-                    return Err(Error::Timeout);
-                }
+        // Wait for all tasks to complete or the timeout to fire
+        let timeout_future = match timeout {
+            Some(duration) => futures::future::Either::Left(self.sleep(duration)),
+            None => futures::future::Either::Right(futures::future::pending()),
+        };
+        select! {
+            result = stop_resolved => {
+                result.map_err(|_| Error::Closed)?;
+                Ok(())
+            },
+            _ = timeout_future => {
+                Err(Error::Timeout)
             }
-        } else {
-            stop_resolved.await.map_err(|_| Error::Closed)?;
         }
-
-        Ok(())
     }
 
     fn stopped(&self) -> Signal {
