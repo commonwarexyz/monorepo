@@ -459,7 +459,7 @@ mod tests {
         collections::HashMap,
         panic::{catch_unwind, AssertUnwindSafe},
         str::FromStr,
-        sync::Mutex,
+        sync::{Arc, Mutex},
     };
     use tracing::{error, Level};
     use utils::reschedule;
@@ -1195,6 +1195,49 @@ mod tests {
         });
     }
 
+    fn test_spawn_child_abort_on_parent_abort<R: Runner>(runner: R, use_ref: bool)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            let child_handle = Arc::new(Mutex::new(None));
+            let child_handle2 = child_handle.clone();
+
+            let (parent_initialized_tx, parent_initialized_rx) = oneshot::channel();
+            let parent_handle = context.clone().spawn(move |context| async move {
+                let spawn_child = |task| {
+                    if use_ref {
+                        context.clone().spawn_child_ref()(task)
+                    } else {
+                        context.clone().spawn_child(|_| task)
+                    }
+                };
+
+                // Spawn child task that hangs forever, should be aborted when parent aborts
+                let handle = spawn_child(pending::<()>());
+
+                // Store child task handle so we can test it later
+                *child_handle2.lock().unwrap() = Some(handle);
+
+                parent_initialized_tx.send(()).unwrap();
+
+                // Parent task runs until aborted
+                pending::<()>().await
+            });
+
+            // Wait for parent task to spawn the children
+            parent_initialized_rx.await.unwrap();
+
+            // Abort parent task
+            parent_handle.abort();
+            assert!(parent_handle.await.is_err());
+
+            // Child task should also resolve with error due to cascading abort
+            let child_handle = child_handle.lock().unwrap().take().unwrap();
+            assert!(child_handle.await.is_err());
+        });
+    }
+
     fn test_spawn_blocking<R: Runner>(runner: R, dedicated: bool)
     where
         R::Context: Spawner,
@@ -1451,6 +1494,18 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_spawn_child_abort_on_parent_abort() {
+        let runner = deterministic::Runner::default();
+        test_spawn_child_abort_on_parent_abort(runner, false);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_child_ref_abort_on_parent_abort() {
+        let runner = deterministic::Runner::default();
+        test_spawn_child_abort_on_parent_abort(runner, true);
+    }
+
+    #[test]
     fn test_deterministic_spawn_blocking() {
         for dedicated in [false, true] {
             let executor = deterministic::Runner::default();
@@ -1643,6 +1698,18 @@ mod tests {
     fn test_tokio_spawn_duplicate() {
         let executor = tokio::Runner::default();
         test_spawn_duplicate(executor);
+    }
+
+    #[test]
+    fn test_tokio_spawn_child_abort_on_parent_abort() {
+        let runner = tokio::Runner::default();
+        test_spawn_child_abort_on_parent_abort(runner, false);
+    }
+
+    #[test]
+    fn test_tokio_spawn_child_ref_abort_on_parent_abort() {
+        let runner = tokio::Runner::default();
+        test_spawn_child_abort_on_parent_abort(runner, true);
     }
 
     #[test]
