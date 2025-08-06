@@ -955,6 +955,13 @@ mod tests {
                     assert_eq!(sig.unwrap(), kill);
                 });
 
+            // Sleep for a bit before stopping
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Signal the tasks and wait for them to stop
+            let result = context.clone().stop(kill, None).await;
+            assert!(result.is_ok());
+
             // Spawn a task after stop is called
             let after = context
                 .with_label("after")
@@ -974,13 +981,6 @@ mod tests {
                         }
                     }
                 });
-
-            // Sleep for a bit before stopping
-            context.sleep(Duration::from_millis(50)).await;
-
-            // Signal the tasks and wait for them to stop
-            let result = context.stop(kill, None).await;
-            assert!(result.is_ok());
 
             // Ensure both tasks complete
             let result = join!(before, after);
