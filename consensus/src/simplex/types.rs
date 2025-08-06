@@ -1,11 +1,11 @@
 //! Types used in [crate::simplex].
 
-use crate::{Artifact, Artifactable, Collection, Viewable};
+use crate::{Artifact, Artifactable, Collection, Verifiable, Viewable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
 };
-use commonware_cryptography::{Digest, Signature as CSignature, Signer, Verifier};
+use commonware_cryptography::{Committable, Digest, Signature as CSignature, Signer, Verifier};
 use commonware_utils::{quorum, union};
 use std::marker::PhantomData;
 
@@ -235,6 +235,14 @@ impl<D: Digest> Viewable for Proposal<D> {
     }
 }
 
+impl<D: Digest> Committable for Proposal<D> {
+    type Commitment = D;
+
+    fn commitment(&self) -> D {
+        self.payload
+    }
+}
+
 /// Signature represents a validator's cryptographic signature with their identifier.
 /// This combines the validator's public key index with their actual signature.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -296,19 +304,11 @@ pub struct Notarize<S: CSignature, D: Digest> {
     pub signature: Signature<S>,
 }
 
-impl<S: CSignature, D: Digest> Notarize<S, D> {
-    /// Creates a new notarize with the given proposal and signature.
-    pub fn new(proposal: Proposal<D>, signature: Signature<S>) -> Self {
-        Self {
-            proposal,
-            signature,
-        }
-    }
-
+impl<S: CSignature, D: Digest, K: Verifier<Signature = S>> Verifiable<K> for Notarize<S, D> {
     /// Verifies the signature on this notarize using the provided verifier.
     ///
     /// This ensures that the notarize was actually produced by the claimed validator.
-    pub fn verify<K: Verifier<Signature = S>>(&self, namespace: &[u8], public_key: &K) -> bool {
+    fn verify(&self, namespace: &[u8], public_key: &K) -> bool {
         let notarize_namespace = notarize_namespace(namespace);
         let message = self.proposal.encode();
         public_key.verify(
@@ -316,6 +316,16 @@ impl<S: CSignature, D: Digest> Notarize<S, D> {
             &message,
             &self.signature.signature,
         )
+    }
+}
+
+impl<S: CSignature, D: Digest> Notarize<S, D> {
+    /// Creates a new notarize with the given proposal and signature.
+    pub fn new(proposal: Proposal<D>, signature: Signature<S>) -> Self {
+        Self {
+            proposal,
+            signature,
+        }
     }
 
     /// Creates a new signed notarize using the provided cryptographic scheme.
@@ -397,7 +407,9 @@ impl<S: CSignature, D: Digest> Notarization<S, D> {
             signatures,
         }
     }
+}
 
+impl<S: CSignature, D: Digest, K: Verifier<Signature = S>> Verifiable<[K]> for Notarization<S, D> {
     /// Verifies all signatures in this notarization using the provided verifier.
     ///
     /// This ensures that:
@@ -406,7 +418,7 @@ impl<S: CSignature, D: Digest> Notarization<S, D> {
     /// 3. All signers are in the validator set
     ///
     /// In `read_cfg`, we ensure that the signatures are sorted by public key index and are unique.
-    pub fn verify<K: Verifier<Signature = S>>(&self, namespace: &[u8], participants: &[K]) -> bool {
+    fn verify(&self, namespace: &[u8], participants: &[K]) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
         if self.signatures.len() < threshold as usize {
@@ -482,6 +494,14 @@ impl<S: CSignature, D: Digest> Viewable for Notarization<S, D> {
     }
 }
 
+impl<S: CSignature, D: Digest> Committable for Notarization<S, D> {
+    type Commitment = D;
+
+    fn commitment(&self) -> D {
+        self.proposal.commitment()
+    }
+}
+
 /// Nullify represents a validator's nullify to skip the current view.
 /// This is typically used when the leader is unresponsive or fails to propose a valid block.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -498,17 +518,6 @@ impl<S: CSignature> Nullify<S> {
         Self { view, signature }
     }
 
-    /// Verifies the signature on this nullify using the provided verifier.
-    pub fn verify<K: Verifier<Signature = S>>(&self, namespace: &[u8], public_key: &K) -> bool {
-        let nullify_namespace = nullify_namespace(namespace);
-        let message = view_message(self.view);
-        public_key.verify(
-            Some(nullify_namespace.as_ref()),
-            &message,
-            &self.signature.signature,
-        )
-    }
-
     /// Creates a new signed nullify using the provided cryptographic scheme.
     pub fn sign<C: Signer<Signature = S>>(
         namespace: &[u8],
@@ -523,6 +532,19 @@ impl<S: CSignature> Nullify<S> {
             view,
             signature: Signature::new(public_key_index, signature),
         }
+    }
+}
+
+impl<S: CSignature, K: Verifier<Signature = S>> Verifiable<K> for Nullify<S> {
+    /// Verifies the signature on this nullify using the provided verifier.
+    fn verify(&self, namespace: &[u8], public_key: &K) -> bool {
+        let nullify_namespace = nullify_namespace(namespace);
+        let message = view_message(self.view);
+        public_key.verify(
+            Some(nullify_namespace.as_ref()),
+            &message,
+            &self.signature.signature,
+        )
     }
 }
 
@@ -582,11 +604,13 @@ impl<S: CSignature> Nullification<S> {
     pub fn new(view: View, signatures: Vec<Signature<S>>) -> Self {
         Self { view, signatures }
     }
+}
 
+impl<S: CSignature, K: Verifier<Signature = S>> Verifiable<[K]> for Nullification<S> {
     /// Verifies all signatures in this nullification using the provided verifier.
     ///
     /// Similar to Notarization::verify, ensures quorum of valid signatures from validators.
-    pub fn verify<K: Verifier<Signature = S>>(&self, namespace: &[u8], participants: &[K]) -> bool {
+    fn verify(&self, namespace: &[u8], participants: &[K]) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
         if self.signatures.len() < threshold as usize {
@@ -769,11 +793,13 @@ impl<S: CSignature, D: Digest> Finalization<S, D> {
             signatures,
         }
     }
+}
 
+impl<S: CSignature, D: Digest, V: Verifier<Signature = S>> Verifiable<[V]> for Finalization<S, D> {
     /// Verifies all signatures in this finalization using the provided verifier.
     ///
     /// Similar to Notarization::verify, ensures quorum of valid signatures from validators.
-    pub fn verify<V: Verifier<Signature = S>>(&self, namespace: &[u8], participants: &[V]) -> bool {
+    fn verify(&self, namespace: &[u8], participants: &[V]) -> bool {
         // Get allowed signers
         let (threshold, count) = threshold(participants);
         if self.signatures.len() < threshold as usize {
@@ -846,6 +872,14 @@ impl<S: CSignature, D: Digest> Viewable for Finalization<S, D> {
 
     fn view(&self) -> View {
         self.proposal.view()
+    }
+}
+
+impl<S: CSignature, D: Digest> Committable for Finalization<S, D> {
+    type Commitment = D;
+
+    fn commitment(&self) -> D {
+        self.proposal.commitment()
     }
 }
 
@@ -1020,41 +1054,45 @@ impl<S: CSignature, D: Digest> EncodeSize for Response<S, D> {
 /// Activity represents all possible activities that can occur in the consensus protocol.
 /// This includes both regular consensus messages and fault evidence.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub enum Activity<S: CSignature, D: Digest> {
+pub enum Activity<K: Verifier, D: Digest> {
     /// A single notarize over a proposal
-    Notarize(Notarize<S, D>),
+    Notarize(Notarize<K::Signature, D>),
     /// An aggregated set of validator notarizes that meets quorum
-    Notarization(Notarization<S, D>),
+    Notarization(Notarization<K::Signature, D>),
     /// A single validator nullify to skip the current view
-    Nullify(Nullify<S>),
+    Nullify(Nullify<K::Signature>),
     /// An aggregated set of validator nullifies that meets quorum
-    Nullification(Nullification<S>),
+    Nullification(Nullification<K::Signature>),
     /// A single validator finalize over a proposal
-    Finalize(Finalize<S, D>),
+    Finalize(Finalize<K::Signature, D>),
     /// An aggregated set of validator finalizes that meets quorum
-    Finalization(Finalization<S, D>),
+    Finalization(Finalization<K::Signature, D>),
     /// Evidence of a validator sending conflicting notarizes (Byzantine behavior)
-    ConflictingNotarize(ConflictingNotarize<S, D>),
+    ConflictingNotarize(ConflictingNotarize<K::Signature, D>),
     /// Evidence of a validator sending conflicting finalizes (Byzantine behavior)
-    ConflictingFinalize(ConflictingFinalize<S, D>),
+    ConflictingFinalize(ConflictingFinalize<K::Signature, D>),
     /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior)
-    NullifyFinalize(NullifyFinalize<S, D>),
+    NullifyFinalize(NullifyFinalize<K::Signature, D>),
 }
 
-pub struct ActivityCollection<S: CSignature, D: Digest> {
-    _ps: PhantomData<S>,
+pub struct ActivityCollection<K: Verifier, D: Digest> {
+    _pk: PhantomData<K>,
     _pd: PhantomData<D>,
 }
 
-impl<S: CSignature, D: Digest> Collection for ActivityCollection<S, D> {
+impl<K: Verifier, D: Digest> Collection for ActivityCollection<K, D> {
     type View = View;
-    type Nullification = Nullification<S>;
-    type Finalization = Finalization<S, D>;
-    type Notarization = Notarization<S, D>;
+    type CodecCfg = usize;
+    type Commitment = D;
+    type Context = Vec<K>;
+
+    type Nullification = Nullification<K::Signature>;
+    type Finalization = Finalization<K::Signature, D>;
+    type Notarization = Notarization<K::Signature, D>;
 }
 
-impl<S: CSignature, D: Digest> Artifactable for Activity<S, D> {
-    type ArtifactCollection = ActivityCollection<S, D>;
+impl<K: Verifier, D: Digest> Artifactable for Activity<K, D> {
+    type ArtifactCollection = ActivityCollection<K, D>;
 
     fn artifact(&self) -> Option<Artifact<Self::ArtifactCollection>> {
         match self {
@@ -1066,7 +1104,7 @@ impl<S: CSignature, D: Digest> Artifactable for Activity<S, D> {
     }
 }
 
-impl<S: CSignature, D: Digest> Write for Activity<S, D> {
+impl<K: Verifier, D: Digest> Write for Activity<K, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Activity::Notarize(notarize) => {
@@ -1109,33 +1147,39 @@ impl<S: CSignature, D: Digest> Write for Activity<S, D> {
     }
 }
 
-impl<S: CSignature, D: Digest> Read for Activity<S, D> {
+impl<K: Verifier, D: Digest> Read for Activity<K, D> {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let tag = u8::read(reader)?;
         match tag {
-            0 => Ok(Activity::Notarize(Notarize::<S, D>::read(reader)?)),
-            1 => Ok(Activity::Notarization(Notarization::<S, D>::read_cfg(
-                reader, max_len,
-            )?)),
-            2 => Ok(Activity::Nullify(Nullify::<S>::read(reader)?)),
-            3 => Ok(Activity::Nullification(Nullification::<S>::read_cfg(
-                reader, max_len,
-            )?)),
-            4 => Ok(Activity::Finalize(Finalize::<S, D>::read(reader)?)),
-            5 => Ok(Activity::Finalization(Finalization::<S, D>::read_cfg(
-                reader, max_len,
-            )?)),
-            6 => Ok(Activity::ConflictingNotarize(
-                ConflictingNotarize::<S, D>::read(reader)?,
-            )),
-            7 => Ok(Activity::ConflictingFinalize(
-                ConflictingFinalize::<S, D>::read(reader)?,
-            )),
-            8 => Ok(Activity::NullifyFinalize(NullifyFinalize::<S, D>::read(
+            0 => Ok(Activity::Notarize(Notarize::<K::Signature, D>::read(
                 reader,
             )?)),
+            1 => Ok(Activity::Notarization(
+                Notarization::<K::Signature, D>::read_cfg(reader, max_len)?,
+            )),
+            2 => Ok(Activity::Nullify(Nullify::<K::Signature>::read(reader)?)),
+            3 => Ok(Activity::Nullification(
+                Nullification::<K::Signature>::read_cfg(reader, max_len)?,
+            )),
+            4 => Ok(Activity::Finalize(Finalize::<K::Signature, D>::read(
+                reader,
+            )?)),
+            5 => Ok(Activity::Finalization(
+                Finalization::<K::Signature, D>::read_cfg(reader, max_len)?,
+            )),
+            6 => Ok(Activity::ConflictingNotarize(ConflictingNotarize::<
+                K::Signature,
+                D,
+            >::read(reader)?)),
+            7 => Ok(Activity::ConflictingFinalize(ConflictingFinalize::<
+                K::Signature,
+                D,
+            >::read(reader)?)),
+            8 => Ok(Activity::NullifyFinalize(
+                NullifyFinalize::<K::Signature, D>::read(reader)?,
+            )),
             _ => Err(Error::Invalid(
                 "consensus::simplex::Activity",
                 "Invalid type",
@@ -1144,7 +1188,7 @@ impl<S: CSignature, D: Digest> Read for Activity<S, D> {
     }
 }
 
-impl<S: CSignature, D: Digest> EncodeSize for Activity<S, D> {
+impl<K: Verifier, D: Digest> EncodeSize for Activity<K, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Notarize(notarize) => notarize.encode_size(),
@@ -1164,7 +1208,7 @@ impl<S: CSignature, D: Digest> EncodeSize for Activity<S, D> {
     }
 }
 
-impl<S: CSignature, D: Digest> Viewable for Activity<S, D> {
+impl<K: Verifier, D: Digest> Viewable for Activity<K, D> {
     type View = View;
 
     fn view(&self) -> View {

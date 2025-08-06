@@ -7,7 +7,7 @@ use crate::{
         actors::voter,
         types::{Backfiller, Notarization, Nullification, Request, Response, View},
     },
-    Supervisor, Viewable,
+    Supervisor, Verifiable, Viewable,
 };
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;

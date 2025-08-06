@@ -1,6 +1,6 @@
 //! Types used in [crate::threshold_simplex].
 
-use crate::{Artifact, Artifactable, Collection, Viewable};
+use crate::{Artifact, Artifactable, Collection, Verifiable, Viewable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
@@ -15,7 +15,7 @@ use commonware_cryptography::{
         poly::PartialSignature,
         variant::Variant,
     },
-    Digest,
+    Committable, Digest,
 };
 use commonware_utils::union;
 use std::{
@@ -597,6 +597,14 @@ impl<D: Digest> Proposal<D> {
     }
 }
 
+impl<D: Digest> Committable for Proposal<D> {
+    type Commitment = D;
+
+    fn commitment(&self) -> D {
+        self.payload
+    }
+}
+
 impl<D: Digest> Write for Proposal<D> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.view).write(writer);
@@ -659,35 +667,6 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
             proposal_signature,
             seed_signature,
         }
-    }
-
-    /// Verifies the [PartialSignature]s on this [Notarize].
-    ///
-    /// This ensures that:
-    /// 1. The notarize signature is valid for the claimed proposal
-    /// 2. The seed signature is valid for the view
-    /// 3. Both signatures are from the same signer
-    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
-        let notarize_namespace = notarize_namespace(namespace);
-        let notarize_message = self.proposal.encode();
-        let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
-        let seed_namespace = seed_namespace(namespace);
-        let seed_message = view_message(self.proposal.view);
-        let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
-        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
-            return false;
-        };
-        let signature = aggregate_signatures::<V, _>(&[
-            self.proposal_signature.value,
-            self.seed_signature.value,
-        ]);
-        aggregate_verify_multiple_messages::<V, _>(
-            evaluated,
-            &[notarize_message, seed_message],
-            &signature,
-            1,
-        )
-        .is_ok()
     }
 
     /// Verifies a batch of [Notarize] messages using BLS aggregate verification.
@@ -771,6 +750,37 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
         let seed_signature =
             partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), &seed_message);
         Notarize::new(proposal, proposal_signature, seed_signature)
+    }
+}
+
+impl<V: Variant, D: Digest> Verifiable<[V::Public]> for Notarize<V, D> {
+    /// Verifies the [PartialSignature]s on this [Notarize].
+    ///
+    /// This ensures that:
+    /// 1. The notarize signature is valid for the claimed proposal
+    /// 2. The seed signature is valid for the view
+    /// 3. Both signatures are from the same signer
+    fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
+        let notarize_namespace = notarize_namespace(namespace);
+        let notarize_message = self.proposal.encode();
+        let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = view_message(self.proposal.view);
+        let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+        let Some(evaluated) = polynomial.get(self.signer() as usize) else {
+            return false;
+        };
+        let signature = aggregate_signatures::<V, _>(&[
+            self.proposal_signature.value,
+            self.seed_signature.value,
+        ]);
+        aggregate_verify_multiple_messages::<V, _>(
+            evaluated,
+            &[notarize_message, seed_message],
+            &signature,
+            1,
+        )
+        .is_ok()
     }
 }
 
@@ -873,6 +883,14 @@ impl<V: Variant, D: Digest> Notarization<V, D> {
             1,
         )
         .is_ok()
+    }
+}
+
+impl<V: Variant, D: Digest> Committable for Notarization<V, D> {
+    type Commitment = D;
+
+    fn commitment(&self) -> D {
+        self.proposal.commitment()
     }
 }
 
@@ -1206,19 +1224,11 @@ pub struct Finalize<V: Variant, D: Digest> {
     pub proposal_signature: PartialSignature<V>,
 }
 
-impl<V: Variant, D: Digest> Finalize<V, D> {
-    /// Creates a new finalize with the given proposal and signature.
-    pub fn new(proposal: Proposal<D>, proposal_signature: PartialSignature<V>) -> Self {
-        Finalize {
-            proposal,
-            proposal_signature,
-        }
-    }
-
+impl<V: Variant, D: Digest> Verifiable<[V::Public]> for Finalize<V, D> {
     /// Verifies the [PartialSignature] on this [Finalize].
     ///
     /// This ensures that the signature is valid for the given proposal.
-    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
+    fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let finalize_namespace = finalize_namespace(namespace);
         let message = self.proposal.encode();
         let Some(evaluated) = polynomial.get(self.signer() as usize) else {
@@ -1231,6 +1241,16 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
             &self.proposal_signature.value,
         )
         .is_ok()
+    }
+}
+
+impl<V: Variant, D: Digest> Finalize<V, D> {
+    /// Creates a new finalize with the given proposal and signature.
+    pub fn new(proposal: Proposal<D>, proposal_signature: PartialSignature<V>) -> Self {
+        Finalize {
+            proposal,
+            proposal_signature,
+        }
     }
 
     /// Verifies a batch of [Finalize] messages using BLS aggregate verification.
@@ -1381,6 +1401,14 @@ impl<V: Variant, D: Digest> Finalization<V, D> {
             1,
         )
         .is_ok()
+    }
+}
+
+impl<V: Variant, D: Digest> Committable for Finalization<V, D> {
+    type Commitment = D;
+
+    fn commitment(&self) -> D {
+        self.proposal.commitment()
     }
 }
 
@@ -1765,6 +1793,8 @@ pub struct ActivityCollection<V: Variant, D: Digest> {
 
 impl<V: Variant, D: Digest> Collection for ActivityCollection<V, D> {
     type View = View;
+    type CodecCfg = ();
+    type Commitment = D;
     type Nullification = Nullification<V>;
     type Finalization = Finalization<V, D>;
     type Notarization = Notarization<V, D>;

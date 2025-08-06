@@ -1,13 +1,16 @@
 //! Reporter implementations for various standard types.
 
-use crate::Reporter;
+use crate::{Artifactable, Reporter};
 use futures::join;
 
 /// An implementation of [Reporter] for an optional [Reporter].
 ///
 /// This is useful for reporting activity to a [Reporter] that may not be present.
 /// Reporting is a no-op if the [Reporter] is `None`.
-impl<R: Reporter> Reporter for Option<R> {
+impl<R: Reporter> Reporter for Option<R>
+where
+    R::Activity: Artifactable,
+{
     type Activity = R::Activity;
 
     async fn report(&mut self, activity: Self::Activity) {
@@ -29,6 +32,7 @@ impl<R1, R2> Reporter for Reporters<R1, R2>
 where
     R1: Reporter,
     R2: Reporter<Activity = R1::Activity>,
+    R1::Activity: Artifactable,
 {
     type Activity = R1::Activity;
 

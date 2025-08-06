@@ -13,11 +13,27 @@ pub mod ordered_broadcast;
 pub mod simplex;
 pub mod threshold_simplex;
 
+pub trait Verifiable<C: ?Sized>: Sized {
+    fn verify(&self, namespace: &[u8], context: &C) -> bool;
+}
+
 pub trait Collection {
     type View;
-    type Nullification: Viewable<View = Self::View>;
-    type Notarization: Viewable<View = Self::View>;
-    type Finalization: Viewable<View = Self::View>;
+    type CodecCfg: Clone;
+    type Commitment: Digest;
+    type Context;
+
+    type Nullification: Codec<Cfg = Self::CodecCfg>
+        + Viewable<View = Self::View>
+        + Verifiable<Self::Context>;
+    type Notarization: Codec<Cfg = Self::CodecCfg>
+        + Viewable<View = Self::View>
+        + Committable<Commitment = Self::Commitment>
+        + Verifiable<Self::Context>;
+    type Finalization: Codec<Cfg = Self::CodecCfg>
+        + Viewable<View = Self::View>
+        + Committable<Commitment = Self::Commitment>
+        + Verifiable<Self::Context>;
 }
 
 pub enum Artifact<C: Collection> {
@@ -152,7 +168,7 @@ cfg_if::cfg_if! {
             /// want to reward (or penalize) participation in different ways and in different places. For example,
             /// validators could be required to send multiple types of messages (i.e. vote and finalize) and rewarding
             /// both equally may better align incentives with desired behavior.
-            type Activity: Artifactable;
+            type Activity;
 
             /// Report some activity observed by the consensus implementation.
             fn report(&mut self, activity: Self::Activity) -> impl Future<Output = ()> + Send;
