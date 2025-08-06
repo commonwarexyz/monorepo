@@ -997,8 +997,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         // Destroy the journal (removes all journal sections)
         self.journal.destroy().await?;
 
+        // Destroy the table
         drop(self.table);
-
         self.context
             .remove(&self.table_partition, Some(TABLE_BLOB_NAME))
             .await?;
