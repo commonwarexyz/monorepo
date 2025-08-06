@@ -1195,6 +1195,20 @@ mod tests {
         });
     }
 
+    fn spawn_child_impl<C, F, Fut, T>(context: &C, use_ref: bool, task_fn: F) -> Handle<T>
+    where
+        C: Spawner,
+        F: FnOnce(C) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send,
+    {
+        if use_ref {
+            context.clone().spawn_child_ref()(task_fn(context.clone()))
+        } else {
+            context.clone().spawn_child(task_fn)
+        }
+    }
+
     fn test_spawn_child<R: Runner>(runner: R, use_ref: bool)
     where
         R::Context: Spawner + Clock,
@@ -1206,16 +1220,8 @@ mod tests {
             let (parent_initialized_tx, parent_initialized_rx) = oneshot::channel();
             let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
             let parent_handle = context.clone().spawn(move |context| async move {
-                let spawn_child = |task| {
-                    if use_ref {
-                        context.clone().spawn_child_ref()(task)
-                    } else {
-                        context.clone().spawn_child(|_| task)
-                    }
-                };
-
                 // Spawn child that completes immediately
-                let handle = spawn_child(async {});
+                let handle = spawn_child_impl(&context, use_ref, |_| async {});
 
                 // Store child handle so we can test it later
                 *child_handle2.lock().unwrap() = Some(handle);
@@ -1251,16 +1257,8 @@ mod tests {
 
             let (parent_initialized_tx, parent_initialized_rx) = oneshot::channel();
             let parent_handle = context.clone().spawn(move |context| async move {
-                let spawn_child = |task| {
-                    if use_ref {
-                        context.clone().spawn_child_ref()(task)
-                    } else {
-                        context.clone().spawn_child(|_| task)
-                    }
-                };
-
                 // Spawn child task that hangs forever, should be aborted when parent aborts
-                let handle = spawn_child(pending::<()>());
+                let handle = spawn_child_impl(&context, use_ref, |_| pending::<()>());
 
                 // Store child task handle so we can test it later
                 *child_handle2.lock().unwrap() = Some(handle);
@@ -1294,16 +1292,8 @@ mod tests {
 
             let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
             let parent_handle = context.clone().spawn(move |context| async move {
-                let spawn_child = |task| {
-                    if use_ref {
-                        context.clone().spawn_child_ref()(task)
-                    } else {
-                        context.clone().spawn_child(|_| task)
-                    }
-                };
-
                 // Spawn child task that hangs forever, should be aborted when parent completes
-                let handle = spawn_child(pending::<()>());
+                let handle = spawn_child_impl(&context, use_ref, |_| pending::<()>());
 
                 // Store child task handle so we can test it later
                 *child_handle2.lock().unwrap() = Some(handle);
