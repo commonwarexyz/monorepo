@@ -81,7 +81,7 @@ where
                                 }
                                 return;
                             } else {
-                                debug!(request_id = request_id.value(), "request sent, awaiting response");
+                                debug!(request_id, "request sent, awaiting response");
                             }
                         },
                         None => {
@@ -99,10 +99,10 @@ where
                                 Ok(message) => {
                                     let request_id = message.request_id();
                                     if let Some(response_sender) = self.pending_requests.remove(&request_id) {
-                                        debug!(request_id = request_id.value(), "correlating response with request");
+                                        debug!(request_id, "correlating response with request");
                                         let _ = response_sender.send(Ok(message));
                                     } else {
-                                        warn!(request_id = request_id.value(), "received response for unknown request ID");
+                                        warn!(request_id, "received response for unknown request ID");
                                     }
                                 },
                                 Err(e) => {
@@ -169,16 +169,12 @@ where
     }
 
     pub async fn get_sync_target(&self) -> Result<SyncTarget<Digest>, Error> {
-        let request = GetSyncTargetRequest {
-            request_id: self.requester.next_request_id(),
-        };
-
-        let request_id = request.request_id.value();
+        let request_id = self.requester.next();
+        let request = GetSyncTargetRequest { request_id };
 
         let response = self
             .send_request(Message::GetSyncTargetRequest(request))
             .await?;
-
         match response {
             Message::GetSyncTargetResponse(response) => Ok(response.target),
             Message::Error(err) => {
@@ -212,9 +208,7 @@ where
 
         response_receiver
             .await
-            .map_err(|_| Error::ResponseChannelClosed {
-                request_id: request_id.value(),
-            })?
+            .map_err(|_| Error::ResponseChannelClosed { request_id })?
     }
 }
 
@@ -235,19 +229,17 @@ where
         start_loc: u64,
         max_ops: NonZeroU64,
     ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, SyncError> {
+        let request_id = self.requester.next();
         let request = GetOperationsRequest {
-            request_id: self.requester.next_request_id(),
+            request_id,
             size,
             start_loc,
             max_ops,
         };
 
-        let request_id = request.request_id.value();
-
         let response = self
             .send_request(Message::GetOperationsRequest(request))
             .await?;
-
         match response {
             Message::GetOperationsResponse(response) => {
                 let (success_tx, _success_rx) = oneshot::channel();
