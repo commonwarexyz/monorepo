@@ -7,7 +7,7 @@ use thiserror::Error;
 pub enum Error {
     /// Stream error during communication
     #[error("stream error")]
-    Stream(#[from] commonware_stream::Error),
+    Network(#[from] commonware_stream::Error),
 
     /// Received unexpected response type for a request
     #[error("unexpected response type for request {request_id}")]
@@ -15,7 +15,7 @@ pub enum Error {
 
     /// Server returned an error response
     #[error("server error (code: {code:?}): {message}")]
-    ServerError {
+    Server {
         code: crate::ErrorCode,
         message: String,
     },
@@ -51,7 +51,7 @@ impl Error {
         match self {
             Error::InvalidRequest(_) => crate::ErrorCode::InvalidRequest,
             Error::Database(_) => crate::ErrorCode::DatabaseError,
-            Error::Stream(_) => crate::ErrorCode::NetworkError,
+            Error::Network(_) => crate::ErrorCode::NetworkError,
             Error::RequestChannelClosed | Error::ResponseChannelClosed { .. } => {
                 crate::ErrorCode::InternalError
             }

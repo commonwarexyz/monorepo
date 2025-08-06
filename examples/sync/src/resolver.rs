@@ -75,7 +75,7 @@ where
                                 error!(error = %e, "failed to send request, exiting");
                                 // Notify the pending request of the error
                                 if let Some(response_sender) = self.pending_requests.remove(&request_id) {
-                                    let _ = response_sender.send(Err(Error::Stream(e)));
+                                    let _ = response_sender.send(Err(Error::Network(e)));
                                 }
                                 return;
                             } else {
@@ -179,7 +179,7 @@ where
             Message::GetSyncTargetResponse(response) => Ok(response.target),
             Message::Error(err) => {
                 error!(error = %err.message, "server error");
-                Err(Error::ServerError {
+                Err(Error::Server {
                     code: err.error_code,
                     message: err.message,
                 })
@@ -257,7 +257,7 @@ where
                     success_tx,
                 })
             }
-            Message::Error(err) => Err(Error::ServerError {
+            Message::Error(err) => Err(Error::Server {
                 code: err.error_code,
                 message: err.message,
             }),
