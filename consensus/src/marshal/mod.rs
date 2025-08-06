@@ -11,7 +11,6 @@
 //!
 //! The actor interacts with four main components:
 //! - [crate::Reporter]: Receives ordered, finalized blocks at-least-once
-//! - [crate::threshold_simplex]: Provides consensus messages
 //! - Application: Provides verified blocks
 //! - [commonware_broadcast::buffered]: Provides uncertified blocks received from the network
 //! - [commonware_resolver::p2p]: Provides a backfill mechanism for missing blocks
@@ -46,7 +45,6 @@
 //!
 //! ## Limitations and Future Work
 //!
-//! - Only works with [crate::threshold_simplex] rather than general consensus.
 //! - Assumes at-most one notarization per view, incompatible with some consensus protocols.
 //! - No state sync supported. Will attempt to sync every block in the history of the chain.
 //! - Stores the entire history of the chain, which requires indefinite amounts of disk space.

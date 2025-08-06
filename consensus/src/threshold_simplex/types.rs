@@ -2020,30 +2020,20 @@ where
     V: Clone + Send + Sync + 'static,
     D: Clone + Send + Sync + 'static,
 {
-    type ArtifactCollection = ThresholdSimplexCollection<V, D>;
+    type Collection = ThresholdSimplexCollection<V, D>;
 
-    /// Returns an artifact only for verified activities (threshold signatures).
+    /// Returns an artifact for verified activities (threshold signatures).
     ///
-    /// Individual votes (Notarize, Nullify, Finalize) and fault evidence do not
-    /// produce artifacts as they are not verified consensus outputs.
-    fn artifact(&self) -> Option<Artifact<Self::ArtifactCollection>> {
+    /// Individual votes (Notarize, Nullify, Finalize) return their respective artifacts,
+    /// while fault evidence returns None artifact as it is not a verified consensus output.
+    fn artifact(&self) -> Artifact<Self::Collection> {
         match self {
-            Activity::Notarization(notarization) => {
-                Some(Artifact::Notarization(notarization.clone()))
-            }
+            Activity::Notarization(notarization) => Artifact::Notarization(notarization.clone()),
             Activity::Nullification(nullification) => {
-                Some(Artifact::Nullification(nullification.clone()))
+                Artifact::Nullification(nullification.clone())
             }
-            Activity::Finalization(finalization) => {
-                Some(Artifact::Finalization(finalization.clone()))
-            }
-            // Individual votes and fault evidence don't produce artifacts
-            Activity::Notarize(_)
-            | Activity::Nullify(_)
-            | Activity::Finalize(_)
-            | Activity::ConflictingNotarize(_)
-            | Activity::ConflictingFinalize(_)
-            | Activity::NullifyFinalize(_) => None,
+            Activity::Finalization(finalization) => Artifact::Finalization(finalization.clone()),
+            _ => Artifact::None,
         }
     }
 }

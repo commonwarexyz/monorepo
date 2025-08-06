@@ -33,6 +33,7 @@ pub trait Collection {
 }
 
 pub enum Artifact<C: Collection> {
+    None,
     Notarization(C::Notarization),
     Nullification(C::Nullification),
     Finalization(C::Finalization),
@@ -40,10 +41,10 @@ pub enum Artifact<C: Collection> {
 
 /// Artifactable is a trait that provides access to an artifact of the object.
 pub trait Artifactable: Clone + Send + Sync + 'static {
-    type ArtifactCollection: Collection;
+    type Collection: Collection;
 
     /// Get the artifact from the object.
-    fn artifact(&self) -> Option<Artifact<Self::ArtifactCollection>>;
+    fn artifact(&self) -> Artifact<Self::Collection>;
 }
 
 /// Viewable is a trait that provides access to the view (round) number.

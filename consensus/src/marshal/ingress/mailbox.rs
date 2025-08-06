@@ -1,6 +1,5 @@
-use crate::{Block, Reporter, Viewable};
-use commonware_codec::Codec;
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Committable, Verifiable};
+use crate::{Artifact, Artifactable, Block, Reporter};
+use commonware_cryptography::bls12381::primitives::variant::Variant;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -147,22 +146,43 @@ impl<V: Variant, B: Block, N, F> Mailbox<V, B, N, F> {
     }
 }
 
-impl<V: Variant, B: Block, N, F> Reporter for Mailbox<V, B, N, F>
-where
-    N: Codec
-        + Viewable<View = u64>
-        + Committable<Commitment = B::Commitment>
-        + for<'a> Verifiable<&'a V::Public>,
-    F: Codec
-        + Viewable<View = u64>
-        + Committable<Commitment = B::Commitment>
-        + for<'a> Verifiable<&'a V::Public>,
+/// Reporter implementation for threshold_simplex Activity.
+/// This implementation works with any Artifactable activity by using the artifact() method
+/// to extract notarizations and finalizations and forward them to the marshal.
+impl<V: Variant, B: Block> Reporter
+    for Mailbox<
+        V,
+        B,
+        crate::threshold_simplex::types::Notarization<V, B::Commitment>,
+        crate::threshold_simplex::types::Finalization<V, B::Commitment>,
+    >
 {
     type Activity = crate::threshold_simplex::types::Activity<V, B::Commitment>;
 
-    async fn report(&mut self, _activity: Self::Activity) {
-        // TODO: This needs to be implemented properly by converting from concrete types
-        // to generic types or by making Activity generic as well.
-        // For now, we skip reporting to avoid type errors.
+    async fn report(&mut self, activity: Self::Activity) {
+        match activity.artifact() {
+            Artifact::Notarization(notarization) => {
+                if self
+                    .sender
+                    .send(Message::Notarization { notarization })
+                    .await
+                    .is_err()
+                {
+                    error!("failed to send notarization message to actor: receiver dropped");
+                }
+            }
+            Artifact::Finalization(finalization) => {
+                if self
+                    .sender
+                    .send(Message::Finalization { finalization })
+                    .await
+                    .is_err()
+                {
+                    error!("failed to send finalization message to actor: receiver dropped");
+                }
+            }
+            // Nullifications and None artifacts are dropped for this marshal implementation
+            _ => {}
+        }
     }
 }
