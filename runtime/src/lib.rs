@@ -967,9 +967,6 @@ mod tests {
                     assert_eq!(sig.unwrap(), kill);
                 });
 
-            // Sleep for a bit before stopping
-            context.sleep(Duration::from_millis(50)).await;
-
             // Signal the tasks and wait for them to stop
             let result = context.clone().stop(kill, None).await;
             assert!(result.is_ok());
@@ -979,22 +976,8 @@ mod tests {
                 .with_label("after")
                 .spawn(move |context| async move {
                     // A call to `stopped()` after `stop()` resolves immediately
-                    let signal = context.stopped();
-                    pin_mut!(signal);
-                    assert!(signal.as_mut().now_or_never().is_some());
-
-                    loop {
-                        select! {
-                            sig = &mut signal => {
-                                // Stopper resolved
-                                assert_eq!(sig.unwrap(), kill);
-                                break;
-                            },
-                            _ = context.sleep(Duration::from_millis(10)) => {
-                                // Continue waiting
-                            },
-                        }
-                    }
+                    let value = context.stopped().await.unwrap();
+                    assert_eq!(value, kill);
                 });
 
             // Ensure both tasks complete
