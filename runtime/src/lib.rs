@@ -43,8 +43,6 @@ mod storage;
 pub mod telemetry;
 mod utils;
 pub use utils::*;
-
-use crate::utils::signal::Signal;
 #[cfg(any(feature = "iouring-storage", feature = "iouring-network"))]
 mod iouring;
 
@@ -214,7 +212,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// If `stop` has already been called, the `Signal` returned will resolve
     /// immediately. The `Signal` returned will always resolve to the value of the
     /// first `stop` call.
-    fn stopped(&self) -> Signal;
+    fn stopped(&self) -> signal::Signal;
 }
 
 /// Interface to register and encode metrics.
