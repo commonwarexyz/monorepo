@@ -8,6 +8,7 @@ use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
 use commonware_storage::{
     adb::{
+        self,
         any::sync::{self, client::Config as SyncConfig},
         sync::{Error as SyncError, Target},
     },
@@ -112,7 +113,7 @@ async fn sync<E>(
     context: &E,
     config: &Config,
     sync_iteration: u32,
-) -> Result<(), SyncError<commonware_storage::adb::Error, Error>>
+) -> Result<(), SyncError<adb::Error, Error>>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
@@ -206,10 +207,7 @@ where
 }
 
 /// Continuously sync the database to the server's state.
-async fn run<E>(
-    context: E,
-    config: Config,
-) -> Result<(), SyncError<commonware_storage::adb::Error, Error>>
+async fn run<E>(context: E, config: Config) -> Result<(), SyncError<adb::Error, Error>>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
