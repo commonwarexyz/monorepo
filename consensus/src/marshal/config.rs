@@ -1,21 +1,19 @@
-use crate::Block;
-use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
+use crate::{Block, Collection};
+use commonware_cryptography::PublicKey;
 use commonware_resolver::p2p::Coordinator;
 use governor::Quota;
 
 /// Marshal configuration.
 #[derive(Debug)]
-pub struct Config<V: Variant, P: PublicKey, Z: Coordinator<PublicKey = P>, B: Block, N, F> {
+pub struct Config<B: Block, P: PublicKey, Z: Coordinator<PublicKey = P>, C: Collection> {
     /// Codec configuration for notarization type.
-    pub notarization_codec_config: N,
+    pub collection_codec_config: C::CodecCfg,
 
-    /// Codec configuration for finalization type.
-    pub finalization_codec_config: F,
     /// The public key of the validator.
     pub public_key: P,
 
     /// The identity of the network.
-    pub identity: V::Public,
+    pub identity: C::VerifyKey,
 
     /// The coordinator for the resolvers.
     pub coordinator: Z,

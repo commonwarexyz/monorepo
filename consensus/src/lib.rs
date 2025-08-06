@@ -13,23 +13,35 @@ pub mod ordered_broadcast;
 pub mod simplex;
 pub mod threshold_simplex;
 
-pub trait Collection {
+pub trait Collection: Send + Sync + 'static {
     type View;
-    type CodecCfg: Clone;
+    type CodecCfg: Clone + Send + Sync + 'static;
     type Commitment: Digest;
-    type VerifyKey;
+    type VerifyKey: Send + Sync + 'static;
 
     type Nullification: Codec<Cfg = Self::CodecCfg>
         + Viewable<View = Self::View>
-        + Verifiable<Self::VerifyKey>;
+        + Verifiable<Self::VerifyKey>
+        + Clone
+        + Send
+        + Sync
+        + 'static;
     type Notarization: Codec<Cfg = Self::CodecCfg>
         + Viewable<View = Self::View>
         + Committable<Commitment = Self::Commitment>
-        + Verifiable<Self::VerifyKey>;
+        + Verifiable<Self::VerifyKey>
+        + Clone
+        + Send
+        + Sync
+        + 'static;
     type Finalization: Codec<Cfg = Self::CodecCfg>
         + Viewable<View = Self::View>
         + Committable<Commitment = Self::Commitment>
-        + Verifiable<Self::VerifyKey>;
+        + Verifiable<Self::VerifyKey>
+        + Clone
+        + Send
+        + Sync
+        + 'static;
 }
 
 pub enum Artifact<C: Collection> {

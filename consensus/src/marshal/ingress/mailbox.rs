@@ -1,10 +1,8 @@
-use crate::{Artifact, Artifactable, Block, Reporter};
-use commonware_cryptography::bls12381::primitives::variant::Variant;
+use crate::{Artifact, Artifactable, Block, Collection, Reporter};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
-use std::marker::PhantomData;
 use tracing::error;
 
 /// Messages sent to the marshal [Actor](super::super::actor::Actor).
@@ -12,7 +10,7 @@ use tracing::error;
 /// These messages are sent from the consensus engine and other parts of the
 /// system to drive the state of the marshal.
 #[allow(dead_code)] // Some variants may not be used during refactoring
-pub(crate) enum Message<V: Variant, B: Block, N, F> {
+pub(crate) enum Message<B: Block, A: Artifactable> {
     // -------------------- Application Messages --------------------
     /// A request to retrieve a block by its digest.
     Get {
@@ -48,28 +46,24 @@ pub(crate) enum Message<V: Variant, B: Block, N, F> {
     /// A notarization from the consensus engine.
     Notarization {
         /// The notarization.
-        notarization: N,
+        notarization: <A::Collection as Collection>::Notarization,
     },
     /// A finalization from the consensus engine.
     Finalization {
         /// The finalization.
-        finalization: F,
+        finalization: <A::Collection as Collection>::Finalization,
     },
-
-    /// PhantomData to ensure V is used
-    #[doc(hidden)]
-    _Phantom(PhantomData<V>),
 }
 
 /// A mailbox for sending messages to the marshal [Actor](super::super::actor::Actor).
 #[derive(Clone)]
-pub struct Mailbox<V: Variant, B: Block, N, F> {
-    sender: mpsc::Sender<Message<V, B, N, F>>,
+pub struct Mailbox<B: Block, A: Artifactable> {
+    sender: mpsc::Sender<Message<B, A>>,
 }
 
-impl<V: Variant, B: Block, N, F> Mailbox<V, B, N, F> {
+impl<B: Block, A: Artifactable> Mailbox<B, A> {
     /// Creates a new mailbox.
-    pub(crate) fn new(sender: mpsc::Sender<Message<V, B, N, F>>) -> Self {
+    pub(crate) fn new(sender: mpsc::Sender<Message<B, A>>) -> Self {
         Self { sender }
     }
 
@@ -149,15 +143,8 @@ impl<V: Variant, B: Block, N, F> Mailbox<V, B, N, F> {
 /// Reporter implementation for threshold_simplex Activity.
 /// This implementation works with any Artifactable activity by using the artifact() method
 /// to extract notarizations and finalizations and forward them to the marshal.
-impl<V: Variant, B: Block> Reporter
-    for Mailbox<
-        V,
-        B,
-        crate::threshold_simplex::types::Notarization<V, B::Commitment>,
-        crate::threshold_simplex::types::Finalization<V, B::Commitment>,
-    >
-{
-    type Activity = crate::threshold_simplex::types::Activity<V, B::Commitment>;
+impl<B: Block, A: Artifactable> Reporter for Mailbox<B, A> {
+    type Activity = A;
 
     async fn report(&mut self, activity: Self::Activity) {
         match activity.artifact() {
