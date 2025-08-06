@@ -1314,6 +1314,69 @@ mod tests {
         });
     }
 
+    fn test_spawn_child_cascading_abort<R: Runner>(runner: R, use_ref: bool)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            // We create the following tree of tasks. All tasks will run
+            // indefinitely (until aborted).
+            //
+            //          root
+            //     /     |     \
+            //    /      |      \
+            //   c0      c1      c2
+            //  /  \    /  \    /  \
+            // g0  g1  g2  g3  g4  g5
+
+            let handles = Arc::new(Mutex::new(Vec::new()));
+            let (mut initialized_tx, mut initialized_rx) = mpsc::channel(9);
+            let root_task = {
+                let handles = handles.clone();
+                context.clone().spawn(move |context| async move {
+                    for _ in 0..3 {
+                        let handles2 = handles.clone();
+                        let mut initialized_tx2 = initialized_tx.clone();
+                        let handle =
+                            spawn_child_impl(&context, use_ref, move |context| async move {
+                                for _ in 0..2 {
+                                    let handle = spawn_child_impl(&context, use_ref, |_| async {
+                                        pending::<()>().await;
+                                    });
+                                    handles2.lock().unwrap().push(handle);
+                                    initialized_tx2.send(()).await.unwrap();
+                                }
+                                pending::<()>().await;
+                            });
+
+                        handles.lock().unwrap().push(handle);
+                        initialized_tx.send(()).await.unwrap();
+                    }
+
+                    pending::<()>().await;
+                })
+            };
+
+            // Wait for tasks to initialize
+            for _ in 0..9 {
+                initialized_rx.next().await.unwrap();
+            }
+
+            // Verify we have all 9 handles (3 children + 6 grandchildren)
+            assert_eq!(handles.lock().unwrap().len(), 9,);
+
+            // Abort root task
+            root_task.abort();
+            assert!(root_task.await.is_err());
+
+            // All handles should resolve with error due to cascading abort
+            let handles = handles.lock().unwrap().drain(..).collect::<Vec<_>>();
+            for handle in handles {
+                assert!(handle.await.is_err());
+            }
+        });
+    }
+
     fn test_spawn_blocking<R: Runner>(runner: R, dedicated: bool)
     where
         R::Context: Spawner,
@@ -1606,6 +1669,18 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_spawn_child_cascading_abort() {
+        let runner = deterministic::Runner::default();
+        test_spawn_child_cascading_abort(runner, false);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_child_ref_cascading_abort() {
+        let runner = deterministic::Runner::default();
+        test_spawn_child_cascading_abort(runner, true);
+    }
+
+    #[test]
     fn test_deterministic_spawn_blocking() {
         for dedicated in [false, true] {
             let executor = deterministic::Runner::default();
@@ -1834,6 +1909,18 @@ mod tests {
     fn test_tokio_spawn_child_ref_abort_on_parent_completion() {
         let runner = tokio::Runner::default();
         test_spawn_child_abort_on_parent_completion(runner, true);
+    }
+
+    #[test]
+    fn test_tokio_spawn_child_cascading_abort() {
+        let runner = tokio::Runner::default();
+        test_spawn_child_cascading_abort(runner, false);
+    }
+
+    #[test]
+    fn test_tokio_spawn_child_ref_cascading_abort() {
+        let runner = tokio::Runner::default();
+        test_spawn_child_cascading_abort(runner, true);
     }
 
     #[test]
