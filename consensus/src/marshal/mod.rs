@@ -171,9 +171,10 @@ mod tests {
             let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
 
             // Generate shares
-            let (identity, shares) =
+            let (identity_poly, shares) =
                 generate_shares::<_, V>(&mut context, None, NUM_VALIDATORS, QUORUM);
-            let identity = *poly::public::<V>(&identity);
+            let identity = *poly::public::<V>(&identity_poly);
+            let identity: &'static <V as commonware_cryptography::bls12381::primitives::variant::Variant>::Public = Box::leak(Box::new(identity));
 
             // Initialize validators
             let mut pks = Vec::new();
@@ -194,7 +195,7 @@ mod tests {
                     &mut oracle,
                     coordinator.clone(),
                     secrets[i].clone(),
-                    &identity,
+                    identity,
                 )
                 .await;
                 applications.insert(pks[i].clone(), application);

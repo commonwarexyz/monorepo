@@ -140,9 +140,6 @@ impl<B: Block, A: Artifactable> Mailbox<B, A> {
     }
 }
 
-/// Reporter implementation for threshold_simplex Activity.
-/// This implementation works with any Artifactable activity by using the artifact() method
-/// to extract notarizations and finalizations and forward them to the marshal.
 impl<B: Block, A: Artifactable> Reporter for Mailbox<B, A> {
     type Activity = A;
 

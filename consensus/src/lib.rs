@@ -13,6 +13,7 @@ pub mod ordered_broadcast;
 pub mod simplex;
 pub mod threshold_simplex;
 
+/// Collection represents a collection of artifacts that are used to track the progress of the consensus engine.
 pub trait Collection: Send + Sync + 'static {
     type View;
     type CodecCfg: Clone + Send + Sync + 'static;
@@ -44,6 +45,7 @@ pub trait Collection: Send + Sync + 'static {
         + 'static;
 }
 
+/// Artifact represents a single artifact of the consensus engine.
 pub enum Artifact<C: Collection> {
     None,
     Notarization(C::Notarization),
@@ -51,7 +53,7 @@ pub enum Artifact<C: Collection> {
     Finalization(C::Finalization),
 }
 
-/// Artifactable is a trait that provides access to an artifact of the object.
+/// Artifactable is a trait that provides access to an artifact of the consensus engine.
 pub trait Artifactable: Clone + Send + Sync + 'static {
     type Collection: Collection;
 

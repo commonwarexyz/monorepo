@@ -1265,7 +1265,19 @@ impl<V: Variant> EncodeSize for Nullification<V> {
 
 impl<V: Variant> Verifiable<&V::Public> for Nullification<V> {
     fn verify(&self, namespace: &[u8], verification_key: &V::Public) -> bool {
-        self.verify(namespace, verification_key)
+        let nullify_namespace = nullify_namespace(namespace);
+        let view_message = view_message(self.view);
+        let nullify_message = (Some(nullify_namespace.as_ref()), view_message.as_ref());
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = (Some(seed_namespace.as_ref()), view_message.as_ref());
+        let signature = aggregate_signatures::<V, _>(&[self.view_signature, self.seed_signature]);
+        aggregate_verify_multiple_messages::<V, _>(
+            verification_key,
+            &[nullify_message, seed_message],
+            &signature,
+            1,
+        )
+        .is_ok()
     }
 }
 
@@ -1536,7 +1548,21 @@ impl<V: Variant, D: Digest> Committable for Finalization<V, D> {
 
 impl<V: Variant, D: Digest> Verifiable<&V::Public> for Finalization<V, D> {
     fn verify(&self, namespace: &[u8], verification_key: &V::Public) -> bool {
-        self.verify(namespace, verification_key)
+        let finalize_namespace = finalize_namespace(namespace);
+        let finalize_message = self.proposal.encode();
+        let finalize_message = (Some(finalize_namespace.as_ref()), finalize_message.as_ref());
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = view_message(self.proposal.view);
+        let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+        let signature =
+            aggregate_signatures::<V, _>(&[self.proposal_signature, self.seed_signature]);
+        aggregate_verify_multiple_messages::<V, _>(
+            verification_key,
+            &[finalize_message, seed_message],
+            &signature,
+            1,
+        )
+        .is_ok()
     }
 }
 
