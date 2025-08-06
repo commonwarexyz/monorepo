@@ -7,13 +7,12 @@ use super::{
         orchestrator::{Orchestration, Orchestrator},
     },
 };
-use crate::{
-    threshold_simplex::types::{Finalization, Notarization},
-    Block, Reporter,
-};
+use crate::{Block, Reporter, Viewable};
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Codec, Decode, Encode};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
+use commonware_cryptography::{
+    bls12381::primitives::variant::Variant, Committable, PublicKey, Verifiable,
+};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
 use commonware_resolver::{
@@ -80,6 +79,14 @@ pub struct Actor<
     V: Variant,
     P: PublicKey,
     Z: Coordinator<PublicKey = P>,
+    N: Codec
+        + Viewable<View = u64>
+        + Committable<Commitment = B::Commitment>
+        + for<'a> Verifiable<&'a V::Public>,
+    F: Codec
+        + Viewable<View = u64>
+        + Committable<Commitment = B::Commitment>
+        + for<'a> Verifiable<&'a V::Public>,
 > {
     // ---------- Context ----------
     context: R,
@@ -88,7 +95,7 @@ pub struct Actor<
     // Coordinator
     coordinator: Z,
     // Mailbox
-    mailbox: mpsc::Receiver<Message<V, B>>,
+    mailbox: mpsc::Receiver<Message<V, B, N, F>>,
 
     // ---------- Configuration ----------
     // Public key
@@ -107,6 +114,10 @@ pub struct Actor<
     max_repair: u64,
     // Codec configuration
     codec_config: B::Cfg,
+    // Notarization codec configuration
+    notarization_codec_config: N::Cfg,
+    // Finalization codec configuration
+    finalization_codec_config: F::Cfg,
     // Partition prefix
     partition_prefix: String,
 
@@ -124,15 +135,13 @@ pub struct Actor<
     // be different (e.g. from an equivocation).
     notarized_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     // Notarizations stored by view
-    notarizations_by_view:
-        prunable::Archive<TwoCap, R, B::Commitment, Notarization<V, B::Commitment>>,
+    notarizations_by_view: prunable::Archive<TwoCap, R, B::Commitment, N>,
     // Finalizations stored by view
-    finalizations_by_view:
-        prunable::Archive<TwoCap, R, B::Commitment, Finalization<V, B::Commitment>>,
+    finalizations_by_view: prunable::Archive<TwoCap, R, B::Commitment, F>,
 
     // ---------- Immutable Storage ----------
     // Finalizations stored by height
-    finalizations_by_height: immutable::Archive<R, B::Commitment, Finalization<V, B::Commitment>>,
+    finalizations_by_height: immutable::Archive<R, B::Commitment, F>,
     // Finalized blocks stored by height
     finalized_blocks: immutable::Archive<R, B::Commitment, B>,
 
@@ -152,10 +161,21 @@ impl<
         V: Variant,
         P: PublicKey,
         Z: Coordinator<PublicKey = P>,
-    > Actor<B, R, V, P, Z>
+        N: Codec
+            + Viewable<View = u64>
+            + Committable<Commitment = B::Commitment>
+            + for<'a> Verifiable<&'a V::Public>,
+        F: Codec
+            + Viewable<View = u64>
+            + Committable<Commitment = B::Commitment>
+            + for<'a> Verifiable<&'a V::Public>,
+    > Actor<B, R, V, P, Z, N, F>
 {
     /// Create a new application actor.
-    pub async fn init(context: R, config: Config<V, P, Z, B>) -> (Self, Mailbox<V, B>) {
+    pub async fn init(
+        context: R,
+        config: Config<V, P, Z, B, N::Cfg, F::Cfg>,
+    ) -> (Self, Mailbox<V, B, N, F>) {
         // Initialize prunable
         let verified_blocks = Self::init_prunable_archive(
             &context,
@@ -171,10 +191,20 @@ impl<
             config.codec_config.clone(),
         )
         .await;
-        let notarizations_by_view =
-            Self::init_prunable_archive(&context, "notarizations_by_view", &config, ()).await;
-        let finalizations_by_view =
-            Self::init_prunable_archive(&context, "finalizations_by_view", &config, ()).await;
+        let notarizations_by_view = Self::init_prunable_archive(
+            &context,
+            "notarizations_by_view",
+            &config,
+            config.notarization_codec_config.clone(),
+        )
+        .await;
+        let finalizations_by_view = Self::init_prunable_archive(
+            &context,
+            "finalizations_by_view",
+            &config,
+            config.finalization_codec_config.clone(),
+        )
+        .await;
 
         // Initialize finalizations by height
         let start = Instant::now();
@@ -203,7 +233,7 @@ impl<
                     config.partition_prefix
                 ),
                 items_per_section: config.immutable_items_per_section,
-                codec_config: (),
+                codec_config: config.finalization_codec_config.clone(),
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
             },
@@ -276,6 +306,8 @@ impl<
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
                 codec_config: config.codec_config.clone(),
+                notarization_codec_config: config.notarization_codec_config.clone(),
+                finalization_codec_config: config.finalization_codec_config.clone(),
                 partition_prefix: config.partition_prefix,
 
                 last_processed_view: 0,
@@ -373,8 +405,8 @@ impl<
                             self.put_verified_block(view, block.commitment(), block).await;
                         }
                         Message::Notarization { notarization } => {
-                            let view = notarization.proposal.view;
-                            let commitment = notarization.proposal.payload;
+                            let view = notarization.view();
+                            let commitment = notarization.commitment();
 
                             // Store notarization by view
                             self.put_notarization_by_view(view, commitment, notarization.clone()).await;
@@ -391,8 +423,8 @@ impl<
                         }
                         Message::Finalization { finalization } => {
                             // Store finalization by view
-                            let view = finalization.proposal.view;
-                            let commitment = finalization.proposal.payload;
+                            let view = finalization.view();
+                            let commitment = finalization.commitment();
                             self.put_finalization_by_view(view, commitment, finalization.clone()).await;
 
                             // Search for block locally, otherwise fetch it remotely
@@ -416,6 +448,7 @@ impl<
                             let result = self.find_block(&mut buffer, commitment).await;
                             let _ = response.send(result);
                         }
+                        Message::_Phantom(_) => {},
                         Message::Subscribe { view, commitment, response } => {
                             // Check for block locally
                             if let Some(block) = self.find_block(&mut buffer, commitment).await {
@@ -488,7 +521,7 @@ impl<
                                 }
 
                                 // Update the last processed height and view
-                                self.last_processed_view = finalization.proposal.view;
+                                self.last_processed_view = finalization.view();
                             }
                         }
                         Orchestration::Repair { height } => {
@@ -573,7 +606,7 @@ impl<
                                     };
 
                                     // Get block
-                                    let commitment = notarization.proposal.payload;
+                                    let commitment = notarization.commitment();
                                     let Some(block) = self.find_block(&mut buffer, commitment).await else {
                                         debug!(?commitment, "block missing on request");
                                         continue;
@@ -609,14 +642,14 @@ impl<
                                 },
                                 Request::Finalized { height } => {
                                     // Parse finalization
-                                    let Ok((finalization, block)) = <(Finalization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
+                                    let Ok((finalization, block)) = <(F, B)>::decode_cfg(value, &(self.finalization_codec_config.clone(), self.codec_config.clone())) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
 
                                     // Validation
                                     if block.height() != height
-                                        || finalization.proposal.payload != block.commitment()
+                                        || finalization.commitment() != block.commitment()
                                         || !finalization.verify(&self.namespace, &self.identity)
                                     {
                                         let _ = response.send(false);
@@ -630,14 +663,14 @@ impl<
                                 },
                                 Request::Notarized { view } => {
                                     // Parse notarization
-                                    let Ok((notarization, block)) = <(Notarization<V, B::Commitment>, B)>::decode_cfg(value, &((), self.codec_config.clone())) else {
+                                    let Ok((notarization, block)) = <(N, B)>::decode_cfg(value, &(self.notarization_codec_config.clone(), self.codec_config.clone())) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
 
                                     // Validation
-                                    if notarization.proposal.view != view
-                                        || notarization.proposal.payload != block.commitment()
+                                    if notarization.view() != view
+                                        || notarization.commitment() != block.commitment()
                                         || !notarization.verify(&self.namespace, &self.identity)
                                     {
                                         let _ = response.send(false);
@@ -665,7 +698,7 @@ impl<
     async fn init_prunable_archive<T: Codec>(
         context: &R,
         name: &str,
-        config: &Config<V, P, Z, B>,
+        config: &Config<V, P, Z, B, N::Cfg, F::Cfg>,
         codec_config: T::Cfg,
     ) -> prunable::Archive<TwoCap, R, B::Commitment, T> {
         let start = Instant::now();
@@ -752,7 +785,7 @@ impl<
         &mut self,
         view: u64,
         commitment: B::Commitment,
-        notarization: Notarization<V, B::Commitment>,
+        notarization: N,
     ) {
         match self
             .notarizations_by_view
@@ -776,7 +809,7 @@ impl<
         &mut self,
         view: u64,
         commitment: B::Commitment,
-        finalization: Finalization<V, B::Commitment>,
+        finalization: F,
     ) {
         match self
             .finalizations_by_view
@@ -844,7 +877,7 @@ impl<
         &mut self,
         height: u64,
         commitment: B::Commitment,
-        finalization: Finalization<V, B::Commitment>,
+        finalization: F,
         block: B,
         notifier: &mut mpsc::Sender<()>,
     ) {
@@ -894,10 +927,7 @@ impl<
     }
 
     /// Get a finalization from the archive by height.
-    async fn get_finalization_by_height(
-        &self,
-        id: Identifier<'_, B::Commitment>,
-    ) -> Option<Finalization<V, B::Commitment>> {
+    async fn get_finalization_by_height(&self, id: Identifier<'_, B::Commitment>) -> Option<F> {
         match self.finalizations_by_height.get(id).await {
             Ok(finalization) => finalization,
             Err(e) => panic!("failed to get finalization: {e}"),
@@ -905,10 +935,7 @@ impl<
     }
 
     /// Get a notarization from the archive by view.
-    async fn get_notarization_by_view(
-        &self,
-        id: Identifier<'_, B::Commitment>,
-    ) -> Option<Notarization<V, B::Commitment>> {
+    async fn get_notarization_by_view(&self, id: Identifier<'_, B::Commitment>) -> Option<N> {
         match self.notarizations_by_view.get(id).await {
             Ok(notarization) => notarization,
             Err(e) => panic!("failed to get notarization by view: {e}"),
@@ -916,10 +943,7 @@ impl<
     }
 
     /// Get a finalization from the archive by view.
-    async fn get_finalization_from_view(
-        &self,
-        id: Identifier<'_, B::Commitment>,
-    ) -> Option<Finalization<V, B::Commitment>> {
+    async fn get_finalization_from_view(&self, id: Identifier<'_, B::Commitment>) -> Option<F> {
         match self.finalizations_by_view.get(id).await {
             Ok(finalization) => finalization,
             Err(e) => panic!("failed to get finalization by view: {e}"),

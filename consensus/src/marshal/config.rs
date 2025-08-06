@@ -5,7 +5,12 @@ use governor::Quota;
 
 /// Marshal configuration.
 #[derive(Debug)]
-pub struct Config<V: Variant, P: PublicKey, Z: Coordinator<PublicKey = P>, B: Block> {
+pub struct Config<V: Variant, P: PublicKey, Z: Coordinator<PublicKey = P>, B: Block, N, F> {
+    /// Codec configuration for notarization type.
+    pub notarization_codec_config: N,
+
+    /// Codec configuration for finalization type.
+    pub finalization_codec_config: F,
     /// The public key of the validator.
     pub public_key: P,
 

@@ -297,9 +297,11 @@ mod tests {
         identity: <V as Variant>::Public,
     ) -> (
         Application<B>,
-        crate::marshal::ingress::mailbox::Mailbox<V, B>,
+        crate::marshal::ingress::mailbox::Mailbox<V, B, Notarization<V, D>, Finalization<V, D>>,
     ) {
         let config = Config {
+            notarization_codec_config: (),
+            finalization_codec_config: (),
             public_key: secret.public_key(),
             identity,
             coordinator,

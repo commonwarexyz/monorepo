@@ -23,7 +23,6 @@ pub trait Viewable {
     fn view(&self) -> Self::View;
 }
 
-
 /// Block is the interface for a block in the blockchain.
 ///
 /// Blocks are used to track the progress of the consensus engine.

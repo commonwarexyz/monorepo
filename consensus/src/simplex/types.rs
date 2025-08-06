@@ -1,12 +1,11 @@
 //! Types used in [crate::simplex].
 
 use crate::Viewable;
-use commonware_cryptography::Verifiable;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
 };
-use commonware_cryptography::{Digest, Signature as CSignature, Signer, Verifier};
+use commonware_cryptography::{Digest, Signature as CSignature, Signer, Verifiable, Verifier};
 use commonware_utils::{quorum, union};
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.

@@ -1,7 +1,6 @@
 //! Types used in [crate::threshold_simplex].
 
 use crate::Viewable;
-use commonware_cryptography::Verifiable;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
@@ -16,7 +15,7 @@ use commonware_cryptography::{
         poly::PartialSignature,
         variant::Variant,
     },
-    Digest,
+    Committable, Digest, Verifiable,
 };
 use commonware_utils::union;
 use std::{
@@ -960,6 +959,14 @@ impl<V: Variant, D: Digest> EncodeSize for Notarization<V, D> {
     }
 }
 
+impl<V: Variant, D: Digest> Committable for Notarization<V, D> {
+    type Commitment = D;
+
+    fn commitment(&self) -> Self::Commitment {
+        self.proposal.payload
+    }
+}
+
 impl<V: Variant, D: Digest> Seedable<V> for Notarization<V, D> {
     fn seed(&self) -> Seed<V> {
         Seed::new(self.view(), self.seed_signature)
@@ -1510,6 +1517,20 @@ impl<V: Variant, D: Digest> EncodeSize for Finalization<V, D> {
 impl<V: Variant, D: Digest> Seedable<V> for Finalization<V, D> {
     fn seed(&self) -> Seed<V> {
         Seed::new(self.view(), self.seed_signature)
+    }
+}
+
+impl<V: Variant, D: Digest> Committable for Finalization<V, D> {
+    type Commitment = D;
+
+    fn commitment(&self) -> Self::Commitment {
+        self.proposal.payload
+    }
+}
+
+impl<V: Variant, D: Digest> Verifiable<&V::Public> for Finalization<V, D> {
+    fn verify(&self, namespace: &[u8], verification_key: &V::Public) -> bool {
+        self.verify(namespace, verification_key)
     }
 }
 
