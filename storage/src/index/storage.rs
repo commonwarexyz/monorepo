@@ -93,6 +93,11 @@ pub struct Cursor<'a, T: Translator, V: Eq> {
     pruned: &'a Counter,
 }
 
+// SAFETY: The Cursor is safe to send between threads. The raw pointer `past_tail`
+// is only used as an internal optimization and doesn't escape the cursor's lifetime.
+// The pointed-to data is owned by the cursor through the `past` field.
+unsafe impl<'a, T: Translator, V: Eq + Send> Send for Cursor<'a, T, V> {}
+
 impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
     /// Creates a new `Cursor` from a mutable record reference, detaching its `next` chain for iteration.
     fn new(
