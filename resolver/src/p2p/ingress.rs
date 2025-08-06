@@ -1,6 +1,8 @@
 use crate::Resolver;
-use commonware_utils::Array;
+use commonware_utils::Span;
 use futures::{channel::mpsc, SinkExt};
+
+type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
 
 /// Messages that can be sent to the peer actor.
 pub enum Message<K> {
@@ -9,6 +11,12 @@ pub enum Message<K> {
 
     /// Cancel a fetch request by key.
     Cancel { key: K },
+
+    /// Cancel all fetch requests.
+    Clear,
+
+    /// Cancel all fetch requests that do not satisfy the predicate.
+    Retain { predicate: Predicate<K> },
 }
 
 /// A way to send messages to the peer actor.
@@ -25,7 +33,7 @@ impl<K> Mailbox<K> {
     }
 }
 
-impl<K: Array> Resolver for Mailbox<K> {
+impl<K: Span> Resolver for Mailbox<K> {
     type Key = K;
 
     /// Send a fetch request to the peer actor.
@@ -46,5 +54,27 @@ impl<K: Array> Resolver for Mailbox<K> {
             .send(Message::Cancel { key })
             .await
             .expect("Failed to send cancel_fetch");
+    }
+
+    /// Send a cancel all request to the peer actor.
+    ///
+    /// Panics if the send fails.
+    async fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {
+        self.sender
+            .send(Message::Retain {
+                predicate: Box::new(predicate),
+            })
+            .await
+            .expect("Failed to send retain");
+    }
+
+    /// Send a clear request to the peer actor.
+    ///
+    /// Panics if the send fails.
+    async fn clear(&mut self) {
+        self.sender
+            .send(Message::Clear)
+            .await
+            .expect("Failed to send cancel_all");
     }
 }

@@ -108,7 +108,7 @@ mod tests {
         deterministic::{self, Context},
         Runner,
     };
-    use commonware_utils::array::FixedBytes;
+    use commonware_utils::sequence::FixedBytes;
     use rand::Rng;
     use std::collections::BTreeMap;
 

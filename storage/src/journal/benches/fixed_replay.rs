@@ -5,7 +5,7 @@ use commonware_runtime::{
     Runner as _,
 };
 use commonware_storage::journal::fixed::Journal;
-use commonware_utils::array::FixedBytes;
+use commonware_utils::sequence::FixedBytes;
 use criterion::{black_box, criterion_group, Criterion};
 use futures::{pin_mut, StreamExt};
 use std::time::{Duration, Instant};

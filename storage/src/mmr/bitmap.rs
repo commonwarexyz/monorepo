@@ -24,7 +24,7 @@ use crate::{
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
-use commonware_utils::array::prefixed_u64::U64;
+use commonware_utils::sequence::prefixed_u64::U64;
 use std::collections::{HashSet, VecDeque};
 use tracing::{debug, error, warn};
 

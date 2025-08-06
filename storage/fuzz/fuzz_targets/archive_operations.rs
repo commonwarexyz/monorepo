@@ -9,7 +9,7 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::array::FixedBytes;
+use commonware_utils::sequence::FixedBytes;
 use libfuzzer_sys::fuzz_target;
 
 type Key = FixedBytes<16>;

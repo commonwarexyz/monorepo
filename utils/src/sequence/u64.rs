@@ -1,6 +1,4 @@
-//! A `u64` array type with a prefix byte to allow for multiple key contexts.
-
-use crate::Array;
+use crate::{Array, Span};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use std::{
@@ -18,26 +16,18 @@ pub enum Error {
     InvalidLength,
 }
 
-/// An `Array` implementation for prefixed `U64`
+/// An `Array` implementation for `u64`.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 #[repr(transparent)]
-pub struct U64([u8; u64::SIZE + 1]);
+pub struct U64([u8; u64::SIZE]);
 
 impl U64 {
-    pub fn new(prefix: u8, value: u64) -> Self {
-        let mut arr = [0; u64::SIZE + 1];
-        arr[0] = prefix;
-        arr[1..].copy_from_slice(&u64::to_be_bytes(value));
-
-        Self(arr)
+    pub fn new(value: u64) -> Self {
+        Self(value.to_be_bytes())
     }
 
     pub fn to_u64(&self) -> u64 {
-        u64::from_be_bytes(self.0[1..].try_into().unwrap())
-    }
-
-    pub fn prefix(&self) -> u8 {
-        self.0[0]
+        u64::from_be_bytes(self.0)
     }
 }
 
@@ -51,19 +41,27 @@ impl Read for U64 {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        <[u8; Self::SIZE]>::read(buf).map(Self)
+        <[u8; U64::SIZE]>::read(buf).map(Self)
     }
 }
 
 impl FixedSize for U64 {
-    const SIZE: usize = u64::SIZE + 1;
+    const SIZE: usize = u64::SIZE;
 }
+
+impl Span for U64 {}
 
 impl Array for U64 {}
 
 impl From<[u8; U64::SIZE]> for U64 {
     fn from(value: [u8; U64::SIZE]) -> Self {
         Self(value)
+    }
+}
+
+impl From<u64> for U64 {
+    fn from(value: u64) -> Self {
+        Self(value.to_be_bytes())
     }
 }
 
@@ -82,18 +80,13 @@ impl Deref for U64 {
 
 impl Debug for U64 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}:{}",
-            self.0[0],
-            u64::from_be_bytes(self.0[1..].try_into().unwrap())
-        )
+        write!(f, "{}", u64::from_be_bytes(self.0))
     }
 }
 
 impl Display for U64 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Debug::fmt(self, f)
+        write!(f, "{}", u64::from_be_bytes(self.0))
     }
 }
 
@@ -103,26 +96,19 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
 
     #[test]
-    fn test_prefixed_u64() {
-        let prefix = 69u8;
+    fn test_u64() {
         let value = 42u64;
-        let array = U64::new(prefix, value);
-        let decoded = U64::decode(array.as_ref()).unwrap();
-        assert_eq!(value, decoded.to_u64());
-        assert_eq!(prefix, decoded.prefix());
-        let from = U64::from(array.0);
-        assert_eq!(value, from.to_u64());
-        assert_eq!(prefix, from.prefix());
+        let array = U64::new(value);
+        assert_eq!(value, U64::decode(array.as_ref()).unwrap().to_u64());
+        assert_eq!(value, U64::from(array.0).to_u64());
 
         let vec = array.to_vec();
-        let from_vec = U64::decode(vec.as_ref()).unwrap();
-        assert_eq!(value, from_vec.to_u64());
-        assert_eq!(prefix, from_vec.prefix());
+        assert_eq!(value, U64::decode(vec.as_ref()).unwrap().to_u64());
     }
 
     #[test]
-    fn test_prefixed_u64_codec() {
-        let original = U64::new(69, 42u64);
+    fn test_codec() {
+        let original = U64::new(42u64);
 
         let encoded = original.encode();
         assert_eq!(encoded.len(), U64::SIZE);

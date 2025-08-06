@@ -1,4 +1,4 @@
-use crate::{hex, Array};
+use crate::{hex, Array, Span};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use std::{
@@ -23,7 +23,7 @@ pub struct FixedBytes<const N: usize>([u8; N]);
 
 impl<const N: usize> FixedBytes<N> {
     /// Creates a new `FixedBytes` instance from an array of length `N`.
-    pub fn new(value: [u8; N]) -> Self {
+    pub const fn new(value: [u8; N]) -> Self {
         Self(value)
     }
 }
@@ -45,6 +45,8 @@ impl<const N: usize> Read for FixedBytes<N> {
 impl<const N: usize> FixedSize for FixedBytes<N> {
     const SIZE: usize = N;
 }
+
+impl<const N: usize> Span for FixedBytes<N> {}
 
 impl<const N: usize> Array for FixedBytes<N> {}
 

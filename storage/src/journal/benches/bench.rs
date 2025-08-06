@@ -1,6 +1,6 @@
 use commonware_runtime::{buffer::PoolRef, tokio::Context};
 use commonware_storage::journal::fixed::{Config as JConfig, Journal};
-use commonware_utils::array::FixedBytes;
+use commonware_utils::sequence::FixedBytes;
 use criterion::criterion_main;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
