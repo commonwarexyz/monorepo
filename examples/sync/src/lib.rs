@@ -56,7 +56,7 @@ pub fn create_adb_config() -> Config<Translator> {
         log_write_buffer: NZUsize!(1024),
         translator: Translator::default(),
         thread_pool: None,
-        buffer_pool: commonware_runtime::buffer::PoolRef::new(1024, 10),
+        buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
         pruning_delay: 10,
     }
 }

@@ -761,7 +761,7 @@ pub mod test {
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             pruning_delay: 10,
         }
     }

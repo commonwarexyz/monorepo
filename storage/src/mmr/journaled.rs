@@ -716,7 +716,7 @@ mod tests {
             items_per_blob: 7,
             write_buffer: NZUsize!(1024),
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         }
     }
 
@@ -1236,7 +1236,7 @@ mod tests {
                     items_per_blob: 7,
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 },
             )
             .await
@@ -1288,7 +1288,7 @@ mod tests {
                     items_per_blob: 7,
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 },
             )
             .await
@@ -1314,7 +1314,7 @@ mod tests {
                     items_per_blob: 7,
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 },
             )
             .await

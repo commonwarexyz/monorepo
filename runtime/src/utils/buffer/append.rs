@@ -236,7 +236,7 @@ mod tests {
                 .open("test", "blob".as_bytes())
                 .await
                 .expect("Failed to open blob");
-            let pool_ref = PoolRef::new(PAGE_SIZE, 10);
+            let pool_ref = PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(10));
             let blob = Append::new(blob, size, NZUsize!(BUFFER_SIZE), pool_ref.clone())
                 .await
                 .unwrap();
@@ -258,7 +258,7 @@ mod tests {
             assert_eq!(size, 0);
 
             // Wrap the blob, then append 11 consecutive pages of data.
-            let pool_ref = PoolRef::new(PAGE_SIZE, 10);
+            let pool_ref = PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(10));
             let blob = Append::new(blob, size, NZUsize!(BUFFER_SIZE), pool_ref.clone())
                 .await
                 .unwrap();
@@ -292,7 +292,7 @@ mod tests {
                 .expect("Failed to open blob");
             assert_eq!(size, 0);
 
-            let pool_ref = PoolRef::new(PAGE_SIZE, 10);
+            let pool_ref = PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(10));
             let blob = Append::new(blob, size, NZUsize!(BUFFER_SIZE), pool_ref.clone())
                 .await
                 .unwrap();

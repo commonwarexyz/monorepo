@@ -76,13 +76,13 @@ fn fuzz(input: FuzzInput) {
                 partition: "fixed_journal_operations_fuzz_test".to_string(),
                 items_per_blob: 3,
                 write_buffer: NZUsize!(MAX_WRITE_BUF),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             },
             JournalType::Variable => VariableConfig {
                 partition: "variable_journal_operations_fuzz_test".to_string(),
                 items_per_blob: 3,
                 write_buffer: NZUsize!(MAX_WRITE_BUF),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             },
         };
 

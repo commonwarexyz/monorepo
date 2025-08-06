@@ -887,7 +887,7 @@ pub(crate) mod tests {
             log_write_buffer: NZUsize!(64),
             translator: TestTranslator::default(),
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             pruning_delay: 100,
         }
     }

@@ -756,7 +756,7 @@ mod tests {
         Config {
             partition: "test_partition".into(),
             items_per_blob,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             write_buffer: NZUsize!(2048),
         }
     }
@@ -1602,7 +1602,7 @@ mod tests {
                 partition: "test_fresh_start".into(),
                 items_per_blob: 5,
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Initialize journal with sync boundaries when no existing data exists
@@ -1657,7 +1657,7 @@ mod tests {
                 partition: "test_overlap".into(),
                 items_per_blob: 4,
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with 20 operations
@@ -1731,7 +1731,7 @@ mod tests {
                 partition: "test_exact_match".into(),
                 items_per_blob: 3,
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with 20 operations (0-19)
@@ -1805,7 +1805,7 @@ mod tests {
                 partition: "test_rewind".into(),
                 items_per_blob: 4,
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with 30 operations (0-29)
@@ -1885,7 +1885,7 @@ mod tests {
                 partition: "test_invalid_range".into(),
                 items_per_blob: 4,
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             let lower_bound = 6;
@@ -1918,7 +1918,7 @@ mod tests {
                 partition: "test_init_at_size".into(),
                 items_per_blob: 5,
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Test 1: Initialize at size 0 (empty journal)

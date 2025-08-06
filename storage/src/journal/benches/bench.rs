@@ -37,7 +37,7 @@ async fn get_journal<const ITEM_SIZE: usize>(
         partition: partition_name.to_string(),
         items_per_blob,
         write_buffer: NZUsize!(WRITE_BUFFER),
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
     };
     Journal::init(context, journal_config).await.unwrap()
 }

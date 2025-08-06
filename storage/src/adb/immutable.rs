@@ -662,7 +662,7 @@ pub(super) mod test {
             locations_items_per_blob: 7,
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         }
     }
 

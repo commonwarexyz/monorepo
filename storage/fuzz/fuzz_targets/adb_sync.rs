@@ -48,7 +48,7 @@ fn test_config(test_name: &str, pruning_delay: u64) -> Config<TwoCap> {
         log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
         thread_pool: None,
-        buffer_pool: PoolRef::new(PAGE_SIZE, 1),
+        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(1)),
         pruning_delay: (pruning_delay % 1000) + 1,
     }
 }

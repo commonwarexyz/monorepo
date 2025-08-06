@@ -53,7 +53,7 @@ fn fuzz(data: FuzzInput) {
             log_write_buffer: NZUsize!(1024),
             bitmap_metadata_partition: "fuzz_current_bitmap_metadata".into(),
             translator: TwoCap,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             thread_pool: None,
             pruning_delay: 10,
         };

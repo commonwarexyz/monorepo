@@ -45,7 +45,7 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
         log_write_buffer: NZUsize!(1024),
         translator: EightCap,
         thread_pool: Some(pool),
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         pruning_delay: 10,
     }
 }
