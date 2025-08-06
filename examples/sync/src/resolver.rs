@@ -2,9 +2,9 @@
 //! to fetch operations and proofs.
 
 use crate::{
-    error::Error, GetOperationsRequest, GetSyncTargetRequest, Message, RequestId, Requester, MAX_MESSAGE_SIZE,
+    error::Error, GetOperationsRequest, GetSyncTargetRequest, Message, RequestId, Requester,
+    MAX_MESSAGE_SIZE,
 };
-use std::sync::Arc;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
@@ -17,7 +17,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use std::{collections::HashMap, marker::PhantomData, net::SocketAddr, num::NonZeroU64};
+use std::{collections::HashMap, marker::PhantomData, net::SocketAddr, num::NonZeroU64, sync::Arc};
 use tracing::{debug, error, info, warn};
 
 const REQUEST_BUFFER_SIZE: usize = 64;

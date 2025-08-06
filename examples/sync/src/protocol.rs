@@ -461,7 +461,7 @@ mod tests {
         // Request IDs should be monotonically increasing
         assert!(id2.value() > id1.value());
         assert!(id3.value() > id2.value());
-        
+
         // Should be consecutive since we're using a single Requester
         assert_eq!(id2.value(), id1.value() + 1);
         assert_eq!(id3.value(), id2.value() + 1);
