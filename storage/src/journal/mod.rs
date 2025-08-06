@@ -5,6 +5,8 @@
 //! to serve as a backing store for some in-memory data structure, or as a building block for a more
 //! complex construction that prescribes some meaning to items in the log.
 
+use thiserror::Error;
+
 pub mod fixed;
 pub mod variable;
 
@@ -30,7 +32,7 @@ where
 }
 
 /// Errors that can occur when interacting with `Journal`.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
