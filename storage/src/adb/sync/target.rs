@@ -1,3 +1,4 @@
+use crate::adb::sync;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
@@ -44,50 +45,34 @@ impl<D: Digest> Read for Target<D> {
     }
 }
 
-/// Errors that can occur during target update validation
-#[derive(Debug, thiserror::Error, Clone)]
-pub enum TargetUpdateError {
-    /// Target bounds are invalid (lower > upper)
-    #[error("invalid target bounds: lower_bound {lower_bound} > upper_bound {upper_bound}")]
-    InvalidBounds { lower_bound: u64, upper_bound: u64 },
-    /// Target moved backward (bounds decreased)
-    #[error("sync target moved backward: old bounds [{old_lower}, {old_upper}], new bounds [{new_lower}, {new_upper}]")]
-    MovedBackward {
-        old_lower: u64,
-        old_upper: u64,
-        new_lower: u64,
-        new_upper: u64,
-    },
-    /// Target root is unchanged
-    #[error("sync target root unchanged")]
-    RootUnchanged,
-}
-
 /// Validate a target update against the current target
-pub fn validate_target_update<D: Digest>(
+pub fn validate_update<T, U, D>(
     old_target: &Target<D>,
     new_target: &Target<D>,
-) -> Result<(), TargetUpdateError> {
+) -> Result<(), sync::error::Error<T, U>>
+where
+    T: std::error::Error + Send + 'static,
+    U: std::error::Error + Send + 'static,
+    D: Digest,
+{
     if new_target.lower_bound_ops > new_target.upper_bound_ops {
-        return Err(TargetUpdateError::InvalidBounds {
-            lower_bound: new_target.lower_bound_ops,
-            upper_bound: new_target.upper_bound_ops,
+        return Err(sync::error::Error::InvalidTarget {
+            lower_bound_pos: new_target.lower_bound_ops,
+            upper_bound_pos: new_target.upper_bound_ops,
         });
     }
 
     if new_target.lower_bound_ops < old_target.lower_bound_ops
         || new_target.upper_bound_ops < old_target.upper_bound_ops
     {
-        return Err(TargetUpdateError::MovedBackward {
-            old_lower: old_target.lower_bound_ops,
-            old_upper: old_target.upper_bound_ops,
-            new_lower: new_target.lower_bound_ops,
-            new_upper: new_target.upper_bound_ops,
+        return Err(sync::error::Error::SyncTargetMovedBackward {
+            old: Box::new(old_target.root),
+            new: Box::new(new_target.root),
         });
     }
 
     if new_target.root == old_target.root {
-        return Err(TargetUpdateError::RootUnchanged);
+        return Err(sync::error::Error::SyncTargetRootUnchanged);
     }
 
     Ok(())
@@ -155,7 +140,8 @@ mod tests {
         new_target: Target<sha256::Digest>,
         should_succeed: bool,
     ) {
-        let result = validate_target_update(&old_target, &new_target);
+        let result: Result<(), crate::adb::sync::error::Error<std::io::Error, std::io::Error>> =
+            validate_update(&old_target, &new_target);
         if should_succeed {
             assert!(result.is_ok());
         } else {

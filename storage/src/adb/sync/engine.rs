@@ -1,9 +1,7 @@
 //! Core sync engine components that are shared across sync clients.
 
 use crate::{
-    adb::sync::{
-        resolver::Resolver, target::TargetUpdateError, Database, Error, Journal, Target, Verifier,
-    },
+    adb::sync::{resolver::Resolver, Database, Error, Journal, Target, Verifier},
     mmr::verification::Proof,
 };
 use commonware_cryptography::Digest;
@@ -558,25 +556,7 @@ where
         match event {
             Event::TargetUpdate(new_target) => {
                 // Validate and handle the target update
-                crate::adb::sync::target::validate_target_update(&self.target, &new_target)
-                    .map_err(|e| match e {
-                        TargetUpdateError::MovedBackward { .. } => {
-                            Error::<DB::Error, R::Error>::SyncTargetMovedBackward {
-                                old: Box::new(self.target.root),
-                                new: Box::new(new_target.root),
-                            }
-                        }
-                        TargetUpdateError::InvalidBounds {
-                            lower_bound,
-                            upper_bound,
-                        } => Error::<DB::Error, R::Error>::InvalidTarget {
-                            lower_bound_pos: lower_bound,
-                            upper_bound_pos: upper_bound,
-                        },
-                        TargetUpdateError::RootUnchanged => {
-                            Error::<DB::Error, R::Error>::SyncTargetRootUnchanged
-                        }
-                    })?;
+                crate::adb::sync::target::validate_update(&self.target, &new_target)?;
 
                 let mut updated_self = self.reset_for_target_update(new_target).await?;
 
