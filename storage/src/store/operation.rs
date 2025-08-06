@@ -1,9 +1,9 @@
-//! Operations that can be applied to a [`Store`] database.
+//! Operations that can be applied to a [Store] database.
 //!
-//! The [`Operation`] enum implements the `Array` trait, allowing for a persistent log of operations
+//! The [Operation] enum implements the `Array` trait, allowing for a persistent log of operations
 //! based on a `crate::Journal`.
 //!
-//! [`Store`]: crate::store::Store
+//! [Operation]: crate::store::Operation
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, Error as CodecError, Read, ReadExt, Write};
@@ -46,7 +46,7 @@ const DELETE_CONTEXT: u8 = 1;
 const COMMIT_CONTEXT: u8 = 2;
 
 impl<K: Array, V: Codec> Operation<K, V> {
-    /// If this is a [`Operation::Set`] operation, returns the key. Otherwise, returns None.
+    /// If this is a set or operation, returns the key. Otherwise, returns None.
     pub fn to_key(&self) -> Option<&K> {
         match self {
             Operation::Set(key, _) => Some(key),
@@ -55,7 +55,7 @@ impl<K: Array, V: Codec> Operation<K, V> {
         }
     }
 
-    /// If this is a [`Operation::Set`] operation, returns the value. Otherwise, returns None.
+    /// If this is a [Operation::Set] operation, returns the value. Otherwise, returns None.
     pub fn to_value(&self) -> Option<&V> {
         match self {
             Operation::Set(_, value) => Some(value),

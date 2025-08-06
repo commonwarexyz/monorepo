@@ -123,7 +123,7 @@ impl<K: Array, V: Codec> Variable<K, V> {
         }
     }
 
-    /// If this is a [Variable::Set] operation, returns the value. Otherwise, returns None.
+    /// If this is an operation involving a value, returns the value. Otherwise, returns None.
     pub fn to_value(&self) -> Option<&V> {
         match self {
             Variable::Set(_, value) => Some(value),

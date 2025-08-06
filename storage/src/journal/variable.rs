@@ -646,7 +646,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             ))
             .map(|(&section, _)| section)
             .collect();
-        for index in &trailing {
+        for index in trailing.iter().rev() {
             // Remove the underlying blob from storage.
             let blob = self.blobs.remove(index).unwrap();
 

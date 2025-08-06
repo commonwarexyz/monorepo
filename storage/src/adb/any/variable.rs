@@ -233,7 +233,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             mmr_leaves = locations_size;
         }
 
-        // The size of the log at the last commit point (or 0 if none).
+        // The size of the log at the last commit point (including the commit operation), or 0 if
+        // none.
         let mut end_loc = 0;
         // The offset into the log at the end_loc.
         let mut end_offset = 0;
@@ -251,7 +252,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     Err(e) => {
                         return Err(Error::JournalError(e));
                     }
-                    Ok((section, offset, _, op)) => {
+                    Ok((section, offset, size, op)) => {
                         if !oldest_retained_loc_found {
                             self.log_size = section * self.log_items_per_section;
                             self.oldest_retained_loc = self.log_size;
@@ -264,7 +265,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                         // index.
                         let expected = loc / self.log_items_per_section;
                         assert_eq!(section, expected,
-                                "section {section} did not match expected session {expected} from location {loc}");
+                                "given section {section} did not match expected section {expected} from location {loc}");
 
                         if self.log_size > mmr_leaves {
                             warn!(
@@ -280,14 +281,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                             Operation::Delete(key) => {
                                 let result = self.get_loc(&key).await?;
                                 if let Some(old_loc) = result {
-                                    Self::delete_loc(&mut self.snapshot, &key, old_loc);
                                     uncommitted_ops.insert(key, (Some(old_loc), None));
+                                } else {
+                                    uncommitted_ops.remove(&key);
                                 }
                             }
                             Operation::Update(key, _) => {
                                 let result = self.get_loc(&key).await?;
                                 if let Some(old_loc) = result {
-                                    Self::update_loc(&mut self.snapshot, &key, old_loc, loc);
                                     uncommitted_ops.insert(key, (Some(old_loc), Some(loc)));
                                 } else {
                                     uncommitted_ops.insert(key, (None, Some(loc)));
@@ -316,7 +317,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                 }
                                 uncommitted_ops.clear();
                                 end_loc = self.log_size;
-                                end_offset = offset;
+                                end_offset = offset + size;
                             }
                             _ => unreachable!(
                                 "unexpected operation type at offset {offset} of section {section}"
@@ -326,16 +327,17 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 }
             }
         }
-        if !uncommitted_ops.is_empty() {
+        if end_loc < self.log_size {
             warn!(
                 op_count = uncommitted_ops.len(),
+                log_size = end_loc,
                 "rewinding over uncommitted operations at end of log"
             );
-            let new_last_section = end_loc / self.log_items_per_section;
+            let prune_to_section = end_loc.saturating_sub(1) / self.log_items_per_section;
             self.log
-                .rewind_to_offset(new_last_section, end_offset)
+                .rewind_to_offset(prune_to_section, end_offset)
                 .await?;
-            self.log.sync(new_last_section).await?;
+            self.log.sync(prune_to_section).await?;
             self.log_size = end_loc;
         }
 
@@ -748,6 +750,26 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         Ok(())
     }
+
+    #[cfg(test)]
+    pub(super) async fn simulate_failure(
+        mut self,
+        sync_mmr: bool,
+        sync_locations: bool,
+        sync_log: bool,
+    ) -> Result<(), Error> {
+        let section = self.current_section();
+        if sync_mmr {
+            self.mmr.sync(&mut self.hasher).await?;
+        }
+        if sync_log {
+            self.log.sync(section).await?;
+        }
+        if sync_locations {
+            self.locations.sync().await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1110,6 +1132,96 @@ pub(super) mod test {
             let db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
             assert!(db.get(&k).await.unwrap().is_none());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    pub fn test_any_variable_db_recovery() {
+        let executor = deterministic::Runner::default();
+        // Build a db with 1000 keys, some of which we update and some of which we delete.
+        const ELEMENTS: u64 = 1000;
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
+            let root = db.root(&mut hasher);
+
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
+                db.update(k, v.clone()).await.unwrap();
+            }
+
+            // Simulate a failed commit and test that we rollback to the previous root.
+            db.simulate_failure(false, false, false).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+
+            // re-apply the updates and commit them this time.
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
+                db.update(k, v.clone()).await.unwrap();
+            }
+            db.commit().await.unwrap();
+            let root = db.root(&mut hasher);
+
+            // Update every 3rd key
+            for i in 0u64..ELEMENTS {
+                if i % 3 != 0 {
+                    continue;
+                }
+                let k = hash(&i.to_be_bytes());
+                let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
+                db.update(k, v.clone()).await.unwrap();
+            }
+
+            // Simulate a failed commit and test that we rollback to the previous root.
+            db.simulate_failure(false, false, false).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+
+            // Re-apply updates for every 3rd key and commit them this time.
+            for i in 0u64..ELEMENTS {
+                if i % 3 != 0 {
+                    continue;
+                }
+                let k = hash(&i.to_be_bytes());
+                let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
+                db.update(k, v.clone()).await.unwrap();
+            }
+            db.commit().await.unwrap();
+            let root = db.root(&mut hasher);
+
+            // Delete every 7th key
+            for i in 0u64..ELEMENTS {
+                if i % 7 != 1 {
+                    continue;
+                }
+                let k = hash(&i.to_be_bytes());
+                db.delete(k).await.unwrap();
+            }
+
+            // Simulate a failed commit and test that we rollback to the previous root.
+            db.simulate_failure(false, false, false).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+
+            // Re-delete every 7th key and commit this time.
+            for i in 0u64..ELEMENTS {
+                if i % 7 != 1 {
+                    continue;
+                }
+                let k = hash(&i.to_be_bytes());
+                db.delete(k).await.unwrap();
+            }
+            db.commit().await.unwrap();
+
+            assert_eq!(db.op_count(), 2787);
+            assert_eq!(db.inactivity_floor_loc, 1480);
+            assert_eq!(db.oldest_retained_loc().unwrap(), 1477);
+            assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
         });
