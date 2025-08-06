@@ -1,4 +1,4 @@
-//! An unauthenticated key-value database supporting variable-sized values.
+//! An mutable key-value database that supports variable-sized values.
 //!
 //! # Terminology
 //!
@@ -12,9 +12,9 @@
 //!
 //! 1. **Initialization**: Create with [`Store::init`] using a [`Config`]
 //! 2. **Insertion**: Use [`Store::update`] to set a value for a given key
-//! 3. **Queries**: Use [`Store::get`] to retrieve current values
-//! 4. **Deletions**: Use [`Store::delete`] to remove a key's value
-//! 5. **Persistence**: Call [`Store::commit`] to make changes durable
+//! 3. **Deletions**: Use [`Store::delete`] to remove a key's value
+//! 4. **Persistence**: Call [`Store::commit`] to make changes durable
+//! 5. **Queries**: Use [`Store::get`] to retrieve current values
 //! 6. **Cleanup**: Call [`Store::close`] to shutdown gracefully or [`Store::destroy`] to remove all data
 //!
 //! # Pruning
@@ -114,6 +114,17 @@ use operation::Operation;
 /// snapshot.
 const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 
+/// Errors that can occur when interacting with a [`Store`] database.
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error(transparent)]
+    Journal(#[from] crate::journal::Error),
+
+    /// The requested key was not found in the snapshot.
+    #[error("key not found")]
+    KeyNotFound,
+}
+
 /// Configuration for initializing a [`Store`] database.
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
@@ -142,6 +153,8 @@ pub struct Config<T: Translator, C> {
     pub translator: T,
 
     /// The buffer pool to use for caching data.
+    ///
+    /// TODO: Use this for the variable journal as well (#1223)
     pub buffer_pool: PoolRef,
 }
 
@@ -355,7 +368,7 @@ where
             let stream = self.log.replay(SNAPSHOT_READ_BUFFER_SIZE).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
-                let (section, offset, _size, op) = result?;
+                let (section, offset, _, op) = result?;
 
                 if oldest_retained_loc.is_none() {
                     self.op_count = section * self.log_items_per_section;
@@ -439,13 +452,17 @@ where
     async fn apply_op(&mut self, op: Operation<K, V>) -> Result<u32, Error> {
         let current_section = self.op_count / self.log_items_per_section;
 
-        self.uncommitted_ops += 1;
-
         // Append the operation to the entry log, and the offset to the locations log.
-        let (offset, _size) = self.log.append(current_section, op).await?;
+        //
+        // The section number can be derived from the location by dividing the location
+        // by the number of items to store in each section, hence why we only store a
+        // map of location -> offset within the section.
+        let (offset, _) = self.log.append(current_section, op).await?;
         self.locations.append(offset.into()).await?;
 
+        self.uncommitted_ops += 1;
         self.op_count += 1;
+
         let new_section = self.op_count / self.log_items_per_section;
 
         // Sync the previous section if we transitioned to a new section
@@ -613,17 +630,6 @@ where
             .await
             .map_err(Error::Journal)
     }
-}
-
-/// Errors that can occur when interacting with a [`Store`] database.
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error(transparent)]
-    Journal(#[from] crate::journal::Error),
-
-    /// The requested key was not found in the snapshot.
-    #[error("key not found")]
-    KeyNotFound,
 }
 
 #[cfg(test)]
@@ -912,6 +918,44 @@ mod test {
 
             let iter = store.snapshot.get(&k_n);
             assert_eq!(iter.count(), 0);
+
+            store.destroy().await.unwrap();
+        });
+    }
+
+    /// Tests the pruning example in the module documentation.
+    #[test_traced("DEBUG")]
+    fn test_store_pruning() {
+        let executor = deterministic::Runner::default();
+
+        executor.start(|mut ctx| async move {
+            let mut store = create_test_store(ctx.with_label("store")).await;
+
+            let k_a = Digest::random(&mut ctx);
+            let k_b = Digest::random(&mut ctx);
+
+            let v_a = Digest::random(&mut ctx);
+            let v_b = Digest::random(&mut ctx);
+            let v_c = Digest::random(&mut ctx);
+
+            store.update(k_a, v_a).await.unwrap();
+            store.update(k_b, v_b).await.unwrap();
+
+            store.commit().await.unwrap();
+            assert_eq!(store.op_count, 6);
+            assert_eq!(store.uncommitted_ops, 0);
+            assert_eq!(store.inactivity_floor_loc, 3);
+            assert_eq!(store.get(&k_a).await.unwrap().unwrap(), v_a);
+
+            store.update(k_b, v_a).await.unwrap();
+            store.update(k_a, v_c).await.unwrap();
+
+            store.commit().await.unwrap();
+            assert_eq!(store.op_count, 9);
+            assert_eq!(store.uncommitted_ops, 0);
+            assert_eq!(store.inactivity_floor_loc, 6);
+            assert_eq!(store.get(&k_a).await.unwrap().unwrap(), v_c);
+            assert_eq!(store.get(&k_b).await.unwrap().unwrap(), v_a);
 
             store.destroy().await.unwrap();
         });

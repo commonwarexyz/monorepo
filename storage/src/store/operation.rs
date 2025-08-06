@@ -17,20 +17,26 @@ use std::{
 /// An operation applied to an unauthenticated database with a variable size value.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Operation<K: Array, V: Codec> {
+    /// Indicates the key now has the wrapped value.
     Set(K, V),
+
+    /// Indicates the key no longer has a value.
     Delete(K),
+
+    /// Indicates all prior operations are no longer subject to rollback, and the floor on inactive
+    /// operations has been raised to the wrapped value.
     Commit(u64),
 }
 
 impl<K: Array, V: Codec> EncodeSize for Operation<K, V> {
     fn encode_size(&self) -> usize {
-        match self {
+        1 + match self {
             // 1 byte for the context + fixed key size + value’s own size
-            Operation::Set(_, v) => 1 + K::SIZE + v.encode_size(),
+            Operation::Set(_, v) => K::SIZE + v.encode_size(),
             // 1 byte for the context + fixed key size
-            Operation::Delete(_) => 1 + K::SIZE,
+            Operation::Delete(_) => K::SIZE,
             // Only the context byte
-            Operation::Commit(floor_num) => 1 + floor_num.encode_size(),
+            Operation::Commit(floor_num) => floor_num.encode_size(),
         }
     }
 }
