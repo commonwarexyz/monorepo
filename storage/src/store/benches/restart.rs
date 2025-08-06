@@ -9,6 +9,7 @@ use commonware_storage::{
     store::{Config as SConfig, Store},
     translator::EightCap,
 };
+use commonware_utils::NZUsize;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::time::Instant;
@@ -29,14 +30,14 @@ const PAGE_CACHE_SIZE: usize = 10_000;
 fn store_cfg() -> SConfig<EightCap, ()> {
     SConfig::<EightCap, ()> {
         log_journal_partition: format!("log_{PARTITION_SUFFIX}"),
-        log_write_buffer: 64 * 1024,
+        log_write_buffer: NZUsize!(64 * 1024),
         log_compression: None,
         log_codec_config: (),
         log_items_per_section: ITEMS_PER_BLOB,
         locations_journal_partition: format!("locations_{PARTITION_SUFFIX}"),
         locations_items_per_blob: ITEMS_PER_BLOB,
         translator: EightCap,
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 
