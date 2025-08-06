@@ -577,6 +577,7 @@ pub struct Context {
     executor: Arc<Executor>,
     network: Arc<Network>,
     storage: MeteredStorage<AuditedStorage<MemStorage>>,
+    children: Arc<Mutex<Vec<futures::future::AbortHandle>>>,
 }
 
 impl Default for Context {
@@ -627,6 +628,7 @@ impl Context {
             executor: executor.clone(),
             network: Arc::new(network),
             storage,
+            children: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -690,11 +692,60 @@ impl Context {
             executor,
             network: Arc::new(network),
             storage: self.storage,
+            children: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub fn auditor(&self) -> &Auditor {
         &self.executor.auditor
+    }
+
+    // Helper method for spawn_ref and spawn_child_ref
+    fn spawn_ref_internal<F, T>(&mut self, is_child: bool) -> impl FnOnce(F) -> Handle<T> + 'static
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Ensure a context only spawns one task
+        assert!(!self.spawned, "already spawned");
+        self.spawned = true;
+
+        // Get metrics
+        let (label, gauge) = spawn_metrics!(self, future);
+
+        // Set up the task
+        let executor = self.executor.clone();
+
+        // We only need to register this task with the parent if it's a child task
+        let parent_children = if is_child {
+            Some(self.children.clone())
+        } else {
+            None
+        };
+
+        let children = if is_child {
+            // Child task gets fresh children list
+            Arc::new(Mutex::new(Vec::new()))
+        } else {
+            // Regular task uses current context's children list
+            self.children.clone()
+        };
+
+        move |f: F| {
+            let (task, handle) = Handle::init_future(f, gauge, false, children);
+
+            // Spawn the task
+            Tasks::register_work(&executor.tasks, label, Box::pin(task));
+
+            // Register this child with the parent if needed
+            if let Some(parent_list) = parent_children {
+                if let Some(abort_handle) = handle.abort_handle() {
+                    parent_list.lock().unwrap().push(abort_handle);
+                }
+            }
+
+            handle
+        }
     }
 }
 
@@ -706,6 +757,7 @@ impl Clone for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
+            children: self.children.clone(),
         }
     }
 }
@@ -725,8 +777,9 @@ impl crate::Spawner for Context {
 
         // Set up the task
         let executor = self.executor.clone();
+        let children = self.children.clone();
         let future = f(self);
-        let (f, handle) = Handle::init_future(future, gauge, false);
+        let (f, handle) = Handle::init_future(future, gauge, false, children);
 
         // Spawn the task
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
@@ -738,22 +791,7 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // Ensure a context only spawns one task
-        assert!(!self.spawned, "already spawned");
-        self.spawned = true;
-
-        // Get metrics
-        let (label, gauge) = spawn_metrics!(self, future);
-
-        // Set up the task
-        let executor = self.executor.clone();
-        move |f: F| {
-            let (f, handle) = Handle::init_future(f, gauge, false);
-
-            // Spawn the task
-            Tasks::register_work(&executor.tasks, label, Box::pin(f));
-            handle
-        }
+        self.spawn_ref_internal(false)
     }
 
     fn spawn_child<F, Fut, T>(self, f: F) -> Handle<T>
@@ -762,8 +800,25 @@ impl crate::Spawner for Context {
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // TODO: Implement actual child tracking
-        self.spawn(f)
+        // Create child context with its own empty children list
+        let child_context = Self {
+            name: self.name.clone(),
+            spawned: self.spawned,
+            executor: self.executor.clone(),
+            network: self.network.clone(),
+            storage: self.storage.clone(),
+            children: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        // Spawn the child normally
+        let child_handle = child_context.spawn(f);
+
+        // Register this child with the parent
+        if let Some(abort_handle) = child_handle.abort_handle() {
+            self.children.lock().unwrap().push(abort_handle);
+        }
+
+        child_handle
     }
 
     fn spawn_child_ref<F, T>(&mut self) -> impl FnOnce(F) -> Handle<T> + 'static
@@ -771,8 +826,7 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // TODO: Implement actual child tracking
-        self.spawn_ref()
+        self.spawn_ref_internal(true)
     }
 
     fn spawn_blocking<F, T>(self, dedicated: bool, f: F) -> Handle<T>
@@ -871,6 +925,7 @@ impl crate::Metrics for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
+            children: self.children.clone(),
         }
     }
 
