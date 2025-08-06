@@ -1,6 +1,7 @@
 //! Types used in [crate::threshold_simplex].
 
 use crate::Viewable;
+use commonware_cryptography::Verifiable;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
@@ -779,6 +780,31 @@ impl<V: Variant, D: Digest> Attributable for Notarize<V, D> {
     }
 }
 
+impl<V: Variant, D: Digest> Verifiable<&[V::Public]> for Notarize<V, D> {
+    fn verify(&self, namespace: &[u8], verification_key: &[V::Public]) -> bool {
+        let notarize_namespace = notarize_namespace(namespace);
+        let notarize_message = self.proposal.encode();
+        let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = view_message(self.proposal.view);
+        let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+        let Some(evaluated) = verification_key.get(self.signer() as usize) else {
+            return false;
+        };
+        let signature = aggregate_signatures::<V, _>(&[
+            self.proposal_signature.value,
+            self.seed_signature.value,
+        ]);
+        aggregate_verify_multiple_messages::<V, _>(
+            evaluated,
+            &[notarize_message, seed_message],
+            &signature,
+            1,
+        )
+        .is_ok()
+    }
+}
+
 impl<V: Variant, D: Digest> Viewable for Notarize<V, D> {
     type View = View;
 
@@ -880,6 +906,26 @@ impl<V: Variant, D: Digest> Viewable for Notarization<V, D> {
 
     fn view(&self) -> View {
         self.proposal.view()
+    }
+}
+
+impl<V: Variant, D: Digest> Verifiable<&V::Public> for Notarization<V, D> {
+    fn verify(&self, namespace: &[u8], verification_key: &V::Public) -> bool {
+        let notarize_namespace = notarize_namespace(namespace);
+        let notarize_message = self.proposal.encode();
+        let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = view_message(self.proposal.view);
+        let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
+        let signature =
+            aggregate_signatures::<V, _>(&[self.proposal_signature, self.seed_signature]);
+        aggregate_verify_multiple_messages::<V, _>(
+            verification_key,
+            &[notarize_message, seed_message],
+            &signature,
+            1,
+        )
+        .is_ok()
     }
 }
 
@@ -1056,6 +1102,28 @@ impl<V: Variant> Nullify<V> {
 impl<V: Variant> Attributable for Nullify<V> {
     fn signer(&self) -> u32 {
         self.view_signature.index
+    }
+}
+
+impl<V: Variant> Verifiable<&[V::Public]> for Nullify<V> {
+    fn verify(&self, namespace: &[u8], verification_key: &[V::Public]) -> bool {
+        let nullify_namespace = nullify_namespace(namespace);
+        let view_message = view_message(self.view);
+        let nullify_message = (Some(nullify_namespace.as_ref()), view_message.as_ref());
+        let seed_namespace = seed_namespace(namespace);
+        let seed_message = (Some(seed_namespace.as_ref()), view_message.as_ref());
+        let Some(evaluated) = verification_key.get(self.signer() as usize) else {
+            return false;
+        };
+        let signature =
+            aggregate_signatures::<V, _>(&[self.view_signature.value, self.seed_signature.value]);
+        aggregate_verify_multiple_messages::<V, _>(
+            evaluated,
+            &[nullify_message, seed_message],
+            &signature,
+            1,
+        )
+        .is_ok()
     }
 }
 
@@ -1295,6 +1363,23 @@ impl<V: Variant, D: Digest> Finalize<V, D> {
 impl<V: Variant, D: Digest> Attributable for Finalize<V, D> {
     fn signer(&self) -> u32 {
         self.proposal_signature.index
+    }
+}
+
+impl<V: Variant, D: Digest> Verifiable<&[V::Public]> for Finalize<V, D> {
+    fn verify(&self, namespace: &[u8], verification_key: &[V::Public]) -> bool {
+        let finalize_namespace = finalize_namespace(namespace);
+        let message = self.proposal.encode();
+        let Some(evaluated) = verification_key.get(self.signer() as usize) else {
+            return false;
+        };
+        verify_message::<V>(
+            evaluated,
+            Some(finalize_namespace.as_ref()),
+            &message,
+            &self.proposal_signature.value,
+        )
+        .is_ok()
     }
 }
 

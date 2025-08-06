@@ -86,6 +86,22 @@ pub trait PublicKey: Verifier + Sized + ReadExt + Encode + PartialEq + Array {}
 /// A [Signature] over a message.
 pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq + Array {}
 
+/// Verifiable is a trait for cryptographically verifying consensus messages.
+/// This trait abstracts over different verification methods used by different consensus implementations.
+pub trait Verifiable<Key> {
+    /// Verifies the cryptographic validity of this message.
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - The namespace for domain separation to prevent cross-protocol attacks
+    /// * `key` - The verification key or parameters (e.g., public key, polynomial, identity)
+    ///
+    /// # Returns
+    ///
+    /// `true` if the message is cryptographically valid, `false` otherwise
+    fn verify(&self, namespace: &[u8], key: Key) -> bool;
+}
+
 /// Verifies whether all [Signature]s are correct or that some [Signature] is incorrect.
 pub trait BatchVerifier<K: PublicKey> {
     /// Create a new batch verifier.

@@ -1,6 +1,7 @@
 //! Types used in [crate::simplex].
 
 use crate::Viewable;
+use commonware_cryptography::Verifiable;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
@@ -374,6 +375,18 @@ impl<S: CSignature, D: Digest> Attributable for Notarize<S, D> {
     }
 }
 
+impl<S: CSignature, D: Digest, K: Verifier<Signature = S>> Verifiable<&K> for Notarize<S, D> {
+    fn verify(&self, namespace: &[u8], verification_key: &K) -> bool {
+        let notarize_namespace = notarize_namespace(namespace);
+        let message = self.proposal.encode();
+        verification_key.verify(
+            Some(notarize_namespace.as_ref()),
+            &message,
+            &self.signature.signature,
+        )
+    }
+}
+
 /// Notarization represents an aggregated set of notarizes that meets the quorum threshold.
 /// It includes the proposal and the set of signatures from validators.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -481,6 +494,39 @@ impl<S: CSignature, D: Digest> Viewable for Notarization<S, D> {
     }
 }
 
+impl<S: CSignature, D: Digest, K: Verifier<Signature = S>> Verifiable<&[K]> for Notarization<S, D> {
+    fn verify(&self, namespace: &[u8], verification_key: &[K]) -> bool {
+        // Get allowed signers
+        let (threshold, count) = threshold(verification_key);
+        if self.signatures.len() < threshold as usize {
+            return false;
+        }
+        if self.signatures.len() > count as usize {
+            return false;
+        }
+
+        // Verify signatures
+        let notarize_namespace = notarize_namespace(namespace);
+        let message = self.proposal.encode();
+        for signature in &self.signatures {
+            // Get public key
+            let Some(public_key) = verification_key.get(signature.public_key as usize) else {
+                return false;
+            };
+
+            // Verify signature
+            if !public_key.verify(
+                Some(notarize_namespace.as_ref()),
+                &message,
+                &signature.signature,
+            ) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// Nullify represents a validator's nullify to skip the current view.
 /// This is typically used when the leader is unresponsive or fails to propose a valid block.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -559,6 +605,18 @@ impl<S: CSignature> Viewable for Nullify<S> {
 impl<S: CSignature> Attributable for Nullify<S> {
     fn signer(&self) -> u32 {
         self.signature.signer()
+    }
+}
+
+impl<S: CSignature, K: Verifier<Signature = S>> Verifiable<&K> for Nullify<S> {
+    fn verify(&self, namespace: &[u8], verification_key: &K) -> bool {
+        let nullify_namespace = nullify_namespace(namespace);
+        let message = view_message(self.view);
+        verification_key.verify(
+            Some(nullify_namespace.as_ref()),
+            &message,
+            &self.signature.signature,
+        )
     }
 }
 
@@ -743,6 +801,18 @@ impl<S: CSignature, D: Digest> Viewable for Finalize<S, D> {
 impl<S: CSignature, D: Digest> Attributable for Finalize<S, D> {
     fn signer(&self) -> u32 {
         self.signature.signer()
+    }
+}
+
+impl<S: CSignature, D: Digest, K: Verifier<Signature = S>> Verifiable<&K> for Finalize<S, D> {
+    fn verify(&self, namespace: &[u8], verification_key: &K) -> bool {
+        let finalize_namespace = finalize_namespace(namespace);
+        let message = self.proposal.encode();
+        verification_key.verify(
+            Some(finalize_namespace.as_ref()),
+            &message,
+            &self.signature.signature,
+        )
     }
 }
 
