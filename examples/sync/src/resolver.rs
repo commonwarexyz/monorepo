@@ -2,8 +2,9 @@
 //! to fetch operations and proofs.
 
 use crate::{
-    error::Error, GetOperationsRequest, GetSyncTargetRequest, Message, RequestId, MAX_MESSAGE_SIZE,
+    error::Error, GetOperationsRequest, GetSyncTargetRequest, Message, RequestId, Requester, MAX_MESSAGE_SIZE,
 };
+use std::sync::Arc;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
@@ -135,6 +136,7 @@ where
         + Clone,
 {
     request_sender: mpsc::Sender<IoRequest>,
+    requester: Arc<Requester>,
     _phantom: PhantomData<E>,
 }
 
@@ -161,13 +163,14 @@ where
 
         Self {
             request_sender,
+            requester: Arc::new(Requester::new()),
             _phantom: PhantomData,
         }
     }
 
     pub async fn get_sync_target(&self) -> Result<SyncTarget<Digest>, Error> {
         let request = GetSyncTargetRequest {
-            request_id: RequestId::new(),
+            request_id: self.requester.next_request_id(),
         };
 
         let request_id = request.request_id.value();
@@ -233,7 +236,7 @@ where
         max_ops: NonZeroU64,
     ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, SyncError> {
         let request = GetOperationsRequest {
-            request_id: RequestId::new(),
+            request_id: self.requester.next_request_id(),
             size,
             start_loc,
             max_ops,

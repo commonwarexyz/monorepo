@@ -33,20 +33,33 @@ const MAX_DIGESTS: usize = 10_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RequestId(u64);
 
-impl Default for RequestId {
+impl RequestId {
+    pub fn value(&self) -> u64 {
+        self.0
+    }
+}
+
+/// A requester that generates monotonically increasing request IDs.
+#[derive(Debug)]
+pub struct Requester {
+    counter: AtomicU64,
+}
+
+impl Default for Requester {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl RequestId {
+impl Requester {
     pub fn new() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(1);
-        RequestId(COUNTER.fetch_add(1, Ordering::Relaxed))
+        Requester {
+            counter: AtomicU64::new(1),
+        }
     }
 
-    pub fn value(&self) -> u64 {
-        self.0
+    pub fn next_request_id(&self) -> RequestId {
+        RequestId(self.counter.fetch_add(1, Ordering::Relaxed))
     }
 }
 
@@ -440,15 +453,16 @@ mod tests {
 
     #[test]
     fn test_request_id_generation() {
-        let id1 = RequestId::new();
-        let id2 = RequestId::new();
-        let id3 = RequestId::new();
+        let requester = Requester::new();
+        let id1 = requester.next_request_id();
+        let id2 = requester.next_request_id();
+        let id3 = requester.next_request_id();
 
-        // Request IDs should be incrementing
+        // Request IDs should be monotonically increasing
         assert!(id2.value() > id1.value());
         assert!(id3.value() > id2.value());
-
-        // Should be consecutive
+        
+        // Should be consecutive since we're using a single Requester
         assert_eq!(id2.value(), id1.value() + 1);
         assert_eq!(id3.value(), id2.value() + 1);
     }
@@ -487,8 +501,9 @@ mod tests {
     #[test]
     fn test_get_operations_request_validation() {
         // Valid request
+        let requester = Requester::new();
         let request = GetOperationsRequest {
-            request_id: RequestId::new(),
+            request_id: requester.next_request_id(),
             size: 100,
             start_loc: 10,
             max_ops: NZU64!(50),
@@ -497,7 +512,7 @@ mod tests {
 
         // Invalid start_loc
         let request = GetOperationsRequest {
-            request_id: RequestId::new(),
+            request_id: requester.next_request_id(),
             size: 100,
             start_loc: 100,
             max_ops: NZU64!(50),
@@ -509,7 +524,7 @@ mod tests {
 
         // start_loc beyond size
         let request = GetOperationsRequest {
-            request_id: RequestId::new(),
+            request_id: requester.next_request_id(),
             size: 100,
             start_loc: 150,
             max_ops: NZU64!(50),
