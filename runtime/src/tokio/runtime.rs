@@ -472,10 +472,7 @@ impl crate::Spawner for Context {
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
         let stop_resolved = {
             let mut shutdown = self.executor.shutdown.lock().unwrap();
-            match shutdown.stop(value) {
-                Some(completion) => completion,
-                None => return Ok(()),
-            }
+            shutdown.stop(value)
         };
 
         if let Some(timeout_duration) = timeout {
@@ -491,8 +488,6 @@ impl crate::Spawner for Context {
         } else {
             stop_resolved.await.map_err(|_| Error::Closed)?;
         }
-
-        self.executor.shutdown.lock().unwrap().completed();
 
         Ok(())
     }

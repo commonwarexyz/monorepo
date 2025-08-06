@@ -20,7 +20,7 @@ use std::{
 /// ## Basic Usage
 ///
 /// ```rust
-/// use commonware_runtime::{Spawner, Runner, Signaler, deterministic};
+/// use commonware_runtime::{Spawner, Runner, deterministic, signal::Signaler};
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
@@ -45,7 +45,7 @@ use std::{
 ///
 /// ```rust
 /// use commonware_macros::select;
-/// use commonware_runtime::{Clock, Spawner, Runner, Signaler, deterministic, Metrics};
+/// use commonware_runtime::{Clock, Spawner, Runner, deterministic, Metrics, signal::Signaler};
 /// use futures::channel::oneshot;
 /// use std::time::Duration;
 ///
@@ -158,69 +158,65 @@ impl Signaler {
 /// Employs [Signaler] to coordinate the graceful shutdown of many tasks.
 pub enum Stopper {
     /// The stopper is running and stop has not been called yet.
-    Running { signaler: Signaler, signal: Signal },
-    /// Stop has been called but completion is still pending.
-    Stopping {
+    Running {
+        // We must use an Option here because we need to move the signaler out of the
+        // Running state when stopping.
+        signaler: Option<Signaler>,
+        signal: Signal,
+    },
+    /// Stop has been called and completion is pending or resolved.
+    Stopped {
         stop_value: i32,
         completion: Shared<oneshot::Receiver<()>>,
     },
-    /// Stop has completed.
-    Stopped { stop_value: i32 },
 }
 
 impl Stopper {
     /// Create a new stopper in running mode.
     pub fn new() -> Self {
         let (signaler, signal) = Signaler::new();
-        Self::Running { signaler, signal }
+        Self::Running {
+            signaler: Some(signaler),
+            signal,
+        }
     }
 
     /// Get the signal for runtime users to await.
     pub fn stopped(&self) -> Signal {
         match self {
             Self::Running { signal, .. } => signal.clone(),
-            Self::Stopping { stop_value, .. } | Self::Stopped { stop_value } => {
-                Signal::Closed(*stop_value)
-            }
+            Self::Stopped { stop_value, .. } => Signal::Closed(*stop_value),
         }
     }
 
     /// Initiate shutdown returning a completion future.
-    /// Returns `None` if stop has already completed.
-    pub fn stop(&mut self, value: i32) -> Option<Shared<oneshot::Receiver<()>>> {
-        match std::mem::replace(self, Self::Stopped { stop_value: value }) {
+    /// Always returns a completion future, even if stop was already called.
+    /// If stop was already called, returns the same shared completion future
+    /// that will resolve immediately if already completed.
+    pub fn stop(&mut self, value: i32) -> Shared<oneshot::Receiver<()>> {
+        match self {
             Self::Running { signaler, .. } => {
-                let completion_rx = signaler.signal(value);
+                // Take the signaler out of the Option (it is always populated in Running)
+                let sig = signaler.take().unwrap();
+
+                // Signal shutdown and get the completion receiver
+                let completion_rx = sig.signal(value);
                 let shared_completion = completion_rx.shared();
-                *self = Self::Stopping {
+
+                // Transition to Stopped state
+                *self = Self::Stopped {
                     stop_value: value,
                     completion: shared_completion.clone(),
                 };
-                Some(shared_completion)
-            }
-            Self::Stopping {
-                stop_value,
-                completion,
-            } => {
-                *self = Self::Stopping {
-                    stop_value,
-                    completion: completion.clone(),
-                };
-                Some(completion)
-            }
-            Self::Stopped { stop_value } => {
-                *self = Self::Stopped { stop_value };
-                None
-            }
-        }
-    }
 
-    /// Mark shutdown as finished. This should be called after the completion future resolves.
-    pub fn completed(&mut self) {
-        if let Self::Stopping { stop_value, .. } = self {
-            *self = Self::Stopped {
-                stop_value: *stop_value,
-            };
+                shared_completion
+            }
+            Self::Stopped { completion, .. } => {
+                // Ignore the stop value (always return the first used)
+
+                // Return existing completion (may already be resolved)
+                completion.clone()
+            }
         }
     }
 }

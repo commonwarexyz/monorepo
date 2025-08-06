@@ -90,7 +90,7 @@ pub fn create_pool<S: Spawner + Metrics>(
 ///
 /// Usage:
 /// ```rust
-/// use commonware_runtime::{Spawner, Runner, Signaler, deterministic, RwLock};
+/// use commonware_runtime::{Spawner, Runner, deterministic, RwLock};
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
