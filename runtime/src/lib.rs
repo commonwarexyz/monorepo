@@ -43,6 +43,8 @@ mod storage;
 pub mod telemetry;
 mod utils;
 pub use utils::*;
+
+use crate::utils::signal::Signal;
 #[cfg(any(feature = "iouring-storage", feature = "iouring-network"))]
 mod iouring;
 

@@ -32,8 +32,8 @@ use crate::{
         metered::Storage as MeteredStorage,
     },
     telemetry::metrics::task::Label,
-    utils::ShutdownState,
-    Clock, Error, Handle, ListenerOf, Signal, METRICS_PREFIX,
+    utils::signal::{Signal, Stopper},
+    Clock, Error, Handle, ListenerOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_utils::{hex, SystemTimeExt};
@@ -227,7 +227,7 @@ pub struct Executor {
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
     partitions: Mutex<HashMap<String, Partition>>,
-    shutdown: Mutex<ShutdownState>,
+    shutdown: Mutex<Stopper>,
     finished: Mutex<bool>,
     recovered: Mutex<bool>,
 }
@@ -616,7 +616,7 @@ impl Context {
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             partitions: Mutex::new(HashMap::new()),
-            shutdown: Mutex::new(ShutdownState::default()),
+            shutdown: Mutex::new(Stopper::default()),
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
         });
@@ -680,7 +680,7 @@ impl Context {
             metrics: metrics.clone(),
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
-            shutdown: Mutex::new(ShutdownState::default()),
+            shutdown: Mutex::new(Stopper::default()),
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
         });
@@ -828,7 +828,7 @@ impl crate::Spawner for Context {
             stop_resolved.await.map_err(|_| Error::Closed)?;
         }
 
-        self.executor.shutdown.lock().unwrap().finished();
+        self.executor.shutdown.lock().unwrap().completed();
 
         Ok(())
     }

@@ -10,9 +10,9 @@ use crate::{
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
 use crate::{
-    network::metered::Network as MeteredNetwork, storage::metered::Storage as MeteredStorage,
-    telemetry::metrics::task::Label, utils::ShutdownState, Clock, Error, Handle, Signal, SinkOf,
-    StreamOf, METRICS_PREFIX,
+    network::metered::Network as MeteredNetwork, signal::Signal,
+    storage::metered::Storage as MeteredStorage, telemetry::metrics::task::Label,
+    utils::signal::Stopper, Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -211,7 +211,7 @@ pub struct Executor {
     registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
-    shutdown: Mutex<ShutdownState>,
+    shutdown: Mutex<Stopper>,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -309,7 +309,7 @@ impl crate::Runner for Runner {
             registry: Mutex::new(registry),
             metrics,
             runtime,
-            shutdown: Mutex::new(ShutdownState::default()),
+            shutdown: Mutex::new(Stopper::default()),
         });
 
         // Get metrics
@@ -492,7 +492,7 @@ impl crate::Spawner for Context {
             stop_resolved.await.map_err(|_| Error::Closed)?;
         }
 
-        self.executor.shutdown.lock().unwrap().finished();
+        self.executor.shutdown.lock().unwrap().completed();
 
         Ok(())
     }
