@@ -456,8 +456,7 @@ mod tests {
                 assert_eq!(buf, [i as u8; PAGE_SIZE]);
             }
 
-            // Sync the blob before drop.
-            blob.sync().await.expect("Failed to sync blob");
+            blob.sync().await.unwrap();
         });
     }
 }

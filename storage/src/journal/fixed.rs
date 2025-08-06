@@ -692,7 +692,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         Ok(())
     }
 
-    /// Closes all open sections.
+    /// Syncs and closes all open sections.
     pub async fn close(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
             blob.sync().await?;
@@ -704,7 +704,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         Ok(())
     }
 
-    /// Sync and remove any underlying blobs created by the journal.
+    /// Remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
             drop(blob);

@@ -358,10 +358,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
 
     /// Sync all pending entries and [Blob]s.
     pub async fn close(mut self) -> Result<(), Error> {
-        // Sync any pending entries
         self.sync().await?;
-
-        // Sync and drop all blobs
         for (_, blob) in take(&mut self.blobs) {
             blob.sync().await?;
         }

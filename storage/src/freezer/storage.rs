@@ -988,7 +988,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
         self.journal.close().await?;
         self.table.sync().await?;
-
         Ok(checkpoint)
     }
 

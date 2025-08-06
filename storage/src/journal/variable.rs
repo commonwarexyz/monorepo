@@ -726,7 +726,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 break;
             }
 
-            // Remove and sync blob
+            // Remove blob
             let blob = self.blobs.remove(&section).unwrap();
             let size = blob.size().await;
             drop(blob);
@@ -745,7 +745,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok(())
     }
 
-    /// Closes all open sections.
+    /// Syncs and closes all open sections.
     pub async fn close(self) -> Result<(), Error> {
         for (section, blob) in self.blobs.into_iter() {
             let size = blob.size().await;

@@ -839,7 +839,7 @@ mod tests {
             writer.write_at(b"pending".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 7);
 
-            // Sync writer to flush and sync all data
+            // Sync writer to persist data
             writer.sync().await.unwrap();
 
             // Verify data persistence
