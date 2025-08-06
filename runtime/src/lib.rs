@@ -410,7 +410,7 @@ mod tests {
     use futures::{
         channel::{mpsc, oneshot},
         future::{pending, ready},
-        join, SinkExt, StreamExt,
+        join, pin_mut, FutureExt, SinkExt, StreamExt,
     };
     use prometheus_client::metrics::counter::Counter;
     use std::{
@@ -966,8 +966,11 @@ mod tests {
             let after = context
                 .with_label("after")
                 .spawn(move |context| async move {
-                    // Wait for stop signal
-                    let mut signal = context.stopped();
+                    // A call to `stopped()` after `stop()` resolves immediately
+                    let signal = context.stopped();
+                    pin_mut!(signal);
+                    assert!(signal.as_mut().now_or_never().is_some());
+
                     loop {
                         select! {
                             sig = &mut signal => {
@@ -1070,6 +1073,63 @@ mod tests {
 
             // Assert that we got a timeout error
             assert!(matches!(result, Err(Error::Timeout)));
+        });
+    }
+
+    fn test_shutdown_multiple_stop_calls<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Metrics + Clock,
+    {
+        use std::sync::{
+            atomic::{AtomicU32, Ordering},
+            Arc,
+        };
+
+        let kill1 = 42;
+        let kill2 = 43;
+
+        runner.start(|context| async move {
+            let counter = Arc::new(AtomicU32::new(0));
+
+            // Spawn a task that delays completion to test timing
+            let task = context.with_label("blocking_task").spawn({
+                let counter = counter.clone();
+                move |context| async move {
+                    let sig = context.stopped().await;
+                    assert_eq!(sig.unwrap(), kill1);
+                    context.sleep(Duration::from_millis(50)).await;
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+
+            // Give task time to start
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Issue two separate stop calls
+            // The second stop call uses a different stop value that should be ignored
+            let stop_task1 = context.clone().stop(kill1, None);
+            pin_mut!(stop_task1);
+            let stop_task2 = context.clone().stop(kill2, None);
+            pin_mut!(stop_task2);
+
+            // Both of them should be awaiting completion
+            assert!(stop_task1.as_mut().now_or_never().is_none());
+            assert!(stop_task2.as_mut().now_or_never().is_none());
+
+            assert!(stop_task1.await.is_ok());
+            assert!(stop_task2.await.is_ok());
+
+            // Verify first stop value wins
+            let sig = context.stopped().await;
+            assert_eq!(sig.unwrap(), kill1);
+
+            // Wait for blocking task to complete
+            let result = task.await;
+            assert!(result.is_ok());
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+            // Post-completion stop should return immediately
+            assert!(context.stop(kill2, None).now_or_never().unwrap().is_ok());
         });
     }
 
@@ -1344,6 +1404,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_shutdown_multiple_stop_calls() {
+        let executor = deterministic::Runner::default();
+        test_shutdown_multiple_stop_calls(executor);
+    }
+
+    #[test]
     fn test_deterministic_spawn_ref() {
         let executor = deterministic::Runner::default();
         test_spawn_ref(executor);
@@ -1530,6 +1596,12 @@ mod tests {
     fn test_tokio_shutdown_timeout() {
         let executor = tokio::Runner::default();
         test_shutdown_timeout(executor);
+    }
+
+    #[test]
+    fn test_tokio_shutdown_multiple_stop_calls() {
+        let executor = tokio::Runner::default();
+        test_shutdown_multiple_stop_calls(executor);
     }
 
     #[test]
