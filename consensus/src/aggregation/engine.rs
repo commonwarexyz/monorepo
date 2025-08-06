@@ -33,6 +33,7 @@ use std::{
     cmp::max,
     collections::{BTreeMap, HashMap},
     marker::PhantomData,
+    num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
@@ -137,8 +138,8 @@ pub struct Engine<
     /// Journal for storing acks signed by this node.
     journal: Option<Journal<E, Activity<V, D>>>,
     journal_partition: String,
-    journal_write_buffer: usize,
-    journal_replay_buffer: usize,
+    journal_write_buffer: NonZeroUsize,
+    journal_replay_buffer: NonZeroUsize,
     journal_heights_per_section: u64,
     journal_compression: Option<u8>,
 
@@ -197,8 +198,8 @@ impl<
             rebroadcast_deadlines: PrioritySet::new(),
             journal: None,
             journal_partition: cfg.journal_partition,
-            journal_write_buffer: cfg.journal_write_buffer.into(),
-            journal_replay_buffer: cfg.journal_replay_buffer.into(),
+            journal_write_buffer: cfg.journal_write_buffer,
+            journal_replay_buffer: cfg.journal_replay_buffer,
             journal_heights_per_section: cfg.journal_heights_per_section.into(),
             journal_compression: cfg.journal_compression,
             priority_acks: cfg.priority_acks,
