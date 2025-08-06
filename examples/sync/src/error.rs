@@ -59,19 +59,3 @@ impl Error {
         }
     }
 }
-
-// Convert sync errors (which are now SyncError<crate::adb::Error>) to our Error type
-// impl From<commonware_storage::adb::sync::error::SyncError<commonware_storage::adb::Error>>
-//     for Error
-// {
-//     fn from(
-//         err: commonware_storage::adb::sync::error::SyncError<commonware_storage::adb::Error>,
-//     ) -> Self {
-//         match err {
-//             commonware_storage::adb::sync::error::SyncError::Database(db_err) => {
-//                 Error::Database(db_err)
-//             }
-//             other => Error::InvalidConfig(other.to_string()),
-//         }
-//     }
-// }
