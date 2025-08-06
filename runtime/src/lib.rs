@@ -185,6 +185,19 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// the `Signal` returned by `stopped`, that they should exit. It then waits
     /// for all `Signal` references to be dropped before returning.
     ///
+    /// ## Multiple Stop Calls
+    ///
+    /// This method is idempotent and safe to call multiple times concurrently (on
+    /// different instances of the same context since it consumes `self`). The first
+    /// call initiates shutdown with the provided `value`, and all subsequent calls
+    /// will wait for the same completion regardless of their `value` parameter, i.e.
+    /// the original `value` from the first call is preserved.
+    ///
+    /// Once all tasks complete their cleanup, subsequent `stop()` calls return
+    /// immediately without waiting.
+    ///
+    /// ## Timeout
+    ///
     /// If a timeout is provided, the method will return an error if all `Signal`
     /// references have not been dropped within the specified duration.
     fn stop(
@@ -196,7 +209,9 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Returns an instance of a `Signal` that resolves when `stop` is called by
     /// any task.
     ///
-    /// If `stop` has already been called, the returned `Signal` will resolve immediately.
+    /// If `stop` has already been called, the `Signal` returned will resolve
+    /// immediately. The `Signal` returned will always resolve to the value of the
+    /// first `stop` call.
     fn stopped(&self) -> Signal;
 }
 
