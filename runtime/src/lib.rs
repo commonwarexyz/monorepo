@@ -1195,6 +1195,52 @@ mod tests {
         });
     }
 
+    fn test_spawn_child<R: Runner>(runner: R, use_ref: bool)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            let child_handle = Arc::new(Mutex::new(None));
+            let child_handle2 = child_handle.clone();
+
+            let (parent_initialized_tx, parent_initialized_rx) = oneshot::channel();
+            let (parent_complete_tx, parent_complete_rx) = oneshot::channel();
+            let parent_handle = context.clone().spawn(move |context| async move {
+                let spawn_child = |task| {
+                    if use_ref {
+                        context.clone().spawn_child_ref()(task)
+                    } else {
+                        context.clone().spawn_child(|_| task)
+                    }
+                };
+
+                // Spawn child that completes immediately
+                let handle = spawn_child(async {});
+
+                // Store child handle so we can test it later
+                *child_handle2.lock().unwrap() = Some(handle);
+
+                parent_initialized_tx.send(()).unwrap();
+
+                // Parent task completes
+                parent_complete_rx.await.unwrap();
+            });
+
+            // Wait for parent task to spawn the children
+            parent_initialized_rx.await.unwrap();
+
+            // Child task completes successfully
+            let child_handle = child_handle.lock().unwrap().take().unwrap();
+            assert!(child_handle.await.is_ok());
+
+            // Complete the parent task
+            parent_complete_tx.send(()).unwrap();
+
+            // Wait for parent task to complete successfully
+            assert!(parent_handle.await.is_ok());
+        });
+    }
+
     fn test_spawn_child_abort_on_parent_abort<R: Runner>(runner: R, use_ref: bool)
     where
         R::Context: Spawner + Clock,
@@ -1534,6 +1580,18 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_spawn_child() {
+        let runner = deterministic::Runner::default();
+        test_spawn_child(runner, false);
+    }
+
+    #[test]
+    fn test_deterministic_spawn_child_ref() {
+        let runner = deterministic::Runner::default();
+        test_spawn_child(runner, true);
+    }
+
+    #[test]
     fn test_deterministic_spawn_child_abort_on_parent_abort() {
         let runner = deterministic::Runner::default();
         test_spawn_child_abort_on_parent_abort(runner, false);
@@ -1750,6 +1808,18 @@ mod tests {
     fn test_tokio_spawn_duplicate() {
         let executor = tokio::Runner::default();
         test_spawn_duplicate(executor);
+    }
+
+    #[test]
+    fn test_tokio_spawn_child() {
+        let runner = tokio::Runner::default();
+        test_spawn_child(runner, false);
+    }
+
+    #[test]
+    fn test_tokio_spawn_child_ref() {
+        let runner = tokio::Runner::default();
+        test_spawn_child(runner, true);
     }
 
     #[test]
