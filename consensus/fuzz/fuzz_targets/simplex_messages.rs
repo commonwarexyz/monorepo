@@ -63,12 +63,13 @@ fn fuzzer(input: FuzzInput) {
         let mut registrations = register_validators(&mut oracle, &validators).await;
 
         // Link all validators
+        // The first validator is byzantine.
         let link = Link {
             latency: 0.0,
             jitter: 0.0,
             success_rate: 1.0,
         };
-        link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+        link_validators(&mut oracle, &validators, Action::Link(link), input.partition.create()).await;
 
         // Create engines
         let relay = Arc::new(relay::Relay::new());

@@ -24,6 +24,58 @@ use std::time::Duration;
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Arbitrary)]
+pub enum PartitionStrategy {
+    /// All validators can communicate with all others (full mesh)
+    AllToAll,
+
+    /// Validator 0 acts as byzantine, can talk to itself and both halves
+    /// Other validators are split into two partitions that cannot communicate
+    TwoPartitionsWithByzantine,
+
+    /// The byzantine validator can send messages to all other validators.
+    /// Other validators cannot communicate with each other.
+    ManyPartitionsWithByzantine,
+
+    /// No validator can communicate with any other (complete isolation)
+    AllIsolated,
+
+    /// Validator i can send messages to itself or the next validator
+    Linear,
+}
+
+fn two_partitions_with_byzantine(n: usize, i: usize, j: usize) -> bool {
+    if i == 0 || j == 0 {
+        return true;
+    }
+
+    let mid = n / 2;
+    let i_partition = if i <= mid { 1 } else { 2 };
+    let j_partition = if j <= mid { 1 } else { 2 };
+
+    i_partition == j_partition
+}
+
+fn many_partitions_with_byzantine(_: usize, i: usize, j: usize) -> bool {
+    i == 0 || j == 0
+}
+
+fn linear(n: usize, i: usize, j: usize) -> bool {
+    i + 1 % n == j % n || i == j
+}
+
+impl PartitionStrategy {
+    pub fn create(&self) -> Option<fn(usize, usize, usize) -> bool> {
+        match self {
+            PartitionStrategy::AllToAll => None,
+            PartitionStrategy::AllIsolated => Some(|_n, i, j| i == j),
+            PartitionStrategy::TwoPartitionsWithByzantine => Some(two_partitions_with_byzantine),
+            PartitionStrategy::ManyPartitionsWithByzantine => Some(many_partitions_with_byzantine),
+            PartitionStrategy::Linear => Some(linear),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Arbitrary)]
 pub enum Mutation {
     Payload,
     View,
@@ -44,6 +96,7 @@ pub struct FuzzInput {
     pub seed: u64, // Seed for rng
     #[arbitrary(with = |u: &mut Unstructured| u.int_in_range(32..=3000))]
     pub max_steps: u16, // The number of steps the fuzzing actor can do before it stops.
+    pub partition: PartitionStrategy,
 }
 pub struct Fuzzer<E: Clock + Spawner> {
     context: E,
