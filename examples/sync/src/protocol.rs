@@ -52,7 +52,7 @@ impl Requester {
     }
 
     pub fn next(&self) -> RequestId {
-        self.counter.fetch_add(1, Ordering::SeqCst)
+        self.counter.fetch_add(1, Ordering::Relaxed)
     }
 }
 
