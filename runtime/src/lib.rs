@@ -364,8 +364,10 @@ pub trait Storage: Clone + Send + Sync + 'static {
 /// name, they are not expected to coordinate access to underlying storage
 /// and writing to both is undefined behavior.
 ///
-/// Blobs are synced during drop. Call `sync` before dropping to ensure all
-/// changes are durably persisted and handle errors.
+/// Blobs are automatically closed when they go out of scope. Any pending
+/// changes that have not been synced may be discarded when the blob is dropped.
+/// Use the `sync` method before dropping to ensure all changes are durably
+/// persisted.
 #[allow(clippy::len_without_is_empty)]
 pub trait Blob: Clone + Send + Sync + 'static {
     /// Read from the blob at the given offset.
