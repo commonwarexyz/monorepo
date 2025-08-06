@@ -32,7 +32,7 @@ use crate::{
         metered::Storage as MeteredStorage,
     },
     telemetry::metrics::task::Label,
-    utils::Signaler,
+    utils::ShutdownState,
     Clock, Error, Handle, ListenerOf, Signal, METRICS_PREFIX,
 };
 use commonware_macros::select;
@@ -227,8 +227,7 @@ pub struct Executor {
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
     partitions: Mutex<HashMap<String, Partition>>,
-    signaler: Mutex<Option<Signaler>>,
-    signal: Mutex<Option<Signal>>,
+    shutdown: Mutex<ShutdownState>,
     finished: Mutex<bool>,
     recovered: Mutex<bool>,
 }
@@ -598,7 +597,6 @@ impl Context {
         let deadline = cfg
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
-        let (signaler, signal) = Signaler::new();
         let auditor = Arc::new(Auditor::default());
         let storage = MeteredStorage::new(
             AuditedStorage::new(MemStorage::default(), auditor.clone()),
@@ -618,8 +616,7 @@ impl Context {
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             partitions: Mutex::new(HashMap::new()),
-            signaler: Mutex::new(Some(signaler)),
-            signal: Mutex::new(Some(signal)),
+            shutdown: Mutex::new(ShutdownState::default()),
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
         });
@@ -666,7 +663,6 @@ impl Context {
 
         // Copy state
         let auditor = self.executor.auditor.clone();
-        let (signaler, signal) = Signaler::new();
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
@@ -684,8 +680,7 @@ impl Context {
             metrics: metrics.clone(),
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
-            signaler: Mutex::new(Some(signaler)),
-            signal: Mutex::new(Some(signal)),
+            shutdown: Mutex::new(ShutdownState::default()),
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
         });
@@ -812,15 +807,11 @@ impl crate::Spawner for Context {
         });
 
         let stop_resolved = {
-            let mut signaler = self.executor.signaler.lock().unwrap();
-            let completion_rx = signaler
-                .take()
-                .expect("signaler should always be present when stop is called")
-                .signal(value);
-
-            self.executor.signal.lock().unwrap().take();
-
-            completion_rx
+            let mut shutdown = self.executor.shutdown.lock().unwrap();
+            match shutdown.stop(value) {
+                Some(completion) => completion,
+                None => return Ok(()),
+            }
         };
 
         if let Some(timeout_duration) = timeout {
@@ -837,18 +828,14 @@ impl crate::Spawner for Context {
             stop_resolved.await.map_err(|_| Error::Closed)?;
         }
 
+        self.executor.shutdown.lock().unwrap().finished();
+
         Ok(())
     }
 
     fn stopped(&self) -> Signal {
         self.executor.auditor.event(b"stopped", |_| {});
-        self.executor
-            .signal
-            .lock()
-            .unwrap()
-            .as_ref()
-            .expect("signal should always be present until stop is called")
-            .clone()
+        self.executor.shutdown.lock().unwrap().stopped()
     }
 }
 

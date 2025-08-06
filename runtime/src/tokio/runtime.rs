@@ -11,7 +11,7 @@ use crate::{
 };
 use crate::{
     network::metered::Network as MeteredNetwork, storage::metered::Storage as MeteredStorage,
-    telemetry::metrics::task::Label, utils::Signaler, Clock, Error, Handle, Signal, SinkOf,
+    telemetry::metrics::task::Label, utils::ShutdownState, Clock, Error, Handle, Signal, SinkOf,
     StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
@@ -211,8 +211,7 @@ pub struct Executor {
     registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
-    signaler: Mutex<Option<Signaler>>,
-    signal: Mutex<Option<Signal>>,
+    shutdown: Mutex<ShutdownState>,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -253,7 +252,6 @@ impl crate::Runner for Runner {
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
-        let (signaler, signal) = Signaler::new();
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
@@ -311,8 +309,7 @@ impl crate::Runner for Runner {
             registry: Mutex::new(registry),
             metrics,
             runtime,
-            signaler: Mutex::new(Some(signaler)),
-            signal: Mutex::new(Some(signal)),
+            shutdown: Mutex::new(ShutdownState::default()),
         });
 
         // Get metrics
@@ -474,15 +471,11 @@ impl crate::Spawner for Context {
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
         let stop_resolved = {
-            let mut signaler = self.executor.signaler.lock().unwrap();
-            let completion_rx = signaler
-                .take()
-                .expect("signaler should always be present when stop is called")
-                .signal(value);
-
-            self.executor.signal.lock().unwrap().take();
-
-            completion_rx
+            let mut shutdown = self.executor.shutdown.lock().unwrap();
+            match shutdown.stop(value) {
+                Some(completion) => completion,
+                None => return Ok(()),
+            }
         };
 
         if let Some(timeout_duration) = timeout {
@@ -499,17 +492,13 @@ impl crate::Spawner for Context {
             stop_resolved.await.map_err(|_| Error::Closed)?;
         }
 
+        self.executor.shutdown.lock().unwrap().finished();
+
         Ok(())
     }
 
     fn stopped(&self) -> Signal {
-        self.executor
-            .signal
-            .lock()
-            .unwrap()
-            .as_ref()
-            .expect("signal should always be present until stop is called")
-            .clone()
+        self.executor.shutdown.lock().unwrap().stopped()
     }
 }
 

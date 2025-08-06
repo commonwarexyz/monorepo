@@ -123,7 +123,16 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
 /// });
 /// ```
 #[derive(Clone)]
-pub struct Signal {
+pub enum Signal {
+    /// A live signal that will resolve when the signaler signals completion.
+    Live(LiveSignal),
+    /// A pre-resolved signal with a known value.
+    Resolved { value: i32 },
+}
+
+/// A live signal with completion tracking.
+#[derive(Clone)]
+pub struct LiveSignal {
     inner: Shared<oneshot::Receiver<i32>>,
     _guard: Arc<SignalGuard>,
 }
@@ -144,7 +153,10 @@ impl Future for Signal {
     type Output = Result<i32, oneshot::Canceled>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.inner).poll(cx)
+        match &mut *self {
+            Signal::Live(live) => Pin::new(&mut live.inner).poll(cx),
+            Signal::Resolved { value } => Poll::Ready(Ok(*value)),
+        }
     }
 }
 
@@ -163,12 +175,12 @@ impl Signaler {
         let (completion_tx, completion_rx) = oneshot::channel();
 
         let signaler = Self { tx, completion_rx };
-        let signal = Signal {
+        let signal = Signal::Live(LiveSignal {
             inner: rx.shared(),
             _guard: Arc::new(SignalGuard {
                 tx: Some(completion_tx),
             }),
-        };
+        });
 
         (signaler, signal)
     }
@@ -177,6 +189,82 @@ impl Signaler {
     pub fn signal(self, value: i32) -> oneshot::Receiver<()> {
         let _ = self.tx.send(value);
         self.completion_rx
+    }
+}
+
+/// Manages shutdown state for a runtime executor.
+pub enum ShutdownState {
+    /// The runtime is running and stop has not been called yet.
+    Running { signaler: Signaler, signal: Signal },
+    /// Stop has been called but completion is still pending.
+    Stopping {
+        stop_value: i32,
+        completion: Shared<oneshot::Receiver<()>>,
+    },
+    /// Stop has completed.
+    Stopped { stop_value: i32 },
+}
+
+impl ShutdownState {
+    /// Create a new shutdown state in running mode.
+    pub fn new() -> Self {
+        let (signaler, signal) = Signaler::new();
+        Self::Running { signaler, signal }
+    }
+
+    /// Get the signal for runtime users to await.
+    pub fn stopped(&self) -> Signal {
+        match self {
+            Self::Running { signal, .. } => signal.clone(),
+            Self::Stopping { stop_value, .. } | Self::Stopped { stop_value } => {
+                Signal::Resolved { value: *stop_value }
+            }
+        }
+    }
+
+    /// Initiate shutdown returning a completion future.
+    /// Returns `None` if stop has already completed.
+    pub fn stop(&mut self, value: i32) -> Option<Shared<oneshot::Receiver<()>>> {
+        match std::mem::replace(self, Self::Stopped { stop_value: value }) {
+            Self::Running { signaler, .. } => {
+                let completion_rx = signaler.signal(value);
+                let shared_completion = completion_rx.shared();
+                *self = Self::Stopping {
+                    stop_value: value,
+                    completion: shared_completion.clone(),
+                };
+                Some(shared_completion)
+            }
+            Self::Stopping {
+                stop_value,
+                completion,
+            } => {
+                *self = Self::Stopping {
+                    stop_value,
+                    completion: completion.clone(),
+                };
+                Some(completion)
+            }
+            Self::Stopped { stop_value } => {
+                *self = Self::Stopped { stop_value };
+                None
+            }
+        }
+    }
+
+    /// Mark shutdown as finished. This should be called after the completion future resolves.
+    pub fn finished(&mut self) {
+        if let Self::Stopping { stop_value, .. } = self {
+            *self = Self::Stopped {
+                stop_value: *stop_value,
+            };
+        }
+    }
+}
+
+impl Default for ShutdownState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
