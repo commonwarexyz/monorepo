@@ -585,7 +585,7 @@ module replica {
     }
 
     // -------------------------------------------------
-    // ── Backup timer: If timer expires, broadcast nullify(v) if not yet broadcast notarize(c, v).
+    // Backup timer: If timer expires, broadcast nullify(v) if not yet broadcast notarize(c, v).
     // -------------------------------------------------
 
     action on_timer_expired(id: ReplicaId): bool = all {
@@ -618,13 +618,13 @@ module replica {
     }
 
     // -------------------------------------------------
-    // ── Byzantine behavior (completely adversarial)
+    // Byzantine behavior (completely adversarial)
     // -------------------------------------------------
 
     action faulty_step: bool = all {
         FAULTY != Set(),
 
-        // adversary may inject arbitrary well-typed vote messages
+        // Adversary may inject arbitrary well-typed vote messages.
         all {
             nondet senders = FAULTY.powerset().oneOf()
             nondet view = VIEWS.oneOf()
@@ -639,7 +639,7 @@ module replica {
             })
             sent_vote' = sent_vote.union(votes),
         },
-        // adversary may inject arbitrary certificates
+        // Adversary may inject arbitrary certificates.
         all {
             nondet sender = FAULTY.oneOf()
             nondet senders = FAULTY.powerset().oneOf()
@@ -662,7 +662,7 @@ module replica {
             }
             sent_certificate' = sent_certificate.union(Set(cert))
         },
-        // adversary may inject arbitrary proposal
+        // Adversary may inject arbitrary proposal.
         all {
             nondet view_parent = VIEWS.oneOf()
             nondet view = VIEWS.oneOf()
@@ -680,7 +680,7 @@ module replica {
         }
     }
 
-    // part of the state that is not touched by the Byzantine validators
+    // Part of the state that is not touched by the Byzantine validators.
     action _unchanged_replica_state = all {
         ghost_committed_blocks' = ghost_committed_blocks,
         replica_state' = replica_state,
@@ -694,23 +694,15 @@ module replica {
     // Invariants
     // -------------------------------------------------
 
-    // Assumptions and thresholds:
-
+    // Assumptions and thresholds.
     val assumptions_valid = all {
-        2*L <= (N - F) + 1, // # Liveness guard, prevents equivocation stall
         CORRECT.size() + FAULTY.size() == N,
         N >= 5*F+1,
-        L + Q > N + F,
-        
-        2*F + 1 <= L,
-        L <= N - 3*F,
-
-        4*F + 1 <= Q,
-        Q <= N - F,
-        Q > L
+        2*L <= (N - F) + 1, // Liveness guard, prevents equivocation stall.
+        L + Q > N + F, // Every L-quorum and every Q-quorum share at least one honest replica.
     } 
 
-    // no two correct replicas disagree on the committed blocks
+    // No two correct replicas disagree on the committed blocks.
     val agreement = tuples(CORRECT, CORRECT).forall(((p1, p2)) => {
         val blocks1 = ghost_committed_blocks.get(p1)
         val blocks2 = ghost_committed_blocks.get(p2)
@@ -725,7 +717,7 @@ module replica {
         length(votes) <= 1
     }
 
-    // A correct replica should not send two votes in the same view
+    // A correct replica should not send two votes in the same view.
     // Honest replicas may not broadcast a notarize(c, v) after first broadcasting a nullify(v).
     val no_vote_equivocation_inv = CORRECT.forall(id => {
         val self = replica_state.get(id)
@@ -746,7 +738,7 @@ module replica {
         views_with_nullification.intersect(views_with_finalization) == Set()
     })
 
-    // No equivocation
+    // No equivocation.
     val no_proposal_equivocation = tuples(sent_proposal, sent_proposal).forall(((m1, m2)) => or {
         not(m1.view == m2.view and m1.sig == m2.sig),
         FAULTY.contains(m1.sig),
@@ -759,7 +751,7 @@ module replica {
     })
 
 
-    // Make sure that no invalid certificates are stored
+    // Make sure that no invalid certificates are stored.
     val certificates_are_valid_inv = CORRECT.forall(id => {
         val certs = store_certificate.get(id)
         certs.forall(cert => and {
@@ -836,7 +828,7 @@ module replica {
 
     val safe = all_invariants
 
-    // Test invariants:
+    // Test invariants.
 
     val correct_nodes_sent_certificates_valid = sent_certificate.filter(cert => cert.ghost_sender.in(CORRECT)).forall(cert => {
         cert.signatures.size() >= L
@@ -851,7 +843,7 @@ module replica {
         store_certificates_are_valid
     }
 
-    // Examples:
+    // Examples.
 
     // Check this invariant to see an example of having a finalized block.
     val block_example = not(CORRECT.exists(id => {
