@@ -1568,6 +1568,7 @@ mod tests {
                 hex(&digest),
                 "ed2ea67208cde2ee8c16cca5aa4f369f55b1402258c6b7760e5baf134e38944a",
             );
+            blob.sync().await.expect("Failed to sync blob");
             let (blob, size) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
@@ -1582,6 +1583,7 @@ mod tests {
                 hex(&digest),
                 "cc7efd4fc999aff36b9fd4213ba8da5810dc1849f92ae2ddf7c6dc40545f9aff",
             );
+            blob.sync().await.expect("Failed to sync blob");
 
             let journal = Journal::<Context, Digest>::init(context.clone(), cfg.clone())
                 .await
