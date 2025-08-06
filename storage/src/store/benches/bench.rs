@@ -1,5 +1,5 @@
 use criterion::criterion_main;
 
-mod store_init;
+mod restart;
 
-criterion_main!(store_init::benches);
+criterion_main!(restart::benches);

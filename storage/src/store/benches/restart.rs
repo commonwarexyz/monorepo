@@ -49,7 +49,6 @@ fn store_cfg() -> SConfig<EightCap, ()> {
 fn gen_random_store(cfg: Config, num_elements: u64, num_operations: u64) {
     let runner = Runner::new(cfg.clone());
     runner.start(|ctx| async move {
-        info!("starting DB generation...");
         let store_cfg = store_cfg();
         let mut db = Store::<_, _, _, EightCap>::init(ctx, store_cfg)
             .await
@@ -85,15 +84,16 @@ fn gen_random_store(cfg: Config, num_elements: u64, num_operations: u64) {
 type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
 
 /// Benchmark the initialization of a large randomly generated store db.
-fn bench_store_init(c: &mut Criterion) {
+fn bench_restart(c: &mut Criterion) {
     tracing_subscriber::fmt().try_init().ok();
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg.clone());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
-            info!(elements, operations, "benchmarking store init",);
+            // Create a large store db.
             gen_random_store(cfg.clone(), elements, operations);
 
+            // Restart the db.
             c.bench_function(
                 &format!(
                     "{}/elements={} operations={}",
@@ -118,10 +118,7 @@ fn bench_store_init(c: &mut Criterion) {
 
             let runner = Runner::new(cfg.clone());
             runner.start(|ctx| async move {
-                info!("cleaning up db...");
-                let store_cfg = store_cfg();
-                // Clean up the database after the benchmark.
-                let db = StoreDb::init(ctx.clone(), store_cfg.clone()).await.unwrap();
+                let db = StoreDb::init(ctx, store_cfg()).await.unwrap();
                 db.destroy().await.unwrap();
             });
         }
@@ -131,5 +128,5 @@ fn bench_store_init(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_store_init
+    targets = bench_restart
 }
