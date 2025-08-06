@@ -153,8 +153,7 @@ pub struct Config<T: Translator, C> {
     pub translator: T,
 
     /// The buffer pool to use for caching data.
-    ///
-    /// TODO: Use this for the variable journal as well (#1223)
+    // TODO: Use this for the variable journal as well (#1223)
     pub buffer_pool: PoolRef,
 }
 
