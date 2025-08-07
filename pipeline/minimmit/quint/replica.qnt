@@ -698,7 +698,7 @@ module replica {
     val assumptions_valid = all {
         CORRECT.size() + FAULTY.size() == N,
         N >= 5*F+1,
-        2*L <= (N - F) + 1, // Liveness guard, prevents equivocation stall.
+        2*L <= Q + 1, // Liveness guard, prevents equivocation stall.
         L + Q > N + F, // Every L-quorum and every Q-quorum share at least one honest replica.
     } 
 
