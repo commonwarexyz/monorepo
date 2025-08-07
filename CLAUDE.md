@@ -76,9 +76,9 @@ cargo bench -p commonware-cryptography
 ### Critical Implementation Notes
 - Overflow checks enabled in all profiles (including release) for safety
 - All cryptographic operations use constant-time implementations where applicable
-- P2P layer uses TCP with ChaCha20-Poly1305 encryption and X25519 key exchange
+- P2P layer provides abstract `Sender`/`Receiver`/`Blocker` traits, transport-agnostic
 - Storage provides abstract data structures (ADB, MMR, journals) over runtime storage backends
-- Extensive use of async/await with configurable runtime (Tokio for production, Deterministic for testing)
+- All code outside `runtime` is runtime-agnostic (never import tokio, use `futures` or runtime capabilities)
 
 ## Testing Strategy
 - Unit tests: Core logic validation
@@ -93,6 +93,57 @@ cargo bench -p commonware-cryptography
 3. Run `cargo clippy` before committing
 4. Use `cargo +nightly fmt` for formatting
 5. For cryptography changes, also run `cargo +nightly fmt -p commonware-cryptography`
+
+## Deterministic Async Testing
+
+Use the deterministic runtime for reproducible async tests:
+
+```rust
+#[test]
+fn test_async_behavior() {
+    let executor = deterministic::Runner::seeded(42); // Use seed for reproducibility
+    executor.start(|context| async move {
+        // Spawn actors with labels for debugging
+        let handle = context.with_label("worker").spawn(|context| async move {
+            // Actor logic here
+            context.sleep(Duration::from_secs(1)).await;
+        });
+
+        // Control time explicitly
+        context.sleep(Duration::from_millis(100)).await;
+
+        // Use select! for timeouts
+        select! {
+            result = handle => { /* handle result */ },
+            _ = context.sleep(Duration::from_secs(5)) => panic!("timeout"),
+        }
+    });
+}
+```
+
+### Simulated Network Testing
+```rust
+let (network, mut oracle) = Network::new(
+    context.with_label("network"),
+    Config { max_size: 1024 * 1024 }
+);
+network.start();
+
+// Register peers and configure network links
+let (sender, receiver) = oracle.register(public_key, 0).await.unwrap();
+oracle.add_link(pk1, pk2, Link {
+    latency: 10.0,      // ms
+    jitter: 2.5,        // ms
+    success_rate: 0.95, // 95% success
+}).await.unwrap();
+```
+
+### Key Patterns
+- Always use seeds for reproducible tests
+- Label contexts for clear debugging
+- Use `context.auditor().state()` to verify determinism
+- Test with network partitions, delays, and failures
+- Set timeouts with `Runner::timed(Duration::from_secs(30))`
 
 ## Code Style Guide
 
