@@ -14,12 +14,8 @@ use crate::{
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
-use futures::channel::mpsc;
 
 pub mod client;
-
-/// Channel for sending sync target updates
-pub type SyncTargetUpdateSender<D> = mpsc::Sender<Target<D>>;
 
 pub type Error = crate::adb::Error;
 
