@@ -253,13 +253,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                         return Err(Error::JournalError(e));
                     }
                     Ok((section, offset, size, op)) => {
-                        debug!(
-                            section,
-                            offset,
-                            size,
-                            log_size = self.log_size,
-                            "replaying operation"
-                        );
                         if !oldest_retained_loc_found {
                             self.log_size = section * self.log_items_per_section;
                             self.oldest_retained_loc = self.log_size;
@@ -534,14 +527,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let section = self.current_section();
         let (offset, _) = self.log.append(section, op).await?;
         self.log_size += 1;
-        debug!(
-            log_size = self.log_size,
-            section, offset, "appended operation"
-        );
         self.locations.append(offset.into()).await?;
 
         if section != self.current_section() {
-            debug!(section, "syncing log");
             self.log.sync(section).await?;
         }
 
@@ -619,7 +607,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.
-        debug!(log_size = self.log_size, "committing");
         self.raise_inactivity_floor(self.uncommitted_ops + 1)
             .await?;
         self.uncommitted_ops = 0;
@@ -630,7 +617,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // this turns out to be a significant part of commit overhead, or the user wants to ensure
         // the log is backed up externally before discarding.
         self.prune_inactive().await?;
-        debug!(log_size = self.log_size, "prune_inactive complete");
 
         Ok(())
     }
@@ -732,7 +718,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // corresponding MMR & location entries, even in the event of failures, with no need for
         // special recovery.
         let section_with_target = target_prune_loc / self.log_items_per_section;
-        debug!(section = section_with_target, "section with target");
         self.log.prune(section_with_target).await?;
         self.oldest_retained_loc = section_with_target * self.log_items_per_section;
 

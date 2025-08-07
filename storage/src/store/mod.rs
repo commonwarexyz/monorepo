@@ -101,7 +101,6 @@ use crate::{
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},
         variable::{Config as VConfig, Journal as VJournal},
-        Error as JError,
     },
     translator::Translator,
 };
@@ -400,12 +399,6 @@ where
                         return Err(Error::JournalError(e));
                     }
                     Ok((section, offset, size, op)) => {
-                        debug!(
-                            offset,
-                            size,
-                            log_size = self.log_size,
-                            "replaying operation"
-                        );
                         if !oldest_retained_loc_found {
                             self.log_size = section * self.log_items_per_section;
                             self.oldest_retained_loc = self.log_size;
