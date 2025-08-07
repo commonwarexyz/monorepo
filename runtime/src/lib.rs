@@ -997,8 +997,11 @@ mod tests {
                 let counter = counter.clone();
                 let mut started_tx = started_tx.clone();
                 context.spawn(move |context| async move {
-                    started_tx.send(()).await.unwrap();
+                    // Wait for signal to be acquired
                     let mut signal = context.stopped();
+                    started_tx.send(()).await.unwrap();
+
+                    // Increment once killed
                     let value = (&mut signal).await.unwrap();
                     assert_eq!(value, kill);
                     context.sleep(cleanup_duration).await;
