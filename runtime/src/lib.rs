@@ -983,11 +983,6 @@ mod tests {
     where
         R::Context: Spawner + Metrics + Clock,
     {
-        use std::sync::{
-            atomic::{AtomicU32, Ordering},
-            Arc,
-        };
-
         let kill = 42;
         runner.start(|context| async move {
             let (started_tx, mut started_rx) = mpsc::channel(3);
