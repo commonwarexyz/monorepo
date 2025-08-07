@@ -714,7 +714,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 .await?;
         }
 
-        self.tail.sync().await?;
+        drop(self.tail);
         debug!(blob = self.tail_index, "destroyed blob");
         self.context
             .remove(&self.cfg.partition, Some(&self.tail_index.to_be_bytes()))

@@ -456,6 +456,7 @@ mod tests {
                 assert_eq!(buf, [i as u8; PAGE_SIZE]);
             }
 
+            // Cleanup.
             blob.sync().await.unwrap();
         });
     }
