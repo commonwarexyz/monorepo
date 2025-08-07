@@ -128,7 +128,7 @@ mod tests {
     struct FindNextTestCase {
         lower_bound: u64,
         upper_bound: u64,
-        fetched_ops: Vec<(u64, usize)>, // (start location, num_operations)
+        fetched_ops: Vec<(u64, u64)>, // (start location, num_operations)
         requested_ops: Vec<u64>,
         fetch_batch_size: u64,
         expected: Option<(u64, u64)>,
@@ -279,24 +279,15 @@ mod tests {
         expected: Some((0, 0)),
     }; "mixed_coverage_interleaved_ranges")]
     fn test_find_next(test_case: FindNextTestCase) {
-        // Convert fetched_ops to operation counts
-        let operation_counts: BTreeMap<u64, u64> = test_case
-            .fetched_ops
-            .iter()
-            .map(|&(start_loc, num_ops)| (start_loc, num_ops as u64))
-            .collect();
-
-        // Create outstanding requests from input
+        let fetched_ops: BTreeMap<u64, u64> = test_case.fetched_ops.into_iter().collect();
         let outstanding_requests: BTreeSet<u64> = test_case.requested_ops.into_iter().collect();
-
         let result = find_next(
             test_case.lower_bound,
             test_case.upper_bound,
-            &operation_counts,
+            &fetched_ops,
             &outstanding_requests,
             test_case.fetch_batch_size,
         );
-
         assert_eq!(result, test_case.expected);
     }
 }
