@@ -424,15 +424,14 @@ mod tests {
         join, pin_mut, FutureExt, SinkExt, StreamExt,
     };
     use prometheus_client::metrics::counter::Counter;
-    use std::sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc,
-    };
     use std::{
         collections::HashMap,
         panic::{catch_unwind, AssertUnwindSafe},
         str::FromStr,
-        sync::Mutex,
+        sync::{
+            atomic::{AtomicU32, Ordering},
+            Arc, Mutex,
+        },
     };
     use tracing::{error, Level};
     use utils::reschedule;
