@@ -26,7 +26,7 @@ where
 {
     type Op = Fixed<K, V>;
     type Journal = crate::journal::fixed::Journal<E, Fixed<K, V>>;
-    type Verifier = Verifier<E, K, V, H, T>;
+    type Verifier = Verifier<H>;
     type Error = crate::adb::Error;
     type Config = crate::adb::any::Config<T>;
     type Digest = H::Digest;

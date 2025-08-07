@@ -1,48 +1,33 @@
 use crate::{
-    adb::{any::Any, operation::Fixed, sync},
+    adb::{any::verify_proof, operation::Fixed, sync},
     mmr::{hasher::Standard, iterator::leaf_num_to_pos, verification::Proof},
-    translator::Translator,
 };
 use commonware_cryptography::Hasher;
 use commonware_utils::Array;
 
 /// Verifier for Any database operations using the database's built-in proof verification
-pub struct Verifier<E, K, V, H, T>
+pub struct Verifier<H>
 where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-    K: Array,
-    V: Array,
     H: Hasher,
-    T: Translator,
 {
     hasher: Standard<H>,
-    _phantom: std::marker::PhantomData<(E, K, V, T)>,
 }
 
-impl<E, K, V, H, T> Verifier<E, K, V, H, T>
+impl<H> Verifier<H>
 where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-    K: Array,
-    V: Array,
     H: Hasher,
-    T: Translator,
 {
     /// Create a new verifier with the given hasher
     pub fn new(hasher: Standard<H>) -> Self {
-        Self {
-            hasher,
-            _phantom: std::marker::PhantomData,
-        }
+        Self { hasher }
     }
 }
 
-impl<E, K, V, H, T> sync::Verifier<Fixed<K, V>, H::Digest> for Verifier<E, K, V, H, T>
+impl<K, V, H> sync::Verifier<Fixed<K, V>, H::Digest> for Verifier<H>
 where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
     K: Array,
     V: Array,
     H: Hasher,
-    T: Translator,
 {
     type Error = crate::mmr::Error;
 
@@ -53,13 +38,7 @@ where
         operations: &[Fixed<K, V>],
         target_root: &H::Digest,
     ) -> bool {
-        Any::<E, K, V, H, T>::verify_proof(
-            &mut self.hasher,
-            proof,
-            start_loc,
-            operations,
-            target_root,
-        )
+        verify_proof(&mut self.hasher, proof, start_loc, operations, target_root)
     }
 
     fn extract_pinned_nodes(
