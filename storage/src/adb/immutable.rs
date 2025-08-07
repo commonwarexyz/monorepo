@@ -23,6 +23,26 @@ use commonware_utils::{sequence::U32, Array};
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
 use tracing::warn;
 
+pub mod sync;
+
+/// Verify a proof for a range of operations in an Immutable database
+pub fn verify_proof<H, K, V>(
+    hasher: &mut Standard<H>,
+    proof: &Proof<H::Digest>,
+    start_loc: u64,
+    ops: &[Variable<K, V>],
+    root: &H::Digest,
+) -> bool
+where
+    H: CHasher,
+    K: Array,
+    V: Codec,
+{
+    let start_pos = leaf_num_to_pos(start_loc);
+    let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
+    proof.verify_range_inclusion(hasher, &elements, start_pos, root)
+}
+
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot. The exact value does not impact performance significantly as long as it is large
 /// enough, so we don't make it configurable.
@@ -185,6 +205,92 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             hasher,
         };
 
+        Ok(db)
+    }
+
+    /// Returns an [Immutable] initialized from sync data in `cfg` for use in state sync.
+    ///
+    /// # Behavior
+    ///
+    /// This method handles different initialization scenarios based on existing data:
+    /// - If the MMR journal is empty or the last item is before `lower_bound`, it creates a
+    ///   fresh MMR from the provided `pinned_nodes`
+    /// - If the MMR journal has data but is incomplete (< `upper_bound`), missing operations
+    ///   from the log are applied to bring it up to the target state
+    /// - If the MMR journal has data beyond the `upper_bound`, it is rewound to match the sync target
+    ///
+    /// # Returns
+    ///
+    /// An [Immutable] db populated with the state from `cfg.lower_bound` to `cfg.upper_bound`, inclusive.
+    /// The pruning boundary is set to `cfg.lower_bound`.
+    pub async fn init_synced(
+        context: E,
+        mut cfg: sync::ImmutableSyncConfig<E, K, V, T, H::Digest, <Variable<K, V> as Read>::Cfg>,
+    ) -> Result<Self, Error> {
+        // Initialize MMR for sync
+        let mut mmr = Mmr::init_sync(
+            context.with_label("mmr"),
+            crate::mmr::journaled::SyncConfig {
+                config: MmrConfig {
+                    journal_partition: cfg.db_config.mmr_journal_partition,
+                    metadata_partition: cfg.db_config.mmr_metadata_partition,
+                    items_per_blob: cfg.db_config.mmr_items_per_blob,
+                    write_buffer: cfg.db_config.mmr_write_buffer,
+                    thread_pool: cfg.db_config.thread_pool.clone(),
+                    buffer_pool: cfg.db_config.buffer_pool.clone(),
+                },
+                lower_bound: leaf_num_to_pos(cfg.lower_bound),
+                upper_bound: leaf_num_to_pos(cfg.upper_bound + 1) - 1,
+                pinned_nodes: cfg.pinned_nodes,
+            },
+        )
+        .await
+        .map_err(Error::MmrError)?;
+
+        // Initialize locations journal for sync
+        let mut locations = FJournal::init_sync(
+            context.with_label("locations"),
+            FConfig {
+                partition: cfg.db_config.locations_journal_partition,
+                items_per_blob: cfg.db_config.locations_items_per_blob,
+                write_buffer: cfg.db_config.log_write_buffer,
+                buffer_pool: cfg.db_config.buffer_pool.clone(),
+            },
+            cfg.lower_bound,
+            cfg.upper_bound,
+        )
+        .await?;
+
+        // Build snapshot from the log using the existing method
+        // This will handle applying any missing operations to MMR and locations
+        let mut snapshot = Index::init(
+            context.with_label("snapshot"),
+            cfg.db_config.translator.clone(),
+        );
+
+        let mut hasher = Standard::<H>::new();
+        let (log_size, oldest_retained_loc) = Self::build_snapshot_from_log(
+            &mut hasher,
+            cfg.db_config.log_items_per_section,
+            &mut mmr,
+            &mut cfg.log,
+            &mut locations,
+            &mut snapshot,
+        )
+        .await?;
+
+        let mut db = Immutable {
+            mmr,
+            log: cfg.log,
+            log_size,
+            oldest_retained_loc,
+            locations,
+            log_items_per_section: cfg.db_config.log_items_per_section,
+            snapshot,
+            hasher: Standard::<H>::new(),
+        };
+
+        db.sync().await?;
         Ok(db)
     }
 
@@ -639,7 +745,7 @@ pub(super) mod test {
     const PAGE_CACHE_SIZE: usize = 9;
     const ITEMS_PER_SECTION: u64 = 5;
 
-    fn db_config(suffix: &str) -> Config<TwoCap, (commonware_codec::RangeCfg, ())> {
+    pub(crate) fn db_config(suffix: &str) -> Config<TwoCap, (commonware_codec::RangeCfg, ())> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -658,7 +764,7 @@ pub(super) mod test {
         }
     }
 
-    /// A type alias for the concrete [Any] type used in these unit tests.
+    /// A type alias for the concrete [Immutable] type used in these unit tests.
     type ImmutableTest = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     /// Return an [Immutable] database initialized with a fixed config.

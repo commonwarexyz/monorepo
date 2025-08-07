@@ -1,5 +1,6 @@
 //! Error types for the sync example.
 
+use crate::net::ErrorCode;
 use thiserror::Error;
 
 /// Errors that can occur in the sync example.
@@ -15,10 +16,7 @@ pub enum Error {
 
     /// Server returned an error response
     #[error("server error (code: {code:?}): {message}")]
-    Server {
-        code: crate::ErrorCode,
-        message: String,
-    },
+    Server { code: ErrorCode, message: String },
 
     /// Invalid request parameters
     #[error("invalid request: {0}")]
@@ -47,15 +45,15 @@ pub enum Error {
 
 impl Error {
     /// Convert this error to a protocol error code for transmission over the network.
-    pub fn to_error_code(&self) -> crate::ErrorCode {
+    pub fn to_error_code(&self) -> ErrorCode {
         match self {
-            Error::InvalidRequest(_) => crate::ErrorCode::InvalidRequest,
-            Error::Database(_) => crate::ErrorCode::DatabaseError,
-            Error::Network(_) => crate::ErrorCode::NetworkError,
+            Error::InvalidRequest(_) => ErrorCode::InvalidRequest,
+            Error::Database(_) => ErrorCode::DatabaseError,
+            Error::Network(_) => ErrorCode::NetworkError,
             Error::RequestChannelClosed | Error::ResponseChannelClosed { .. } => {
-                crate::ErrorCode::InternalError
+                ErrorCode::InternalError
             }
-            _ => crate::ErrorCode::InternalError,
+            _ => ErrorCode::InternalError,
         }
     }
 }

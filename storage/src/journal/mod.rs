@@ -22,6 +22,11 @@ where
         fixed::Journal::size(self).await
     }
 
+    async fn has_operations_from(&self, location: u64) -> Result<bool, Self::Error> {
+        let size = fixed::Journal::size(self).await?;
+        Ok(size > location)
+    }
+
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
         fixed::Journal::append(self, op).await.map(|_| ())
     }

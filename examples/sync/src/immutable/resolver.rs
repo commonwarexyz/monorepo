@@ -1,23 +1,22 @@
-//! Provides a [Resolver] implementation that communicates with a remote server
-//! to fetch operations and proofs.
+//! Network resolver for Immutable example.
 
+use crate::immutable::{
+    protocol::{GetOperationsRequest, GetSyncTargetRequest, Message},
+    Operation,
+};
+// use crate::protocol::MAX_MESSAGE_SIZE; // unused after refactor
 use crate::net::client::NetworkClient;
-use crate::{error::Error, GetOperationsRequest, GetSyncTargetRequest, Message};
+use crate::Error;
+// use commonware_codec::{DecodeExt, Encode}; // unused after refactor
 use commonware_cryptography::sha256::Digest;
+// use commonware_macros::select; // unused after refactor
 use commonware_storage::adb::sync::{
     resolver::{FetchResult, Resolver as ResolverTrait},
     Target,
 };
 use futures::channel::oneshot;
 use std::{marker::PhantomData, net::SocketAddr, num::NonZeroU64};
-use tracing::error;
 
-/// I/O task that manages connection and request/response correlation.
-// Removed: IoTask, use NetworkClient
-
-// Removed: IoTask, use NetworkClient
-
-/// Network resolver that fetches operations from a remote server.
 #[derive(Clone)]
 pub struct Resolver<E>
 where
@@ -46,7 +45,6 @@ where
     }
 
     pub async fn get_sync_target(&self) -> Result<Target<Digest>, Error> {
-        // NetworkClient correlates by message.request_id; use 0 for target request (no clash due to single in-flight per send())
         let request_id = 0u64;
         let request = GetSyncTargetRequest { request_id };
         let response = self
@@ -55,13 +53,10 @@ where
             .await?;
         match response {
             Message::GetSyncTargetResponse(response) => Ok(response.target),
-            Message::Error(err) => {
-                error!(error = %err.message, "server error");
-                Err(Error::Server {
-                    code: err.error_code,
-                    message: err.message,
-                })
-            }
+            Message::Error(err) => Err(Error::Server {
+                code: err.error_code,
+                message: err.message,
+            }),
             _ => Err(Error::UnexpectedResponse { request_id }),
         }
     }
@@ -79,7 +74,7 @@ where
         + Clone,
 {
     type Digest = Digest;
-    type Op = crate::Operation;
+    type Op = Operation;
     type Error = Error;
 
     async fn get_operations(
@@ -95,12 +90,10 @@ where
             start_loc,
             max_ops,
         };
-
         let response = self
             .client
             .send(Message::GetOperationsRequest(request))
             .await?;
-
         match response {
             Message::GetOperationsResponse(response) => {
                 let (success_tx, _success_rx) = oneshot::channel();

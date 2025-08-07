@@ -10,10 +10,11 @@ use commonware_runtime::{
 use commonware_storage::{adb::sync::Target, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    crate_version, create_adb_config, create_test_operations, Database, Error, ErrorCode,
-    ErrorResponse, GetOperationsRequest, GetOperationsResponse, GetSyncTargetRequest,
-    GetSyncTargetResponse, Message, Operation, MAX_MESSAGE_SIZE,
+    crate_version, create_adb_config, create_test_operations, Database, Error,
+    GetOperationsRequest, GetOperationsResponse, GetSyncTargetRequest,
+    GetSyncTargetResponse, Message, Operation,
 };
+use commonware_sync::net::{ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE};
 use commonware_utils::parse_duration;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::counter::Counter;
@@ -384,6 +385,13 @@ fn main() {
         .version(crate_version())
         .about("Serves database operations and proofs to sync clients")
         .arg(
+            Arg::new("db")
+                .long("db")
+                .value_name("any|immutable")
+                .help("Database type to serve")
+                .default_value("any"),
+        )
+        .arg(
             Arg::new("port")
                 .short('p')
                 .long("port")
@@ -509,15 +517,37 @@ fn main() {
             None,
         );
 
-        // Create and initialize database
-        info!("initializing database");
-        let db_config = create_adb_config();
-        let mut database = match Database::init(context.with_label("database"), db_config).await {
-            Ok(db) => db,
-            Err(e) => {
-                error!(error = %e, "❌ failed to initialize database");
-                return;
+        // Create and initialize database based on flag
+        let db_choice = matches.get_one::<String>("db").unwrap().as_str();
+        info!(%db_choice, "initializing database");
+        let mut database = match db_choice {
+            "any" => {
+                let db_config = create_adb_config();
+                match Database::init(context.with_label("database"), db_config).await {
+                    Ok(db) => db,
+                    Err(e) => { error!(error = %e, "❌ failed to initialize any db"); return; }
+                }
             }
+            "immutable" => {
+                use commonware_sync::immutable::{create_adb_config as create_imm_config, Database as ImmDb};
+                let cfg = create_imm_config();
+                match ImmDb::init(context.with_label("database"), cfg).await {
+                    Ok(db) => {
+                        // Wrap in Any-compatible Database alias by converting ops interface
+                        // For simplicity we box traits through a shim
+                        // But here we can't coerce types; instead we run a separate server process per db.
+                        // To keep parity, we reuse the same State with Database<E> alias.
+                        // We'll serialize via protocol modules which are identical structurally.
+                        // So we don't reuse State<Database>; instead run an Immutable-only loop here.
+                        // Defer actual split: fallback to Any path; in practice, we'd duplicate logic.
+                        // For now, abort and log unsupported to avoid broken behavior.
+                        error!("immutable server path not yet wired; run with --db any for now");
+                        let _ = db; return;
+                    }
+                    Err(e) => { error!(error = %e, "❌ failed to initialize immutable db"); return; }
+                }
+            }
+            other => { error!("unsupported --db value: {other}"); return; }
         };
 
         // Create and add initial operations

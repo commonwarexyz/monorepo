@@ -112,6 +112,7 @@ use std::{
     collections::{btree_map::Entry, BTreeMap},
     io::Cursor,
     marker::PhantomData,
+    num::NonZeroU64,
 };
 use tracing::{debug, trace, warn};
 use zstd::{bulk::compress, decode_all};
@@ -213,6 +214,135 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
             _phantom: PhantomData,
         })
+    }
+
+    /// Initialize a Variable journal for use in state sync.
+    ///
+    /// When opened in this mode, we attempt to configure the journal within the given operation range
+    /// with persisted data. The bounds are operation locations (not section numbers).
+    /// If the journal is empty, we create a fresh journal ready to accept operations starting from the lower bound.
+    /// If the journal has existing data, we prune sections before the lower bound and rewind sections beyond the upper bound.
+    ///
+    /// # Arguments
+    /// * `context` - The storage context
+    /// * `cfg` - Configuration for the journal  
+    /// * `lower_bound` - The first operation location to retain (inclusive)
+    /// * `upper_bound` - The last operation location to retain (inclusive)
+    /// * `items_per_section` - Number of operations per section (from database config)
+    ///
+    /// # Returns
+    /// A journal configured for the specified sync range
+    ///
+    /// # Invariants
+    /// The returned journal will be ready to accept operations starting from any location >= lower_bound
+    /// and <= upper_bound + 1.
+    pub(crate) async fn init_sync(
+        context: E,
+        cfg: Config<V::Cfg>,
+        lower_bound: u64,
+        upper_bound: u64,
+        items_per_section: NonZeroU64,
+    ) -> Result<Self, Error> {
+        if lower_bound > upper_bound {
+            return Err(Error::InvalidSyncRange(lower_bound, upper_bound));
+        }
+
+        // Calculate the section ranges based on operation locations
+        let items_per_section_u64 = items_per_section.get();
+        let lower_section = lower_bound / items_per_section_u64;
+        let upper_section = upper_bound / items_per_section_u64;
+
+        debug!(
+            lower_bound,
+            upper_bound,
+            lower_section,
+            upper_section,
+            items_per_section = items_per_section_u64,
+            "Initializing Variable journal for sync"
+        );
+
+        // Initialize the base journal to see what existing data we have
+        let mut journal = Self::init(context.clone(), cfg.clone()).await?;
+
+        // Determine the range of existing data by finding the highest section with data
+        let existing_sections: Vec<u64> = journal.blobs.keys().cloned().collect();
+        let max_existing_section = existing_sections.last().copied();
+
+        debug!(
+            existing_sections = ?existing_sections,
+            max_existing_section,
+            "Analyzed existing journal data"
+        );
+
+        // Handle sync logic based on existing data
+        let journal = if existing_sections.is_empty() {
+            debug!("No existing journal data, creating fresh journal ready for sync");
+            // No existing data - journal is ready for sync operations starting at lower_bound
+            journal
+        } else if let Some(max_section) = max_existing_section {
+            if max_section < lower_section {
+                debug!(
+                    max_section,
+                    lower_section,
+                    "Existing journal data is stale (all before lower bound), re-initializing"
+                );
+                // All existing data is before our sync range - destroy and recreate
+                journal.destroy().await?;
+                Self::init(context, cfg).await?
+            } else {
+                // We have existing data that overlaps with our sync range
+                // Always prune to lower bound first
+                if lower_section > 0 {
+                    journal.prune(lower_section).await?;
+                }
+
+                // Only remove sections beyond upper_section if they actually exceed our target range
+                if max_section > upper_section {
+                    debug!(
+                        max_section,
+                        lower_section,
+                        upper_section,
+                        "Existing journal data exceeds sync range, removing sections beyond upper bound"
+                    );
+
+                    // For sections beyond upper_section, we need to remove them entirely
+                    let sections_to_remove: Vec<u64> = journal
+                        .blobs
+                        .keys()
+                        .filter(|&&section| section > upper_section)
+                        .cloned()
+                        .collect();
+
+                    for section in sections_to_remove {
+                        debug!(section, "Removing section beyond upper bound");
+                        if let Some(blob) = journal.blobs.remove(&section) {
+                            // Drop the blob and remove it from storage
+                            drop(blob);
+                            let name = section.to_be_bytes();
+                            journal
+                                .context
+                                .remove(&journal.cfg.partition, Some(&name))
+                                .await?;
+                            journal.tracked.dec();
+                        }
+                    }
+                } else {
+                    debug!(
+                        max_section,
+                        lower_section,
+                        upper_section,
+                        "Existing journal data within sync range, no section removal needed"
+                    );
+                }
+
+                journal
+            }
+        } else {
+            // This shouldn't happen since we checked for empty sections above
+            journal
+        };
+
+        Ok(journal)
     }
 
     /// Ensures that a pruned section is not accessed.
@@ -1922,6 +2052,504 @@ mod tests {
                 hex(&digest),
                 "ca3845fa7fabd4d2855ab72ed21226d1d6eb30cb895ea9ec5e5a14201f3f25d8",
             );
+        });
+    }
+
+    /// Test `init_sync` when there is no existing data on disk.
+    #[test_traced]
+    fn test_init_sync_no_existing_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_fresh_start".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+
+            // Initialize journal with sync boundaries when no existing data exists
+            let lower_bound = 10;
+            let upper_bound = 25;
+            let items_per_section = NonZeroU64::new(5).unwrap();
+            let sync_journal = Journal::<deterministic::Context, u64>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound,
+                upper_bound,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to initialize journal with sync boundaries");
+
+            // Verify the journal is ready for sync operations
+            assert!(sync_journal.blobs.is_empty()); // No sections created yet
+            assert_eq!(sync_journal.oldest_allowed, None); // No pruning applied
+
+            // Verify that operations can be appended starting from the sync position
+            let lower_section = lower_bound / items_per_section; // 10/5 = 2
+            let mut journal = sync_journal;
+
+            // Test appending at the exact sync boundary
+            let (offset, _) = journal.append(lower_section, 42u64).await.unwrap();
+            assert_eq!(offset, 0); // First item in section
+
+            // Verify the item can be retrieved
+            let retrieved = journal.get(lower_section, offset).await.unwrap();
+            assert_eq!(retrieved, Some(42u64));
+
+            // Test appending multiple operations
+            let (offset2, _) = journal.append(lower_section, 43u64).await.unwrap();
+            assert_eq!(
+                journal.get(lower_section, offset2).await.unwrap(),
+                Some(43u64)
+            );
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` when there is existing data that overlaps with the sync target range.
+    #[test_traced]
+    fn test_init_sync_existing_data_overlap() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_overlap".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+
+            // Create initial journal with data in multiple sections
+            let mut journal =
+                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
+
+            // Add data to sections 0, 1, 2, 3 (simulating operations 0-19 with items_per_section=5)
+            for section in 0..4 {
+                for item in 0..3 {
+                    journal.append(section, section * 10 + item).await.unwrap();
+                }
+            }
+            journal.close().await.unwrap();
+
+            // Initialize with sync boundaries that overlap with existing data
+            // lower_bound: 8 (section 1), upper_bound: 30 (section 6)
+            let lower_bound = 8;
+            let upper_bound = 30;
+            let items_per_section = NonZeroU64::new(5).unwrap();
+            let journal = Journal::<deterministic::Context, u64>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound,
+                upper_bound,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to initialize journal with overlap");
+
+            // Verify pruning: sections before lower_section are pruned
+            let lower_section = lower_bound / items_per_section; // 8/5 = 1
+            assert_eq!(journal.oldest_allowed, Some(lower_section));
+
+            // Verify section 0 is pruned (< lower_section), section 1+ are retained (>= lower_section)
+            assert!(!journal.blobs.contains_key(&0)); // Section 0 should be pruned
+            assert!(journal.blobs.contains_key(&1)); // Section 1 should be retained (contains operation 8)
+            assert!(journal.blobs.contains_key(&2)); // Section 2 should be retained
+            assert!(journal.blobs.contains_key(&3)); // Section 3 should be retained
+
+            // Verify data integrity: existing data in retained sections is accessible
+            let item = journal.get(1, 0).await.unwrap();
+            assert_eq!(item, Some(10)); // First item in section 1 (1*10+0)
+            let item = journal.get(2, 0).await.unwrap();
+            assert_eq!(item, Some(20)); // First item in section 2 (2*10+0)
+
+            // Verify functional correctness: journal can accept new operations at sync boundaries
+            let mut journal = journal;
+            let sync_section = lower_section; // Section 1 (where operation 8 belongs)
+            let (offset, _) = journal.append(sync_section, 999).await.unwrap();
+            assert_eq!(journal.get(sync_section, offset).await.unwrap(), Some(999));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` when existing data exactly matches the sync target range.
+    #[test_traced]
+    fn test_init_sync_existing_data_exact_match() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_exact_match".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+
+            // Create initial journal with data exactly matching sync range
+            let mut journal =
+                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
+
+            // Add data to sections 1, 2, 3 (operations 5-19 with items_per_section=5)
+            for section in 1..4 {
+                for item in 0..3 {
+                    journal.append(section, section * 100 + item).await.unwrap();
+                }
+            }
+            journal.close().await.unwrap();
+
+            // Initialize with sync boundaries that exactly match existing data
+            let lower_bound = 5; // section 1
+            let upper_bound = 19; // section 3
+            let items_per_section = NonZeroU64::new(5).unwrap();
+            let journal = Journal::<deterministic::Context, u64>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound,
+                upper_bound,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to initialize journal with exact match");
+
+            // Verify pruning to lower bound
+            let lower_section = lower_bound / items_per_section; // 5/5 = 1
+            assert_eq!(journal.oldest_allowed, Some(lower_section));
+
+            // Verify section 0 is pruned, sections 1-3 are retained
+            assert!(!journal.blobs.contains_key(&0)); // Section 0 should be pruned
+            assert!(journal.blobs.contains_key(&1)); // Section 1 should be retained (contains operation 5)
+            assert!(journal.blobs.contains_key(&2)); // Section 2 should be retained
+            assert!(journal.blobs.contains_key(&3)); // Section 3 should be retained
+
+            // Verify data integrity: existing data in retained sections is accessible
+            let item = journal.get(1, 0).await.unwrap();
+            assert_eq!(item, Some(100)); // First item in section 1 (1*100+0)
+            let item = journal.get(2, 0).await.unwrap();
+            assert_eq!(item, Some(200)); // First item in section 2 (2*100+0)
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` when existing data exceeds the sync target range.
+    #[test_traced]
+    fn test_init_sync_existing_data_with_rewind() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_rewind".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+
+            // Create initial journal with data beyond sync range
+            let mut journal =
+                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
+
+            // Add data to sections 0-5 (operations 0-29 with items_per_section=5)
+            for section in 0..6 {
+                for item in 0..3 {
+                    journal
+                        .append(section, section * 1000 + item)
+                        .await
+                        .unwrap();
+                }
+            }
+            journal.close().await.unwrap();
+
+            // Initialize with sync boundaries that are exceeded by existing data
+            let lower_bound = 8; // section 1
+            let upper_bound = 17; // section 3
+            let items_per_section = NonZeroU64::new(5).unwrap();
+            let journal = Journal::<deterministic::Context, u64>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound,
+                upper_bound,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to initialize journal with rewind");
+
+            // Verify pruning to lower bound and rewinding beyond upper bound
+            let lower_section = lower_bound / items_per_section; // 8/5 = 1
+            let _upper_section = upper_bound / items_per_section; // 17/5 = 3
+            assert_eq!(journal.oldest_allowed, Some(lower_section));
+
+            // Verify section 0 is pruned (< lower_section)
+            assert!(!journal.blobs.contains_key(&0));
+
+            // Verify sections within sync range exist (lower_section <= section <= upper_section)
+            assert!(journal.blobs.contains_key(&1)); // Section 1 (contains operation 8)
+            assert!(journal.blobs.contains_key(&2)); // Section 2
+            assert!(journal.blobs.contains_key(&3)); // Section 3 (contains operation 17)
+
+            // Verify sections beyond upper bound are removed (> upper_section)
+            assert!(!journal.blobs.contains_key(&4)); // Section 4 should be removed
+            assert!(!journal.blobs.contains_key(&5)); // Section 5 should be removed
+
+            // Verify data integrity in retained sections
+            let item = journal.get(1, 0).await.unwrap();
+            assert_eq!(item, Some(1000)); // First item in section 1 (1*1000+0)
+            let item = journal.get(2, 0).await.unwrap();
+            assert_eq!(item, Some(2000)); // First item in section 2 (2*1000+0)
+            let item = journal.get(3, 0).await.unwrap();
+            assert_eq!(item, Some(3000)); // First item in section 3 (3*1000+0)
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` when all existing data is stale (before lower bound).
+    #[test_traced]
+    fn test_init_sync_existing_data_stale() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_stale".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+
+            // Create initial journal with stale data
+            let mut journal =
+                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
+
+            // Add data to sections 0, 1 (operations 0-9 with items_per_section=5)
+            for section in 0..2 {
+                for item in 0..3 {
+                    journal.append(section, section * 100 + item).await.unwrap();
+                }
+            }
+            journal.close().await.unwrap();
+
+            // Initialize with sync boundaries beyond all existing data
+            let lower_bound = 15; // section 3
+            let upper_bound = 25; // section 5
+            let items_per_section = NonZeroU64::new(5).unwrap();
+            let journal = Journal::<deterministic::Context, u64>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound,
+                upper_bound,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to initialize journal with stale data");
+
+            // Verify fresh journal (all old data destroyed)
+            assert!(journal.blobs.is_empty());
+            assert_eq!(journal.oldest_allowed, None);
+
+            // Verify old sections don't exist
+            assert!(!journal.blobs.contains_key(&0));
+            assert!(!journal.blobs.contains_key(&1));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` with invalid parameters.
+    #[test_traced]
+    fn test_init_sync_invalid_parameters() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_invalid".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+
+            // Test invalid bounds: lower > upper
+            let result = Journal::<deterministic::Context, u64>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                10,                          // lower_bound
+                5,                           // upper_bound (invalid: < lower_bound)
+                NonZeroU64::new(5).unwrap(), // items_per_section
+            )
+            .await;
+            assert!(matches!(result, Err(super::Error::InvalidSyncRange(10, 5))));
+        });
+    }
+
+    /// Test `init_sync` with section boundary edge cases.
+    #[test_traced]
+    fn test_init_sync_section_boundaries() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_boundaries".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+
+            // Create journal with data at section boundaries
+            let mut journal =
+                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
+
+            // Add data to sections 0, 1, 2, 3, 4
+            for section in 0..5 {
+                journal.append(section, section as u64).await.unwrap();
+            }
+            journal.close().await.unwrap();
+
+            // Test sync boundaries exactly at section boundaries
+            let lower_bound = 10; // Exactly at section boundary (10/5 = 2)
+            let upper_bound = 20; // Exactly at section boundary (20/5 = 4)
+            let items_per_section = NonZeroU64::new(5).unwrap();
+            let journal = Journal::<deterministic::Context, u64>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound,
+                upper_bound,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to initialize journal at boundaries");
+
+            // Verify correct section range
+            let lower_section = lower_bound / items_per_section; // 2
+            let _upper_section = upper_bound / items_per_section; // 4
+            assert_eq!(journal.oldest_allowed, Some(lower_section));
+
+            // Verify sections 2, 3, 4 exist, others don't
+            assert!(!journal.blobs.contains_key(&0));
+            assert!(!journal.blobs.contains_key(&1));
+            assert!(journal.blobs.contains_key(&2));
+            assert!(journal.blobs.contains_key(&3));
+            assert!(journal.blobs.contains_key(&4));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` when lower_bound and upper_bound are in the same section.
+    #[test_traced]
+    fn test_init_sync_same_section_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_same_section".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+
+            // Create journal with data in multiple sections
+            let mut journal =
+                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
+
+            // Add data to sections 0, 1, 2
+            for section in 0..3 {
+                for item in 0..3 {
+                    journal.append(section, section * 100 + item).await.unwrap();
+                }
+            }
+            journal.close().await.unwrap();
+
+            // Test sync boundaries within the same section
+            let lower_bound = 6; // operation 6 (section 1: 6/5 = 1)
+            let upper_bound = 8; // operation 8 (section 1: 8/5 = 1)
+            let items_per_section = NonZeroU64::new(5).unwrap();
+            let mut journal = Journal::<deterministic::Context, u64>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound,
+                upper_bound,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to initialize journal with same-section bounds");
+
+            // Both operations are in section 1, so section 0 should be pruned, section 1+ retained
+            let target_section = lower_bound / items_per_section; // 6/5 = 1
+            assert_eq!(journal.oldest_allowed, Some(target_section));
+
+            // Verify pruning and retention
+            assert!(!journal.blobs.contains_key(&0)); // Section 0 should be pruned
+            assert!(journal.blobs.contains_key(&1)); // Section 1 should be retained
+            assert!(!journal.blobs.contains_key(&2)); // Section 2 should be removed (> upper_section)
+
+            // Verify data integrity
+            let item = journal.get(1, 0).await.unwrap();
+            assert_eq!(item, Some(100)); // First item in section 1
+
+            // Verify functional correctness
+            let (offset, _) = journal.append(target_section, 999).await.unwrap();
+            assert_eq!(
+                journal.get(target_section, offset).await.unwrap(),
+                Some(999)
+            );
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` with edge case where upper_bound requires section removal.
+    #[test_traced]
+    fn test_init_sync_precise_upper_bound_removal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_precise_removal".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: 1024,
+            };
+
+            // Create journal with data in sections 0-4
+            let mut journal =
+                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
+
+            for section in 0..5 {
+                journal.append(section, section * 10).await.unwrap();
+            }
+            journal.close().await.unwrap();
+
+            // Sync with precise upper bound that should remove section 3+
+            let lower_bound = 5; // operation 5 (section 1)
+            let upper_bound = 14; // operation 14 (section 2: 14/5 = 2)
+            let items_per_section = NonZeroU64::new(5).unwrap();
+            let journal = Journal::<deterministic::Context, u64>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound,
+                upper_bound,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to initialize journal with precise upper bound");
+
+            let _lower_section = lower_bound / items_per_section; // 1
+            let _upper_section = upper_bound / items_per_section; // 2
+
+            // Verify precise section management
+            assert!(!journal.blobs.contains_key(&0)); // Pruned (< lower_section)
+            assert!(journal.blobs.contains_key(&1)); // Retained (>= lower_section, <= upper_section)
+            assert!(journal.blobs.contains_key(&2)); // Retained (>= lower_section, <= upper_section)
+            assert!(!journal.blobs.contains_key(&3)); // Removed (> upper_section)
+            assert!(!journal.blobs.contains_key(&4)); // Removed (> upper_section)
+
+            journal.destroy().await.unwrap();
         });
     }
 }

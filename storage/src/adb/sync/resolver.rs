@@ -1,7 +1,8 @@
 use crate::{
     adb::{
         any::{sync::Error, Any},
-        operation::Fixed,
+        immutable::Immutable,
+        operation::{Fixed, Variable},
     },
     mmr::verification::Proof,
     translator::Translator,
@@ -101,6 +102,69 @@ where
         start_loc: u64,
         max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, Error> {
+        let db = self.read().await;
+        db.historical_proof(size, start_loc, max_ops.get())
+            .await
+            .map(|(proof, operations)| FetchResult {
+                proof,
+                operations,
+                // Result of proof verification isn't used by this implementation.
+                success_tx: oneshot::channel().0,
+            })
+    }
+}
+
+impl<E, K, V, H, T> Resolver for Arc<Immutable<E, K, V, H, T>>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: commonware_codec::Codec + Send + Sync + 'static,
+    H: Hasher,
+    T: Translator + Send + Sync + 'static,
+    T::Key: Send + Sync,
+{
+    type Digest = H::Digest;
+    type Op = Variable<K, V>;
+    type Error = crate::adb::Error;
+
+    async fn get_operations(
+        &self,
+        size: u64,
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+        self.historical_proof(size, start_loc, max_ops.get())
+            .await
+            .map(|(proof, operations)| FetchResult {
+                proof,
+                operations,
+                // Result of proof verification isn't used by this implementation.
+                success_tx: oneshot::channel().0,
+            })
+    }
+}
+
+/// Implement Resolver directly for `Arc<RwLock<Immutable>>` to provide maximum ergonomics.
+/// This eliminates the need for wrapper types while allowing direct database access.
+impl<E, K, V, H, T> Resolver for Arc<RwLock<Immutable<E, K, V, H, T>>>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: commonware_codec::Codec + Send + Sync + 'static,
+    H: Hasher,
+    T: Translator + Send + Sync + 'static,
+    T::Key: Send + Sync,
+{
+    type Digest = H::Digest;
+    type Op = Variable<K, V>;
+    type Error = crate::adb::Error;
+
+    async fn get_operations(
+        &self,
+        size: u64,
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
         let db = self.read().await;
         db.historical_proof(size, start_loc, max_ops.get())
             .await

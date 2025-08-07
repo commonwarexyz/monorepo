@@ -2,7 +2,9 @@
 
  [![Crates.io](https://img.shields.io/crates/v/commonware-sync.svg)](https://crates.io/crates/commonware-sync)
 
-Continuously synchronize state between a server and client with [adb::any::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/struct.Any.html).
+Continuously synchronize state between a server and client with authenticated databases. This example
+uses [adb::any::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/struct.Any.html),
+and the core sync engine also supports [adb::immutable::Immutable](https://docs.rs/commonware-storage/latest/commonware_storage/adb/immutable/struct.Immutable.html).
 
 ## Components
 
@@ -94,6 +96,49 @@ Client options:
 
    The client will continue syncing indefinitely, with each iteration showing a new sync_iteration value.
 
+## Using Immutable
+
+The sync engine is generic over the authenticated database. To use `Immutable` instead of `Any`:
+
+1. Implement or reuse a Resolver that serves `Variable<K, V>` operations and proofs from an `Immutable` source.
+   The library already implements `Resolver` for `Arc<Immutable<...>>` and `Arc<RwLock<Immutable<...>>>`.
+2. Construct an `EngineConfig<Immutable<...>, R>` and call `sync::sync(config).await`.
+
+Minimal sketch:
+
+```rust
+use commonware_storage::adb::{
+    immutable::{Immutable, Config as ImmutableConfig},
+    operation::Variable,
+    sync::{self, Engine, Target},
+};
+use commonware_runtime::{deterministic, RwLock};
+use commonware_cryptography::{Sha256, sha256};
+use std::sync::Arc;
+
+type Db = Immutable<deterministic::Context, sha256::Digest, sha256::Digest, Sha256, commonware_storage::translator::TwoCap>;
+
+async fn run_immutable_sync(context: deterministic::Context, cfg: ImmutableConfig<_, ()>, target_db: Arc<RwLock<Db>>) -> Db {
+    let mut hasher = commonware_storage::mmr::hasher::Standard::<Sha256>::new();
+    let root = target_db.read().await.root(&mut hasher);
+    let lower = target_db.read().await.oldest_retained_loc;
+    let upper = target_db.read().await.op_count() - 1;
+
+    let config = sync::engine::EngineConfig {
+        db_config: cfg,
+        fetch_batch_size: commonware_utils::NZU64!(64),
+        target: Target { root, lower_bound_ops: lower, upper_bound_ops: upper },
+        context,
+        resolver: target_db.clone(),
+        apply_batch_size: 1024,
+        max_outstanding_requests: 1,
+        update_receiver: None,
+    };
+
+    sync::sync::<Db, _>(config).await.expect("immutable sync")
+}
+```
+
 ## Metrics
 
 Both the server and client expose Prometheus metrics:
@@ -104,6 +149,44 @@ To fetch server metrics (using default port):
 ```bash
 curl http://localhost:9090/metrics
 ```
+
+### Running the Immutable Example (end-to-end)
+
+Run the dedicated Immutable server, then point the shared client at it with `--db immutable`.
+
+- Start the Immutable server (default port 8081):
+
+```bash
+cargo run --manifest-path examples/sync/Cargo.toml --bin server_immutable
+
+# Customize (optional)
+cargo run --manifest-path examples/sync/Cargo.toml --bin server_immutable -- \
+  --port 8081 \
+  --initial-ops 100 \
+  --storage-dir /tmp/commonware-sync/server-immutable \
+  --metrics-port 9092 \
+  --op-interval 100ms \
+  --ops-per-interval 5
+```
+
+- In another terminal, run the client against Immutable and the server port 8081:
+
+```bash
+cargo run --manifest-path examples/sync/Cargo.toml --bin client -- --db immutable --server 127.0.0.1:8081
+
+# Customize (optional)
+cargo run --manifest-path examples/sync/Cargo.toml --bin client -- --db immutable \
+  --server 127.0.0.1:8081 \
+  --batch-size 50 \
+  --storage-dir /tmp/commonware-sync/client-immutable \
+  --metrics-port 9093 \
+  --target-update-interval 1s \
+  --sync-interval 10s
+```
+
+Notes:
+- The Immutable server defaults to port 8081 (metrics 9092). The client defaults to 127.0.0.1:8080, so pass `--server 127.0.0.1:8081` when using Immutable.
+- The client binary is shared; `--db immutable` selects the Immutable path. Use `--db any` for the Any example.
 
 ## Sync Process
 
