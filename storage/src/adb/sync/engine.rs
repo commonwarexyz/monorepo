@@ -1,20 +1,15 @@
 //! Core sync engine components that are shared across sync clients.
 
 use crate::adb::sync::{
+    requests::Requests,
     resolver::{FetchResult, Resolver},
     Database, Error, Journal, Target, Verifier,
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_utils::NZU64;
-use futures::{channel::mpsc, future::Either, stream::FuturesUnordered, StreamExt};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt::Debug,
-    future::Future,
-    num::NonZeroU64,
-    pin::Pin,
-};
+use futures::{channel::mpsc, future::Either, StreamExt};
+use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
 
 /// Whether sync should continue or complete
 #[derive(Debug)]
@@ -38,79 +33,18 @@ enum Event<Op, D: Digest, E> {
 
 /// Result from a fetch operation with its starting location
 #[derive(Debug)]
-struct IndexedFetchResult<Op, D: Digest, E> {
+pub(super) struct IndexedFetchResult<Op, D: Digest, E> {
     /// The location of the first operation in the batch
     pub start_loc: u64,
     /// The result of the fetch operation
     pub result: Result<FetchResult<Op, D>, E>,
 }
 
-/// Manages outstanding fetch requests for any operation type
-struct OutstandingRequests<Op, D: Digest, E> {
-    /// Futures that will resolve to batches of operations
-    #[allow(clippy::type_complexity)]
-    futures: FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>>,
-    /// Start locations of outstanding requests
-    /// Each element corresponds to an element in `futures` and vice versa
-    locations: BTreeSet<u64>,
-}
-
-impl<Op, D: Digest, E> OutstandingRequests<Op, D, E> {
-    /// Create a new empty set of outstanding requests
-    pub fn new() -> Self {
-        Self {
-            futures: FuturesUnordered::new(),
-            locations: BTreeSet::new(),
-        }
-    }
-
-    /// Add a new outstanding request
-    fn add(
-        &mut self,
-        start_loc: u64,
-        future: Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>,
-    ) {
-        self.locations.insert(start_loc);
-        self.futures.push(future);
-    }
-
-    /// Remove a request from `self.locations` by its starting location.
-    /// Doesn't remove from `self.futures` as it would be expensive.
-    pub fn remove(&mut self, start_loc: u64) {
-        self.locations.remove(&start_loc);
-    }
-
-    /// Get the set of outstanding request locations
-    pub fn locations(&self) -> &BTreeSet<u64> {
-        &self.locations
-    }
-
-    /// Get a mutable reference to the futures stream
-    #[allow(clippy::type_complexity)]
-    fn futures_mut(
-        &mut self,
-    ) -> &mut FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>>
-    {
-        &mut self.futures
-    }
-
-    /// Get the number of outstanding requests
-    pub fn len(&self) -> usize {
-        self.locations.len()
-    }
-}
-
-impl<Op, D: Digest, E> Default for OutstandingRequests<Op, D, E> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Wait for the next synchronization event from either target updates or fetch results.
 /// Returns `None` if the sync is stalled (there are no outstanding requests).
 async fn wait_for_event<Op, D: Digest, E>(
     update_receiver: &mut Option<mpsc::Receiver<Target<D>>>,
-    outstanding_requests: &mut OutstandingRequests<Op, D, E>,
+    outstanding_requests: &mut Requests<Op, D, E>,
 ) -> Option<Event<Op, D, E>> {
     let target_update_fut = match update_receiver {
         Some(update_rx) => Either::Left(update_rx.next()),
@@ -150,7 +84,7 @@ pub struct EngineConfig<DB: Database, R: Resolver<Op = DB::Op, Digest = DB::Dige
 /// A shared sync engine that manages the core synchronization state and operations.
 pub struct Engine<DB: Database, R: Resolver<Op = DB::Op, Digest = DB::Digest>> {
     /// Tracks outstanding fetch requests and their futures
-    outstanding_requests: OutstandingRequests<DB::Op, DB::Digest, R::Error>,
+    outstanding_requests: Requests<DB::Op, DB::Digest, R::Error>,
 
     /// Operations that have been fetched but not yet applied to the log
     pub fetched_operations: BTreeMap<u64, Vec<DB::Op>>,
@@ -209,7 +143,7 @@ where
         let verifier = DB::create_verifier();
 
         Ok(Self {
-            outstanding_requests: OutstandingRequests::new(),
+            outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
             pinned_nodes: None,
             target: config.target,
@@ -309,7 +243,7 @@ where
         .map_err(Error::database)?;
 
         Ok(Self {
-            outstanding_requests: OutstandingRequests::new(),
+            outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
             pinned_nodes: None,
             target: new_target,
@@ -575,15 +509,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::mmr::verification::Proof;
-
     use super::*;
+    use crate::mmr::verification::Proof;
     use commonware_cryptography::sha256;
     use futures::channel::oneshot;
 
     #[test]
     fn test_outstanding_requests() {
-        let mut requests: OutstandingRequests<i32, sha256::Digest, ()> = OutstandingRequests::new();
+        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
         assert_eq!(requests.len(), 0);
 
         // Test adding requests
