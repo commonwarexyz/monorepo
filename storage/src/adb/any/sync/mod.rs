@@ -31,24 +31,6 @@ where
     pub apply_batch_size: usize,
 }
 
-impl<E, T> TryFrom<AnySyncConfig<E, T>> for crate::journal::fixed::Config
-where
-    E: Storage + Clock + Metrics,
-    T: Translator,
-{
-    type Error = ();
-
-    fn try_from(config: AnySyncConfig<E, T>) -> Result<Self, Self::Error> {
-        Ok(crate::journal::fixed::Config {
-            partition: config.db_config.log_journal_partition,
-            items_per_blob: config.db_config.log_items_per_blob,
-            write_buffer: config.db_config.log_write_buffer,
-            buffer_pool: config.db_config.buffer_pool,
-        })
-    }
-}
-
-/// Implementation of SyncDatabase for Any database
 impl<E, K, V, H, T> crate::adb::sync::Database for Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
@@ -57,7 +39,6 @@ where
     H: Hasher,
     T: Translator,
 {
-    // Core associated types
     type Op = Fixed<K, V>;
     type Journal = crate::journal::fixed::Journal<E, Fixed<K, V>>;
     type Verifier = Verifier<E, K, V, H, T>;
@@ -66,7 +47,6 @@ where
     type Digest = H::Digest;
     type Context = E;
 
-    /// Create a journal for syncing with the given bounds
     async fn create_journal(
         context: Self::Context,
         config: &Self::Config,
@@ -89,7 +69,6 @@ where
         .await
     }
 
-    /// Create a verifier for proof validation  
     fn create_verifier() -> Self::Verifier {
         Verifier::new(Standard::<H>::new())
     }
