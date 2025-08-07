@@ -239,8 +239,7 @@ where
 
         let response = self
             .send_request(Message::GetOperationsRequest(request))
-            .await
-            .map_err(|_e| Error::InvalidConfig("Invalid sync range".to_string()))?; // TODO put a better error here
+            .await?;
 
         match response {
             Message::GetOperationsResponse(response) => {
