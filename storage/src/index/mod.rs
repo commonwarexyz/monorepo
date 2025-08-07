@@ -23,9 +23,11 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Metrics};
     use rand::Rng;
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
-    use std::thread;
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+        thread,
+    };
 
     #[test_traced]
     fn test_index_basic() {
