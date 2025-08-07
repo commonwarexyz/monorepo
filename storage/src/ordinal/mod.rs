@@ -444,7 +444,7 @@ mod tests {
                     .unwrap();
                 // Corrupt the CRC by changing a byte
                 blob.write_at(vec![0xFF], 32).await.unwrap();
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
             }
 
             // Reopen and try to read corrupted data
@@ -571,7 +571,7 @@ mod tests {
                     .unwrap();
                 // Overwrite second record with partial data (32 bytes instead of 36)
                 blob.write_at(vec![0xFF; 32], 36).await.unwrap();
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
             }
 
             // Reopen and verify it handles partial write gracefully
@@ -640,7 +640,7 @@ mod tests {
                 blob.write_at(vec![0xFF, 0xFF, 0xFF, 0xFF], 10)
                     .await
                     .unwrap();
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
             }
 
             // Reopen and verify it detects corruption
@@ -696,7 +696,7 @@ mod tests {
                     .await
                     .unwrap();
                 blob.write_at(vec![0xFF], 32).await.unwrap(); // Corrupt CRC of index 0
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
 
                 // Corrupt value in second blob (which will invalidate CRC)
                 let (blob, _) = context
@@ -704,7 +704,7 @@ mod tests {
                     .await
                     .unwrap();
                 blob.write_at(vec![0xFF; 4], 5).await.unwrap(); // Corrupt value of index 10
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
             }
 
             // Reopen and verify handling of CRC corruptions
@@ -774,7 +774,7 @@ mod tests {
                 garbage.extend_from_slice(&invalid_crc.to_be_bytes());
                 assert_eq!(garbage.len(), 36); // Full record size
                 blob.write_at(garbage, size).await.unwrap();
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
             }
 
             // Reopen and verify it handles extra bytes
@@ -835,7 +835,7 @@ mod tests {
                 valid_record.extend_from_slice(&crc.to_be_bytes());
                 blob.write_at(valid_record, 36 * 5).await.unwrap();
 
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
             }
 
             // Initialize store and verify it handles zero-filled records
@@ -1877,7 +1877,7 @@ mod tests {
                 // Corrupt the CRC of record at index 2
                 let offset = 2 * 36 + 32; // 2 * record_size + value_size
                 blob.write_at(vec![0xFF], offset).await.unwrap();
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
             }
 
             // Reinitialize with bits that include the corrupted record

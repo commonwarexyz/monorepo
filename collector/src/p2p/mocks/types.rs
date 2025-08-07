@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{
     hash,
     sha256::{Digest, Sha256},
@@ -23,8 +23,8 @@ impl Write for Request {
 impl Read for Request {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _cfg: &()) -> Result<Self, CodecError> {
-        let id = buf.get_u64();
-        let data = buf.get_u32();
+        let id = u64::read(buf)?;
+        let data = u32::read(buf)?;
         Ok(Self { id, data })
     }
 }
@@ -70,8 +70,8 @@ impl Read for Response {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &()) -> Result<Self, CodecError> {
-        let id = buf.get_u64();
-        let result = buf.get_u64();
+        let id = u64::read(buf)?;
+        let result = u64::read(buf)?;
         Ok(Self { id, result })
     }
 }

@@ -457,7 +457,7 @@ mod tests {
             }
 
             // Cleanup.
-            blob.close().await.expect("Failed to destroy blob");
+            blob.sync().await.unwrap();
         });
     }
 }

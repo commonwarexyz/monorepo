@@ -682,7 +682,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
     /// Safely removes any previously tracked blob from underlying storage.
     async fn remove_blob(&mut self, index: u64, blob: Append<E::Blob>) -> Result<(), Error> {
-        blob.close().await?;
+        drop(blob);
         self.context
             .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
             .await?;
@@ -692,29 +692,29 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         Ok(())
     }
 
-    /// Closes all open sections.
+    /// Syncs and closes all open sections.
     pub async fn close(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
-            blob.close().await?;
-            debug!(blob = i, "closed blob");
+            blob.sync().await?;
+            debug!(blob = i, "synced blob");
         }
-        self.tail.close().await?;
-        debug!(blob = self.tail_index, "closed blob");
+        self.tail.sync().await?;
+        debug!(blob = self.tail_index, "synced tail");
 
         Ok(())
     }
 
-    /// Close and remove any underlying blobs created by the journal.
+    /// Remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
-            blob.close().await?;
+            drop(blob);
             debug!(blob = i, "destroyed blob");
             self.context
                 .remove(&self.cfg.partition, Some(&i.to_be_bytes()))
                 .await?;
         }
 
-        self.tail.close().await?;
+        drop(self.tail);
         debug!(blob = self.tail_index, "destroyed blob");
         self.context
             .remove(&self.cfg.partition, Some(&self.tail_index.to_be_bytes()))
@@ -1017,7 +1017,7 @@ mod tests {
                 .await
                 .expect("Failed to write incorrect checksum");
             let corrupted_item_pos = 40 * ITEMS_PER_BLOB + ITEMS_PER_BLOB / 2;
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
             let journal = Journal::init(context.clone(), cfg.clone())
@@ -1092,7 +1092,7 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
             let result = Journal::<_, Digest>::init(context.clone(), cfg.clone()).await;
             assert!(matches!(
                 result.err().unwrap(),
@@ -1149,7 +1149,7 @@ mod tests {
             blob.write_at(bad_checksum.to_be_bytes().to_vec(), checksum_offset as u64)
                 .await
                 .expect("Failed to write incorrect checksum");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
                 .await
@@ -1164,7 +1164,7 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
                 .await
@@ -1276,7 +1276,7 @@ mod tests {
                 .expect("Failed to open blob");
             // truncate the most recent blob by 1 byte which corrupts the most recent item
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
             let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
@@ -1333,7 +1333,7 @@ mod tests {
                 .expect("Failed to open blob");
             // Truncate the most recent blob by 1 byte which corrupts the one appended item
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
             let mut journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
@@ -1383,7 +1383,7 @@ mod tests {
             blob.write_at(vec![0u8; Digest::SIZE * 3 - 1], size)
                 .await
                 .expect("Failed to extend blob");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
             let mut journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
@@ -1568,7 +1568,7 @@ mod tests {
                 hex(&digest),
                 "ed2ea67208cde2ee8c16cca5aa4f369f55b1402258c6b7760e5baf134e38944a",
             );
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
             let (blob, size) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
@@ -1583,7 +1583,7 @@ mod tests {
                 hex(&digest),
                 "cc7efd4fc999aff36b9fd4213ba8da5810dc1849f92ae2ddf7c6dc40545f9aff",
             );
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             let journal = Journal::<Context, Digest>::init(context.clone(), cfg.clone())
                 .await

@@ -932,7 +932,7 @@ mod tests {
 
             // truncate the blob by one byte to corrupt the checksum of the last parent node.
             blob.resize(len - 1).await.expect("Failed to corrupt blob");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             let mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
@@ -967,7 +967,7 @@ mod tests {
             blob.resize(36 * 5 + 35)
                 .await
                 .expect("Failed to corrupt blob");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             let mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
