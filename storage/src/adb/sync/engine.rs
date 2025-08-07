@@ -1,18 +1,13 @@
 //! Core sync engine components that are shared across sync clients.
 
-use crate::{
-    adb::sync::{resolver::Resolver, Database, Error, Journal, Target, Verifier},
-    mmr::verification::Proof,
+use crate::adb::sync::{
+    resolver::{FetchResult, Resolver},
+    Database, Error, Journal, Target, Verifier,
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_utils::NZU64;
-use futures::{
-    channel::{mpsc, oneshot},
-    future::Either,
-    stream::FuturesUnordered,
-    StreamExt,
-};
+use futures::{channel::mpsc, future::Either, stream::FuturesUnordered, StreamExt};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
@@ -48,26 +43,6 @@ struct IndexedFetchResult<Op, D: Digest, E> {
     pub start_loc: u64,
     /// The result of the fetch operation
     pub result: Result<FetchResult<Op, D>, E>,
-}
-
-/// Result from a fetch operation
-pub struct FetchResult<Op, D: Digest> {
-    /// The proof for the operations
-    pub proof: Proof<D>,
-    /// The operations that were fetched
-    pub operations: Vec<Op>,
-    /// Channel to report success/failure back to resolver
-    pub success_tx: oneshot::Sender<bool>,
-}
-
-impl<Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<Op, D> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FetchResult")
-            .field("proof", &self.proof)
-            .field("operations", &self.operations)
-            .field("success_tx", &"<callback>")
-            .finish()
-    }
 }
 
 /// Manages outstanding fetch requests for any operation type
@@ -600,8 +575,11 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::mmr::verification::Proof;
+
     use super::*;
     use commonware_cryptography::sha256;
+    use futures::channel::oneshot;
 
     #[test]
     fn test_outstanding_requests() {

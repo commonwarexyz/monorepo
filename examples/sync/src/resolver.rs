@@ -9,7 +9,8 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_storage::adb::sync::{
-    engine::FetchResult, resolver::Resolver as ResolverTrait, Target,
+    resolver::{FetchResult, Resolver as ResolverTrait},
+    Target,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::{

@@ -2,8 +2,8 @@ use crate::{
     adb::{
         any::{sync::Error, Any},
         operation::Fixed,
-        sync::engine::FetchResult,
     },
+    mmr::verification::Proof,
     translator::Translator,
 };
 use commonware_cryptography::{Digest, Hasher};
@@ -11,6 +11,26 @@ use commonware_runtime::{Clock, Metrics, RwLock, Storage};
 use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::{future::Future, num::NonZeroU64, sync::Arc};
+
+/// Result from a fetch operation
+pub struct FetchResult<Op, D: Digest> {
+    /// The proof for the operations
+    pub proof: Proof<D>,
+    /// The operations that were fetched
+    pub operations: Vec<Op>,
+    /// Channel to report success/failure back to resolver
+    pub success_tx: oneshot::Sender<bool>,
+}
+
+impl<Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<Op, D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FetchResult")
+            .field("proof", &self.proof)
+            .field("operations", &self.operations)
+            .field("success_tx", &"<callback>")
+            .finish()
+    }
+}
 
 /// Trait for network communication with the sync server
 pub trait Resolver: Send + Sync + Clone + 'static {
