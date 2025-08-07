@@ -428,7 +428,10 @@ mod tests {
         collections::HashMap,
         panic::{catch_unwind, AssertUnwindSafe},
         str::FromStr,
-        sync::Mutex,
+        sync::{
+            atomic::{AtomicU32, Ordering},
+            Arc, Mutex,
+        },
     };
     use tracing::{error, Level};
     use utils::reschedule;
@@ -952,8 +955,10 @@ mod tests {
             let before = context
                 .with_label("before")
                 .spawn(move |context| async move {
-                    let sig = context.stopped().await;
-                    assert_eq!(sig.unwrap(), kill);
+                    let mut signal = context.stopped();
+                    let value = (&mut signal).await.unwrap();
+                    assert_eq!(value, kill);
+                    drop(signal);
                 });
 
             // Signal the tasks and wait for them to stop
@@ -980,11 +985,6 @@ mod tests {
     where
         R::Context: Spawner + Metrics + Clock,
     {
-        use std::sync::{
-            atomic::{AtomicU32, Ordering},
-            Arc,
-        };
-
         let kill = 42;
         runner.start(|context| async move {
             let (started_tx, mut started_rx) = mpsc::channel(3);
@@ -997,8 +997,11 @@ mod tests {
                 let counter = counter.clone();
                 let mut started_tx = started_tx.clone();
                 context.spawn(move |context| async move {
-                    started_tx.send(()).await.unwrap();
+                    // Wait for signal to be acquired
                     let mut signal = context.stopped();
+                    started_tx.send(()).await.unwrap();
+
+                    // Increment once killed
                     let value = (&mut signal).await.unwrap();
                     assert_eq!(value, kill);
                     context.sleep(cleanup_duration).await;
@@ -1060,30 +1063,34 @@ mod tests {
     where
         R::Context: Spawner + Metrics + Clock,
     {
-        use std::sync::{
-            atomic::{AtomicU32, Ordering},
-            Arc,
-        };
-
         let kill1 = 42;
         let kill2 = 43;
 
         runner.start(|context| async move {
+            let (started_tx, started_rx) = oneshot::channel();
             let counter = Arc::new(AtomicU32::new(0));
 
             // Spawn a task that delays completion to test timing
             let task = context.with_label("blocking_task").spawn({
                 let counter = counter.clone();
                 move |context| async move {
-                    let sig = context.stopped().await;
-                    assert_eq!(sig.unwrap(), kill1);
+                    // Wait for signal to be acquired
+                    let mut signal = context.stopped();
+                    started_tx.send(()).unwrap();
+
+                    // Wait for signal to be resolved
+                    let value = (&mut signal).await.unwrap();
+                    assert_eq!(value, kill1);
                     context.sleep(Duration::from_millis(50)).await;
+
+                    // Increment counter
                     counter.fetch_add(1, Ordering::SeqCst);
+                    drop(signal);
                 }
             });
 
             // Give task time to start
-            context.sleep(Duration::from_millis(10)).await;
+            started_rx.await.unwrap();
 
             // Issue two separate stop calls
             // The second stop call uses a different stop value that should be ignored
@@ -1096,6 +1103,7 @@ mod tests {
             assert!(stop_task1.as_mut().now_or_never().is_none());
             assert!(stop_task2.as_mut().now_or_never().is_none());
 
+            // Wait for both stop calls to complete
             assert!(stop_task1.await.is_ok());
             assert!(stop_task2.await.is_ok());
 
