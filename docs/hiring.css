@@ -2,7 +2,7 @@
 
 :root {
     --colorAppBackground: white;
-    --fontFamily: 'Inconsolata', monospace;
+    --fontFamily: 'Consolas', monospace;
     --widthMaxJobBoard: 800px;
     --colorPrimary900: blue;
     --colorPrimary600: lightblue;
