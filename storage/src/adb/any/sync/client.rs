@@ -104,63 +104,9 @@ pub(crate) mod tests {
         Standard::<Sha256>::new()
     }
 
-    #[test_traced]
-    fn test_sync_basic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Create source database with some operations
-            let mut source_db = create_test_db(context.clone()).await;
-            let ops = create_test_ops(5);
-            apply_ops(&mut source_db, ops.clone()).await;
-            source_db.commit().await.unwrap();
-            let target_root = source_db.root(&mut test_hasher());
-
-            // Create resolver from source database
-            let source_db = Arc::new(RwLock::new(source_db));
-            let config = Config {
-                context: context.with_label("sync"),
-                update_receiver: None,
-                db_config: create_test_config(context.next_u64()),
-                fetch_batch_size: NZU64!(2),
-                target: Target {
-                    root: target_root,
-                    lower_bound_ops: {
-                        let db = source_db.read().await;
-                        db.inactivity_floor_loc
-                    },
-                    upper_bound_ops: {
-                        let db = source_db.read().await;
-                        db.op_count().saturating_sub(1)
-                    },
-                },
-                resolver: source_db.clone(),
-                hasher: test_hasher(),
-                apply_batch_size: 2,
-                max_outstanding_requests: 2,
-            };
-
-            // Sync the database
-            let synced_db = sync(config).await.unwrap();
-
-            // Verify roots match
-            let expected_root = source_db.read().await.root(&mut test_hasher());
-            let actual_root = synced_db.root(&mut test_hasher());
-            assert_eq!(actual_root, expected_root);
-
-            // Cleanup
-            Arc::try_unwrap(source_db)
-                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
-                .into_inner()
-                .destroy()
-                .await
-                .unwrap();
-            synced_db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_case(1, 0; "lower_bound_greater_than_upper_bound")]
-    #[test_traced]
-    fn test_sync_invalid_bounds(lower_bound: u64, upper_bound: u64) {
+    /// Test that invalid bounds are rejected
+    #[test]
+    fn test_sync_invalid_bounds() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let resolver = FailResolver::<Digest, Digest, Digest>::new();
@@ -173,8 +119,8 @@ pub(crate) mod tests {
                 fetch_batch_size: NZU64!(2),
                 target: Target {
                     root: target_root,
-                    lower_bound_ops: lower_bound,
-                    upper_bound_ops: upper_bound,
+                    lower_bound_ops: 1,
+                    upper_bound_ops: 0,
                 },
                 resolver,
                 hasher: test_hasher(),
@@ -223,7 +169,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// Comprehensive sync test with various batch sizes
     #[test_case(1, NZU64!(1); "singleton db with batch size == 1")]
     #[test_case(1, NZU64!(2); "singleton db with batch size > db size")]
     #[test_case(1000, NZU64!(1); "db with batch size 1")]
@@ -232,7 +177,6 @@ pub(crate) mod tests {
     #[test_case(1000, NZU64!(100); "db size divided by batch size")]
     #[test_case(1000, NZU64!(1000); "db size == batch size")]
     #[test_case(1000, NZU64!(1001); "batch size > db size")]
-    #[test_traced]
     fn test_sync(target_db_ops: usize, fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
@@ -301,8 +245,9 @@ pub(crate) mod tests {
         });
     }
 
-    /// Test syncing a subset of the target database operations
-    #[test_traced]
+    /// Test that sync works when target database has operations beyond the requested range
+    /// of operations to sync.
+    #[test]
     fn test_sync_subset_of_target_database() {
         const TARGET_DB_OPS: usize = 1000;
         let executor = deterministic::Runner::default();
@@ -364,8 +309,9 @@ pub(crate) mod tests {
         });
     }
 
-    /// Test syncing with existing database that partially matches target
-    #[test_traced]
+    // Test syncing where the sync client has some but not all of the operations in the target
+    // database.
+    #[test]
     fn test_sync_use_existing_db_partial_match() {
         const ORIGINAL_DB_OPS: usize = 1_000;
 
@@ -467,7 +413,7 @@ pub(crate) mod tests {
     }
 
     /// Test case where existing database on disk exactly matches the sync target
-    #[test_traced]
+    #[test]
     fn test_sync_use_existing_db_exact_match() {
         const NUM_OPS: usize = 1_000;
 
@@ -587,7 +533,9 @@ pub(crate) mod tests {
                 max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
             };
-            // Send target update with decreased lower bound (before starting sync)
+            let client = new_client(config).await.unwrap();
+
+            // Send target update with decreased lower bound
             update_sender
                 .send(Target {
                     root: initial_root,
@@ -597,8 +545,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            // Start sync - it should fail when processing the target update
-            let result = sync(config).await;
+            let result = client.step().await;
             assert!(matches!(
                 result,
                 Err(SyncError::SyncTargetMovedBackward { .. })
@@ -648,7 +595,9 @@ pub(crate) mod tests {
                 max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
             };
-            // Send target update with decreased upper bound (before starting sync)
+            let client = new_client(config).await.unwrap();
+
+            // Send target update with decreased upper bound
             update_sender
                 .send(Target {
                     root: initial_root,
@@ -658,8 +607,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            // Start sync - it should fail when processing the target update
-            let result = sync(config).await;
+            let result = client.step().await;
             assert!(matches!(
                 result,
                 Err(SyncError::SyncTargetMovedBackward { .. })
@@ -674,7 +622,7 @@ pub(crate) mod tests {
         });
     }
 
-    /// Test that the client succeeds when bounds are updated
+    /// Test that the client succeeds when bounds are updated to a
     #[test_traced("WARN")]
     fn test_target_update_bounds_increase() {
         let executor = deterministic::Runner::default();
@@ -736,10 +684,10 @@ pub(crate) mod tests {
 
             // Verify the synced database has the expected state
             let mut hasher = test_hasher();
+            assert_eq!(synced_db.root(&mut hasher), final_root);
             assert_eq!(synced_db.op_count(), final_upper_bound + 1);
             assert_eq!(synced_db.inactivity_floor_loc, final_lower_bound);
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), final_lower_bound);
-            assert_eq!(synced_db.root(&mut hasher), final_root);
 
             synced_db.destroy().await.unwrap();
 
@@ -752,6 +700,7 @@ pub(crate) mod tests {
         });
     }
 
+    /// Test that the client fails to sync with invalid bounds (lower > upper)
     #[test_traced("WARN")]
     fn test_target_update_invalid_bounds() {
         let executor = deterministic::Runner::default();
@@ -786,6 +735,7 @@ pub(crate) mod tests {
                 max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
             };
+            let client = new_client(config).await.unwrap();
 
             // Send target update with invalid bounds (lower > upper)
             update_sender
@@ -797,7 +747,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let result = sync(config).await;
+            let result = client.step().await;
             assert!(matches!(result, Err(SyncError::InvalidTarget { .. })));
 
             Arc::try_unwrap(target_db)
@@ -852,6 +802,7 @@ pub(crate) mod tests {
             // we don't panic
             let _ = update_sender
                 .send(Target {
+                    // Dummy target update
                     root: Digest::from([2u8; 32]),
                     lower_bound_ops: lower_bound + 1,
                     upper_bound_ops: upper_bound + 1,
@@ -865,6 +816,7 @@ pub(crate) mod tests {
             assert_eq!(synced_db.inactivity_floor_loc, lower_bound);
 
             synced_db.destroy().await.unwrap();
+
             Arc::try_unwrap(target_db)
                 .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
                 .into_inner()
@@ -1135,10 +1087,10 @@ pub(crate) mod tests {
     }
 
     /// Test demonstrating that a synced database can be reopened and retain its state.
-    #[test_traced]
+    #[test_traced("WARN")]
     fn test_sync_database_persistence() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             // Create and populate a simple target database
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(10);
