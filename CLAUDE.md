@@ -76,9 +76,9 @@ cargo bench -p commonware-cryptography
 ### Critical Implementation Notes
 - Overflow checks enabled in all profiles (including release) for safety
 - All cryptographic operations use constant-time implementations where applicable
-- P2P layer uses quic-go via FFI for transport
-- Storage supports both RocksDB and FoundationDB backends
-- Extensive use of async/await with configurable runtime (Tokio/Solana)
+- P2P layer uses TCP with ChaCha20-Poly1305 encryption and X25519 key exchange
+- Storage provides abstract data structures (ADB, MMR, journals) over runtime storage backends
+- Extensive use of async/await with configurable runtime (Tokio for production, Deterministic for testing)
 
 ## Testing Strategy
 - Unit tests: Core logic validation
@@ -123,10 +123,10 @@ Use `thiserror` for all error types:
 pub enum Error {
     #[error("descriptive message: {0}")]
     VariantWithContext(String),
-    
+
     #[error("validation failed: Context({0}), Message({1})")]
     ValidationError(&'static str, &'static str),
-    
+
     #[error("wrapped: {0}")]
     Wrapped(#[from] OtherError),
 }
@@ -165,14 +165,14 @@ pub trait PrivateKeyExt: PrivateKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     // Helper functions first
     fn setup_test_environment() -> TestEnv { }
-    
+
     // Tests with descriptive names
     #[test]
     fn test_specific_behavior() { }
-    
+
     #[test]
     #[should_panic(expected = "error message")]
     fn test_panic_condition() { }
