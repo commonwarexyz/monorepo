@@ -145,12 +145,12 @@ jobs:
       uses: actions/checkout@v4
     - name: Run setup
       uses: ./.github/actions/setup
-    - name: Install Miri
+    - name: Install miri
       run: |
         rustup toolchain install nightly --component miri
         rustup override set nightly
         cargo miri setup
-    - name: Run Miri tests for storage::index
+    - name: Run miri tests for storage::index
       run: |
         cd storage
         MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --lib index::
