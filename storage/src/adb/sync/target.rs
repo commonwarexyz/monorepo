@@ -111,41 +111,70 @@ mod tests {
         assert_eq!(target.upper_bound_ops, deserialized.upper_bound_ops);
     }
 
+    type TestError = crate::adb::sync::error::Error<std::io::Error, std::io::Error>;
+
     #[test_case(
         Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
         Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 50, upper_bound_ops: 200 },
-        true;
+        Ok(());
         "valid update"
     )]
     #[test_case(
         Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
         Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 200, upper_bound_ops: 100 },
-        false;
+        Err(TestError::InvalidTarget { lower_bound_pos: 200, upper_bound_pos: 100 });
         "invalid bounds - lower > upper"
     )]
     #[test_case(
         Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
         Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 0, upper_bound_ops: 50 },
-        false;
+        Err(TestError::SyncTargetMovedBackward {
+            old: Box::new(sha256::Digest::from([0; 32])),
+            new: Box::new(sha256::Digest::from([1; 32]))
+        });
         "moves backward"
     )]
     #[test_case(
         Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
         Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 50, upper_bound_ops: 200 },
-        false;
+        Err(TestError::SyncTargetRootUnchanged);
         "same root"
     )]
-    fn test_validate_target_update(
+    fn test_validate_update(
         old_target: Target<sha256::Digest>,
         new_target: Target<sha256::Digest>,
-        should_succeed: bool,
+        expected: Result<(), TestError>,
     ) {
-        let result: Result<(), crate::adb::sync::error::Error<std::io::Error, std::io::Error>> =
-            validate_update(&old_target, &new_target);
-        if should_succeed {
-            assert!(result.is_ok());
-        } else {
-            assert!(result.is_err());
+        let result = validate_update(&old_target, &new_target);
+        match (&result, &expected) {
+            (Ok(()), Ok(())) => {}
+            (Ok(()), Err(expected_err)) => {
+                panic!("Expected error {expected_err:?} but got success");
+            }
+            (Err(actual_err), Ok(())) => {
+                panic!("Expected success but got error: {actual_err:?}");
+            }
+            (Err(actual_err), Err(expected_err)) => match (actual_err, expected_err) {
+                (
+                    TestError::InvalidTarget {
+                        lower_bound_pos: a_lower,
+                        upper_bound_pos: a_upper,
+                    },
+                    TestError::InvalidTarget {
+                        lower_bound_pos: e_lower,
+                        upper_bound_pos: e_upper,
+                    },
+                ) => {
+                    assert_eq!(a_lower, e_lower);
+                    assert_eq!(a_upper, e_upper);
+                }
+                (
+                    TestError::SyncTargetMovedBackward { .. },
+                    TestError::SyncTargetMovedBackward { .. },
+                ) => {}
+                (TestError::SyncTargetRootUnchanged, TestError::SyncTargetRootUnchanged) => {}
+                _ => panic!("Error type mismatch: got {actual_err:?}, expected {expected_err:?}"),
+            },
         }
     }
 }

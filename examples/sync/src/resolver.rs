@@ -2,7 +2,8 @@
 //! to fetch operations and proofs.
 
 use crate::{
-    error::Error, GetOperationsRequest, GetSyncTargetRequest, Message, RequestId, MAX_MESSAGE_SIZE,
+    error::Error, GetOperationsRequest, GetSyncTargetRequest, Message, RequestId, Requester,
+    MAX_MESSAGE_SIZE,
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
@@ -15,7 +16,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use std::{collections::HashMap, marker::PhantomData, net::SocketAddr, num::NonZeroU64};
+use std::{collections::HashMap, marker::PhantomData, net::SocketAddr, num::NonZeroU64, sync::Arc};
 use tracing::{debug, error, info, warn};
 
 const REQUEST_BUFFER_SIZE: usize = 64;
@@ -79,7 +80,7 @@ where
                                 }
                                 return;
                             } else {
-                                debug!(request_id = request_id.value(), "request sent, awaiting response");
+                                debug!(request_id, "request sent, awaiting response");
                             }
                         },
                         None => {
@@ -97,10 +98,10 @@ where
                                 Ok(message) => {
                                     let request_id = message.request_id();
                                     if let Some(response_sender) = self.pending_requests.remove(&request_id) {
-                                        debug!(request_id = request_id.value(), "correlating response with request");
+                                        debug!(request_id, "correlating response with request");
                                         let _ = response_sender.send(Ok(message));
                                     } else {
-                                        warn!(request_id = request_id.value(), "received response for unknown request ID");
+                                        warn!(request_id, "received response for unknown request ID");
                                     }
                                 },
                                 Err(e) => {
@@ -134,6 +135,7 @@ where
         + Clone,
 {
     request_sender: mpsc::Sender<IoRequest>,
+    requester: Arc<Requester>,
     _phantom: PhantomData<E>,
 }
 
@@ -160,21 +162,18 @@ where
 
         Self {
             request_sender,
+            requester: Arc::new(Requester::new()),
             _phantom: PhantomData,
         }
     }
 
     pub async fn get_sync_target(&self) -> Result<Target<Digest>, Error> {
-        let request = GetSyncTargetRequest {
-            request_id: RequestId::new(),
-        };
-
-        let request_id = request.request_id.value();
+        let request_id = self.requester.next();
+        let request = GetSyncTargetRequest { request_id };
 
         let response = self
             .send_request(Message::GetSyncTargetRequest(request))
             .await?;
-
         match response {
             Message::GetSyncTargetResponse(response) => Ok(response.target),
             Message::Error(err) => {
@@ -208,9 +207,7 @@ where
 
         response_receiver
             .await
-            .map_err(|_| Error::ResponseChannelClosed {
-                request_id: request_id.value(),
-            })?
+            .map_err(|_| Error::ResponseChannelClosed { request_id })?
     }
 }
 
@@ -231,14 +228,13 @@ where
         start_loc: u64,
         max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+        let request_id = self.requester.next();
         let request = GetOperationsRequest {
-            request_id: RequestId::new(),
+            request_id,
             size,
             start_loc,
             max_ops,
         };
-
-        let request_id = request.request_id.value();
 
         let response = self
             .send_request(Message::GetOperationsRequest(request))

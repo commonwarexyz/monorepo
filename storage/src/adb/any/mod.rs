@@ -138,7 +138,7 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T:
     ///
     /// # Invariant
     ///
-    /// Only references operations of type Operation::Update.
+    /// Only references operations of type [Fixed::Update].
     pub(super) snapshot: Index<T, u64>,
 
     /// The number of operations that are pending commit.

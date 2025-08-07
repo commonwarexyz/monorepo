@@ -30,43 +30,29 @@ pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 const MAX_DIGESTS: usize = 10_000;
 
 /// Unique identifier for correlating requests with responses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RequestId(u64);
+pub type RequestId = u64;
 
-impl Default for RequestId {
+/// A requester that generates monotonically increasing request IDs.
+#[derive(Debug)]
+pub struct Requester {
+    counter: AtomicU64,
+}
+
+impl Default for Requester {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl RequestId {
+impl Requester {
     pub fn new() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(1);
-        RequestId(COUNTER.fetch_add(1, Ordering::Relaxed))
+        Requester {
+            counter: AtomicU64::new(1),
+        }
     }
 
-    pub fn value(&self) -> u64 {
-        self.0
-    }
-}
-
-impl Write for RequestId {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-    }
-}
-
-impl EncodeSize for RequestId {
-    fn encode_size(&self) -> usize {
-        self.0.encode_size()
-    }
-}
-
-impl Read for RequestId {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Ok(RequestId(u64::read(buf)?))
+    pub fn next(&self) -> RequestId {
+        self.counter.fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -440,17 +426,18 @@ mod tests {
 
     #[test]
     fn test_request_id_generation() {
-        let id1 = RequestId::new();
-        let id2 = RequestId::new();
-        let id3 = RequestId::new();
+        let requester = Requester::new();
+        let id1 = requester.next();
+        let id2 = requester.next();
+        let id3 = requester.next();
 
-        // Request IDs should be incrementing
-        assert!(id2.value() > id1.value());
-        assert!(id3.value() > id2.value());
+        // Request IDs should be monotonically increasing
+        assert!(id2 > id1);
+        assert!(id3 > id2);
 
-        // Should be consecutive
-        assert_eq!(id2.value(), id1.value() + 1);
-        assert_eq!(id3.value(), id2.value() + 1);
+        // Should be consecutive since we're using a single Requester
+        assert_eq!(id2, id1 + 1);
+        assert_eq!(id3, id2 + 1);
     }
 
     #[test]
@@ -487,8 +474,9 @@ mod tests {
     #[test]
     fn test_get_operations_request_validation() {
         // Valid request
+        let requester = Requester::new();
         let request = GetOperationsRequest {
-            request_id: RequestId::new(),
+            request_id: requester.next(),
             size: 100,
             start_loc: 10,
             max_ops: NZU64!(50),
@@ -497,7 +485,7 @@ mod tests {
 
         // Invalid start_loc
         let request = GetOperationsRequest {
-            request_id: RequestId::new(),
+            request_id: requester.next(),
             size: 100,
             start_loc: 100,
             max_ops: NZU64!(50),
@@ -509,7 +497,7 @@ mod tests {
 
         // start_loc beyond size
         let request = GetOperationsRequest {
-            request_id: RequestId::new(),
+            request_id: requester.next(),
             size: 100,
             start_loc: 150,
             max_ops: NZU64!(50),

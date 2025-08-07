@@ -103,7 +103,7 @@ impl<K: Array, V: Array> Fixed<K, V> {
     }
 }
 
-impl<K: Array, V: Array> Variable<K, V> {
+impl<K: Array, V: Codec> Variable<K, V> {
     /// If this is a [Variable::Set] operation, returns the key. Otherwise, returns None.
     pub fn to_key(&self) -> Option<&K> {
         match self {

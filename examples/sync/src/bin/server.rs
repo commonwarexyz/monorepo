@@ -225,7 +225,7 @@ where
     let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
 
     debug!(
-        request_id = request.request_id.value(),
+        request_id = request.request_id,
         max_ops,
         start_loc = request.start_loc,
         db_size,
@@ -245,7 +245,7 @@ where
     })?;
 
     debug!(
-        request_id = request.request_id.value(),
+        request_id = request.request_id,
         operations_len = operations.len(),
         proof_len = proof.digests.len(),
         "sending operations and proof"
