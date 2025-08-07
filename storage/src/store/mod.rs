@@ -96,12 +96,12 @@
 //! ```
 
 use crate::{
-    adb::operation::Variable as Operation,
     index::Index,
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},
         variable::{Config as VConfig, Journal as VJournal},
     },
+    store::operation::Variable as Operation,
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
@@ -110,6 +110,8 @@ use commonware_utils::{sequence::U32, Array};
 use futures::{pin_mut, try_join, StreamExt};
 use std::collections::HashMap;
 use tracing::{debug, warn};
+
+pub mod operation;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.

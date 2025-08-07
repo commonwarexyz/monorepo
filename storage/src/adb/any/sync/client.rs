@@ -6,10 +6,10 @@ use crate::{
     adb::{
         self,
         any::{sync::metrics::Metrics, SyncConfig},
-        operation::Fixed,
     },
     journal::fixed::{Config as JConfig, Journal},
     mmr::{self, iterator::leaf_num_to_pos, verification::Proof},
+    store::operation::Fixed,
     translator::Translator,
 };
 use commonware_cryptography::{Digest, Hasher};
@@ -929,8 +929,8 @@ pub(crate) mod tests {
                         expected_kvs.remove(key);
                         deleted_keys.insert(*key);
                     }
-                    _ => {
-                        panic!("unexpected operation");
+                    Fixed::CommitFloor(_) => {
+                        // Ignore
                     }
                 }
             }

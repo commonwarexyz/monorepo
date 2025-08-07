@@ -3,7 +3,7 @@
 //! same size, use the [crate::adb::any::Any] db instead.
 
 use crate::{
-    adb::{operation::Variable as Operation, Error},
+    adb::Error,
     index::Index,
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},
@@ -15,6 +15,7 @@ use crate::{
         journaled::{Config as MmrConfig, Mmr},
         verification::Proof,
     },
+    store::operation::Variable as Operation,
     translator::Translator,
 };
 use commonware_codec::{Codec, Encode as _, Read};
@@ -130,16 +131,6 @@ pub struct Variable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHashe
     pub(super) hasher: Standard<H>,
 }
 
-/// The result of a database `update` operation.
-pub enum UpdateResult {
-    /// Tried to set a key to its current value.
-    NoOp,
-    /// Key was not previously in the snapshot & its new loc is the wrapped value.
-    Inserted(u64),
-    /// Key was previously in the snapshot & its (old, new) loc pair is wrapped.
-    Updated(u64, u64),
-}
-
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
     Variable<E, K, V, H, T>
 {
@@ -226,8 +217,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 locations_size, "rewinding misaligned locations map"
             );
             self.locations.rewind(mmr_leaves).await?;
-        }
-        if mmr_leaves > locations_size {
+        } else if mmr_leaves > locations_size {
             warn!(mmr_leaves, locations_size, "rewinding misaligned mmr");
             self.mmr.pop((mmr_leaves - locations_size) as usize).await?;
             mmr_leaves = locations_size;

@@ -8,7 +8,7 @@
 //! and cannot be updated after.
 
 use crate::{
-    adb::{operation::Fixed, Error},
+    adb::Error,
     index::Index,
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
@@ -18,6 +18,7 @@ use crate::{
         journaled::{Config as MmrConfig, Mmr},
         verification::Proof,
     },
+    store::operation::Fixed,
     translator::Translator,
 };
 use commonware_codec::Encode as _;

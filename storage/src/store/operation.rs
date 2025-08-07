@@ -117,7 +117,7 @@ impl<K: Array, V: Codec> Variable<K, V> {
         match self {
             Variable::Set(key, _) => Some(key),
             Variable::Commit() => None,
-            Variable::Delete(_) => None,
+            Variable::Delete(key) => Some(key),
             Variable::Update(key, _) => Some(key),
             Variable::CommitFloor(_) => None,
         }
