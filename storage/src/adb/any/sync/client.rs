@@ -280,28 +280,32 @@ pub(crate) mod tests {
     fn test_sync_invalid_bounds() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let resolver = FailResolver::<Digest, Digest, Digest>::new();
-            let target_root = Digest::from([0; 32]);
+            let target_db = create_test_db(context.clone()).await;
 
             let config = Config {
-                context: context.with_label("sync"),
-                update_receiver: None,
                 db_config: create_test_config(context.next_u64()),
-                fetch_batch_size: NZU64!(2),
+                fetch_batch_size: NZU64!(10),
                 target: Target {
-                    root: target_root,
-                    lower_bound_ops: 1,
-                    upper_bound_ops: 0,
+                    root: Digest::from([1u8; 32]),
+                    lower_bound_ops: 31, // Invalid: lower > upper
+                    upper_bound_ops: 30,
                 },
-                resolver,
+                context,
+                resolver: Arc::new(commonware_runtime::RwLock::new(target_db)),
                 hasher: test_hasher(),
-                apply_batch_size: 2,
-                max_outstanding_requests: 2,
+                apply_batch_size: 1024,
+                max_outstanding_requests: 1,
+                update_receiver: None,
             };
 
-            // Attempt to sync - should fail due to invalid bounds
             let result = sync(config).await;
-            assert!(matches!(result, Err(SyncError::InvalidTarget { .. })));
+            assert!(matches!(
+                result,
+                Err(SyncError::InvalidTarget {
+                    lower_bound_pos: 31,
+                    upper_bound_pos: 30,
+                })
+            ));
         });
     }
 
@@ -682,7 +686,7 @@ pub(crate) mod tests {
         });
     }
 
-    /// Test that the client succeeds when bounds are updated to a
+    /// Test that the client succeeds when bounds are updated
     #[test_traced("WARN")]
     fn test_target_update_bounds_increase() {
         let executor = deterministic::Runner::default();
@@ -740,6 +744,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
+            // Complete the sync
             let synced_db = sync(config).await.unwrap();
 
             // Verify the synced database has the expected state
