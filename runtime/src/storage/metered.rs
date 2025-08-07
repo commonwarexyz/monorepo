@@ -102,6 +102,9 @@ pub struct Blob<B> {
     metrics: Arc<MetricsHandle>,
 }
 
+/// A wrapper around a `Metrics` implementation that updates
+/// metrics when a blob (that may have been cloned multiple times)
+/// is dropped.
 struct MetricsHandle(Arc<Metrics>);
 
 impl Deref for MetricsHandle {
