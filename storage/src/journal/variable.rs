@@ -2404,7 +2404,7 @@ mod tests {
 
             // Add data to sections 0, 1, 2, 3, 4
             for section in 0..5 {
-                journal.append(section, section as u64).await.unwrap();
+                journal.append(section, section).await.unwrap();
             }
             journal.close().await.unwrap();
 

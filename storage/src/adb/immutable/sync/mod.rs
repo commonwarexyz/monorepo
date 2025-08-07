@@ -140,9 +140,6 @@ where
                 .await
                 .map_err(crate::adb::Error::from)
         } else {
-            // Preserve current_size so we continue appending at the correct location
-            let current_size = journal.size().await.map_err(crate::adb::Error::from)?;
-
             // Extract the Variable journal to perform section-based pruning
             let mut variable_journal = journal.into_inner();
 

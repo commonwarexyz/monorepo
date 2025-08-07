@@ -8,10 +8,11 @@ use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
 use commonware_storage::adb::sync::Target;
 use commonware_sync::{crate_version, Error};
 // Any example imports
-use commonware_sync::{create_adb_config, Database as AnyDb, Resolver};
+use commonware_sync::{create_adb_config, AnyProtocol, Database as AnyDb};
 // Immutable example imports
-use commonware_sync::immutable::resolver::Resolver as ImmResolver;
+use commonware_sync::immutable::protocol::ImmutableProtocol;
 use commonware_sync::immutable::{create_adb_config as create_imm_config, Database as ImmDb};
+use commonware_sync::net::GenericResolver;
 use commonware_utils::parse_duration;
 use futures::channel::mpsc;
 use rand::Rng;
@@ -341,11 +342,11 @@ fn main() {
         let db_choice = matches.get_one::<String>("db").unwrap().as_str();
         let result = match db_choice {
             "any" => {
-                run_generic::<_, AnyDb<_>, Resolver<_>, _, _, _, _, _, _, _>(
+                run_generic::<_, AnyDb<_>, GenericResolver<_, AnyProtocol>, _, _, _, _, _, _, _>(
                     context.with_label("sync"),
                     config,
                     create_adb_config,
-                    |ctx, addr| Resolver::new(ctx, addr),
+                    |ctx, addr| GenericResolver::<_, AnyProtocol>::new(ctx, addr),
                     |resolver| {
                         let r = resolver.clone();
                         move || {
@@ -362,28 +363,37 @@ fn main() {
                 )
                 .await
             }
-            "immutable" => {
-                run_generic::<_, ImmDb<_>, ImmResolver<_>, _, _, _, _, _, _, _>(
-                    context.with_label("sync"),
-                    config,
-                    create_imm_config,
-                    |ctx, addr| ImmResolver::new(ctx, addr),
-                    |resolver| {
-                        let r = resolver.clone();
-                        move || {
-                            let r2 = r.clone();
-                            async move { r2.get_sync_target().await }
-                        }
-                    },
-                    |database| async move {
-                        let got_root =
-                            <ImmDb<_> as commonware_storage::adb::sync::Database>::root(&database);
-                        info!(root = %got_root, "✅ immutable sync completed successfully");
-                        database.close().await.map_err(|e| format!("{e}"))
-                    },
-                )
-                .await
-            }
+            "immutable" => run_generic::<
+                _,
+                ImmDb<_>,
+                GenericResolver<_, ImmutableProtocol>,
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+            >(
+                context.with_label("sync"),
+                config,
+                create_imm_config,
+                |ctx, addr| GenericResolver::<_, ImmutableProtocol>::new(ctx, addr),
+                |resolver| {
+                    let r = resolver.clone();
+                    move || {
+                        let r2 = r.clone();
+                        async move { r2.get_sync_target().await }
+                    }
+                },
+                |database| async move {
+                    let got_root =
+                        <ImmDb<_> as commonware_storage::adb::sync::Database>::root(&database);
+                    info!(root = %got_root, "✅ immutable sync completed successfully");
+                    database.close().await.map_err(|e| format!("{e}"))
+                },
+            )
+            .await,
             other => Err(format!("unsupported --db value: {other}")),
         };
 

@@ -59,14 +59,11 @@ where
         // Validate that current_size is within the expected range
         assert!(
             current_size >= lower_bound,
-            "current_size ({}) must be >= lower_bound ({})",
-            current_size,
-            lower_bound
+            "current_size ({current_size}) must be >= lower_bound ({lower_bound})",
         );
         assert!(
             current_size <= upper_bound + 1,
-            "current_size ({}) must be <= upper_bound + 1 ({})",
-            current_size,
+            "current_size ({current_size}) must be <= upper_bound + 1 ({})",
             upper_bound + 1
         );
 

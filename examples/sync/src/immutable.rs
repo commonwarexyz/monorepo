@@ -4,7 +4,6 @@ use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_storage::adb::immutable::Config;
 
 pub mod protocol;
-pub mod resolver;
 
 /// Hasher type used in the database.
 pub type Hasher = commonware_cryptography::sha256::Sha256;

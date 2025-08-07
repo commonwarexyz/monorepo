@@ -1,8 +1,8 @@
 //! Provides a [Resolver] implementation that communicates with a remote server
 //! to fetch operations and proofs.
 
-use crate::net::client::NetworkClient;
-use crate::{error::Error, GetOperationsRequest, GetSyncTargetRequest, Message};
+use crate::net::{self as net, client::NetworkClient, Protocol};
+use crate::{error::Error, AnyProtocol, Message};
 use commonware_cryptography::sha256::Digest;
 use commonware_storage::adb::sync::{
     resolver::{FetchResult, Resolver as ResolverTrait},
@@ -10,12 +10,6 @@ use commonware_storage::adb::sync::{
 };
 use futures::channel::oneshot;
 use std::{marker::PhantomData, net::SocketAddr, num::NonZeroU64};
-use tracing::error;
-
-/// I/O task that manages connection and request/response correlation.
-// Removed: IoTask, use NetworkClient
-
-// Removed: IoTask, use NetworkClient
 
 /// Network resolver that fetches operations from a remote server.
 #[derive(Clone)]
@@ -47,27 +41,9 @@ where
 
     pub async fn get_sync_target(&self) -> Result<Target<Digest>, Error> {
         // NetworkClient correlates by message.request_id; use 0 for target request (no clash due to single in-flight per send())
-        let request_id = 0u64;
-        let request = GetSyncTargetRequest { request_id };
-        let response = self
-            .client
-            .send(Message::GetSyncTargetRequest(request))
-            .await?;
-        match response {
-            Message::GetSyncTargetResponse(response) => Ok(response.target),
-            Message::Error(err) => {
-                error!(error = %err.message, "server error");
-                Err(Error::Server {
-                    code: err.error_code,
-                    message: err.message,
-                })
-            }
-            _ => Err(Error::UnexpectedResponse { request_id }),
-        }
-    }
-
-    async fn send_request(&self, message: Message) -> Result<Message, Error> {
-        self.client.send(message).await
+        AnyProtocol::parse_get_target_response(
+            self.client.send(AnyProtocol::make_get_target(0u64)).await?,
+        )
     }
 }
 
@@ -79,7 +55,7 @@ where
         + Clone,
 {
     type Digest = Digest;
-    type Op = crate::Operation;
+    type Op = <AnyProtocol as net::Protocol>::Op;
     type Error = Error;
 
     async fn get_operations(
@@ -88,33 +64,16 @@ where
         start_loc: u64,
         max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
-        let request_id = 0u64;
-        let request = GetOperationsRequest {
-            request_id,
-            size,
-            start_loc,
-            max_ops,
-        };
-
-        let response = self
-            .client
-            .send(Message::GetOperationsRequest(request))
-            .await?;
-
-        match response {
-            Message::GetOperationsResponse(response) => {
-                let (success_tx, _success_rx) = oneshot::channel();
-                Ok(FetchResult {
-                    operations: response.operations,
-                    proof: response.proof,
-                    success_tx,
-                })
-            }
-            Message::Error(err) => Err(Error::Server {
-                code: err.error_code,
-                message: err.message,
-            }),
-            _ => Err(Error::UnexpectedResponse { request_id }),
-        }
+        let (proof, operations) = AnyProtocol::parse_get_ops_response(
+            self.client
+                .send(AnyProtocol::make_get_ops(0u64, size, start_loc, max_ops))
+                .await?,
+        )?;
+        let (success_tx, _rx) = oneshot::channel();
+        Ok(FetchResult {
+            operations,
+            proof,
+            success_tx,
+        })
     }
 }

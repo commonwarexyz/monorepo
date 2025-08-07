@@ -10,7 +10,7 @@
 //! - Getting target updates for dynamic sync
 //! - Error handling
 
-use crate::net::{ErrorResponse, RequestId, WireMessage};
+use crate::net::{self as net, ErrorResponse, RequestId, WireMessage};
 use crate::Operation;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -61,6 +61,62 @@ impl WireMessage for Message {
 
     fn decode_from(bytes: &[u8]) -> Result<Self, commonware_codec::Error> {
         Self::decode(bytes)
+    }
+}
+
+/// Implement Protocol adapter for Any protocol
+#[derive(Clone)]
+pub struct AnyProtocol;
+
+impl net::Protocol for AnyProtocol {
+    type Digest = Digest;
+    type Op = crate::Operation;
+    type Message = Message;
+
+    fn make_get_target(request_id: RequestId) -> Self::Message {
+        Message::GetSyncTargetRequest(GetSyncTargetRequest { request_id })
+    }
+
+    fn parse_get_target_response(msg: Self::Message) -> Result<Target<Self::Digest>, crate::Error> {
+        match msg {
+            Message::GetSyncTargetResponse(r) => Ok(r.target),
+            Message::Error(err) => Err(crate::Error::Server {
+                code: err.error_code,
+                message: err.message,
+            }),
+            other => Err(crate::Error::UnexpectedResponse {
+                request_id: other.request_id(),
+            }),
+        }
+    }
+
+    fn make_get_ops(
+        request_id: RequestId,
+        size: u64,
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    ) -> Self::Message {
+        Message::GetOperationsRequest(GetOperationsRequest {
+            request_id,
+            size,
+            start_loc,
+            max_ops,
+        })
+    }
+
+    fn parse_get_ops_response(
+        msg: Self::Message,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Op>), crate::Error> {
+        match msg {
+            Message::GetOperationsResponse(r) => Ok((r.proof, r.operations)),
+            Message::Error(err) => Err(crate::Error::Server {
+                code: err.error_code,
+                message: err.message,
+            }),
+            other => Err(crate::Error::UnexpectedResponse {
+                request_id: other.request_id(),
+            }),
+        }
     }
 }
 
