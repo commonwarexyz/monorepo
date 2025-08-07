@@ -147,6 +147,13 @@ oracle.add_link(pk1, pk2, Link {
 
 ## Code Style Guide
 
+### Runtime Isolation Rule
+**CRITICAL**: All code outside the `runtime` primitive must be runtime-agnostic:
+- Never import or use `tokio` directly outside of `runtime/`
+- Always use `futures` for async operations
+- Use capabilities exported by `runtime` traits for I/O operations
+- This ensures all primitives remain portable across different runtime implementations
+
 ### Import Organization
 Always organize imports in this order:
 ```rust
