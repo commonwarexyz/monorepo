@@ -84,8 +84,6 @@ pub enum Error {
     BlobResizeFailed(String, String, IoError),
     #[error("blob sync failed: {0}/{1} error: {2}")]
     BlobSyncFailed(String, String, IoError),
-    #[error("blob close failed: {0}/{1} error: {2}")]
-    BlobCloseFailed(String, String, IoError),
     #[error("blob insufficient length")]
     BlobInsufficientLength,
     #[error("offset overflow")]
@@ -382,6 +380,10 @@ pub trait Storage: Clone + Send + Sync + 'static {
 /// opening a new file descriptor. If multiple blobs are opened with the same
 /// name, they are not expected to coordinate access to underlying storage
 /// and writing to both is undefined behavior.
+///
+/// When a blob is dropped, any unsynced changes may be discarded. Implementations
+/// may attempt to sync during drop but errors will go unhandled. Call `sync`
+/// before dropping to ensure all changes are durably persisted.
 #[allow(clippy::len_without_is_empty)]
 pub trait Blob: Clone + Send + Sync + 'static {
     /// Read from the blob at the given offset.
@@ -409,9 +411,6 @@ pub trait Blob: Clone + Send + Sync + 'static {
 
     /// Ensure all pending data is durably persisted.
     fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
-
-    /// Close the blob.
-    fn close(self) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 #[cfg(test)]
@@ -630,8 +629,8 @@ mod tests {
                 .expect("Failed to read from blob");
             assert_eq!(read.as_ref(), data);
 
-            // Close the blob
-            blob.close().await.expect("Failed to close blob");
+            // Sync the blob
+            blob.sync().await.expect("Failed to sync blob");
 
             // Scan blobs in the partition
             let blobs = context
@@ -654,8 +653,8 @@ mod tests {
                 .expect("Failed to read data");
             assert_eq!(read.as_ref(), b"Storage");
 
-            // Close the blob
-            blob.close().await.expect("Failed to close blob");
+            // Sync the blob
+            blob.sync().await.expect("Failed to sync blob");
 
             // Remove the blob
             context
@@ -757,9 +756,6 @@ mod tests {
                 .await
                 .expect("Failed to write");
             blob.sync().await.expect("Failed to sync after write");
-            blob.close()
-                .await
-                .expect("Failed to close blob after writing");
 
             // Re-open and check length
             let (blob, len) = context.open(partition, name).await.unwrap();
@@ -771,9 +767,6 @@ mod tests {
                 .await
                 .expect("Failed to resize to extend");
             blob.sync().await.expect("Failed to sync after resize");
-            blob.close()
-                .await
-                .expect("Failed to close blob after resizing");
 
             // Re-open and check length again
             let (blob, len) = context.open(partition, name).await.unwrap();
@@ -793,7 +786,6 @@ mod tests {
             // Truncate the blob
             blob.resize(data.len() as u64).await.unwrap();
             blob.sync().await.unwrap();
-            blob.close().await.unwrap();
 
             // Reopen to check truncation
             let (blob, size) = context.open(partition, name).await.unwrap();
@@ -802,7 +794,7 @@ mod tests {
             // Read truncated data
             let read_buf = blob.read_at(vec![0; data.len()], 0).await.unwrap();
             assert_eq!(read_buf.as_ref(), data);
-            blob.close().await.unwrap();
+            blob.sync().await.unwrap();
         });
     }
 
@@ -831,8 +823,8 @@ mod tests {
                     .await
                     .expect("Failed to write data2");
 
-                // Close the blob
-                blob.close().await.expect("Failed to close blob");
+                // Sync the blob
+                blob.sync().await.expect("Failed to sync blob");
             }
 
             for (additional, partition) in partitions.iter().enumerate() {
@@ -850,9 +842,6 @@ mod tests {
                     .expect("Failed to read data");
                 assert_eq!(&read.as_ref()[..5], b"Hello");
                 assert_eq!(&read.as_ref()[5 + additional..], b"World");
-
-                // Close the blob
-                blob.close().await.expect("Failed to close blob");
             }
         });
     }
@@ -944,8 +933,8 @@ mod tests {
                 .expect("Failed to read from blob");
             assert_eq!(read.as_ref(), data);
 
-            // Close the blob
-            blob.close().await.expect("Failed to close blob");
+            // Drop the blob
+            drop(blob);
 
             // Ensure no blobs still open
             let buffer = context.encode();

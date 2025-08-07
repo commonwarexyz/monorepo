@@ -69,14 +69,4 @@ impl crate::Blob for Blob {
             .await
             .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
     }
-
-    async fn close(self) -> Result<(), Error> {
-        let mut file = self.file.lock().await;
-        file.sync_all()
-            .await
-            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))?;
-        file.shutdown()
-            .await
-            .map_err(|e| Error::BlobCloseFailed(self.partition.clone(), hex(&self.name), e))
-    }
 }
