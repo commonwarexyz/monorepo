@@ -106,8 +106,8 @@ pub(crate) mod tests {
 
     #[test_traced]
     fn test_sync_basic() {
-        let runner = deterministic::Runner::default();
-        runner.start(|mut context| async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
             // Create source database with some operations
             let mut source_db = create_test_db(context.clone()).await;
             let ops = create_test_ops(5);
@@ -161,8 +161,8 @@ pub(crate) mod tests {
     #[test_case(1, 0; "lower_bound_greater_than_upper_bound")]
     #[test_traced]
     fn test_sync_invalid_bounds(lower_bound: u64, upper_bound: u64) {
-        let runner = deterministic::Runner::default();
-        runner.start(|mut context| async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
             let resolver = FailResolver::<Digest, Digest, Digest>::new();
             let target_root = Digest::from([0; 32]);
 
@@ -196,8 +196,8 @@ pub(crate) mod tests {
 
     #[test_traced]
     fn test_sync_resolver_fails() {
-        let runner = deterministic::Runner::default();
-        runner.start(|mut context| async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
             let resolver = FailResolver::<Digest, Digest, Digest>::new();
             let target_root = Digest::from([0; 32]);
 
@@ -226,16 +226,16 @@ pub(crate) mod tests {
     /// Comprehensive sync test with various batch sizes
     #[test_case(1, NZU64!(1); "singleton db with batch size == 1")]
     #[test_case(1, NZU64!(2); "singleton db with batch size > db size")]
-    #[test_case(100, NZU64!(1); "db with batch size 1")]
-    #[test_case(100, NZU64!(3); "db size not evenly divided by batch size")]
-    #[test_case(100, NZU64!(99); "db size not evenly divided by batch size; different batch size")]
-    #[test_case(100, NZU64!(50); "db size divided by batch size")]
-    #[test_case(100, NZU64!(100); "db size == batch size")]
-    #[test_case(100, NZU64!(101); "batch size > db size")]
+    #[test_case(1000, NZU64!(1); "db with batch size 1")]
+    #[test_case(1000, NZU64!(3); "db size not evenly divided by batch size")]
+    #[test_case(1000, NZU64!(999); "db size not evenly divided by batch size; different batch size")]
+    #[test_case(1000, NZU64!(100); "db size divided by batch size")]
+    #[test_case(1000, NZU64!(1000); "db size == batch size")]
+    #[test_case(1000, NZU64!(1001); "batch size > db size")]
     #[test_traced]
     fn test_sync(target_db_ops: usize, fetch_batch_size: NonZeroU64) {
-        let runner = deterministic::Runner::default();
-        runner.start(|mut context| async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
             let mut target_db = create_test_db(context.clone()).await;
             let target_db_ops = create_test_ops(target_db_ops);
             apply_ops(&mut target_db, target_db_ops.clone()).await;
@@ -305,8 +305,8 @@ pub(crate) mod tests {
     #[test_traced]
     fn test_sync_subset_of_target_database() {
         const TARGET_DB_OPS: usize = 1000;
-        let runner = deterministic::Runner::default();
-        runner.start(|mut context| async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(TARGET_DB_OPS);
             // Apply all but the last operation
@@ -369,8 +369,8 @@ pub(crate) mod tests {
     fn test_sync_use_existing_db_partial_match() {
         const ORIGINAL_DB_OPS: usize = 1_000;
 
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
             let original_ops = create_test_ops(ORIGINAL_DB_OPS);
 
             // Create two databases
@@ -471,8 +471,8 @@ pub(crate) mod tests {
     fn test_sync_use_existing_db_exact_match() {
         const NUM_OPS: usize = 1_000;
 
-        let runner = deterministic::Runner::default();
-        runner.start(|mut context| async move {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
             let target_ops = create_test_ops(NUM_OPS);
 
             // Create two databases
