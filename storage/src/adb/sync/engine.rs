@@ -288,7 +288,7 @@ where
                 .collect();
 
             // Find the next gap in the sync range that needs to be fetched.
-            let Some((start_loc, end_loc)) = crate::adb::sync::gaps::find_next_gap(
+            let Some((start_loc, end_loc)) = crate::adb::sync::gaps::find_next(
                 log_size,
                 self.target.upper_bound_ops,
                 &operation_counts,
