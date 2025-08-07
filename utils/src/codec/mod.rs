@@ -1,0 +1,1 @@
+//! Empty file - directory should be removed

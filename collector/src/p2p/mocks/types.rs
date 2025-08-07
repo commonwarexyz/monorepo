@@ -15,8 +15,8 @@ pub struct Request {
 
 impl Write for Request {
     fn write(&self, buf: &mut impl BufMut) {
-        buf.put_u64(self.id);
-        buf.put_u32(self.data);
+        self.id.write(buf);
+        self.data.write(buf);
     }
 }
 
@@ -61,8 +61,8 @@ pub struct Response {
 
 impl Write for Response {
     fn write(&self, buf: &mut impl BufMut) {
-        buf.put_u64(self.id);
-        buf.put_u64(self.result);
+        self.id.write(buf);
+        self.result.write(buf);
     }
 }
 

@@ -47,11 +47,11 @@ impl Write for Record {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::Freezer(checkpoint) => {
-                buf.put_u8(0);
+                0u8.write(buf);
                 checkpoint.write(buf);
             }
             Self::Ordinal(indices) => {
-                buf.put_u8(1);
+                1u8.write(buf);
                 indices.write(buf);
             }
         }

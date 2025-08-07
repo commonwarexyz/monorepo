@@ -27,19 +27,19 @@ impl<D: Digest> Write for Inbound<D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Inbound::PutBlock(block) => {
-                buf.put_u8(0);
+                0u8.write(buf);
                 block.write(buf);
             }
             Inbound::GetBlock(block) => {
-                buf.put_u8(1);
+                1u8.write(buf);
                 block.write(buf);
             }
             Inbound::PutFinalization(finalization) => {
-                buf.put_u8(2);
+                2u8.write(buf);
                 finalization.write(buf);
             }
             Inbound::GetFinalization(finalization) => {
-                buf.put_u8(3);
+                3u8.write(buf);
                 finalization.write(buf);
             }
         }

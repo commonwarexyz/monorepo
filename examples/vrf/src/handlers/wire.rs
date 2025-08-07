@@ -115,11 +115,11 @@ impl<S: Signature> Write for Payload<S> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Payload::Start { group } => {
-                buf.put_u8(0);
+                0u8.write(buf);
                 group.write(buf);
             }
             Payload::Share { commitment, share } => {
-                buf.put_u8(1);
+                1u8.write(buf);
                 commitment.write(buf);
                 share.write(buf);
             }
@@ -127,7 +127,7 @@ impl<S: Signature> Write for Payload<S> {
                 public_key,
                 signature,
             } => {
-                buf.put_u8(2);
+                2u8.write(buf);
                 UInt(*public_key).write(buf);
                 signature.write(buf);
             }
@@ -136,7 +136,7 @@ impl<S: Signature> Write for Payload<S> {
                 acks,
                 reveals,
             } => {
-                buf.put_u8(3);
+                3u8.write(buf);
                 commitment.write(buf);
                 acks.write(buf);
                 reveals.write(buf);
@@ -145,12 +145,12 @@ impl<S: Signature> Write for Payload<S> {
                 commitments,
                 reveals,
             } => {
-                buf.put_u8(4);
+                4u8.write(buf);
                 commitments.write(buf);
                 reveals.write(buf);
             }
             Payload::Abort => {
-                buf.put_u8(5);
+                5u8.write(buf);
             }
         }
     }

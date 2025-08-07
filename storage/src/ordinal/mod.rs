@@ -132,6 +132,7 @@ pub struct Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_cryptography::crc32_hash;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::{sequence::FixedBytes, BitVec};
@@ -831,7 +832,7 @@ mod tests {
 
                 // Write a valid record after the zeros
                 let mut valid_record = vec![44u8; 32];
-                let crc = crc32fast::hash(&valid_record);
+                let crc = crc32_hash(&valid_record);
                 valid_record.extend_from_slice(&crc.to_be_bytes());
                 blob.write_at(valid_record, 36 * 5).await.unwrap();
 

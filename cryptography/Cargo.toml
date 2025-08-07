@@ -23,6 +23,7 @@ zeroize = { workspace = true, features = ["zeroize_derive"] }
 ed25519-consensus = "2.1.0"
 blst = { workspace = true, features = ["no-threads"] }
 p256 = { workspace = true, features = ["ecdsa"] }
+crc32fast = "1.4.2"
 
 # Enable "js" feature when WASM is target
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]

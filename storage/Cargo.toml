@@ -19,7 +19,6 @@ commonware-utils = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
-crc32fast = "1.4.2"
 prometheus-client = { workspace = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }

@@ -7,7 +7,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     util::at_least, Codec, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
-use commonware_utils::Array;
+use commonware_utils::{Array, Zeroed};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
@@ -125,21 +125,21 @@ impl<K: Array, V: Array> Write for Fixed<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Fixed::Deleted(k) => {
-                buf.put_u8(DELETE_CONTEXT);
+                DELETE_CONTEXT.write(buf);
                 k.write(buf);
                 // Pad with 0 up to [Self::SIZE]
-                buf.put_bytes(0, V::SIZE);
+                Zeroed::new(V::SIZE).write(buf);
             }
             Fixed::Update(k, v) => {
-                buf.put_u8(UPDATE_CONTEXT);
+                UPDATE_CONTEXT.write(buf);
                 k.write(buf);
                 v.write(buf);
             }
             Fixed::Commit(floor_loc) => {
-                buf.put_u8(COMMIT_CONTEXT);
-                buf.put_slice(&floor_loc.to_be_bytes());
+                COMMIT_CONTEXT.write(buf);
+                floor_loc.write(buf);
                 // Pad with 0 up to [Self::SIZE]
-                buf.put_bytes(0, Self::SIZE - 1 - u64::SIZE);
+                Zeroed::new(Self::SIZE - u8::SIZE - u64::SIZE).write(buf);
             }
         }
     }
@@ -149,12 +149,12 @@ impl<K: Array, V: Codec> Write for Variable<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Variable::Set(k, v) => {
-                buf.put_u8(SET_CONTEXT);
+                SET_CONTEXT.write(buf);
                 k.write(buf);
                 v.write(buf);
             }
             Variable::Commit() => {
-                buf.put_u8(COMMIT_CONTEXT);
+                COMMIT_CONTEXT.write(buf);
             }
         }
     }
@@ -175,26 +175,12 @@ impl<K: Array, V: Array> Read for Fixed<K, V> {
             DELETE_CONTEXT => {
                 let key = K::read(buf)?;
                 // Check that the value is all zeroes
-                for _ in 0..V::SIZE {
-                    if buf.get_u8() != 0 {
-                        return Err(CodecError::Invalid(
-                            "storage::adb::Operation",
-                            "delete value non-zero",
-                        ));
-                    }
-                }
+                Zeroed::read_cfg(buf, &V::SIZE)?;
                 Ok(Self::Deleted(key))
             }
             COMMIT_CONTEXT => {
                 let floor_loc = u64::read(buf)?;
-                for _ in 0..(Self::SIZE - 1 - u64::SIZE) {
-                    if buf.get_u8() != 0 {
-                        return Err(CodecError::Invalid(
-                            "storage::adb::Operation",
-                            "commit value non-zero",
-                        ));
-                    }
-                }
+                Zeroed::read_cfg(buf, &(Self::SIZE - 1 - u64::SIZE))?;
                 Ok(Self::Commit(floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),

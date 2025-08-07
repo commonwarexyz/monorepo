@@ -15,6 +15,8 @@ pub use priority_set::PrioritySet;
 pub mod futures;
 mod stable_buf;
 pub use stable_buf::StableBuf;
+mod zeroed;
+pub use zeroed::Zeroed;
 
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {

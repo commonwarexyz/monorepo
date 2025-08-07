@@ -101,6 +101,7 @@
 use super::Error;
 use bytes::BufMut;
 use commonware_codec::Codec;
+use commonware_cryptography::{crc32_hash, Crc32Hasher, Hasher};
 use commonware_runtime::{
     buffer::{Read, Write},
     Blob, Error as RError, Metrics, Storage,
@@ -233,7 +234,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         offset: u32,
     ) -> Result<(u32, u32, V), Error> {
         // Read item size
-        let mut hasher = crc32fast::Hasher::new();
+        let mut hasher = Crc32Hasher::new();
         let offset = offset as u64 * ITEM_ALIGNMENT;
         let size = blob.read_at(vec![0; 4], offset).await?;
         hasher.update(size.as_ref());
@@ -255,8 +256,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // Verify integrity
         let checksum = hasher.finalize();
         let stored_checksum = u32::from_be_bytes(buf[size..].try_into().unwrap());
-        if checksum != stored_checksum {
-            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
+        if checksum.to_u32() != stored_checksum {
+            return Err(Error::ChecksumMismatch(stored_checksum, checksum.to_u32()));
         }
 
         // Compute next offset
@@ -291,7 +292,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         }
 
         // Read item size (4 bytes)
-        let mut hasher = crc32fast::Hasher::new();
+        let mut hasher = Crc32Hasher::new();
         let mut size_buf = [0u8; 4];
         reader
             .read_exact(&mut size_buf, 4)
@@ -315,8 +316,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // Verify integrity
         let checksum = hasher.finalize();
         let stored_checksum = u32::from_be_bytes(buf[size..].try_into().unwrap());
-        if checksum != stored_checksum {
-            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
+        if checksum.to_u32() != stored_checksum {
+            return Err(Error::ChecksumMismatch(stored_checksum, checksum.to_u32()));
         }
 
         // If compression is enabled, decompress the item
@@ -348,7 +349,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let buf = blob.read_at(vec![0u8; entry_size], offset).await?;
 
         // Check size
-        let mut hasher = crc32fast::Hasher::new();
+        let mut hasher = Crc32Hasher::new();
         let disk_size = u32::from_be_bytes(buf.as_ref()[..4].try_into().unwrap());
         hasher.update(&buf.as_ref()[..4]);
         if disk_size != len {
@@ -361,8 +362,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let checksum = hasher.finalize();
         let stored_checksum =
             u32::from_be_bytes(buf.as_ref()[4 + len as usize..].try_into().unwrap());
-        if checksum != stored_checksum {
-            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
+        if checksum.to_u32() != stored_checksum {
+            return Err(Error::ChecksumMismatch(stored_checksum, checksum.to_u32()));
         }
 
         // Decompress item
@@ -558,7 +559,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let mut buf = Vec::with_capacity(entry_len);
         buf.put_u32(item_len);
         buf.put_slice(&encoded);
-        let checksum = crc32fast::hash(&buf);
+        let checksum = crc32_hash(&buf);
         buf.put_u32(checksum);
         assert_eq!(buf.len(), entry_len);
 

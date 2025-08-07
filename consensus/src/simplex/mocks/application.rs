@@ -1,7 +1,7 @@
 use super::relay::Relay;
 use crate::{simplex::types::Context, Automaton as Au, Relay as Re};
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{FixedSize, ReadExt};
+use bytes::Bytes;
+use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Spawner};
@@ -189,11 +189,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             .await;
 
         // Generate the payload
-        let payload_len = u64::SIZE + H::Digest::SIZE + u64::SIZE;
-        let mut payload = Vec::with_capacity(payload_len);
-        payload.put_u64(context.view);
-        payload.extend_from_slice(&context.parent.1);
-        payload.put_u64(self.context.gen::<u64>()); // Ensures we always have a unique payload
+        let payload = (context.view, context.parent.1, self.context.gen::<u64>()).encode();
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();
 

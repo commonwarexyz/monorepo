@@ -97,7 +97,7 @@ impl EncodeSize for usize {
 impl Write for bool {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
-        buf.put_u8(if *self { 1 } else { 0 });
+        (if *self { 1 } else { 0 }).write(buf);
     }
 }
 

@@ -2,6 +2,7 @@ use super::{Config, Error};
 use crate::rmap::RMap;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_cryptography::crc32_hash;
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
@@ -25,12 +26,12 @@ struct Record<V: Array> {
 
 impl<V: Array> Record<V> {
     fn new(value: V) -> Self {
-        let crc = crc32fast::hash(value.as_ref());
+        let crc = crc32_hash(value.as_ref());
         Self { value, crc }
     }
 
     fn is_valid(&self) -> bool {
-        self.crc == crc32fast::hash(self.value.as_ref())
+        self.crc == crc32_hash(self.value.as_ref())
     }
 }
 

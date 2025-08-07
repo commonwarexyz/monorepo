@@ -23,15 +23,15 @@ impl<D: Digest> Write for Outbound<D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Outbound::Success(success) => {
-                buf.put_u8(0);
+                0u8.write(buf);
                 success.write(buf);
             }
             Outbound::Block(data) => {
-                buf.put_u8(1);
+                1u8.write(buf);
                 data.write(buf);
             }
             Outbound::Finalization(data) => {
-                buf.put_u8(2);
+                2u8.write(buf);
                 data.write(buf);
             }
         }

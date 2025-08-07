@@ -56,8 +56,8 @@
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
 use super::Error;
-use bytes::BufMut;
-use commonware_codec::{Codec, DecodeExt, FixedSize};
+use commonware_codec::{Codec, DecodeExt, Encode, FixedSize};
+use commonware_cryptography::{Checksummed, Crc32Hasher};
 use commonware_runtime::{
     buffer::{Append, PoolRef, Read},
     Blob, Error as RError, Metrics, Storage,
@@ -404,15 +404,18 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         while tail_size > 0 {
             let offset = tail_size - Self::CHUNK_SIZE_U64;
             let read = tail.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-            match Self::verify_integrity(read.as_ref()) {
+            match Checksummed::<A, Crc32Hasher>::decode(read.as_ref()) {
                 Ok(_) => break, // Valid item found, we can stop truncating.
-                Err(Error::ChecksumMismatch(_, _)) => {
-                    warn!(blob = tail_index, offset, "checksum mismatch: truncating",);
+                Err(err) => {
+                    // Assume any decode error is a checksum issue for truncation purposes
+                    warn!(
+                        blob = tail_index,
+                        offset, "decode error during truncation: {:?}", err
+                    );
                     tail_size -= Self::CHUNK_SIZE_U64;
                     tail.resize(tail_size).await?;
                     truncated = true;
                 }
-                Err(err) => return Err(err),
             }
         }
 
@@ -447,11 +450,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         let mut size = self.tail.size().await;
         assert!(size < self.cfg.items_per_blob * Self::CHUNK_SIZE_U64);
         assert_eq!(size % Self::CHUNK_SIZE_U64, 0);
-        let mut buf: Vec<u8> = Vec::with_capacity(Self::CHUNK_SIZE);
-        let item = item.encode();
-        let checksum = crc32fast::hash(&item);
-        buf.extend_from_slice(&item);
-        buf.put_u32(checksum);
+        let buf = Checksummed::<A, Crc32Hasher>::from(item).encode();
 
         // Write the item to the blob
         let item_pos = (size / Self::CHUNK_SIZE_U64) + self.cfg.items_per_blob * self.tail_index;
@@ -555,22 +554,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
         let offset = (item_pos % self.cfg.items_per_blob) * Self::CHUNK_SIZE_U64;
         let read = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        Self::verify_integrity(read.as_ref())
-    }
-
-    /// Verify the integrity of the Array + checksum in `buf`, returning:
-    /// - The array if it is valid,
-    /// - Error::ChecksumMismatch if the checksum is invalid, or
-    /// - Error::Codec if the array could not be decoded after passing the checksum check.
-    ///
-    ///  Error::Codec likely indicates a logic error rather than a corruption issue.
-    fn verify_integrity(buf: &[u8]) -> Result<A, Error> {
-        let stored_checksum = u32::from_be_bytes(buf[A::SIZE..].try_into().unwrap());
-        let checksum = crc32fast::hash(&buf[..A::SIZE]);
-        if checksum != stored_checksum {
-            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
-        }
-        A::decode(&buf[..A::SIZE]).map_err(Error::Codec)
+        Ok(Checksummed::<A, Crc32Hasher>::decode(read.as_ref())?.into_inner())
     }
 
     /// Returns an ordered stream of all items in the journal with position >= `start_pos`.
@@ -636,13 +620,15 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                     match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
                         Ok(()) => {
                             let next_offset = offset + Self::CHUNK_SIZE_U64;
-                            let result = Self::verify_integrity(&buf).map(|item| (item_pos, item));
+                            let result = Checksummed::<A, Crc32Hasher>::decode(buf.as_slice())
+                                .map(|item| (item_pos, item.into_inner()))
+                                .map_err(Error::Codec);
                             if result.is_err() {
                                 debug!("corrupted item at {item_pos}");
                             }
                             Some((result, (buf, reader, next_offset)))
                         }
-                        Err(err) => Some((Err(Error::Runtime(err)), (buf, reader, size))),
+                        Err(err) => Some((Err(Error::Runtime(err)), (buf, reader, offset))),
                     }
                 },
             )

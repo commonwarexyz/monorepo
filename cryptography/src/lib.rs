@@ -19,7 +19,11 @@ pub mod bloomfilter;
 pub use bloomfilter::BloomFilter;
 pub mod lthash;
 pub use lthash::LtHash;
+pub mod checksummed;
+pub use checksummed::Checksummed;
+pub mod crc32;
 pub mod secp256r1;
+pub use crc32::{hash as crc32_hash, Crc32, Crc32Hasher};
 
 /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
 pub trait Signer: Send + Sync + Clone + 'static {

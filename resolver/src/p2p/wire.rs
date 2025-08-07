@@ -15,7 +15,7 @@ pub struct Message<Key: Span> {
 
 impl<Key: Span> Write for Message<Key> {
     fn write(&self, buf: &mut impl BufMut) {
-        buf.put_u64(self.id);
+        self.id.write(buf);
         self.payload.write(buf);
     }
 }
@@ -55,15 +55,15 @@ impl<Key: Span> Write for Payload<Key> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Payload::Request(key) => {
-                buf.put_u8(0);
+                0u8.write(buf);
                 key.write(buf);
             }
             Payload::Response(data) => {
-                buf.put_u8(1);
+                1u8.write(buf);
                 data.write(buf);
             }
             Payload::ErrorResponse => {
-                buf.put_u8(2);
+                2u8.write(buf);
             }
         }
     }
