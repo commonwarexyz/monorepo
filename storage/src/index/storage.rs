@@ -297,10 +297,16 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
     }
 }
 
-unsafe impl<'a, T: Translator, V: Eq> Send for Cursor<'a, T, V> {
-    // SAFETY: The raw pointer `past_tail` only points to memory owned by
-    // this Cursor (via the `past` field) and is never exposed externally.
-    // All other fields are Send when their type parameters are Send.
+unsafe impl<'a, T, V> Send for Cursor<'a, T, V>
+where
+    T: Translator + Send,
+    T::Key: Send,
+    V: Eq + Send,
+{
+    // SAFETY: `Send` is safe because the raw pointer `past_tail` only ever points
+    // to heap memory owned by `self.past`. Since the pointer's referent is moved
+    // along with the `Cursor`, no data races can occur. The `where` clause
+    // ensures all generic parameters are also `Send`.
 }
 
 impl<T: Translator, V: Eq> Drop for Cursor<'_, T, V> {
