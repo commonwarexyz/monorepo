@@ -297,6 +297,19 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
     }
 }
 
+/// SAFETY: `Cursor` is safe to send across threads if its type parameters are `Send`.
+/// The raw pointer `past_tail` only points to data owned by the `Cursor` itself
+/// (through the `past` field) and is never exposed externally.
+unsafe impl<'a, T, V> Send for Cursor<'a, T, V>
+where
+    T: Translator,
+    T::Key: Send,
+    V: Eq + Send,
+    // Note: We need the metrics types to be Send as well, but &'a Gauge and &'a Counter
+    // are Send if Gauge and Counter are Sync, which they are.
+{
+}
+
 impl<T: Translator, V> Drop for Cursor<'_, T, V>
 where
     V: Eq,
