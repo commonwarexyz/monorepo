@@ -8,7 +8,7 @@ pub trait Database: Sized {
     type Op;
     type Journal: Journal<Op = Self::Op>;
     type Verifier: Verifier<Self::Op, Self::Digest>;
-    type Error: std::error::Error + Send + 'static;
+    type Error: std::error::Error + Send + From<<Self::Journal as Journal>::Error> + 'static;
     type Config;
     type Digest: Digest;
     type Context: commonware_runtime::Storage

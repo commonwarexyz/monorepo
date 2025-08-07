@@ -229,7 +229,7 @@ where
             config.target.upper_bound_ops,
         )
         .await
-        .map_err(Error::journal)?;
+        .map_err(Error::database)?;
 
         let verifier = DB::create_verifier();
 
@@ -277,7 +277,7 @@ where
             .max_outstanding_requests
             .saturating_sub(self.outstanding_requests.len());
 
-        let log_size = self.journal.size().await.map_err(Error::journal)?;
+        let log_size = self.journal.size().await.map_err(Error::database)?;
 
         for _ in 0..num_requests {
             // Convert fetched operations to operation counts for shared gap detection
@@ -370,7 +370,7 @@ where
     /// and applies them in order. It removes stale batches and handles partial
     /// application of batches when needed.
     pub async fn apply_operations(&mut self) -> Result<(), Error<DB::Error, R::Error>> {
-        let mut next_loc = self.journal.size().await.map_err(Error::journal)?;
+        let mut next_loc = self.journal.size().await.map_err(Error::database)?;
 
         // Remove any batches of operations with stale data.
         // That is, those whose last operation is before `next_loc`.
@@ -421,7 +421,7 @@ where
         I: IntoIterator<Item = DB::Op>,
     {
         for op in operations {
-            self.journal.append(op).await.map_err(Error::journal)?;
+            self.journal.append(op).await.map_err(Error::database)?;
             // No need to sync here -- the journal will periodically sync its storage
             // and we will also sync when we're done applying all operations.
         }
@@ -430,7 +430,7 @@ where
 
     /// Check if sync is complete based on the current journal size and target
     pub async fn is_complete(&self) -> Result<bool, Error<DB::Error, R::Error>> {
-        let journal_size = self.journal.size().await.map_err(Error::journal)?;
+        let journal_size = self.journal.size().await.map_err(Error::database)?;
 
         // Calculate the target journal size (upper bound is inclusive)
         let target_journal_size = self.target.upper_bound_ops + 1;

@@ -9,6 +9,12 @@ where
     T: std::error::Error + Send + 'static,
     U: std::error::Error + Send + 'static,
 {
+    /// Database error
+    #[error("database error: {0}")]
+    Database(T),
+    /// Resolver error
+    #[error("resolver error: {0:?}")]
+    Resolver(U),
     /// Hash mismatch after sync
     #[error("root digest mismatch - expected {expected:?}, got {actual:?}")]
     RootMismatch {
@@ -36,12 +42,6 @@ where
     /// Sync already completed
     #[error("sync already completed")]
     AlreadyComplete,
-    /// Error from the underlying database
-    #[error("database error: {0}")]
-    Database(T),
-    /// Resolver error
-    #[error("resolver error: {0:?}")]
-    Resolver(U),
     /// Sync stalled - no pending fetches
     #[error("sync stalled - no pending fetches")]
     SyncStalled,
@@ -50,33 +50,16 @@ where
     PinnedNodes(String),
 }
 
-impl<T, U> From<T> for Error<T, U>
-where
-    T: std::error::Error + Send + 'static,
-    U: std::error::Error + Send + 'static,
-{
-    fn from(err: T) -> Self {
-        Self::Database(err)
-    }
-}
-
 impl<T, U> Error<T, U>
 where
     T: std::error::Error + Send + 'static,
     U: std::error::Error + Send + 'static,
 {
-    pub fn resolver(err: U) -> Self {
-        Self::Resolver(err)
+    pub fn resolver(err: impl Into<U>) -> Self {
+        Self::Resolver(err.into())
     }
 
-    pub fn database(err: T) -> Self {
-        Self::Database(err)
-    }
-
-    pub fn journal<J>(err: J) -> Self
-    where
-        T: From<J>,
-    {
-        Self::Database(T::from(err))
+    pub fn database(err: impl Into<T>) -> Self {
+        Self::Database(err.into())
     }
 }
