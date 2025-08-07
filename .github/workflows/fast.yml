@@ -137,6 +137,24 @@ jobs:
     - name: Build storage
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path storage/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_storage.wasm
 
+  Unsafe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Install miri
+      run: |
+        rustup toolchain install nightly --component miri
+        rustup override set nightly
+        cargo miri setup
+    - name: Run miri tests for storage::index
+      run: |
+        cd storage
+        MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --lib index::
+
   Scripts:
     runs-on: ubuntu-latest
     timeout-minutes: 10
