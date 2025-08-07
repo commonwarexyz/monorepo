@@ -67,7 +67,7 @@ async fn test_sync<
     let config = test_config(test_name, pruning_delay);
     let expected_root = target.root;
 
-    let sync_config = sync::client::Config {
+    let sync_config = sync::config::Config {
         context,
         update_receiver: None,
         db_config: config,

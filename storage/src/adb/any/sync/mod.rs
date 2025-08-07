@@ -1,95 +1,23 @@
 use crate::{
     adb::{
-        any::{Any, SyncConfig},
+        any::{sync::verifier::Verifier, Any, SyncConfig},
         operation::Fixed,
         sync::{
             engine::EngineConfig, resolver::Resolver, Engine, Error as SyncError, Journal, Target,
-            Verifier,
         },
     },
     journal::fixed,
-    mmr::{hasher::Standard, iterator::leaf_num_to_pos, verification::Proof},
+    mmr::hasher::Standard,
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
-pub mod client;
+pub mod config;
+mod verifier;
 
 pub type Error = crate::adb::Error;
-
-/// Verifier for Any database operations using the database's built-in proof verification
-pub struct AnyVerifier<E, K, V, H, T>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-{
-    hasher: Standard<H>,
-    // Phantom data to maintain type information
-    _phantom: std::marker::PhantomData<(E, K, V, T)>,
-}
-
-impl<E, K, V, H, T> AnyVerifier<E, K, V, H, T>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-{
-    /// Create a new verifier with the given hasher
-    pub fn new(hasher: Standard<H>) -> Self {
-        Self {
-            hasher,
-            _phantom: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<E, K, V, H, T> Verifier<Fixed<K, V>, H::Digest> for AnyVerifier<E, K, V, H, T>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: Array,
-    H: Hasher,
-    T: Translator,
-{
-    type Error = crate::mmr::Error;
-
-    fn verify_proof(
-        &mut self,
-        proof: &Proof<H::Digest>,
-        start_loc: u64,
-        operations: &[Fixed<K, V>],
-        target_root: &H::Digest,
-    ) -> bool {
-        Any::<E, K, V, H, T>::verify_proof(
-            &mut self.hasher,
-            proof,
-            start_loc,
-            operations,
-            target_root,
-        )
-    }
-
-    fn extract_pinned_nodes(
-        &mut self,
-        proof: &Proof<H::Digest>,
-        start_loc: u64,
-        operations_len: u64,
-    ) -> Result<Option<Vec<H::Digest>>, Self::Error> {
-        // Always try to extract pinned nodes - the engine will decide when to use them
-        let start_pos_mmr = leaf_num_to_pos(start_loc);
-        let end_pos_mmr = leaf_num_to_pos(start_loc + operations_len - 1);
-        proof
-            .extract_pinned_nodes(start_pos_mmr, end_pos_mmr)
-            .map(Some)
-    }
-}
 
 /// Configuration for building Any database from completed sync
 #[derive(Clone)]
@@ -132,7 +60,7 @@ where
     // Core associated types
     type Op = Fixed<K, V>;
     type Journal = crate::journal::fixed::Journal<E, Fixed<K, V>>;
-    type Verifier = AnyVerifier<E, K, V, H, T>;
+    type Verifier = Verifier<E, K, V, H, T>;
     type Error = crate::adb::Error;
     type Config = AnySyncConfig<E, T>;
     type Digest = H::Digest;
@@ -163,7 +91,7 @@ where
 
     /// Create a verifier for proof validation  
     fn create_verifier() -> Self::Verifier {
-        AnyVerifier::new(Standard::<H>::new())
+        Verifier::new(Standard::<H>::new())
     }
 
     async fn from_sync_result(
@@ -231,7 +159,7 @@ where
 ///
 /// Returns a SyncEngine ready to start syncing operations.
 pub async fn new_client<E, K, V, H, T, R>(
-    mut config: client::Config<E, K, V, H, T, R>,
+    mut config: config::Config<E, K, V, H, T, R>,
 ) -> Result<Engine<Any<E, K, V, H, T>, R>, SyncError<Error, R::Error>>
 where
     E: Storage + Clock + Metrics,
@@ -273,7 +201,7 @@ where
 ///
 /// When the database's operation log is complete, we reconstruct the database's MMR and snapshot.
 pub async fn sync<E, K, V, H, T, R>(
-    config: client::Config<E, K, V, H, T, R>,
+    config: config::Config<E, K, V, H, T, R>,
 ) -> Result<Any<E, K, V, H, T>, SyncError<Error, R::Error>>
 where
     E: Storage + Clock + Metrics,
