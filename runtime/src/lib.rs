@@ -955,8 +955,10 @@ mod tests {
             let before = context
                 .with_label("before")
                 .spawn(move |context| async move {
-                    let sig = context.stopped().await;
-                    assert_eq!(sig.unwrap(), kill);
+                    let mut signal = context.stopped();
+                    let value = (&mut signal).await.unwrap();
+                    assert_eq!(value, kill);
+                    drop(signal);
                 });
 
             // Signal the tasks and wait for them to stop
