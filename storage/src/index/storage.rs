@@ -297,23 +297,13 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
     }
 }
 
-/// SAFETY: `Cursor` is safe to send across threads if its type parameters are `Send`.
-/// The raw pointer `past_tail` only points to data owned by the `Cursor` itself
-/// (through the `past` field) and is never exposed externally.
-unsafe impl<'a, T, V> Send for Cursor<'a, T, V>
-where
-    T: Translator,
-    T::Key: Send,
-    V: Eq + Send,
-    // Note: We need the metrics types to be Send as well, but &'a Gauge and &'a Counter
-    // are Send if Gauge and Counter are Sync, which they are.
-{
+unsafe impl<'a, T: Translator, V: Eq> Send for Cursor<'a, T, V> {
+    // SAFETY: The raw pointer `past_tail` only points to memory owned by
+    // this Cursor (via the `past` field) and is never exposed externally.
+    // All other fields are Send when their type parameters are Send.
 }
 
-impl<T: Translator, V> Drop for Cursor<'_, T, V>
-where
-    V: Eq,
-{
+impl<T: Translator, V: Eq> Drop for Cursor<'_, T, V> {
     fn drop(&mut self) {
         // Take the entry.
         let mut entry = self.entry.take().unwrap();
