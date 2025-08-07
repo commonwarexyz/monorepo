@@ -668,10 +668,10 @@ impl<
 
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
-        // Clean up bitmap metadata partition
+        // Clean up bitmap metadata partition.
         Bitmap::<H, N>::destroy(self.context.clone(), &self.bitmap_metadata_partition).await?;
 
-        // Clean up Any components (MMR and log)
+        // Clean up Any components (MMR and log).
         self.any.destroy().await
     }
 

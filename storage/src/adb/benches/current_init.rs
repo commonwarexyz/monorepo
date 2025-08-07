@@ -28,11 +28,12 @@ const PAGE_SIZE: usize = 16384;
 /// The number of pages to cache in the buffer pool.
 const PAGE_CACHE_SIZE: usize = 10_000;
 
-/// current_init is not singlethreaded. So we benchmark with 1 and 8 threads to compare singlethreaded and multithreaded performance.
+/// current_init is multithreaded, and will have different performance for different number of threads. 
+/// So we benchmark with 1 and 8 threads to compare singlethreaded and multithreaded performance.
 const SINGLE_THREADED: usize = 1;
 const MULTI_THREADED: usize = 8;
 
-/// Chunk size for the current ADB bitmap - must be a power of 2 (as assumed in current::grafting_height()) and a multiple of digest size (for proof size optimization).
+/// Chunk size for the current ADB bitmap - must be a power of 2 (as assumed in current::grafting_height()) and a multiple of digest size.
 const CHUNK_SIZE: usize = 32;
 
 fn current_cfg(pool: ThreadPool) -> CConfig<EightCap> {
