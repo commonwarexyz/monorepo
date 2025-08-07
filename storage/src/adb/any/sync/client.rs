@@ -85,7 +85,6 @@ pub(crate) mod tests {
             any::{
                 sync::{new_client, sync},
                 test::{apply_ops, create_test_config, create_test_db, create_test_ops, AnyTest},
-                Any,
             },
             sync::{engine::NextStep, resolver::tests::FailResolver},
         },
@@ -273,6 +272,36 @@ pub(crate) mod tests {
                 .destroy()
                 .await
                 .unwrap();
+        });
+    }
+
+    /// Test that invalid bounds are rejected
+    #[test]
+    fn test_sync_invalid_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let resolver = FailResolver::<Digest, Digest, Digest>::new();
+            let target_root = Digest::from([0; 32]);
+
+            let config = Config {
+                context: context.with_label("sync"),
+                update_receiver: None,
+                db_config: create_test_config(context.next_u64()),
+                fetch_batch_size: NZU64!(2),
+                target: Target {
+                    root: target_root,
+                    lower_bound_ops: 1,
+                    upper_bound_ops: 0,
+                },
+                resolver,
+                hasher: test_hasher(),
+                apply_batch_size: 2,
+                max_outstanding_requests: 2,
+            };
+
+            // Attempt to sync - should fail due to invalid bounds
+            let result = sync(config).await;
+            assert!(matches!(result, Err(SyncError::InvalidTarget { .. })));
         });
     }
 
@@ -951,13 +980,7 @@ pub(crate) mod tests {
             };
 
             // Complete the sync
-            let mut client = client;
-            let synced_db: Any<_, _, _, _, _> = loop {
-                match client.step().await.unwrap() {
-                    NextStep::Continue(new_client) => client = new_client,
-                    NextStep::Complete(database) => break database,
-                }
-            };
+            let synced_db = client.sync().await.unwrap();
 
             // Verify the synced database has the expected final state
             let mut hasher = test_hasher();
@@ -1071,13 +1094,7 @@ pub(crate) mod tests {
                 .unwrap();
 
             // Complete the sync
-            let mut client = client;
-            let synced_db: Any<_, _, _, _, _> = loop {
-                match client.step().await.unwrap() {
-                    NextStep::Continue(new_client) => client = new_client,
-                    NextStep::Complete(database) => break database,
-                }
-            };
+            let synced_db = client.sync().await.unwrap();
 
             // Verify the synced database has the expected final state
             let mut hasher = test_hasher();
@@ -1193,36 +1210,6 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             reopened_db.destroy().await.unwrap();
-        });
-    }
-
-    /// Test that invalid bounds are rejected
-    #[test]
-    fn test_sync_invalid_bounds() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            let resolver = FailResolver::<Digest, Digest, Digest>::new();
-            let target_root = Digest::from([0; 32]);
-
-            let config = Config {
-                context: context.with_label("sync"),
-                update_receiver: None,
-                db_config: create_test_config(context.next_u64()),
-                fetch_batch_size: NZU64!(2),
-                target: Target {
-                    root: target_root,
-                    lower_bound_ops: 1,
-                    upper_bound_ops: 0,
-                },
-                resolver,
-                hasher: test_hasher(),
-                apply_batch_size: 2,
-                max_outstanding_requests: 2,
-            };
-
-            // Attempt to sync - should fail due to invalid bounds
-            let result = sync(config).await;
-            assert!(matches!(result, Err(SyncError::InvalidTarget { .. })));
         });
     }
 
