@@ -91,13 +91,16 @@ pub(crate) mod tests {
         },
         mmr::{hasher::Standard, iterator::leaf_num_to_pos},
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Digest as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner, RwLock};
     use commonware_utils::NZU64;
     use futures::{channel::mpsc, SinkExt};
-    use rand::RngCore;
-    use std::sync::Arc;
+    use rand::{rngs::StdRng, RngCore, SeedableRng as _};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
     use test_case::test_case;
 
     fn test_hasher() -> Standard<Sha256> {
@@ -129,9 +132,30 @@ pub(crate) mod tests {
             // Start syncing from the inactivity floor, not 0
             let lower_bound_ops = target_db.inactivity_floor_loc;
 
-            let target_db = Arc::new(RwLock::new(target_db));
+            // Capture target database state and deleted keys before moving into config
+            let mut expected_kvs = HashMap::new();
+            let mut deleted_keys = HashSet::new();
+            for op in &target_db_ops {
+                match op {
+                    Fixed::Update(key, _) => {
+                        if let Some((value, loc)) = target_db.get_with_loc(key).await.unwrap() {
+                            expected_kvs.insert(*key, (value, loc));
+                            deleted_keys.remove(key);
+                        }
+                    }
+                    Fixed::Deleted(key) => {
+                        expected_kvs.remove(key);
+                        deleted_keys.insert(*key);
+                    }
+                    _ => {}
+                }
+            }
+
+            let db_config = create_test_config(context.next_u64());
+
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
-                db_config: create_test_config(context.next_u64()),
+                db_config: db_config.clone(),
                 fetch_batch_size,
                 target: Target {
                     root: target_root,
@@ -145,7 +169,7 @@ pub(crate) mod tests {
                 max_outstanding_requests: 1,
                 update_receiver: None,
             };
-            let got_db = sync(config).await.unwrap();
+            let mut got_db = sync(config).await.unwrap();
 
             // Verify database state
             let mut hasher = test_hasher();
@@ -160,17 +184,89 @@ pub(crate) mod tests {
             // Verify the root digest matches the target
             assert_eq!(got_db.root(&mut hasher), target_root);
 
-            // Verify that key-value operations work correctly by checking a few operations
-            for op in target_db_ops.iter().take(10) {
-                if let Some(key) = op.to_key() {
-                    let target_value = target_db.read().await.get(key).await.unwrap();
-                    let synced_value = got_db.get(key).await.unwrap();
-                    assert_eq!(target_value, synced_value);
-                }
+            // Verify that the synced database matches the target state
+            for (key, &(value, loc)) in &expected_kvs {
+                let synced_opt = got_db.get_with_loc(key).await.unwrap();
+                assert_eq!(synced_opt, Some((value, loc)));
+            }
+            // Verify that deleted keys are absent
+            for key in &deleted_keys {
+                assert!(got_db.get_with_loc(key).await.unwrap().is_none(),);
+            }
+
+            // Put more key-value pairs into both databases
+            let mut new_ops = Vec::new();
+            let mut rng = StdRng::seed_from_u64(42);
+            let mut new_kvs = HashMap::new();
+            for _ in 0..expected_kvs.len() {
+                let key = Digest::random(&mut rng);
+                let value = Digest::random(&mut rng);
+                new_ops.push(Fixed::Update(key, value));
+                new_kvs.insert(key, value);
+            }
+            apply_ops(&mut got_db, new_ops.clone()).await;
+            apply_ops(&mut *target_db.write().await, new_ops).await;
+            got_db.commit().await.unwrap();
+            target_db.write().await.commit().await.unwrap();
+
+            // Verify that the databases match
+            for (key, value) in &new_kvs {
+                let got_value = got_db.get(key).await.unwrap().unwrap();
+                let target_value = target_db.read().await.get(key).await.unwrap().unwrap();
+                assert_eq!(got_value, target_value);
+                assert_eq!(got_value, *value);
+            }
+
+            let final_target_root = target_db.write().await.root(&mut hasher);
+            assert_eq!(got_db.root(&mut hasher), final_target_root);
+
+            // Capture the database state before closing
+            let final_synced_op_count = got_db.op_count();
+            let final_synced_inactivity_floor = got_db.inactivity_floor_loc;
+            let final_synced_log_size = got_db.log.size().await.unwrap();
+            let final_synced_oldest_retained_loc = got_db.oldest_retained_loc();
+            let final_synced_pruned_to_pos = got_db.ops.pruned_to_pos();
+            let final_synced_root = got_db.root(&mut hasher);
+
+            // Close the database
+            got_db.close().await.unwrap();
+
+            // Reopen the database using the same configuration and verify the state is unchanged
+            let reopened_db = AnyTest::init(context, db_config).await.unwrap();
+
+            // Compare state against the database state before closing
+            assert_eq!(reopened_db.op_count(), final_synced_op_count);
+            assert_eq!(
+                reopened_db.inactivity_floor_loc,
+                final_synced_inactivity_floor
+            );
+            assert_eq!(reopened_db.log.size().await.unwrap(), final_synced_log_size);
+            assert_eq!(
+                reopened_db.oldest_retained_loc(),
+                final_synced_oldest_retained_loc,
+            );
+            assert_eq!(reopened_db.ops.pruned_to_pos(), final_synced_pruned_to_pos);
+            assert_eq!(reopened_db.root(&mut hasher), final_synced_root);
+
+            // Verify that the original key-value pairs are still correct
+            for (key, &(value, _loc)) in &expected_kvs {
+                let reopened_value = reopened_db.get(key).await.unwrap();
+                assert_eq!(reopened_value, Some(value));
+            }
+
+            // Verify all new key-value pairs are still correct
+            for (key, &value) in &new_kvs {
+                let reopened_value = reopened_db.get(key).await.unwrap().unwrap();
+                assert_eq!(reopened_value, value);
+            }
+
+            // Verify that deleted keys are still absent
+            for key in &deleted_keys {
+                assert!(reopened_db.get(key).await.unwrap().is_none());
             }
 
             // Cleanup
-            got_db.destroy().await.unwrap();
+            reopened_db.destroy().await.unwrap();
             Arc::try_unwrap(target_db)
                 .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
                 .into_inner()
