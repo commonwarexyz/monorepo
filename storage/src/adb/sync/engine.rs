@@ -76,6 +76,8 @@ pub struct EngineConfig<DB: Database, R: Resolver<Op = DB::Op, Digest = DB::Dige
     pub max_outstanding_requests: usize,
     /// Maximum operations to fetch per batch
     pub fetch_batch_size: NonZeroU64,
+    /// Number of operations to apply in a single batch
+    pub apply_batch_size: usize,
     /// Database-specific configuration
     pub db_config: DB::Config,
     /// Channel for receiving sync target updates
@@ -101,6 +103,9 @@ pub struct Engine<DB: Database, R: Resolver<Op = DB::Op, Digest = DB::Digest>> {
     /// Maximum operations to fetch in a single batch
     pub fetch_batch_size: NonZeroU64,
 
+    /// Number of operations to apply in a single batch
+    pub apply_batch_size: usize,
+
     /// Journal that operations are applied to during sync
     pub journal: DB::Journal,
 
@@ -124,12 +129,18 @@ impl<DB, R> Engine<DB, R>
 where
     DB: Database,
     DB::Error: From<<DB::Journal as Journal>::Error>,
-    DB::Config: Clone,
     DB::Context: Clone,
     R: Resolver<Op = DB::Op, Digest = DB::Digest>,
 {
     /// Create a new sync engine with the given configuration
     pub async fn new(config: EngineConfig<DB, R>) -> Result<Self, Error<DB::Error, R::Error>> {
+        if config.target.lower_bound_ops > config.target.upper_bound_ops {
+            return Err(Error::InvalidTarget {
+                lower_bound_pos: config.target.lower_bound_ops,
+                upper_bound_pos: config.target.upper_bound_ops,
+            });
+        }
+
         // Create journal and verifier using the database's factory methods
         let journal = DB::create_journal(
             config.context.clone(),
@@ -142,20 +153,23 @@ where
 
         let verifier = DB::create_verifier();
 
-        Ok(Self {
+        let mut engine = Self {
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
             pinned_nodes: None,
-            target: config.target,
+            target: config.target.clone(),
             max_outstanding_requests: config.max_outstanding_requests,
             fetch_batch_size: config.fetch_batch_size,
+            apply_batch_size: config.apply_batch_size,
             journal,
-            resolver: config.resolver,
+            resolver: config.resolver.clone(),
             verifier,
             context: config.context,
             config: config.db_config,
             update_receiver: config.update_receiver,
-        })
+        };
+        engine.schedule_requests().await?;
+        Ok(engine)
     }
 
     /// Schedule new fetch requests based on gap analysis and request limits.
@@ -249,6 +263,7 @@ where
             target: new_target,
             max_outstanding_requests: self.max_outstanding_requests,
             fetch_batch_size: self.fetch_batch_size,
+            apply_batch_size: self.apply_batch_size,
             journal,
             resolver: self.resolver,
             verifier: self.verifier,
@@ -436,10 +451,12 @@ where
         if self.is_complete().await? {
             // Build the database from the completed sync
             let database = DB::from_sync_result(
+                self.context,
                 self.config,
                 self.journal,
                 self.pinned_nodes,
                 self.target.clone(),
+                self.apply_batch_size,
             )
             .await
             .map_err(Error::database)?;

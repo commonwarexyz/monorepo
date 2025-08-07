@@ -29,10 +29,12 @@ pub trait Database: Sized {
 
     /// Build a database from a completed sync journal and configuration
     fn from_sync_result(
+        context: Self::Context,
         config: Self::Config,
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
         target: Target<Self::Digest>,
+        apply_batch_size: usize,
     ) -> impl Future<Output = Result<Self, Self::Error>>;
 
     /// Get the root digest of the database for verification

@@ -9,12 +9,14 @@ use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
 use commonware_storage::{
     adb::{
         self,
-        any::sync::{self, config::Config as SyncConfig},
-        sync::{Error as SyncError, Target},
+        any::Any,
+        sync::{self, engine::EngineConfig, Error as SyncError, Target},
     },
     mmr::hasher::Standard,
 };
-use commonware_sync::{crate_version, create_adb_config, Error, Resolver};
+use commonware_sync::{
+    crate_version, create_adb_config, Error, Hasher, Key, Resolver, Translator, Value,
+};
 use commonware_utils::parse_duration;
 use futures::channel::mpsc;
 use rand::Rng;
@@ -159,27 +161,19 @@ where
     });
 
     // Create sync configuration
-    let sync_config = SyncConfig::<
-        E,
-        commonware_sync::Key,
-        commonware_sync::Value,
-        commonware_sync::Hasher,
-        commonware_sync::Translator,
-        Resolver<E>,
-    > {
+    let sync_config = EngineConfig {
         context: context.clone(),
         db_config,
         fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
         target: initial_target,
         resolver,
-        hasher: Standard::new(),
         apply_batch_size: 1024,
         max_outstanding_requests: config.max_outstanding_requests,
         update_receiver: Some(update_receiver),
     };
 
     // Sync to the server's state
-    let database = sync::sync(sync_config).await?;
+    let database: Any<_, Key, Value, Hasher, Translator> = sync::sync(sync_config).await?;
 
     // Cancel the target update task since sync is complete
     target_update_handle.abort();

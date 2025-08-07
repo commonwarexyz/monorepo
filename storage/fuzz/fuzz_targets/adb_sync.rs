@@ -5,9 +5,9 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
     adb::{
-        any::{sync, Any, Config},
+        any::{Any, Config},
         operation::Fixed,
-        sync::{resolver::Resolver, Target},
+        sync::{self, engine::EngineConfig, resolver::Resolver, Target},
     },
     mmr::hasher::Standard,
     translator::TwoCap,
@@ -64,17 +64,16 @@ async fn test_sync<
     test_name: &str,
     pruning_delay: u64,
 ) -> bool {
-    let config = test_config(test_name, pruning_delay);
+    let db_config = test_config(test_name, pruning_delay);
     let expected_root = target.root;
 
-    let sync_config = sync::config::Config {
+    let sync_config: EngineConfig<Any<_, Key, Value, Sha256, TwoCap>, R> = EngineConfig {
         context,
         update_receiver: None,
-        db_config: config,
+        db_config,
         fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
         target,
         resolver,
-        hasher: Standard::<Sha256>::new(),
         apply_batch_size: 100,
         max_outstanding_requests: 10,
     };
