@@ -1,6 +1,8 @@
 //! An authenticated database (ADB) that provides succinct proofs of _any_ value ever associated
-//! with a key, where values can have varying sizes. If the values you wish to store all have the
-//! same size, use the [crate::adb::any::Any] db instead.
+//! with a key, where values can have varying sizes.
+//!
+//! _If the values you wish to store all have the same size, use the [crate::adb::any::Any] db
+//! instead._
 
 use crate::{
     adb::Error,
@@ -323,6 +325,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 log_size = end_loc,
                 "rewinding over uncommitted operations at end of log"
             );
+            // We use saturating_sub below for the case where end_loc == 0, which happens when there
+            // are no committed operations at all remaining.
             let prune_to_section = end_loc.saturating_sub(1) / self.log_items_per_section;
             self.log
                 .rewind_to_offset(prune_to_section, end_offset)
