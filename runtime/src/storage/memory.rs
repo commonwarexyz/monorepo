@@ -157,11 +157,6 @@ impl crate::Blob for Blob {
         *content = new_content;
         Ok(())
     }
-
-    async fn close(self) -> Result<(), crate::Error> {
-        self.sync().await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]

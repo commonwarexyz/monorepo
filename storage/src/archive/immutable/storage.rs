@@ -61,7 +61,7 @@ impl Write for Record {
 impl Read for Record {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let tag = buf.get_u8();
+        let tag = u8::read(buf)?;
         match tag {
             0 => Ok(Self::Freezer(Checkpoint::read(buf)?)),
             1 => Ok(Self::Ordinal(Option::<BitVec>::read_cfg(

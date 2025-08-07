@@ -353,7 +353,8 @@ pub(crate) mod tests {
             // Resize the blob
             blob.resize(5).await.unwrap();
 
-            blob.close().await.unwrap();
+            // Sync the blob
+            blob.sync().await.unwrap();
         }
 
         // Reopen the blob

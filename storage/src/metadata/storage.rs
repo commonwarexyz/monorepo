@@ -400,18 +400,18 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
 
     /// Sync outstanding data and close [Metadata].
     pub async fn close(mut self) -> Result<(), Error> {
-        // Sync and close blobs
+        // Sync and drop blobs
         self.sync().await?;
         for wrapper in self.blobs.into_iter() {
-            wrapper.blob.close().await?;
+            wrapper.blob.sync().await?;
         }
         Ok(())
     }
 
-    /// Close and remove the underlying blobs.
+    /// Remove the underlying blobs for this [Metadata].
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, wrapper) in self.blobs.into_iter().enumerate() {
-            wrapper.blob.close().await?;
+            drop(wrapper.blob);
             self.context
                 .remove(&self.partition, Some(BLOB_NAMES[i]))
                 .await?;

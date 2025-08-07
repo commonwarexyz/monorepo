@@ -66,10 +66,4 @@ impl crate::Blob for Blob {
             .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))?;
         Ok(())
     }
-
-    async fn close(self) -> Result<(), Error> {
-        self.sync().await
-
-        // When the file is dropped, it will be closed.
-    }
 }

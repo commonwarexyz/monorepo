@@ -172,9 +172,4 @@ impl<B: Blob> Blob for Write<B> {
         }
         self.blob.sync().await
     }
-
-    async fn close(self) -> Result<(), Error> {
-        self.sync().await?;
-        self.blob.close().await
-    }
 }

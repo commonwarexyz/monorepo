@@ -176,7 +176,7 @@ impl<K: Array, V: Array> Read for Fixed<K, V> {
                 let key = K::read(buf)?;
                 // Check that the value is all zeroes
                 for _ in 0..V::SIZE {
-                    if buf.get_u8() != 0 {
+                    if u8::read(buf)? != 0 {
                         return Err(CodecError::Invalid(
                             "storage::adb::Operation",
                             "delete value non-zero",
@@ -188,7 +188,7 @@ impl<K: Array, V: Array> Read for Fixed<K, V> {
             COMMIT_CONTEXT => {
                 let floor_loc = u64::read(buf)?;
                 for _ in 0..(Self::SIZE - 1 - u64::SIZE) {
-                    if buf.get_u8() != 0 {
+                    if u8::read(buf)? != 0 {
                         return Err(CodecError::Invalid(
                             "storage::adb::Operation",
                             "commit value non-zero",

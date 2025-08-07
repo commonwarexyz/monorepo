@@ -1,7 +1,7 @@
 use super::relay::Relay;
 use crate::{threshold_simplex::types::Context, Automaton as Au, Relay as Re};
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{FixedSize, ReadExt};
+use bytes::{BufMut, Bytes};
+use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Spawner};
@@ -218,19 +218,14 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             .await;
 
         // Verify contents
-        if contents.len() != 48 {
-            self.panic("invalid payload length");
-        }
-        let parsed_view = contents.get_u64();
+        let (parsed_view, parent, _) =
+            <(u64, H::Digest, u64)>::decode(&mut contents).expect("invalid payload");
         if parsed_view != context.view {
             self.panic(&format!(
                 "invalid view (in payload): {} != {}",
                 parsed_view, context.view
             ));
         }
-        let Ok(parent) = H::Digest::read(&mut contents) else {
-            self.panic("invalid parent");
-        };
         if parent != context.parent.1 {
             self.panic(&format!(
                 "invalid parent (in payload): {:?} != {:?}",

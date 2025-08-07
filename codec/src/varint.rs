@@ -29,7 +29,7 @@
 //! assert_eq!(decoded, -3);
 //! ```
 
-use crate::{EncodeSize, Error, FixedSize, Read, Write};
+use crate::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use bytes::{Buf, BufMut};
 use sealed::{SPrim, UPrim};
 use std::fmt::Debug;
@@ -257,10 +257,7 @@ fn read<T: UPrim>(buf: &mut impl Buf) -> Result<T, Error> {
     // Loop over all the bytes.
     loop {
         // Read the next byte.
-        if !buf.has_remaining() {
-            return Err(Error::EndOfBuffer);
-        }
-        let byte = buf.get_u8();
+        let byte = u8::read(buf)?;
 
         // If this is not the first byte, but the byte is completely zero, we have an invalid
         // varint. This is because this byte has no data bits and no continuation, so there was no
