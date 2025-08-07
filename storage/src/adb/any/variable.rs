@@ -462,7 +462,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
     pub fn op_count(&self) -> u64 {
-        leaf_pos_to_num(self.mmr.size()).unwrap()
+        self.log_size
     }
 
     /// Returns the section of the log where we are currently writing new items.
@@ -733,9 +733,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // special recovery.
         let section_with_target = target_prune_loc / self.log_items_per_section;
         debug!(section = section_with_target, "section with target");
-        if section_with_target == 0 {
-            return Ok(());
-        }
         self.log.prune(section_with_target).await?;
         self.oldest_retained_loc = section_with_target * self.log_items_per_section;
 
