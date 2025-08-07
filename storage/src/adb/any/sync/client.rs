@@ -84,13 +84,12 @@ pub(crate) mod tests {
         adb::{
             any::{
                 sync::{new_client, sync},
+                test::{apply_ops, create_test_config, create_test_db, create_test_ops, AnyTest},
                 Any,
             },
-            operation::Fixed,
             sync::{engine::NextStep, resolver::tests::FailResolver},
         },
         mmr::{hasher::Standard, iterator::leaf_num_to_pos},
-        translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
@@ -101,71 +100,7 @@ pub(crate) mod tests {
     use std::sync::Arc;
     use test_case::test_case;
 
-    type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
-
-    fn create_test_config(seed: u64) -> any::Config<TwoCap> {
-        const PAGE_SIZE: usize = 128;
-        const PAGE_CACHE_SIZE: usize = 1024 * 1024;
-
-        any::Config {
-            mmr_journal_partition: format!("mmr_journal_{seed}"),
-            mmr_metadata_partition: format!("mmr_metadata_{seed}"),
-            mmr_items_per_blob: 1024,
-            mmr_write_buffer: 64,
-            log_journal_partition: format!("log_journal_{seed}"),
-            log_items_per_blob: 1024,
-            log_write_buffer: 64,
-            translator: TwoCap,
-            thread_pool: None,
-            buffer_pool: commonware_runtime::buffer::PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            pruning_delay: 100,
-        }
-    }
-
-    async fn create_test_db(mut context: deterministic::Context) -> AnyTest {
-        let seed = context.next_u64();
-        let config = create_test_config(seed);
-        AnyTest::init(context, config).await.unwrap()
-    }
-
-    fn create_test_ops(n: usize) -> Vec<Fixed<Digest, Digest>> {
-        use commonware_cryptography::Digest as _;
-        use rand::{rngs::StdRng, SeedableRng};
-
-        let mut rng = StdRng::seed_from_u64(1337);
-        let mut prev_key = Digest::random(&mut rng);
-        let mut ops = Vec::new();
-        for i in 0..n {
-            let key = Digest::random(&mut rng);
-            if i % 10 == 0 && i > 0 {
-                ops.push(Fixed::Deleted(prev_key));
-            } else {
-                let value = Digest::random(&mut rng);
-                ops.push(Fixed::Update(key, value));
-                prev_key = key;
-            }
-        }
-        ops
-    }
-
-    async fn apply_ops(db: &mut AnyTest, ops: Vec<Fixed<Digest, Digest>>) {
-        for op in ops {
-            match op {
-                Fixed::Update(key, value) => {
-                    db.update(key, value).await.unwrap();
-                }
-                Fixed::Deleted(key) => {
-                    db.delete(key).await.unwrap();
-                }
-                Fixed::Commit(_) => {
-                    // Commit operations are handled automatically by the database
-                    // when commit() is called, so we can ignore them here
-                }
-            }
-        }
-    }
-
-    fn create_test_hasher() -> Standard<Sha256> {
+    fn test_hasher() -> Standard<Sha256> {
         Standard::<Sha256>::new()
     }
 
@@ -178,7 +113,7 @@ pub(crate) mod tests {
             let ops = create_test_ops(5);
             apply_ops(&mut source_db, ops.clone()).await;
             source_db.commit().await.unwrap();
-            let target_root = source_db.root(&mut create_test_hasher());
+            let target_root = source_db.root(&mut test_hasher());
 
             // Create resolver from source database
             let source_db = Arc::new(RwLock::new(source_db));
@@ -199,7 +134,7 @@ pub(crate) mod tests {
                     },
                 },
                 resolver: source_db.clone(),
-                hasher: create_test_hasher(),
+                hasher: test_hasher(),
                 apply_batch_size: 2,
                 max_outstanding_requests: 2,
             };
@@ -208,8 +143,8 @@ pub(crate) mod tests {
             let synced_db = sync(config).await.unwrap();
 
             // Verify roots match
-            let expected_root = source_db.read().await.root(&mut create_test_hasher());
-            let actual_root = synced_db.root(&mut create_test_hasher());
+            let expected_root = source_db.read().await.root(&mut test_hasher());
+            let actual_root = synced_db.root(&mut test_hasher());
             assert_eq!(actual_root, expected_root);
 
             // Cleanup
@@ -242,7 +177,7 @@ pub(crate) mod tests {
                     upper_bound_ops: upper_bound,
                 },
                 resolver,
-                hasher: create_test_hasher(),
+                hasher: test_hasher(),
                 apply_batch_size: 2,
                 max_outstanding_requests: 2,
             };
@@ -277,7 +212,7 @@ pub(crate) mod tests {
                     upper_bound_ops: 4,
                 },
                 resolver,
-                hasher: create_test_hasher(),
+                hasher: test_hasher(),
                 apply_batch_size: 2,
                 max_outstanding_requests: 2,
             };
@@ -308,7 +243,7 @@ pub(crate) mod tests {
             let target_op_count = target_db.op_count();
             let target_inactivity_floor = target_db.inactivity_floor_loc;
             let target_log_size = target_db.log.size().await.unwrap();
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             let target_root = target_db.root(&mut hasher);
 
             // After commit, the database may have pruned early operations
@@ -334,7 +269,7 @@ pub(crate) mod tests {
             let got_db = sync(config).await.unwrap();
 
             // Verify database state
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             assert_eq!(got_db.op_count(), target_op_count);
             assert_eq!(got_db.inactivity_floor_loc, target_inactivity_floor);
             assert_eq!(got_db.log.size().await.unwrap(), target_log_size);
@@ -378,7 +313,7 @@ pub(crate) mod tests {
             apply_ops(&mut target_db, target_ops[0..TARGET_DB_OPS - 1].to_vec()).await;
             target_db.commit().await.unwrap();
 
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             let upper_bound_ops = target_db.op_count() - 1;
             let root = target_db.root(&mut hasher);
             let lower_bound_ops = target_db.inactivity_floor_loc;
@@ -399,7 +334,7 @@ pub(crate) mod tests {
                 },
                 context,
                 resolver: Arc::new(RwLock::new(target_db)),
-                hasher: create_test_hasher(),
+                hasher: test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_receiver: None,
@@ -460,7 +395,7 @@ pub(crate) mod tests {
             let last_op = create_test_ops(1);
             apply_ops(&mut target_db, last_op.clone()).await;
             target_db.commit().await.unwrap();
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             let root = target_db.root(&mut hasher);
             let lower_bound_ops = target_db.inactivity_floor_loc;
             let upper_bound_ops = target_db.op_count() - 1; // Up to the last operation
@@ -477,7 +412,7 @@ pub(crate) mod tests {
                 },
                 context: context.clone(),
                 resolver: target_db.clone(),
-                hasher: create_test_hasher(),
+                hasher: test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_receiver: None,
@@ -561,7 +496,7 @@ pub(crate) mod tests {
             sync_db.close().await.unwrap();
 
             // Reopen sync_db
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             let root = target_db.root(&mut hasher);
             let lower_bound_ops = target_db.inactivity_floor_loc;
             let upper_bound_ops = target_db.op_count() - 1;
@@ -580,7 +515,7 @@ pub(crate) mod tests {
                 },
                 context: context.clone(),
                 resolver,
-                hasher: create_test_hasher(),
+                hasher: test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_receiver: None,
@@ -629,7 +564,7 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
 
             // Capture initial target state
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
             let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
@@ -647,7 +582,7 @@ pub(crate) mod tests {
                     upper_bound_ops: initial_upper_bound,
                 },
                 resolver: target_db.clone(),
-                hasher: create_test_hasher(),
+                hasher: test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
@@ -690,7 +625,7 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
 
             // Capture initial target state
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
             let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
@@ -708,7 +643,7 @@ pub(crate) mod tests {
                     upper_bound_ops: initial_upper_bound,
                 },
                 resolver: target_db.clone(),
-                hasher: create_test_hasher(),
+                hasher: test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
@@ -751,7 +686,7 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
 
             // Capture initial target state
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
             let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
@@ -762,7 +697,7 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
 
             // Capture final target state
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             let final_lower_bound = target_db.inactivity_floor_loc;
             let final_upper_bound = target_db.op_count() - 1;
             let final_root = target_db.root(&mut hasher);
@@ -781,7 +716,7 @@ pub(crate) mod tests {
                     upper_bound_ops: initial_upper_bound,
                 },
                 resolver: target_db.clone(),
-                hasher: create_test_hasher(),
+                hasher: test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_receiver: Some(update_receiver),
@@ -800,7 +735,7 @@ pub(crate) mod tests {
             let synced_db = sync(config).await.unwrap();
 
             // Verify the synced database has the expected state
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             assert_eq!(synced_db.op_count(), final_upper_bound + 1);
             assert_eq!(synced_db.inactivity_floor_loc, final_lower_bound);
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), final_lower_bound);
@@ -828,7 +763,7 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
 
             // Capture initial target state
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
             let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
@@ -846,7 +781,7 @@ pub(crate) mod tests {
                     upper_bound_ops: initial_upper_bound,
                 },
                 resolver: target_db.clone(),
-                hasher: create_test_hasher(),
+                hasher: test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
@@ -886,7 +821,7 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
 
             // Capture target state
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             let lower_bound = target_db.inactivity_floor_loc;
             let upper_bound = target_db.op_count() - 1;
             let root = target_db.root(&mut hasher);
@@ -904,7 +839,7 @@ pub(crate) mod tests {
                     upper_bound_ops: upper_bound,
                 },
                 resolver: target_db.clone(),
-                hasher: create_test_hasher(),
+                hasher: test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
@@ -924,7 +859,7 @@ pub(crate) mod tests {
                 .await;
 
             // Verify the synced database has the expected state
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), root);
             assert_eq!(synced_db.op_count(), upper_bound + 1);
             assert_eq!(synced_db.inactivity_floor_loc, lower_bound);
@@ -963,7 +898,7 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
 
             // Capture initial target state
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
             let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
@@ -983,7 +918,7 @@ pub(crate) mod tests {
                     upper_bound_ops: initial_upper_bound,
                 },
                 resolver: target_db.clone(),
-                hasher: create_test_hasher(),
+                hasher: test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
@@ -1014,7 +949,7 @@ pub(crate) mod tests {
                 db.commit().await.unwrap();
 
                 // Capture new target state
-                let mut hasher = create_test_hasher();
+                let mut hasher = test_hasher();
                 let new_lower_bound = db.inactivity_floor_loc;
                 let new_upper_bound = db.op_count() - 1;
                 let new_root = db.root(&mut hasher);
@@ -1042,7 +977,7 @@ pub(crate) mod tests {
             };
 
             // Verify the synced database has the expected final state
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), new_root);
 
             // Verify the target database matches the synced database
@@ -1092,7 +1027,7 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
 
             // Capture the state after first commit (this will have a non-zero inactivity floor)
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             let initial_lower_bound = target_db.inactivity_floor_loc;
             let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
@@ -1119,7 +1054,7 @@ pub(crate) mod tests {
                     upper_bound_ops: initial_upper_bound,
                 },
                 resolver: target_db.clone(),
-                hasher: create_test_hasher(),
+                hasher: test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
                 update_receiver: Some(update_receiver),
@@ -1162,7 +1097,7 @@ pub(crate) mod tests {
             };
 
             // Verify the synced database has the expected final state
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), final_root);
 
             // Verify the target database matches the synced database
@@ -1211,7 +1146,7 @@ pub(crate) mod tests {
             target_db.commit().await.unwrap();
 
             // Capture target state
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             let target_root = target_db.root(&mut hasher);
             let lower_bound = target_db.inactivity_floor_loc;
             let upper_bound = target_db.op_count() - 1;
@@ -1230,7 +1165,7 @@ pub(crate) mod tests {
                 },
                 context,
                 resolver: target_db.clone(),
-                hasher: create_test_hasher(),
+                hasher: test_hasher(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_receiver: None,
@@ -1238,7 +1173,7 @@ pub(crate) mod tests {
             let synced_db = sync(config).await.unwrap();
 
             // Verify initial sync worked
-            let mut hasher = create_test_hasher();
+            let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), target_root);
 
             // Save state before closing
