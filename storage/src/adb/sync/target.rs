@@ -49,14 +49,14 @@ impl<D: Digest> Read for Target<D> {
 pub fn validate_update<T, U, D>(
     old_target: &Target<D>,
     new_target: &Target<D>,
-) -> Result<(), sync::error::Error<T, U>>
+) -> Result<(), sync::Error<T, U>>
 where
     T: std::error::Error + Send + 'static,
     U: std::error::Error + Send + 'static,
     D: Digest,
 {
     if new_target.lower_bound_ops > new_target.upper_bound_ops {
-        return Err(sync::error::Error::InvalidTarget {
+        return Err(sync::Error::InvalidTarget {
             lower_bound_pos: new_target.lower_bound_ops,
             upper_bound_pos: new_target.upper_bound_ops,
         });
@@ -65,14 +65,14 @@ where
     if new_target.lower_bound_ops < old_target.lower_bound_ops
         || new_target.upper_bound_ops < old_target.upper_bound_ops
     {
-        return Err(sync::error::Error::SyncTargetMovedBackward {
+        return Err(sync::Error::SyncTargetMovedBackward {
             old: Box::new(old_target.root),
             new: Box::new(new_target.root),
         });
     }
 
     if new_target.root == old_target.root {
-        return Err(sync::error::Error::SyncTargetRootUnchanged);
+        return Err(sync::Error::SyncTargetRootUnchanged);
     }
 
     Ok(())
@@ -111,7 +111,7 @@ mod tests {
         assert_eq!(target.upper_bound_ops, deserialized.upper_bound_ops);
     }
 
-    type TestError = crate::adb::sync::error::Error<std::io::Error, std::io::Error>;
+    type TestError = sync::Error<std::io::Error, std::io::Error>;
 
     #[test_case(
         Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
