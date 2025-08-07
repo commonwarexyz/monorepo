@@ -2,37 +2,40 @@
 //!
 //! # Terminology
 //!
-//! A _key_ in an unauthenticated database either has a _value_ or it doesn't. The _update_ operation
-//! gives a key a specific value whether it previously had no value or had a different value.
+//! A _key_ in an unauthenticated database either has a _value_ or it doesn't. The _update_
+//! operation gives a key a specific value whether it previously had no value or had a different
+//! value.
 //!
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
-//! (2) it is a [`Operation::Set`] operation, and (3) it is the most recent operation for that key.
+//! (2) it is an [Operation::Update] operation, and (3) it is the most recent operation for that
+//! key.
 //!
 //! # Lifecycle
 //!
-//! 1. **Initialization**: Create with [`Store::init`] using a [`Config`]
-//! 2. **Insertion**: Use [`Store::update`] to set a value for a given key
-//! 3. **Deletions**: Use [`Store::delete`] to remove a key's value
-//! 4. **Persistence**: Call [`Store::commit`] to make changes durable
-//! 5. **Queries**: Use [`Store::get`] to retrieve current values
-//! 6. **Cleanup**: Call [`Store::close`] to shutdown gracefully or [`Store::destroy`] to remove all data
+//! 1. **Initialization**: Create with [Store::init] using a [Config]
+//! 2. **Insertion**: Use [Store::update] to assign a value to a given key
+//! 3. **Deletions**: Use [Store::delete] to remove a key's value
+//! 4. **Persistence**: Call [Store::commit] to make changes durable
+//! 5. **Queries**: Use [Store::get] to retrieve current values
+//! 6. **Cleanup**: Call [Store::close] to shutdown gracefully or [Store::destroy] to remove all
+//!    data
 //!
 //! # Pruning
 //!
-//! The database prunes _inactive_ operations every time [`Store::commit`] is called. To achieve this,
-//! an _inactivity floor_ is maintained, which is the location at which all operations before are inactive.
-//! At commit-time, the inactivity floor is raised by the number of uncommitted operations plus 1 for the
-//! tailing commit op. During this process, any encountered active operations are re-applied to the tip of
-//! the log.
+//! The database prunes _inactive_ operations every time [Store::commit] is called. To achieve
+//! this, an _inactivity floor_ is maintained, which is the location at which all operations before
+//! are inactive. At commit-time, the inactivity floor is raised by the number of uncommitted
+//! operations plus 1 for the tailing commit op. During this process, any encountered active
+//! operations are re-applied to the tip of the log.
 //!
-//! |                               Log State                                | Inactivity Floor | Uncommitted Ops |
-//! |------------------------------------------------------------------------|------------------|-----------------|
-//! | [pre-commit] Set(a, v), Set(a, v')                                     |                0 |               2 |
-//! | [raise-floor] Set(a, v), Set(a, v'), Set(a, v'), Set(a, v')            |                3 |               2 |
-//! | [prune+commit] Set(a, v'), Commit(3)                                   |                3 |               0 |
-//! | [pre-commit] Set(a, v'), Commit(3), Set(b, v), Set(a, v'')             |                3 |               2 |
-//! | [raise-floor] Set(a, v'), Commit(3), Set(b, v), Set(a, v''), Set(b, v) |                6 |               2 |
-//! | [prune+commit] Set(a, v''), Set(b, v), Commit(6)                       |                6 |               0 |
+//! |                               Log State                                            | Inactivity Floor | Uncommitted Ops |
+//! |------------------------------------------------------------------------------------|------------------|-----------------|
+//! | [pre-commit] Update(a, v), Update(a, v')                                           |                0 |               2 |
+//! | [raise-floor] Update(a, v), Update(a, v'), Update(a, v'), Update(a, v')            |                3 |               2 |
+//! | [prune+commit] Update(a, v'), Commit(3)                                            |                3 |               0 |
+//! | [pre-commit] Update(a, v'), Commit(3), Update(b, v), Update(a, v'')                |                3 |               2 |
+//! | [raise-floor] Update(a, v'), Commit(3), Update(b, v), Update(a, v''), Update(b, v) |                6 |               2 |
+//! | [prune+commit] Update(a, v''), Update(b, v), Commit(6)                             |                6 |               0 |
 //!
 //! # Example
 //!
@@ -93,6 +96,7 @@
 //! ```
 
 use crate::{
+    adb::operation::Variable as Operation,
     index::Index,
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},
@@ -101,20 +105,17 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::Read;
+use commonware_codec::{Codec, Read};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
-use commonware_utils::{sequence::U32, Array, Span};
+use commonware_utils::{sequence::U32, Array};
 use futures::{pin_mut, try_join, StreamExt};
 use tracing::{debug, warn};
-
-pub mod operation;
-use operation::Operation;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.
 const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 
-/// Errors that can occur when interacting with a [`Store`] database.
+/// Errors that can occur when interacting with a [Store] database.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error(transparent)]
@@ -125,7 +126,7 @@ pub enum Error {
     KeyNotFound,
 }
 
-/// Configuration for initializing a [`Store`] database.
+/// Configuration for initializing a [Store] database.
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
     /// The name of the [`RStorage`] partition used to persist the log of operations.
@@ -157,15 +158,15 @@ pub struct Config<T: Translator, C> {
     pub buffer_pool: PoolRef,
 }
 
-/// An unauthenticated key-value database based off of an append-only [`VJournal`] of operations.
+/// An unauthenticated key-value database based off of an append-only [VJournal] of operations.
 pub struct Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Span,
+    V: Codec,
     T: Translator,
 {
-    /// A log of all [`Operation`]s that have been applied to the store.
+    /// A log of all [Operation]s that have been applied to the store.
     log: VJournal<E, Operation<K, V>>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
@@ -173,7 +174,7 @@ where
     ///
     /// # Invariant
     ///
-    /// Only references operations of type [`Operation::Set`].
+    /// Only references operations of type [Operation::Update].
     snapshot: Index<T, u64>,
 
     /// The number of items to store in each section of the variable journal.
@@ -201,14 +202,14 @@ impl<E, K, V, T> Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Span,
+    V: Codec,
     T: Translator,
 {
     /// Initializes a new [`Store`] database with the given configuration.
     ///
     /// ## Rollback
     ///
-    /// Any uncommitted operations will be rolled back if the [`Store`] was previously closed without
+    /// Any uncommitted operations will be rolled back if the [Store] was previously closed without
     /// committing.
     pub async fn init(
         context: E,
@@ -256,7 +257,7 @@ where
     /// If the key does not exist, returns `Ok(None)`.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         for location in self.snapshot.get(key) {
-            let Operation::Set(k, v) = self.get_op(*location).await? else {
+            let Operation::Update(k, v) = self.get_op(*location).await? else {
                 panic!("location ({location}) does not reference set operation",);
             };
 
@@ -271,7 +272,7 @@ where
     /// Updates the value associated with the given key in the store.
     ///
     /// The operation is immediately visible in the snapshot for subsequent queries, but remains
-    /// uncommitted until [`Store::commit`] is called. Uncommitted operations will be rolled back
+    /// uncommitted until [Store::commit] is called. Uncommitted operations will be rolled back
     /// if the store is closed without committing.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let new_location = self.op_count;
@@ -281,7 +282,7 @@ where
             self.snapshot.insert(&key, new_location);
         };
 
-        self.apply_op(Operation::Set(key.clone(), value.clone()))
+        self.apply_op(Operation::Update(key, value))
             .await
             .map(|_| ())
     }
@@ -310,7 +311,7 @@ where
     }
 
     /// Closes the store. Any uncommitted operations will be lost if they have not been committed
-    /// via [`Store::commit`].
+    /// via [Store::commit].
     pub async fn close(self) -> Result<(), Error> {
         if self.uncommitted_ops > 0 {
             warn!(
@@ -320,6 +321,25 @@ where
         }
 
         try_join!(self.log.close(), self.locations.close())?;
+        Ok(())
+    }
+
+    /// Simulates a commit failure by avoiding syncing either or both of the log or locations.
+    #[cfg(test)]
+    pub async fn simulate_failure(
+        mut self,
+        sync_locations: bool,
+        sync_log: bool,
+    ) -> Result<(), Error> {
+        if sync_locations {
+            self.locations.sync().await?;
+        }
+        if sync_log {
+            self.log
+                .sync(self.op_count / self.log_items_per_section)
+                .await?;
+        }
+
         Ok(())
     }
 
@@ -341,7 +361,7 @@ where
 
     /// Syncs the active section of the log to persistent storage.
     ///
-    /// This method ensures that all buffered data is written to disk, but unlike [`Store::commit`],
+    /// This method ensures that all buffered data is written to disk, but unlike [Store::commit],
     /// does not create a commit point.
     ///
     /// Use this method when you want to ensure data durability without creating a formal
@@ -378,7 +398,7 @@ where
                 self.op_count += 1;
 
                 match op {
-                    Operation::Set(key, _) => {
+                    Operation::Update(key, _) => {
                         uncommitted_ops += 1;
 
                         uncommitted_updates.push((loc, section, offset, key));
@@ -399,7 +419,7 @@ where
 
                         Self::delete_loc(&mut self.snapshot, &key, old_loc);
                     }
-                    Operation::Commit(floor_loc) => {
+                    Operation::CommitFloor(floor_loc) => {
                         // Bump the inactivity floor
                         self.inactivity_floor_loc = floor_loc;
                         last_commit_loc = Some((section, offset));
@@ -418,6 +438,7 @@ where
                         uncommitted_updates.clear();
                         uncommitted_ops = 0;
                     }
+                    _ => unreachable!("unexpected operation"),
                 }
             }
         }
@@ -472,12 +493,12 @@ where
         Ok(offset)
     }
 
-    /// Gets the location of the most recent [`Operation::Set`] for the key, or [`None`] if
+    /// Gets the location of the most recent [Operation::Update] for the key, or [None] if
     /// the key does not have a value.
     async fn get_loc(&self, key: &K) -> Result<Option<u64>, Error> {
         for loc in self.snapshot.get(key) {
             match self.get_op(*loc).await {
-                Ok(Operation::Set(k, _)) => {
+                Ok(Operation::Update(k, _)) => {
                     if k == *key {
                         return Ok(Some(*loc));
                     }
@@ -490,7 +511,7 @@ where
         Ok(None)
     }
 
-    /// Gets a [`Operation`] from the log at the given location.
+    /// Gets a [Operation] from the log at the given location.
     async fn get_op(&self, location: u64) -> Result<Operation<K, V>, Error> {
         let section = location / self.log_items_per_section;
         let offset = self.locations.read(location).await?.to_u32();
@@ -587,7 +608,7 @@ where
             self.inactivity_floor_loc += 1;
         }
 
-        self.apply_op(Operation::Commit(self.inactivity_floor_loc))
+        self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc))
             .await
             .map(|_| ())
     }
@@ -635,7 +656,10 @@ where
 mod test {
     use super::*;
     use crate::translator::TwoCap;
-    use commonware_cryptography::{blake3::Digest, Digest as _};
+    use commonware_cryptography::{
+        blake3::{hash, Digest},
+        Digest as _,
+    };
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
 
@@ -643,17 +667,17 @@ mod test {
     const PAGE_CACHE_SIZE: usize = 9;
 
     /// The type of the store used in tests.
-    type TestStore = Store<deterministic::Context, Digest, Digest, TwoCap>;
+    type TestStore = Store<deterministic::Context, Digest, Vec<u8>, TwoCap>;
 
     async fn create_test_store(context: deterministic::Context) -> TestStore {
         let cfg = Config {
             log_journal_partition: "journal".to_string(),
-            log_write_buffer: 64 * 1024,
+            log_write_buffer: 1024,
             log_compression: None,
-            log_codec_config: (),
-            log_items_per_section: 4,
-            locations_journal_partition: "locations".to_string(),
-            locations_items_per_blob: 4,
+            log_codec_config: ((0..=10000).into(), ()),
+            log_items_per_section: 7,
+            locations_journal_partition: "locations_journal".to_string(),
+            locations_items_per_blob: 11,
             translator: TwoCap,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
@@ -671,7 +695,7 @@ mod test {
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let d1 = Digest::random(&mut context);
-            let v1 = Digest::random(&mut context);
+            let v1 = vec![1, 2, 3];
             db.update(d1, v1).await.unwrap();
             db.close().await.unwrap();
             let mut db = create_test_store(context.clone()).await;
@@ -706,14 +730,14 @@ mod test {
             assert_eq!(store.inactivity_floor_loc, 0);
 
             let key = Digest::random(&mut ctx);
-            let value = Digest::random(&mut ctx);
+            let value = vec![2, 3, 4, 5];
 
             // Attempt to get a key that does not exist
             let result = store.get(&key).await;
             assert!(result.unwrap().is_none());
 
             // Insert a key-value pair
-            store.update(key, value).await.unwrap();
+            store.update(key, value.clone()).await.unwrap();
 
             assert_eq!(store.op_count, 1);
             assert_eq!(store.uncommitted_ops, 1);
@@ -735,7 +759,7 @@ mod test {
             assert_eq!(store.inactivity_floor_loc, 0);
 
             // Insert a key-value pair
-            store.update(key, value).await.unwrap();
+            store.update(key, value.clone()).await.unwrap();
 
             assert_eq!(store.op_count, 1);
             assert_eq!(store.uncommitted_ops, 1);
@@ -764,10 +788,10 @@ mod test {
             assert_eq!(fetched_value.unwrap(), value);
 
             // Insert two new k/v pairs to force pruning of the first section.
-            let (k1, v1) = (Digest::random(&mut ctx), Digest::random(&mut ctx));
-            let (k2, v2) = (Digest::random(&mut ctx), Digest::random(&mut ctx));
-            store.update(k1, v1).await.unwrap();
-            store.update(k2, v2).await.unwrap();
+            let (k1, v1) = (Digest::random(&mut ctx), vec![2, 3, 4, 5, 6]);
+            let (k2, v2) = (Digest::random(&mut ctx), vec![6, 7, 8]);
+            store.update(k1, v1.clone()).await.unwrap();
+            store.update(k2, v2.clone()).await.unwrap();
 
             assert_eq!(store.op_count, 6);
             assert_eq!(store.uncommitted_ops, 2);
@@ -800,8 +824,8 @@ mod test {
             const UPDATES: u64 = 100;
             let k = Digest::random(&mut ctx);
             for _ in 0..UPDATES {
-                let v = Digest::random(&mut ctx);
-                store.update(k, v).await.unwrap();
+                let v = vec![1, 2, 3, 4, 5];
+                store.update(k, v.clone()).await.unwrap();
             }
 
             let iter = store.snapshot.get(&k);
@@ -819,7 +843,7 @@ mod test {
             // 100 operations were applied, and two were moved due to their activity, plus
             // the commit operation.
             assert_eq!(store.op_count, UPDATES + 3);
-            // Only the highest `Set` operation is active, plus the commit operation above it.
+            // Only the highest `Update` operation is active, plus the commit operation above it.
             assert_eq!(store.inactivity_floor_loc, UPDATES + 1);
             // All blobs prior to the inactivity floor are pruned, so the oldest retained location
             // is the first in the last retained blob.
@@ -837,14 +861,14 @@ mod test {
         executor.start(|mut ctx| async move {
             let mut store = create_test_store(ctx.with_label("store")).await;
 
-            let (k1, v1) = (Digest::random(&mut ctx), Digest::random(&mut ctx));
-            let (mut k2, v2) = (Digest::random(&mut ctx), Digest::random(&mut ctx));
+            let (k1, v1) = (Digest::random(&mut ctx), vec![1, 2, 3, 4, 5]);
+            let (mut k2, v2) = (Digest::random(&mut ctx), vec![6, 7, 8, 9, 10]);
 
             // Ensure k2 shares 2 bytes with k1 (test DB uses `TwoCap` translator.)
             k2.0[0..2].copy_from_slice(&k1.0[0..2]);
 
-            store.update(k1, v1).await.unwrap();
-            store.update(k2, v2).await.unwrap();
+            store.update(k1, v1.clone()).await.unwrap();
+            store.update(k2, v2.clone()).await.unwrap();
 
             assert_eq!(store.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(store.get(&k2).await.unwrap().unwrap(), v2);
@@ -872,8 +896,8 @@ mod test {
 
             // Insert a key-value pair
             let k = Digest::random(&mut ctx);
-            let v = Digest::random(&mut ctx);
-            store.update(k, v).await.unwrap();
+            let v = vec![1, 2, 3, 4, 5];
+            store.update(k, v.clone()).await.unwrap();
 
             // Fetch the value
             let fetched_value = store.get(&k).await.unwrap();
@@ -895,7 +919,7 @@ mod test {
             assert!(fetched_value.is_none());
 
             // Re-insert the key
-            store.update(k, v).await.unwrap();
+            store.update(k, v.clone()).await.unwrap();
             let fetched_value = store.get(&k).await.unwrap();
             assert_eq!(fetched_value.unwrap(), v);
 
@@ -933,12 +957,12 @@ mod test {
             let k_a = Digest::random(&mut ctx);
             let k_b = Digest::random(&mut ctx);
 
-            let v_a = Digest::random(&mut ctx);
-            let v_b = Digest::random(&mut ctx);
-            let v_c = Digest::random(&mut ctx);
+            let v_a = vec![1];
+            let v_b = vec![];
+            let v_c = vec![4, 5, 6];
 
-            store.update(k_a, v_a).await.unwrap();
-            store.update(k_b, v_b).await.unwrap();
+            store.update(k_a, v_a.clone()).await.unwrap();
+            store.update(k_b, v_b.clone()).await.unwrap();
 
             store.commit().await.unwrap();
             assert_eq!(store.op_count, 6);
@@ -946,8 +970,8 @@ mod test {
             assert_eq!(store.inactivity_floor_loc, 3);
             assert_eq!(store.get(&k_a).await.unwrap().unwrap(), v_a);
 
-            store.update(k_b, v_a).await.unwrap();
-            store.update(k_a, v_c).await.unwrap();
+            store.update(k_b, v_a.clone()).await.unwrap();
+            store.update(k_a, v_c.clone()).await.unwrap();
 
             store.commit().await.unwrap();
             assert_eq!(store.op_count, 9);
@@ -957,6 +981,92 @@ mod test {
             assert_eq!(store.get(&k_b).await.unwrap().unwrap(), v_a);
 
             store.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    pub fn test_store_db_recovery() {
+        let executor = deterministic::Runner::default();
+        // Build a db with 1000 keys, some of which we update and some of which we delete.
+        const ELEMENTS: u64 = 1000;
+        executor.start(|context| async move {
+            let mut db = create_test_store(context.with_label("store")).await;
+
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
+                db.update(k, v.clone()).await.unwrap();
+            }
+
+            /*            // Simulate a failed commit and test that we rollback to the previous root.
+            db.simulate_failure(false, false).await.unwrap();
+            let mut db = create_test_store(context.with_label("store")).await;
+            assert_eq!(db.op_count(), 0);
+
+            // re-apply the updates and commit them this time.
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
+                db.update(k, v.clone()).await.unwrap();
+            }*/
+            db.commit().await.unwrap();
+
+            // Update every 3rd key
+            for i in 0u64..ELEMENTS {
+                if i % 3 != 0 {
+                    continue;
+                }
+                let k = hash(&i.to_be_bytes());
+                let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
+                db.update(k, v.clone()).await.unwrap();
+            }
+
+            /*// Simulate a failed commit and test that we rollback to the previous root.
+            db.simulate_failure(false, false).await.unwrap();
+            let mut db = create_test_store(context.with_label("store")).await;
+            assert_eq!(db.op_count(), 0);
+
+            // Re-apply updates for every 3rd key and commit them this time.
+            for i in 0u64..ELEMENTS {
+                if i % 3 != 0 {
+                    continue;
+                }
+                let k = hash(&i.to_be_bytes());
+                let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
+                db.update(k, v.clone()).await.unwrap();
+            }*/
+            db.commit().await.unwrap();
+
+            // Delete every 7th key
+            for i in 0u64..ELEMENTS {
+                if i % 7 != 1 {
+                    continue;
+                }
+                let k = hash(&i.to_be_bytes());
+                db.delete(k).await.unwrap();
+            }
+
+            /*            // Simulate a failed commit and test that we rollback to the previous root.
+            db.simulate_failure(false, false).await.unwrap();
+            let mut db = create_test_store(context.with_label("store")).await;
+            assert_eq!(db.op_count(), 0);
+
+            // Re-delete every 7th key and commit this time.
+            for i in 0u64..ELEMENTS {
+                if i % 7 != 1 {
+                    continue;
+                }
+                let k = hash(&i.to_be_bytes());
+                db.delete(k).await.unwrap();
+            }*/
+            db.commit().await.unwrap();
+
+            assert_eq!(db.op_count(), 2787);
+            assert_eq!(db.inactivity_floor_loc, 1480);
+            assert_eq!(db.oldest_retained_loc, 1480);
+            assert_eq!(db.snapshot.items(), 857);
+
+            db.destroy().await.unwrap();
         });
     }
 }
