@@ -17,9 +17,9 @@ _To run the model checker, you must install the Java Development Kit (JDK) 17 or
 The specification supports various configurations for testing:
 
 - **N=6, F=0**: 6 replicas, no Byzantine replicas
-- **N=7, F=0**: 7 replicas, no Byzantine replicas
 - **N=6, F=1**: 6 replicas, 1 Byzantine replica
 - **N=6, F=2**: 6 replicas, 2 Byzantine replicas (safety violations expected)
+- **N=7, F=1**: 7 replicas, no Byzantine replicas
 
 ## Safety Invariants
 
