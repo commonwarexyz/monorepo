@@ -104,71 +104,6 @@ pub(crate) mod tests {
         Standard::<Sha256>::new()
     }
 
-    /// Test that invalid bounds are rejected
-    #[test]
-    fn test_sync_invalid_bounds() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            let resolver = FailResolver::<Digest, Digest, Digest>::new();
-            let target_root = Digest::from([0; 32]);
-
-            let config = Config {
-                context: context.with_label("sync"),
-                update_receiver: None,
-                db_config: create_test_config(context.next_u64()),
-                fetch_batch_size: NZU64!(2),
-                target: Target {
-                    root: target_root,
-                    lower_bound_ops: 1,
-                    upper_bound_ops: 0,
-                },
-                resolver,
-                hasher: test_hasher(),
-                apply_batch_size: 2,
-                max_outstanding_requests: 2,
-            };
-
-            // Attempt to sync - should fail due to invalid bounds
-            let result = sync(config).await;
-            assert!(result.is_err(), "Expected sync to fail with invalid bounds");
-            if let Err(error) = result {
-                match error {
-                    SyncError::InvalidTarget { .. } => {}
-                    other => panic!("Expected InvalidTarget error, got: {other:?}"),
-                }
-            }
-        });
-    }
-
-    #[test_traced]
-    fn test_sync_resolver_fails() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            let resolver = FailResolver::<Digest, Digest, Digest>::new();
-            let target_root = Digest::from([0; 32]);
-
-            let config = Config {
-                context: context.with_label("sync"),
-                update_receiver: None,
-                db_config: create_test_config(context.next_u64()),
-                fetch_batch_size: NZU64!(2),
-                target: Target {
-                    root: target_root,
-                    lower_bound_ops: 0,
-                    upper_bound_ops: 4,
-                },
-                resolver,
-                hasher: test_hasher(),
-                apply_batch_size: 2,
-                max_outstanding_requests: 2,
-            };
-
-            // Attempt to sync - should fail due to resolver error
-            let result = sync(config).await;
-            assert!(result.is_err());
-        });
-    }
-
     #[test_case(1, NZU64!(1); "singleton db with batch size == 1")]
     #[test_case(1, NZU64!(2); "singleton db with batch size > db size")]
     #[test_case(1000, NZU64!(1); "db with batch size 1")]
@@ -1162,6 +1097,65 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             reopened_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that invalid bounds are rejected
+    #[test]
+    fn test_sync_invalid_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let resolver = FailResolver::<Digest, Digest, Digest>::new();
+            let target_root = Digest::from([0; 32]);
+
+            let config = Config {
+                context: context.with_label("sync"),
+                update_receiver: None,
+                db_config: create_test_config(context.next_u64()),
+                fetch_batch_size: NZU64!(2),
+                target: Target {
+                    root: target_root,
+                    lower_bound_ops: 1,
+                    upper_bound_ops: 0,
+                },
+                resolver,
+                hasher: test_hasher(),
+                apply_batch_size: 2,
+                max_outstanding_requests: 2,
+            };
+
+            // Attempt to sync - should fail due to invalid bounds
+            let result = sync(config).await;
+            assert!(matches!(result, Err(SyncError::InvalidTarget { .. })));
+        });
+    }
+
+    #[test_traced]
+    fn test_sync_resolver_fails() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let resolver = FailResolver::<Digest, Digest, Digest>::new();
+            let target_root = Digest::from([0; 32]);
+
+            let config = Config {
+                context: context.with_label("sync"),
+                update_receiver: None,
+                db_config: create_test_config(context.next_u64()),
+                fetch_batch_size: NZU64!(2),
+                target: Target {
+                    root: target_root,
+                    lower_bound_ops: 0,
+                    upper_bound_ops: 4,
+                },
+                resolver,
+                hasher: test_hasher(),
+                apply_batch_size: 2,
+                max_outstanding_requests: 2,
+            };
+
+            // Attempt to sync - should fail due to resolver error
+            let result = sync(config).await;
+            assert!(result.is_err());
         });
     }
 }
