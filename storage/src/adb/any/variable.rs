@@ -253,6 +253,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                         return Err(Error::JournalError(e));
                     }
                     Ok((section, offset, size, op)) => {
+                        debug!(
+                            section,
+                            offset,
+                            size,
+                            log_size = self.log_size,
+                            "replaying operation"
+                        );
                         if !oldest_retained_loc_found {
                             self.log_size = section * self.log_items_per_section;
                             self.oldest_retained_loc = self.log_size;
@@ -353,6 +360,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Confirm post-conditions hold.
         assert_eq!(self.log_size, leaf_pos_to_num(self.mmr.size()).unwrap());
         assert_eq!(self.log_size, self.locations.size().await?);
+
+        debug!(log_size = self.log_size, "build_snapshot_from_log complete");
 
         Ok(self)
     }
@@ -525,9 +534,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let section = self.current_section();
         let (offset, _) = self.log.append(section, op).await?;
         self.log_size += 1;
+        debug!(
+            log_size = self.log_size,
+            section, offset, "appended operation"
+        );
         self.locations.append(offset.into()).await?;
 
         if section != self.current_section() {
+            debug!(section, "syncing log");
             self.log.sync(section).await?;
         }
 
@@ -605,15 +619,20 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn commit(&mut self) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.
+        debug!(log_size = self.log_size, "committing");
         self.raise_inactivity_floor(self.uncommitted_ops + 1)
             .await?;
         self.uncommitted_ops = 0;
         self.sync().await?;
+        debug!(log_size = self.log_size, "commit complete");
 
         // TODO: Make the frequency with which we prune known inactive items configurable in case
         // this turns out to be a significant part of commit overhead, or the user wants to ensure
         // the log is backed up externally before discarding.
-        self.prune_inactive().await
+        self.prune_inactive().await?;
+        debug!(log_size = self.log_size, "prune_inactive complete");
+
+        Ok(())
     }
 
     /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
@@ -702,16 +721,23 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         if ops_to_prune == 0 {
             return Ok(());
         }
-        debug!(ops_to_prune, target_prune_loc, "pruning inactive ops");
+        debug!(
+            log_size = self.log_size,
+            ops_to_prune, target_prune_loc, "pruning inactive ops"
+        );
 
         // Prune the log up to the section containing the requested pruning location. We always
         // prune the log first, and then prune the MMR+locations structures based on the log's
         // actual pruning boundary. This procedure ensures all log operations always have
         // corresponding MMR & location entries, even in the event of failures, with no need for
         // special recovery.
-        let section = target_prune_loc / self.log_items_per_section;
-        self.log.prune(section).await?;
-        self.oldest_retained_loc = section * self.log_items_per_section;
+        let section_with_target = target_prune_loc / self.log_items_per_section;
+        debug!(section = section_with_target, "section with target");
+        if section_with_target == 0 {
+            return Ok(());
+        }
+        self.log.prune(section_with_target).await?;
+        self.oldest_retained_loc = section_with_target * self.log_items_per_section;
 
         // Prune the MMR & locations map up to the oldest retained item in the log after pruning.
         self.locations.prune(self.oldest_retained_loc).await?;

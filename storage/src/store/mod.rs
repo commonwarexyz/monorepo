@@ -847,7 +847,7 @@ mod test {
             assert_eq!(store.inactivity_floor_loc, UPDATES + 1);
             // All blobs prior to the inactivity floor are pruned, so the oldest retained location
             // is the first in the last retained blob.
-            assert_eq!(store.oldest_retained_loc, UPDATES);
+            assert_eq!(store.oldest_retained_loc, UPDATES - UPDATES % 7);
             assert_eq!(store.uncommitted_ops, 0);
 
             store.destroy().await.unwrap();
@@ -998,7 +998,7 @@ mod test {
                 db.update(k, v.clone()).await.unwrap();
             }
 
-            /*            // Simulate a failed commit and test that we rollback to the previous root.
+            // Simulate a failed commit and test that we rollback to the previous root.
             db.simulate_failure(false, false).await.unwrap();
             let mut db = create_test_store(context.with_label("store")).await;
             assert_eq!(db.op_count(), 0);
@@ -1008,8 +1008,9 @@ mod test {
                 let k = hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v.clone()).await.unwrap();
-            }*/
+            }
             db.commit().await.unwrap();
+            let op_count = db.op_count();
 
             // Update every 3rd key
             for i in 0u64..ELEMENTS {
@@ -1021,10 +1022,10 @@ mod test {
                 db.update(k, v.clone()).await.unwrap();
             }
 
-            /*// Simulate a failed commit and test that we rollback to the previous root.
+            // Simulate a failed commit and test that we rollback to the previous root.
             db.simulate_failure(false, false).await.unwrap();
             let mut db = create_test_store(context.with_label("store")).await;
-            assert_eq!(db.op_count(), 0);
+            assert_eq!(db.op_count(), op_count);
 
             // Re-apply updates for every 3rd key and commit them this time.
             for i in 0u64..ELEMENTS {
@@ -1034,7 +1035,7 @@ mod test {
                 let k = hash(&i.to_be_bytes());
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v.clone()).await.unwrap();
-            }*/
+            }
             db.commit().await.unwrap();
 
             // Delete every 7th key
@@ -1063,7 +1064,7 @@ mod test {
 
             assert_eq!(db.op_count(), 2787);
             assert_eq!(db.inactivity_floor_loc, 1480);
-            assert_eq!(db.oldest_retained_loc, 1480);
+            assert_eq!(db.oldest_retained_loc, 1480 - 1480 % 7);
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
