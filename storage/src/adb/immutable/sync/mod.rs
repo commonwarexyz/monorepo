@@ -124,13 +124,9 @@ where
         lower_bound: u64,
         upper_bound: u64,
     ) -> Result<Self::Journal, Self::Error> {
-        // Check if there are operations at or after lower_bound
-        let has_operations = journal
-            .has_operations_from(lower_bound)
-            .await
-            .map_err(crate::adb::Error::from)?;
+        let size = journal.size().await.map_err(crate::adb::Error::from)?;
 
-        if !has_operations {
+        if size <= lower_bound {
             // Close existing journal and create new one
             journal.close().await.map_err(crate::adb::Error::from)?;
             Self::create_journal(context, config, lower_bound, upper_bound)

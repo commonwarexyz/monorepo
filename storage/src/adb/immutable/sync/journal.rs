@@ -108,12 +108,6 @@ where
         Ok(self.current_size)
     }
 
-    async fn has_operations_from(&self, location: u64) -> Result<bool, Self::Error> {
-        // Efficiently check if we have operations at or after the given location
-        // Since we track current_size, this is trivial
-        Ok(self.current_size > location)
-    }
-
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
         // Validate that we're appending at the expected location
         if self.current_size > self.upper_bound {

@@ -113,6 +113,7 @@ use std::{
     io::Cursor,
     marker::PhantomData,
     num::NonZeroU64,
+    ops::Bound,
 };
 use tracing::{debug, trace, warn};
 use zstd::{bulk::compress, decode_all};
@@ -283,7 +284,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             return Self::init(context, cfg).await;
         }
 
-        // We have overlap with the sync range. First prune sections below the lower bound.
+        // Prune sections below the lower bound.
         if lower_section > 0 {
             journal.prune(lower_section).await?;
         }
@@ -297,10 +298,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 "Existing journal data exceeds sync range, removing sections beyond upper bound"
             );
 
-            use std::ops::Bound::{Excluded, Unbounded};
             let sections_to_remove: Vec<u64> = journal
                 .blobs
-                .range((Excluded(upper_section), Unbounded))
+                .range((Bound::Excluded(upper_section), Bound::Unbounded))
                 .map(|(&section, _)| section)
                 .collect();
 
@@ -316,13 +316,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                     journal.tracked.dec();
                 }
             }
-        } else {
-            debug!(
-                last_section,
-                lower_section,
-                upper_section,
-                "Existing journal data within sync range, no section removal needed"
-            );
         }
 
         Ok(journal)
