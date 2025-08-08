@@ -2,7 +2,7 @@ use crate::{
     adb::{
         immutable::{Config, Immutable},
         operation::Variable,
-        sync::{Database, Journal, Target},
+        sync::{self, Journal as _},
     },
     journal::variable,
     mmr::hasher::Standard,
@@ -22,7 +22,7 @@ mod tests;
 
 pub type Error = crate::adb::Error;
 
-impl<E, K, V, H, T> Database for Immutable<E, K, V, H, T>
+impl<E, K, V, H, T> sync::Database for Immutable<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -43,7 +43,7 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, <Self::Journal as Journal>::Error> {
+    ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
         let journal_config = variable::Config {
             partition: config.log_journal_partition.clone(),
             compression: config.log_compression,
@@ -69,7 +69,7 @@ where
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(_) => existing_ops += 1,
-                    Err(e) => return Err(<Self::Journal as Journal>::Error::from(e)),
+                    Err(e) => return Err(<Self::Journal as sync::Journal>::Error::from(e)),
                 }
             }
         }
@@ -96,7 +96,7 @@ where
         db_config: Self::Config,
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        target: Target<Self::Digest>,
+        target: sync::Target<Self::Digest>,
         apply_batch_size: usize,
     ) -> Result<Self, Self::Error> {
         // Extract the Variable journal from the wrapper
