@@ -1,6 +1,6 @@
 use crate::{
     adb::{
-        immutable::{Config, Immutable},
+        immutable,
         operation::Variable,
         sync::{self, Journal as _},
     },
@@ -19,7 +19,7 @@ mod verifier;
 
 pub type Error = crate::adb::Error;
 
-impl<E, K, V, H, T> sync::Database for Immutable<E, K, V, H, T>
+impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -31,7 +31,7 @@ where
     type Journal = journal::ImmutableSyncJournal<E, K, V>;
     type Verifier = verifier::Verifier<H>;
     type Error = crate::adb::Error;
-    type Config = Config<T, V::Cfg>;
+    type Config = immutable::Config<T, V::Cfg>;
     type Digest = H::Digest;
     type Context = E;
 
@@ -100,7 +100,7 @@ where
         let variable_journal = journal.into_inner();
 
         // Create a SyncConfig-like structure for init_synced
-        let sync_config = ImmutableSyncConfig {
+        let sync_config = Config {
             db_config,
             log: variable_journal,
             lower_bound: target.lower_bound_ops,
@@ -176,8 +176,8 @@ where
     }
 }
 
-/// Configuration for syncing an [Immutable] to a pruned target state.
-pub struct ImmutableSyncConfig<E, K, V, T, D, C>
+/// Configuration for syncing an [immutable::Immutable] to a target state.
+pub struct Config<E, K, V, T, D, C>
 where
     E: Storage + Metrics,
     K: Array,
@@ -186,10 +186,11 @@ where
     D: commonware_cryptography::Digest,
 {
     /// Database configuration.
-    pub db_config: Config<T, C>,
+    pub db_config: immutable::Config<T, C>,
 
-    /// The [Immutable]'s log of operations. It has elements from `lower_bound` to `upper_bound`, inclusive.
-    /// Reports `lower_bound` as its pruning boundary (oldest retained operation index).
+    /// The [immutable::Immutable]'s log of operations. It has elements from `lower_bound` to
+    /// `upper_bound`, inclusive. Reports `lower_bound` as its pruning boundary (oldest retained
+    /// operation index).
     pub log: variable::Journal<E, Variable<K, V>>,
 
     /// Sync lower boundary (inclusive) - operations below this index are pruned.
