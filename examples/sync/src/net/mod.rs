@@ -143,75 +143,66 @@ pub trait WireMessage: Encode + Clone + Sized + Send + Sync + 'static {
 pub mod client;
 pub mod wire;
 
-use commonware_cryptography::Digest as CryptoDigest;
+use commonware_cryptography::Digest;
 use commonware_storage::adb::sync::Target;
-use commonware_storage::mmr::verification::Proof;
 use std::num::NonZeroU64;
 
-/// Protocol adapter that abstracts over Any/Immutable wire message enums so a single resolver can be used.
-pub trait Protocol: Clone + Send + 'static {
-    type Digest: CryptoDigest;
-    type Op: Clone + Send + 'static;
-    type Message: WireMessage + Clone + Send + Sync + 'static;
-
-    fn make_get_target(request_id: RequestId) -> Self::Message;
-    fn parse_get_target_response(msg: Self::Message) -> Result<Target<Self::Digest>, crate::Error>;
-
-    fn make_get_ops(
-        request_id: RequestId,
-        size: u64,
-        start_loc: u64,
-        max_ops: NonZeroU64,
-    ) -> Self::Message;
-    fn parse_get_ops_response(
-        msg: Self::Message,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Op>), crate::Error>;
-}
-
-/// Generic network resolver that works with any protocol implementing [Protocol].
+/// Generic network resolver that works directly with generic wire messages.
 #[derive(Clone)]
-pub struct GenericResolver<E, P>
+pub struct GenericResolver<E, Op, D>
 where
     E: commonware_runtime::Network
         + commonware_runtime::Spawner
         + commonware_runtime::Clock
         + Clone,
-    P: Protocol,
+    Op: Read<Cfg = ()> + Write + EncodeSize + Encode + Clone + Send + Sync + 'static,
+    D: Digest,
 {
-    client: client::NetworkClient<E, P::Message>,
+    client: client::NetworkClient<E, wire::Message<Op, D>>,
 }
 
-impl<E, P> GenericResolver<E, P>
+impl<E, Op, D> GenericResolver<E, Op, D>
 where
     E: commonware_runtime::Network
         + commonware_runtime::Spawner
         + commonware_runtime::Clock
         + Clone,
-    P: Protocol,
+    Op: Clone + Send + Sync + 'static + ReadExt<Cfg = ()> + Write + EncodeSize,
+    D: Digest,
 {
     pub fn new(context: E, server_addr: std::net::SocketAddr) -> Self {
-        let client = client::NetworkClient::<E, P::Message>::new(context, server_addr);
+        let client = client::NetworkClient::<E, wire::Message<Op, D>>::new(context, server_addr);
         Self { client }
     }
 
-    pub async fn get_sync_target(&self) -> Result<Target<P::Digest>, crate::Error> {
-        let request_id = 0u64;
-        let request = P::make_get_target(request_id);
+    pub async fn get_sync_target(&self) -> Result<Target<D>, crate::Error> {
+        let request =
+            wire::Message::GetSyncTargetRequest(wire::GetSyncTargetRequest { request_id: 0 });
         let response = self.client.send(request).await?;
-        P::parse_get_target_response(response)
+        match response {
+            wire::Message::GetSyncTargetResponse(r) => Ok(r.target),
+            wire::Message::Error(err) => Err(crate::Error::Server {
+                code: err.error_code,
+                message: err.message,
+            }),
+            other => Err(crate::Error::UnexpectedResponse {
+                request_id: other.request_id(),
+            }),
+        }
     }
 }
 
-impl<E, P> commonware_storage::adb::sync::resolver::Resolver for GenericResolver<E, P>
+impl<E, Op, D> commonware_storage::adb::sync::resolver::Resolver for GenericResolver<E, Op, D>
 where
     E: commonware_runtime::Network
         + commonware_runtime::Spawner
         + commonware_runtime::Clock
         + Clone,
-    P: Protocol,
+    Op: Clone + Send + Sync + 'static + ReadExt<Cfg = ()> + Write + EncodeSize,
+    D: Digest,
 {
-    type Digest = P::Digest;
-    type Op = P::Op;
+    type Digest = D;
+    type Op = Op;
     type Error = crate::Error;
 
     async fn get_operations(
@@ -223,10 +214,27 @@ where
         commonware_storage::adb::sync::resolver::FetchResult<Self::Op, Self::Digest>,
         Self::Error,
     > {
-        let request_id = 0u64;
-        let request = P::make_get_ops(request_id, size, start_loc, max_ops);
+        let request = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
+            request_id: 0,
+            size,
+            start_loc,
+            max_ops,
+        });
         let response = self.client.send(request).await?;
-        let (proof, operations) = P::parse_get_ops_response(response)?;
+        let (proof, operations) = match response {
+            wire::Message::GetOperationsResponse(r) => (r.proof, r.operations),
+            wire::Message::Error(err) => {
+                return Err(crate::Error::Server {
+                    code: err.error_code,
+                    message: err.message,
+                })
+            }
+            other => {
+                return Err(crate::Error::UnexpectedResponse {
+                    request_id: other.request_id(),
+                })
+            }
+        };
         let (tx, _rx) = futures::channel::oneshot::channel();
         Ok(commonware_storage::adb::sync::resolver::FetchResult {
             proof,

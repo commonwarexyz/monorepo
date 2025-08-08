@@ -1,78 +1,14 @@
 //! Any protocol adapter; now delegates wire shape to generic net::wire types.
 
-use crate::net;
 use crate::net::wire;
-use crate::net::RequestId;
 use crate::Operation;
 use commonware_cryptography::sha256::Digest;
-use commonware_storage::adb::sync::Target;
-use commonware_storage::mmr::verification::Proof;
-use std::num::NonZeroU64;
 
 pub type Message = wire::Message<Operation, Digest>;
-type GetOperationsRequest = wire::GetOperationsRequest;
-type GetSyncTargetRequest = wire::GetSyncTargetRequest;
-
-/// Implement Protocol adapter for Any protocol
-#[derive(Clone)]
-pub struct AnyProtocol;
-
-impl net::Protocol for AnyProtocol {
-    type Digest = Digest;
-    type Op = crate::Operation;
-    type Message = Message;
-
-    fn make_get_target(request_id: RequestId) -> Self::Message {
-        Message::GetSyncTargetRequest(GetSyncTargetRequest { request_id })
-    }
-
-    fn parse_get_target_response(msg: Self::Message) -> Result<Target<Self::Digest>, crate::Error> {
-        match msg {
-            Message::GetSyncTargetResponse(r) => Ok(r.target),
-            Message::Error(err) => Err(crate::Error::Server {
-                code: err.error_code,
-                message: err.message,
-            }),
-            other => Err(crate::Error::UnexpectedResponse {
-                request_id: other.request_id(),
-            }),
-        }
-    }
-
-    fn make_get_ops(
-        request_id: RequestId,
-        size: u64,
-        start_loc: u64,
-        max_ops: NonZeroU64,
-    ) -> Self::Message {
-        Message::GetOperationsRequest(GetOperationsRequest {
-            request_id,
-            size,
-            start_loc,
-            max_ops,
-        })
-    }
-
-    fn parse_get_ops_response(
-        msg: Self::Message,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Op>), crate::Error> {
-        match msg {
-            Message::GetOperationsResponse(r) => Ok((r.proof, r.operations)),
-            Message::Error(err) => Err(crate::Error::Server {
-                code: err.error_code,
-                message: err.message,
-            }),
-            other => Err(crate::Error::UnexpectedResponse {
-                request_id: other.request_id(),
-            }),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::net::{ErrorCode, Requester};
+    use crate::net::{wire::GetOperationsRequest, ErrorCode, Requester};
     use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_utils::NZU64;
 
