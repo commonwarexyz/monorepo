@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr};
+use std::collections::HashMap;
 
 use crate::net::{request_id::RequestId, WireMessage, MAX_MESSAGE_SIZE};
 use crate::Error;
@@ -75,15 +75,17 @@ async fn run<Si, St, M>(
 /// Starts the I/O task and returns a sender for requests and a handle to the task.
 /// The I/O task is responsible for sending and receiving messages over the network.
 /// The I/O task uses a oneshot channel to send responses back to the caller.
-pub async fn start_io<E, M>(
+pub fn start_io<E, Si, St, M>(
     context: E,
-    server_addr: SocketAddr,
+    sink: Si,
+    stream: St,
 ) -> Result<(mpsc::Sender<Request<M>>, commonware_runtime::Handle<()>), commonware_runtime::Error>
 where
-    E: commonware_runtime::Spawner + commonware_runtime::Network,
+    E: commonware_runtime::Spawner,
+    Si: Sink,
+    St: Stream,
     M: WireMessage + Send + 'static,
 {
-    let (sink, stream) = context.dial(server_addr).await?;
     let (request_tx, request_rx) = mpsc::channel(REQUEST_BUFFER_SIZE);
     let handle = context.spawn(move |_| run(sink, stream, request_rx, HashMap::new()));
     Ok((request_tx, handle))

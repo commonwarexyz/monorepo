@@ -35,15 +35,18 @@ where
     Op: Clone + Send + Sync + 'static + ReadExt<Cfg = ()> + Write + EncodeSize,
     D: Digest,
 {
-    pub async fn new(context: E, server_addr: std::net::SocketAddr) -> Self {
-        let (request_sender, _) = io::start_io::<E, wire::Message<Op, D>>(context, server_addr)
-            .await
-            .unwrap();
-        Self {
+    /// Returns a resolver connected to the server at the given address.
+    pub async fn connect(
+        context: E,
+        server_addr: std::net::SocketAddr,
+    ) -> Result<Self, commonware_runtime::Error> {
+        let (sink, stream) = context.dial(server_addr).await?;
+        let (request_tx, _) = io::start_io(context, sink, stream)?;
+        Ok(Self {
             request_id_generator: request_id::Generator::new(),
-            request_tx: request_sender,
+            request_tx,
             _phantom: PhantomData,
-        }
+        })
     }
 
     pub async fn get_sync_target(&self) -> Result<Target<D>, crate::Error> {
@@ -102,7 +105,7 @@ where
             start_loc,
             max_ops,
         });
-        let (tx, rx) = futures::channel::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         self.request_tx
             .clone()
             .send(io::Request {
@@ -122,13 +125,9 @@ where
                     message: err.message,
                 })
             }
-            other => {
-                return Err(crate::Error::UnexpectedResponse {
-                    request_id: other.request_id(),
-                })
-            }
+            _ => return Err(crate::Error::UnexpectedResponse { request_id }),
         };
-        let (tx, _rx) = futures::channel::oneshot::channel();
+        let (tx, _rx) = oneshot::channel();
         Ok(commonware_storage::adb::sync::resolver::FetchResult {
             proof,
             operations,
