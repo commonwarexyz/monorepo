@@ -1890,7 +1890,7 @@ pub(super) mod test {
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
             assert_eq!(historical_ops, ops[5..15]);
-            assert!(AnyTest::verify_proof(
+            assert!(verify_proof(
                 &mut hasher,
                 &historical_proof,
                 5,
@@ -1911,7 +1911,7 @@ pub(super) mod test {
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(AnyTest::verify_proof(
+            assert!(verify_proof(
                 &mut hasher,
                 &historical_proof,
                 5,
@@ -1946,7 +1946,7 @@ pub(super) mod test {
             single_db.sync().await.unwrap();
             let single_root = single_db.root(&mut hasher);
 
-            assert!(AnyTest::verify_proof(
+            assert!(verify_proof(
                 &mut hasher,
                 &single_proof,
                 0,
@@ -2007,7 +2007,7 @@ pub(super) mod test {
 
                 // Verify proof against reference root
                 let ref_root = ref_db.root(&mut hasher);
-                assert!(AnyTest::verify_proof(
+                assert!(verify_proof(
                     &mut hasher,
                     &historical_proof,
                     start_loc,
@@ -2100,25 +2100,13 @@ pub(super) mod test {
                 let mut proof = proof.clone();
                 proof.digests[0] = hash(b"invalid");
                 let root_hash = db.root(&mut hasher);
-                assert!(!AnyTest::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    0,
-                    &ops,
-                    &root_hash
-                ));
+                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
             }
             {
                 let mut proof = proof.clone();
                 proof.digests.push(hash(b"invalid"));
                 let root_hash = db.root(&mut hasher);
-                assert!(!AnyTest::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    0,
-                    &ops,
-                    &root_hash
-                ));
+                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
             }
 
             // Changing the ops should cause verification to fail
@@ -2126,42 +2114,24 @@ pub(super) mod test {
                 let mut ops = ops.clone();
                 ops[0] = Operation::Update(hash(b"key1"), hash(b"value1"));
                 let root_hash = db.root(&mut hasher);
-                assert!(!AnyTest::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    0,
-                    &ops,
-                    &root_hash
-                ));
+                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
             }
             {
                 let mut ops = ops.clone();
                 ops.push(Operation::Update(hash(b"key1"), hash(b"value1")));
                 let root_hash = db.root(&mut hasher);
-                assert!(!AnyTest::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    0,
-                    &ops,
-                    &root_hash
-                ));
+                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
             }
 
             // Changing the start location should cause verification to fail
             {
                 let root_hash = db.root(&mut hasher);
-                assert!(!AnyTest::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    1,
-                    &ops,
-                    &root_hash
-                ));
+                assert!(!verify_proof(&mut hasher, &proof, 1, &ops, &root_hash));
             }
 
             // Changing the root digest should cause verification to fail
             {
-                assert!(!AnyTest::verify_proof(
+                assert!(!verify_proof(
                     &mut hasher,
                     &proof,
                     0,
@@ -2175,13 +2145,7 @@ pub(super) mod test {
                 let mut proof = proof.clone();
                 proof.size = 100;
                 let root_hash = db.root(&mut hasher);
-                assert!(!AnyTest::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    0,
-                    &ops,
-                    &root_hash
-                ));
+                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
             }
 
             db.destroy().await.unwrap();
@@ -2235,7 +2199,7 @@ pub(super) mod test {
             let (original_proof, original_ops) = db.proof(proof_start, max_ops).await.unwrap();
 
             // Verify the proof works
-            assert!(AnyTest::verify_proof(
+            assert!(verify_proof(
                 &mut hasher,
                 &original_proof,
                 proof_start,
