@@ -33,7 +33,7 @@ pub fn create_config() -> Config<Translator, ()> {
 
 /// Create deterministic test operations for demonstration purposes.
 /// Generates Set operations and periodic Commit operations.
-pub fn create_test_immutable_operations(count: usize, seed: u64) -> Vec<Operation> {
+pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
     let mut operations = Vec::new();
     let mut hasher = <Hasher as CryptoHasher>::new();
 
