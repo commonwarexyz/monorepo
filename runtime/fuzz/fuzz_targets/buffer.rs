@@ -49,7 +49,6 @@ enum FuzzOperation {
         new_size: u16,
     },
     WriteSync,
-    WriteClose,
     AppendData {
         data: Vec<u8>,
     },
@@ -195,12 +194,6 @@ fn fuzz(input: FuzzInput) {
                 FuzzOperation::WriteSync => {
                     if let Some(ref writer) = write_buffer {
                         let _ = writer.sync().await;
-                    }
-                }
-
-                FuzzOperation::WriteClose => {
-                    if let Some(writer) = write_buffer.take() {
-                        let _ = writer.close().await;
                     }
                 }
 
