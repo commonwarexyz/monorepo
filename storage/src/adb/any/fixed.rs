@@ -1,11 +1,36 @@
-//! Authenticated databases (ADBs) that provides succinct proofs of _any_ value ever associated
-//! with a key.
+//! An authenticated database (ADB) that provides succinct proofs of _any_ value ever associated
+//! with a key. Its implementation is based on an [Mmr] over a log of state-change operations backed
+//! by a [Journal].
+//!
+//! In the [Any] db, it is not possible to prove whether the value of a key is the currently active
+//! one, only that it was associated with the key at some point in the past. This type of
+//! authenticated database is most useful for applications involving keys that are given values once
+//! and cannot be updated after.
 
-pub mod fixed;
-pub mod sync;
-pub mod variable;
+use crate::{
+    adb::Error,
+    index::Index,
+    journal::fixed::{Config as JConfig, Journal},
+    mmr::{
+        bitmap::Bitmap,
+        hasher::Standard,
+        iterator::{leaf_num_to_pos, leaf_pos_to_num},
+        journaled::{Config as MmrConfig, Mmr},
+        verification::Proof,
+    },
+    store::operation::Fixed as Operation,
+    translator::Translator,
+};
+use commonware_codec::Encode as _;
+use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
+use commonware_utils::Array;
+use futures::{
+    future::{try_join_all, TryFutureExt},
+    pin_mut, try_join, StreamExt,
+};
+use tracing::{debug, warn};
 
-/*
 /// Indicator that the generic parameter N is unused by the call. N is only
 /// needed if the caller is providing the optional bitmap.
 const UNUSED_N: usize = 0;
@@ -61,7 +86,7 @@ pub struct SyncConfig<E: RStorage + Metrics, K: Array, V: Array, T: Translator, 
 
     /// The [Any]'s log of operations. It has elements from `lower_bound` to `upper_bound`, inclusive.
     /// Reports `lower_bound` as its pruning boundary (oldest retained operation index).
-    pub log: Journal<E, Fixed<K, V>>,
+    pub log: Journal<E, Operation<K, V>>,
 
     /// Sync lower boundary (inclusive) - operations below this index are pruned.
     pub lower_bound: u64,
@@ -90,7 +115,7 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T:
     ///
     /// The number of leaves in this MMR always equals the number of operations in the unpruned
     /// `log`.
-    pub(super) ops: Mmr<E, H>,
+    pub(crate) mmr: Mmr<E, H>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position of
     /// each operation in the log is called its _location_, which is a stable identifier. Pruning is
@@ -101,41 +126,31 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T:
     ///
     /// An operation's location is always equal to the number of the MMR leaf storing the digest of
     /// the operation.
-    pub(super) log: Journal<E, Fixed<K, V>>,
+    pub(crate) log: Journal<E, Operation<K, V>>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
-    pub(super) inactivity_floor_loc: u64,
+    pub(crate) inactivity_floor_loc: u64,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
     ///
     /// # Invariant
     ///
-    /// Only references operations of type [Fixed::Update].
-    pub(super) snapshot: Index<T, u64>,
+    /// Only references operations of type [Operation::Update].
+    pub(crate) snapshot: Index<T, u64>,
 
     /// The number of operations that are pending commit.
-    pub(super) uncommitted_ops: u64,
+    pub(crate) uncommitted_ops: u64,
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
-    pub(super) hasher: Standard<H>,
+    pub(crate) hasher: Standard<H>,
 
     /// The number of operations to keep below the inactivity floor before pruning.
     /// This creates a gap between the inactivity floor and the pruning boundary,
     /// which is useful for serving state sync clients, who may request operations
     /// below the inactivity floor.
-    pub(super) pruning_delay: u64,
-}
-
-/// The result of a database `update` operation.
-pub enum UpdateResult {
-    /// Tried to set a key to its current value.
-    NoOp,
-    /// Key was not previously in the snapshot & its new loc is the wrapped value.
-    Inserted(u64),
-    /// Key was previously in the snapshot & its (old, new) loc pair is wrapped.
-    Updated(u64, u64),
+    pub(crate) pruning_delay: u64,
 }
 
 impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator>
@@ -160,7 +175,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         .await?;
 
         let db = Any {
-            ops: mmr,
+            mmr,
             log,
             snapshot,
             inactivity_floor_loc,
@@ -210,11 +225,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             },
         )
         .await
-        .map_err(Error::MmrError)?;
+        .map_err(Error::Mmr)?;
 
         // Convert MMR size to number of operations.
         let Some(mmr_ops) = leaf_pos_to_num(mmr.size()) else {
-            return Err(Error::MmrError(crate::mmr::Error::InvalidSize(mmr.size())));
+            return Err(Error::Mmr(crate::mmr::Error::InvalidSize(mmr.size())));
         };
 
         // Apply the missing operations from the log to the MMR.
@@ -243,7 +258,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         .await?;
 
         let mut db = Any {
-            ops: mmr,
+            mmr,
             log: cfg.log,
             snapshot,
             inactivity_floor_loc,
@@ -258,11 +273,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// Initialize and return the mmr and log from the given config, correcting any inconsistencies
     /// between them. Any uncommitted operations in the log will be rolled back and the state of the
     /// db will be as of the last committed operation.
-    pub(super) async fn init_mmr_and_log(
+    pub(crate) async fn init_mmr_and_log(
         context: E,
         cfg: Config<T>,
         hasher: &mut Standard<H>,
-    ) -> Result<(Mmr<E, H>, Journal<E, Fixed<K, V>>), Error> {
+    ) -> Result<(Mmr<E, H>, Journal<E, Operation<K, V>>), Error> {
         let mut mmr = Mmr::init(
             context.with_label("mmr"),
             hasher,
@@ -292,7 +307,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let mut log_size = log.size().await?;
         let mut rewind_leaf_num = log_size;
         while rewind_leaf_num > 0 {
-            if let Fixed::CommitFloor(_) = log.read(rewind_leaf_num - 1).await? {
+            if let Operation::CommitFloor(_) = log.read(rewind_leaf_num - 1).await? {
                 break;
             }
             rewind_leaf_num -= 1;
@@ -322,7 +337,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 mmr.add_batched(hasher, &op.encode()).await?;
                 next_mmr_leaf_num += 1;
             }
-            mmr.sync(hasher).await.map_err(Error::MmrError)?;
+            mmr.sync(hasher).await.map_err(Error::Mmr)?;
         }
 
         // At this point the MMR and log should be consistent.
@@ -338,9 +353,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// number of bits corresponding to the portion of the database below the inactivity floor, and
     /// this method will panic otherwise. The caller is responsible for syncing any changes made to
     /// the bitmap.
-    pub(super) async fn build_snapshot_from_log<const N: usize>(
+    pub(crate) async fn build_snapshot_from_log<const N: usize>(
         start_leaf_num: u64,
-        log: &Journal<E, Fixed<K, V>>,
+        log: &Journal<E, Operation<K, V>>,
         snapshot: &mut Index<T, u64>,
         mut bitmap: Option<&mut Bitmap<H, N>>,
     ) -> Result<u64, Error> {
@@ -356,11 +371,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         while let Some(result) = stream.next().await {
             match result {
                 Err(e) => {
-                    return Err(Error::JournalError(e));
+                    return Err(Error::Journal(e));
                 }
                 Ok((i, op)) => {
                     match op {
-                        Fixed::Delete(key) => {
+                        Operation::Delete(key) => {
                             let result =
                                 Any::<E, K, V, H, T>::delete_key(snapshot, log, &key, i).await?;
                             if let Some(ref mut bitmap) = bitmap {
@@ -370,22 +385,17 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                                 }
                             }
                         }
-                        Fixed::Update(key, _) => {
+                        Operation::Update(key, _) => {
                             let result =
-                                Any::<E, K, V, H, T>::update_loc(snapshot, log, &key, None, i)
-                                    .await?;
+                                Any::<E, K, V, H, T>::update_loc(snapshot, log, &key, i).await?;
                             if let Some(ref mut bitmap) = bitmap {
-                                match result {
-                                    UpdateResult::NoOp => unreachable!("unexpected no-op update"),
-                                    UpdateResult::Inserted(_) => bitmap.append(true),
-                                    UpdateResult::Updated(old_loc, _) => {
-                                        bitmap.set_bit(old_loc, false);
-                                        bitmap.append(true);
-                                    }
+                                if let Some(old_loc) = result {
+                                    bitmap.set_bit(old_loc, false);
                                 }
+                                bitmap.append(true);
                             }
                         }
-                        Fixed::CommitFloor(loc) => inactivity_floor_loc = loc,
+                        Operation::CommitFloor(loc) => inactivity_floor_loc = loc,
                     }
                     if let Some(ref mut bitmap) = bitmap {
                         // If we reach this point and a bit hasn't been added for the operation, then it's
@@ -402,44 +412,34 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     }
 
     /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or
-    /// insert it if the key isn't already present. If a `value` is provided, then it is used to see
-    /// if the key is already assigned that value, in which case there is no update and
-    /// UpdateResult::NoOp is returned.
+    /// insert it if the key isn't already present.
     async fn update_loc(
         snapshot: &mut Index<T, u64>,
-        log: &Journal<E, Fixed<K, V>>,
+        log: &Journal<E, Operation<K, V>>,
         key: &K,
-        value: Option<&V>,
         new_loc: u64,
-    ) -> Result<UpdateResult, Error> {
+    ) -> Result<Option<u64>, Error> {
         // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
         // cursor to look for the key.
         let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
-            return Ok(UpdateResult::Inserted(new_loc));
+            return Ok(None);
         };
 
         // Iterate over conflicts in the snapshot.
         while let Some(&loc) = cursor.next() {
-            let (k, v) = Self::get_update_op(log, loc).await?;
+            let (k, _) = Self::get_update_op(log, loc).await?;
             if k == *key {
                 // Found the key in the snapshot.
-                if let Some(value) = value {
-                    if v == *value {
-                        // The key value is the same as the previous one: treat as a no-op.
-                        return Ok(UpdateResult::NoOp);
-                    }
-                }
-
-                // Update its location to the given one.
                 assert!(new_loc > loc);
                 cursor.update(new_loc);
-                return Ok(UpdateResult::Updated(loc, new_loc));
+                return Ok(Some(loc));
             }
         }
 
         // The key wasn't in the snapshot, so add it to the cursor.
         cursor.insert(new_loc);
-        Ok(UpdateResult::Inserted(new_loc))
+
+        Ok(None)
     }
 
     /// Get the update operation corresponding to a location from the snapshot.
@@ -449,8 +449,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// Panics if the location does not reference an update operation. This should never happen
     /// unless the snapshot is buggy, or this method is being used to look up an operation
     /// independent of the snapshot contents.
-    async fn get_update_op(log: &Journal<E, Fixed<K, V>>, loc: u64) -> Result<(K, V), Error> {
-        let Fixed::Update(k, v) = log.read(loc).await? else {
+    async fn get_update_op(log: &Journal<E, Operation<K, V>>, loc: u64) -> Result<(K, V), Error> {
+        let Operation::Update(k, v) = log.read(loc).await? else {
             panic!("location does not reference update operation. loc={loc}");
         };
 
@@ -464,7 +464,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Get the value & location of the active operation for `key` in the db, or None if it has no
     /// value.
-    pub(super) async fn get_with_loc(&self, key: &K) -> Result<Option<(V, u64)>, Error> {
+    pub(crate) async fn get_with_loc(&self, key: &K) -> Result<Option<(V, u64)>, Error> {
         for &loc in self.snapshot.get(key) {
             let (k, v) = Self::get_update_op(&self.log, loc).await?;
             if k == *key {
@@ -478,12 +478,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
     pub fn op_count(&self) -> u64 {
-        leaf_pos_to_num(self.ops.size()).unwrap()
+        leaf_pos_to_num(self.mmr.size()).unwrap()
     }
 
     /// Return the oldest location that remains readable & provable.
     pub fn oldest_retained_loc(&self) -> Option<u64> {
-        self.ops
+        self.mmr
             .oldest_retained_pos()
             .map(|pos| leaf_pos_to_num(pos).unwrap())
     }
@@ -494,29 +494,26 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         self.inactivity_floor_loc
     }
 
-    /// Updates `key` to have value `value`. If the key already has this same value, then this is a
-    /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
-    /// next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
-        let new_loc = self.op_count();
-        let res = Any::<_, _, _, H, T>::update_loc(
-            &mut self.snapshot,
-            &self.log,
-            &key,
-            Some(&value),
-            new_loc,
-        )
-        .await?;
-        match res {
-            UpdateResult::NoOp => {
-                // The key already has this value, so this is a no-op.
-                return Ok(res);
-            }
-            UpdateResult::Inserted(_) => (),
-            UpdateResult::Updated(_, _) => (),
-        }
+    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
+    /// subject to rollback until the next successful `commit`.
+    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        self.update_return_loc(key, value).await?;
 
-        let op = Fixed::Update(key, value);
+        Ok(())
+    }
+
+    /// Updates `key` to have value `value`, returning the old location of the key if it was
+    /// previously assigned some value, and None otherwise.
+    pub(crate) async fn update_return_loc(
+        &mut self,
+        key: K,
+        value: V,
+    ) -> Result<Option<u64>, Error> {
+        let new_loc = self.op_count();
+        let res =
+            Any::<_, _, _, H, T>::update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
+
+        let op = Operation::Update(key, value);
         self.apply_op(op).await?;
 
         Ok(res)
@@ -529,7 +526,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let loc = self.op_count();
         let r = Self::delete_key(&mut self.snapshot, &self.log, &key, loc).await?;
         if r.is_some() {
-            self.apply_op(Fixed::Delete(key)).await?;
+            self.apply_op(Operation::Delete(key)).await?;
         };
 
         Ok(r)
@@ -539,7 +536,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// associated with it.
     async fn delete_key(
         snapshot: &mut Index<T, u64>,
-        log: &Journal<E, Fixed<K, V>>,
+        log: &Journal<E, Operation<K, V>>,
         key: &K,
         delete_loc: u64,
     ) -> Result<Option<u64>, Error> {
@@ -571,18 +568,18 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     ///
     /// Panics if there are uncommitted operations.
     pub fn root(&self, hasher: &mut Standard<H>) -> H::Digest {
-        self.ops.root(hasher)
+        self.mmr.root(hasher)
     }
 
     /// Update the operations MMR with the given operation, and append the operation to the log. The
     /// `commit` method must be called to make any applied operation persistent & recoverable.
-    pub(super) async fn apply_op(&mut self, op: Fixed<K, V>) -> Result<u64, Error> {
+    pub(crate) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<u64, Error> {
         // Update the ops MMR.
-        self.ops.add_batched(&mut self.hasher, &op.encode()).await?;
+        self.mmr.add_batched(&mut self.hasher, &op.encode()).await?;
         self.uncommitted_ops += 1;
 
         // Append the operation to the log.
-        self.log.append(op).await.map_err(Error::JournalError)
+        self.log.append(op).await.map_err(Error::Journal)
     }
 
     /// Generate and return:
@@ -599,7 +596,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         &self,
         start_loc: u64,
         max_ops: u64,
-    ) -> Result<(Proof<H::Digest>, Vec<Fixed<K, V>>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         self.historical_proof(self.op_count(), start_loc, max_ops)
             .await
     }
@@ -610,7 +607,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         size: u64,
         start_loc: u64,
         max_ops: u64,
-    ) -> Result<(Proof<H::Digest>, Vec<Fixed<K, V>>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         let start_pos = leaf_num_to_pos(start_loc);
         let end_loc = std::cmp::min(
             size.saturating_sub(1),
@@ -620,7 +617,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let mmr_size = leaf_num_to_pos(size);
 
         let proof = self
-            .ops
+            .mmr
             .historical_range_proof(mmr_size, start_pos, end_pos)
             .await?;
         let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
@@ -655,10 +652,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
     /// parallelized if a thread pool is provided.
-    pub(super) async fn sync(&mut self) -> Result<(), Error> {
+    pub(crate) async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
-            self.log.sync().map_err(Error::JournalError),
-            self.ops.sync(&mut self.hasher).map_err(Error::MmrError),
+            self.log.sync().map_err(Error::Journal),
+            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
         )?;
 
         Ok(())
@@ -667,9 +664,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     // Moves the given operation to the tip of the log if it is active, rendering its old location
     // inactive. If the operation was not active, then this is a no-op. Returns the old location
     // of the operation if it was active.
-    pub(super) async fn move_op_if_active(
+    pub(crate) async fn move_op_if_active(
         &mut self,
-        op: Fixed<K, V>,
+        op: Operation<K, V>,
         old_loc: u64,
     ) -> Result<Option<u64>, Error> {
         // If the translated key is not in the snapshot, get a cursor to look for the key.
@@ -705,7 +702,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     ///
     /// This method does not change the state of the db's snapshot, but it always changes the root
     /// since it applies at least one operation.
-    pub(super) async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
+    pub(crate) async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
         for _ in 0..max_steps {
             if self.inactivity_floor_loc == self.op_count() {
                 break;
@@ -716,7 +713,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             self.inactivity_floor_loc += 1;
         }
 
-        self.apply_op(Fixed::CommitFloor(self.inactivity_floor_loc))
+        self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc))
             .await?;
 
         Ok(())
@@ -724,7 +721,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Prune historical operations that are > `pruning_delay` steps behind the inactivity floor.
     /// This does not affect the db's root or current snapshot.
-    pub(super) async fn prune_inactive(&mut self) -> Result<(), Error> {
+    pub(crate) async fn prune_inactive(&mut self) -> Result<(), Error> {
         let Some(oldest_retained_loc) = self.log.oldest_retained_pos().await? else {
             return Ok(());
         };
@@ -739,7 +736,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
         // Prune the MMR, whose pruning boundary serves as the "source of truth" for proving.
         let prune_to_pos = leaf_num_to_pos(target_prune_loc);
-        self.ops
+        self.mmr
             .prune_to_pos(&mut self.hasher, prune_to_pos)
             .await?;
 
@@ -760,8 +757,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         }
 
         try_join!(
-            self.log.close().map_err(Error::JournalError),
-            self.ops.close(&mut self.hasher).map_err(Error::MmrError),
+            self.log.close().map_err(Error::Journal),
+            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
         )?;
 
         Ok(())
@@ -770,8 +767,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         try_join!(
-            self.log.destroy().map_err(Error::JournalError),
-            self.ops.destroy().map_err(Error::MmrError),
+            self.log.destroy().map_err(Error::Journal),
+            self.mmr.destroy().map_err(Error::Mmr),
         )?;
 
         Ok(())
@@ -781,10 +778,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening.
     #[cfg(test)]
     pub async fn simulate_failed_commit_mmr(mut self, write_limit: usize) -> Result<(), Error> {
-        self.apply_op(Fixed::CommitFloor(self.inactivity_floor_loc))
+        self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc))
             .await?;
         self.log.close().await?;
-        self.ops
+        self.mmr
             .simulate_partial_sync(&mut self.hasher, write_limit)
             .await?;
 
@@ -795,9 +792,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// fully committing the log, requiring rollback of the MMR and log upon reopening.
     #[cfg(test)]
     pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error> {
-        self.apply_op(Fixed::CommitFloor(self.inactivity_floor_loc))
+        self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc))
             .await?;
-        self.ops.close(&mut self.hasher).await?;
+        self.mmr.close(&mut self.hasher).await?;
         // Rewind the operation log over the commit op to force rollback to the previous commit.
         self.log.rewind(self.log.size().await? - 1).await?;
         self.log.close().await?;
@@ -812,7 +809,7 @@ pub fn verify_proof<H, K, V>(
     hasher: &mut Standard<H>,
     proof: &Proof<H::Digest>,
     start_loc: u64,
-    ops: &[Fixed<K, V>],
+    ops: &[Operation<K, V>],
     root: &H::Digest,
 ) -> bool
 where
@@ -821,12 +818,14 @@ where
     V: Array,
 {
     let start_pos = leaf_num_to_pos(start_loc);
+
     let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
+
     proof.verify_range_inclusion(hasher, &elements, start_pos, root)
 }
 
 #[cfg(test)]
-pub(crate) mod test {
+pub(super) mod test {
     use super::*;
     use crate::{
         mmr::{hasher::Standard, mem::Mmr as MemMmr},
@@ -867,7 +866,7 @@ pub(crate) mod test {
     }
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    pub(crate) type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    pub type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
@@ -901,17 +900,17 @@ pub(crate) mod test {
 
     /// Create n random operations. Some portion of the updates are deletes.
     /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
-    pub(crate) fn create_test_ops(n: usize) -> Vec<Fixed<Digest, Digest>> {
+    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
         let mut rng = StdRng::seed_from_u64(1337);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
             let key = Digest::random(&mut rng);
             if i % 10 == 0 && i > 0 {
-                ops.push(Fixed::Delete(prev_key));
+                ops.push(Operation::Delete(prev_key));
             } else {
                 let value = Digest::random(&mut rng);
-                ops.push(Fixed::Update(key, value));
+                ops.push(Operation::Update(key, value));
                 prev_key = key;
             }
         }
@@ -919,16 +918,16 @@ pub(crate) mod test {
     }
 
     /// Applies the given operations to the database.
-    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Fixed<Digest, Digest>>) {
+    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
-                Fixed::Update(key, value) => {
+                Operation::Update(key, value) => {
                     db.update(key, value).await.unwrap();
                 }
-                Fixed::Delete(key) => {
+                Operation::Delete(key) => {
                     db.delete(key).await.unwrap();
                 }
-                Fixed::CommitFloor(_) => {
+                Operation::CommitFloor(_) => {
                     db.commit().await.unwrap();
                 }
             }
@@ -989,34 +988,22 @@ pub(crate) mod test {
             assert!(db.get(&d1).await.unwrap().is_none());
             assert!(db.get(&d2).await.unwrap().is_none());
 
-            assert!(matches!(
-                db.update(d1, d2).await.unwrap(),
-                UpdateResult::Inserted(0)
-            ));
+            db.update(d1, d2).await.unwrap();
             assert_eq!(db.get(&d1).await.unwrap().unwrap(), d2);
             assert!(db.get(&d2).await.unwrap().is_none());
 
-            assert!(matches!(
-                db.update(d2, d1).await.unwrap(),
-                UpdateResult::Inserted(1)
-            ));
+            db.update(d2, d1).await.unwrap();
             assert_eq!(db.get(&d1).await.unwrap().unwrap(), d2);
             assert_eq!(db.get(&d2).await.unwrap().unwrap(), d1);
 
-            assert!(matches!(db.delete(d1).await.unwrap(), Some(0)));
+            db.delete(d1).await.unwrap();
             assert!(db.get(&d1).await.unwrap().is_none());
             assert_eq!(db.get(&d2).await.unwrap().unwrap(), d1);
 
-            assert!(matches!(
-                db.update(d1, d1).await.unwrap(),
-                UpdateResult::Inserted(3)
-            ));
+            db.update(d1, d1).await.unwrap();
             assert_eq!(db.get(&d1).await.unwrap().unwrap(), d1);
 
-            assert!(matches!(
-                db.update(d2, d2).await.unwrap(),
-                UpdateResult::Updated(1, 4)
-            ));
+            db.update(d2, d2).await.unwrap();
             assert_eq!(db.get(&d2).await.unwrap().unwrap(), d2);
 
             assert_eq!(db.log.size().await.unwrap(), 5); // 4 updates, 1 deletion.
@@ -1029,24 +1016,10 @@ pub(crate) mod test {
             assert_eq!(db.inactivity_floor_loc, 3);
             assert_eq!(db.log.size().await.unwrap(), 6); // 4 updates, 1 deletion, 1 commit
             db.sync().await.unwrap();
-            let root = db.root(&mut hasher);
-
-            // Multiple assignments of the same value should be a no-op.
-            assert!(matches!(
-                db.update(d1, d1).await.unwrap(),
-                UpdateResult::NoOp
-            ));
-            assert!(matches!(
-                db.update(d2, d2).await.unwrap(),
-                UpdateResult::NoOp
-            ));
-            // Log and root should be unchanged.
-            assert_eq!(db.log.size().await.unwrap(), 6);
-            assert_eq!(db.root(&mut hasher), root);
 
             // Delete all keys.
-            assert!(matches!(db.delete(d1).await.unwrap(), Some(3)));
-            assert!(matches!(db.delete(d2).await.unwrap(), Some(4)));
+            db.delete(d1).await.unwrap();
+            db.delete(d2).await.unwrap();
             assert!(db.get(&d1).await.unwrap().is_none());
             assert!(db.get(&d2).await.unwrap().is_none());
             assert_eq!(db.log.size().await.unwrap(), 8); // 4 updates, 3 deletions, 1 commit
@@ -1056,7 +1029,7 @@ pub(crate) mod test {
             let root = db.root(&mut hasher);
 
             // Multiple deletions of the same key should be a no-op.
-            assert!(db.delete(d1).await.unwrap().is_none());
+            db.delete(d1).await.unwrap();
             assert_eq!(db.log.size().await.unwrap(), 8);
             assert_eq!(db.root(&mut hasher), root);
 
@@ -1207,7 +1180,7 @@ pub(crate) mod test {
             // retained op to tip.
             let max_ops = 4;
             let end_loc = db.op_count();
-            let start_pos = db.ops.pruned_to_pos();
+            let start_pos = db.mmr.pruned_to_pos();
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.raise_inactivity_floor(100).await.unwrap();
@@ -1288,7 +1261,7 @@ pub(crate) mod test {
                 new_db.update(k, v).await.unwrap();
             }
             new_db
-                .apply_op(Fixed::CommitFloor(new_db.inactivity_floor_loc))
+                .apply_op(Operation::CommitFloor(new_db.inactivity_floor_loc))
                 .await
                 .unwrap();
             new_db.sync().await.unwrap();
@@ -1442,7 +1415,7 @@ pub(crate) mod test {
 
             // Check the recovered state is correct.
             let db = AnyTest {
-                ops: mmr,
+                mmr,
                 log,
                 snapshot,
                 inactivity_floor_loc,
@@ -1490,7 +1463,7 @@ pub(crate) mod test {
     pub fn test_any_db_init_synced_empty_to_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let log = Journal::<Context, Fixed<Digest, Digest>>::init(
+            let log = Journal::<Context, Operation<Digest, Digest>>::init(
                 context.clone(),
                 JConfig {
                     partition: "sync_basic_log".into(),
@@ -1518,7 +1491,7 @@ pub(crate) mod test {
             assert_eq!(synced_db.op_count(), 0);
             assert_eq!(synced_db.inactivity_floor_loc, 0);
             assert_eq!(synced_db.log.size().await.unwrap(), 0);
-            assert_eq!(synced_db.ops.size(), 0);
+            assert_eq!(synced_db.mmr.size(), 0);
 
             // Test that we can perform operations on the synced database
             let key1 = hash(&1u64.to_be_bytes());
@@ -1558,7 +1531,7 @@ pub(crate) mod test {
             // Get pinned nodes and target hash before moving source_db
             let pinned_nodes_pos = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(lower_bound_ops));
             let pinned_nodes =
-                join_all(pinned_nodes_pos.map(|pos| source_db.ops.get_node(pos))).await;
+                join_all(pinned_nodes_pos.map(|pos| source_db.mmr.get_node(pos))).await;
             let pinned_nodes = pinned_nodes
                 .iter()
                 .map(|node| node.as_ref().unwrap().unwrap())
@@ -1567,7 +1540,7 @@ pub(crate) mod test {
             let target_hash = source_db.root(&mut hasher);
 
             // Create log with operations
-            let mut log = Journal::<_, Fixed<Digest, Digest>>::init_sync(
+            let mut log = Journal::<_, Operation<Digest, Digest>>::init_sync(
                 context.clone().with_label("ops_log"),
                 JConfig {
                     partition: format!("ops_log_{}", context.next_u64()),
@@ -1605,8 +1578,8 @@ pub(crate) mod test {
             assert_eq!(db.op_count(), upper_bound_ops + 1);
             assert_eq!(db.inactivity_floor_loc, lower_bound_ops);
             assert_eq!(db.oldest_retained_loc(), Some(lower_bound_ops));
-            assert_eq!(db.ops.size(), source_db.ops.size());
-            assert_eq!(db.ops.pruned_to_pos(), leaf_num_to_pos(lower_bound_ops));
+            assert_eq!(db.mmr.size(), source_db.mmr.size());
+            assert_eq!(db.mmr.pruned_to_pos(), leaf_num_to_pos(lower_bound_ops));
             assert_eq!(
                 db.log.size().await.unwrap(),
                 source_db.log.size().await.unwrap()
@@ -1619,10 +1592,10 @@ pub(crate) mod test {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &ops {
-                if let Fixed::Update(key, value) = op {
+                if let Operation::Update(key, value) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
-                } else if let Fixed::Delete(key) = op {
+                } else if let Operation::Delete(key) = op {
                     expected_kvs.remove(key);
                     deleted_keys.insert(*key);
                 }
@@ -1660,7 +1633,7 @@ pub(crate) mod test {
                 let upper_bound = std::cmp::min(lower_bound + 49, total_ops - 1);
 
                 // Create log with operations
-                let mut log = Journal::<_, Fixed<Digest, Digest>>::init_sync(
+                let mut log = Journal::<_, Operation<Digest, Digest>>::init_sync(
                     context.clone().with_label("boundary_log"),
                     JConfig {
                         partition: format!("boundary_log_{}_{}", lower_bound, context.next_u64()),
@@ -1682,7 +1655,7 @@ pub(crate) mod test {
                 log.sync().await.unwrap();
 
                 let pinned_nodes = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(lower_bound))
-                    .map(|pos| source_db.ops.get_node(pos));
+                    .map(|pos| source_db.mmr.get_node(pos));
                 let pinned_nodes = join_all(pinned_nodes).await;
                 let pinned_nodes = pinned_nodes
                     .iter()
@@ -1706,20 +1679,20 @@ pub(crate) mod test {
                 // Verify database state
                 let expected_op_count = upper_bound + 1;
                 assert_eq!(db.log.size().await.unwrap(), expected_op_count);
-                assert_eq!(db.ops.size(), leaf_num_to_pos(expected_op_count));
+                assert_eq!(db.mmr.size(), leaf_num_to_pos(expected_op_count));
                 assert_eq!(db.op_count(), expected_op_count);
                 assert_eq!(db.inactivity_floor_loc, lower_bound);
                 assert_eq!(db.oldest_retained_loc(), Some(lower_bound));
-                assert_eq!(db.ops.pruned_to_pos(), leaf_num_to_pos(lower_bound));
+                assert_eq!(db.mmr.pruned_to_pos(), leaf_num_to_pos(lower_bound));
 
                 // Verify state matches the source operations
                 let mut expected_kvs = HashMap::new();
                 let mut deleted_keys = HashSet::new();
                 for op in &ops[lower_bound as usize..=upper_bound as usize] {
-                    if let Fixed::Update(key, value) = op {
+                    if let Operation::Update(key, value) = op {
                         expected_kvs.insert(*key, *value);
                         deleted_keys.remove(key);
-                    } else if let Fixed::Delete(key) = op {
+                    } else if let Operation::Delete(key) = op {
                         expected_kvs.remove(key);
                         deleted_keys.insert(*key);
                     }
@@ -1760,7 +1733,7 @@ pub(crate) mod test {
             let sync_db_original_size = sync_db.op_count();
 
             // Get pinned nodes before closing the database
-            let pinned_nodes_map = sync_db.ops.get_pinned_nodes();
+            let pinned_nodes_map = sync_db.mmr.get_pinned_nodes();
             let pinned_nodes =
                 Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(sync_db_original_size))
                     .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
@@ -1778,7 +1751,7 @@ pub(crate) mod test {
             let target_db_op_count = target_db.op_count();
             let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc;
             let target_db_log_size = target_db.log.size().await.unwrap();
-            let target_db_mmr_size = target_db.ops.size();
+            let target_db_mmr_size = target_db.mmr.size();
 
             let sync_lower_bound = target_db.inactivity_floor_loc;
             let sync_upper_bound = target_db.op_count() - 1;
@@ -1786,7 +1759,7 @@ pub(crate) mod test {
             let mut hasher = Standard::<Sha256>::new();
             let target_hash = target_db.root(&mut hasher);
 
-            let AnyTest { ops, log, .. } = target_db;
+            let AnyTest { mmr, log, .. } = target_db;
 
             // Re-open `sync_db`
             let sync_db = Any::init_synced(
@@ -1808,9 +1781,9 @@ pub(crate) mod test {
             assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
             assert_eq!(sync_db.oldest_retained_loc(), Some(sync_lower_bound));
             assert_eq!(sync_db.log.size().await.unwrap(), target_db_log_size);
-            assert_eq!(sync_db.ops.size(), target_db_mmr_size);
+            assert_eq!(sync_db.mmr.size(), target_db_mmr_size);
             assert_eq!(
-                sync_db.ops.pruned_to_pos(),
+                sync_db.mmr.pruned_to_pos(),
                 leaf_num_to_pos(sync_lower_bound)
             );
 
@@ -1821,10 +1794,10 @@ pub(crate) mod test {
             let mut expected_kvs = HashMap::new();
             let mut deleted_keys = HashSet::new();
             for op in &original_ops {
-                if let Fixed::Update(key, value) = op {
+                if let Operation::Update(key, value) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
-                } else if let Fixed::Delete(key) = op {
+                } else if let Operation::Delete(key) = op {
                     expected_kvs.remove(key);
                     deleted_keys.insert(*key);
                 }
@@ -1839,7 +1812,7 @@ pub(crate) mod test {
             }
 
             sync_db.destroy().await.unwrap();
-            ops.destroy().await.unwrap();
+            mmr.destroy().await.unwrap();
         });
     }
 
@@ -1859,13 +1832,13 @@ pub(crate) mod test {
             let target_db_op_count = db.op_count();
             let target_db_inactivity_floor_loc = db.inactivity_floor_loc;
             let target_db_log_size = db.log.size().await.unwrap();
-            let target_db_mmr_size = db.ops.size();
+            let target_db_mmr_size = db.mmr.size();
 
-            let AnyTest { ops, log, .. } = db;
+            let AnyTest { mmr, log, .. } = db;
 
             // When we re-open the database, the MMR is closed and the log is opened.
             let mut hasher = Standard::<Sha256>::new();
-            ops.close(&mut hasher).await.unwrap();
+            mmr.close(&mut hasher).await.unwrap();
 
             let sync_db: AnyTest = Any::init_synced(
                 context.clone(),
@@ -1886,9 +1859,9 @@ pub(crate) mod test {
             assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
             assert_eq!(sync_db.oldest_retained_loc(), Some(sync_lower_bound));
             assert_eq!(sync_db.log.size().await.unwrap(), target_db_log_size);
-            assert_eq!(sync_db.ops.size(), target_db_mmr_size);
+            assert_eq!(sync_db.mmr.size(), target_db_mmr_size);
             assert_eq!(
-                sync_db.ops.pruned_to_pos(),
+                sync_db.mmr.pruned_to_pos(),
                 leaf_num_to_pos(sync_lower_bound)
             );
 
@@ -1917,7 +1890,7 @@ pub(crate) mod test {
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
             assert_eq!(historical_ops, ops[5..15]);
-            assert!(verify_proof(
+            assert!(AnyTest::verify_proof(
                 &mut hasher,
                 &historical_proof,
                 5,
@@ -1938,7 +1911,7 @@ pub(crate) mod test {
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(verify_proof(
+            assert!(AnyTest::verify_proof(
                 &mut hasher,
                 &historical_proof,
                 5,
@@ -1973,7 +1946,7 @@ pub(crate) mod test {
             single_db.sync().await.unwrap();
             let single_root = single_db.root(&mut hasher);
 
-            assert!(verify_proof(
+            assert!(AnyTest::verify_proof(
                 &mut hasher,
                 &single_proof,
                 0,
@@ -2034,7 +2007,7 @@ pub(crate) mod test {
 
                 // Verify proof against reference root
                 let ref_root = ref_db.root(&mut hasher);
-                assert!(verify_proof(
+                assert!(AnyTest::verify_proof(
                     &mut hasher,
                     &historical_proof,
                     start_loc,
@@ -2062,10 +2035,7 @@ pub(crate) mod test {
             // Historical size > current database size is invalid
             let result = db.historical_proof(op_count + 1, op_count, 5).await;
             match result {
-                Err(Error::MmrError(crate::mmr::Error::HistoricalSizeTooLarge(
-                    requested,
-                    actual,
-                ))) => {
+                Err(Error::Mmr(crate::mmr::Error::HistoricalSizeTooLarge(requested, actual))) => {
                     assert_eq!(requested, leaf_num_to_pos(op_count + 1));
                     assert_eq!(actual, leaf_num_to_pos(op_count));
                 }
@@ -2089,10 +2059,7 @@ pub(crate) mod test {
             // Historical size == start location is invalid
             let result = db.historical_proof(op_count, op_count, 5).await;
             match result {
-                Err(Error::MmrError(crate::mmr::Error::HistoricalSizeTooSmall(
-                    size,
-                    start_loc,
-                ))) => {
+                Err(Error::Mmr(crate::mmr::Error::HistoricalSizeTooSmall(size, start_loc))) => {
                     assert_eq!(size, leaf_num_to_pos(op_count));
                     assert_eq!(start_loc, leaf_num_to_pos(op_count));
                 }
@@ -2102,10 +2069,7 @@ pub(crate) mod test {
             // Historical size < start location is invalid
             let result = db.historical_proof(op_count, op_count + 1, 5).await;
             match result {
-                Err(Error::MmrError(crate::mmr::Error::HistoricalSizeTooSmall(
-                    size,
-                    start_loc,
-                ))) => {
+                Err(Error::Mmr(crate::mmr::Error::HistoricalSizeTooSmall(size, start_loc))) => {
                     assert_eq!(size, leaf_num_to_pos(op_count));
                     assert_eq!(start_loc, leaf_num_to_pos(op_count + 1));
                 }
@@ -2136,38 +2100,68 @@ pub(crate) mod test {
                 let mut proof = proof.clone();
                 proof.digests[0] = hash(b"invalid");
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
+                assert!(!AnyTest::verify_proof(
+                    &mut hasher,
+                    &proof,
+                    0,
+                    &ops,
+                    &root_hash
+                ));
             }
             {
                 let mut proof = proof.clone();
                 proof.digests.push(hash(b"invalid"));
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
+                assert!(!AnyTest::verify_proof(
+                    &mut hasher,
+                    &proof,
+                    0,
+                    &ops,
+                    &root_hash
+                ));
             }
 
             // Changing the ops should cause verification to fail
             {
                 let mut ops = ops.clone();
-                ops[0] = Fixed::Update(hash(b"key1"), hash(b"value1"));
+                ops[0] = Operation::Update(hash(b"key1"), hash(b"value1"));
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
+                assert!(!AnyTest::verify_proof(
+                    &mut hasher,
+                    &proof,
+                    0,
+                    &ops,
+                    &root_hash
+                ));
             }
             {
                 let mut ops = ops.clone();
-                ops.push(Fixed::Update(hash(b"key1"), hash(b"value1")));
+                ops.push(Operation::Update(hash(b"key1"), hash(b"value1")));
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
+                assert!(!AnyTest::verify_proof(
+                    &mut hasher,
+                    &proof,
+                    0,
+                    &ops,
+                    &root_hash
+                ));
             }
 
             // Changing the start location should cause verification to fail
             {
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 1, &ops, &root_hash));
+                assert!(!AnyTest::verify_proof(
+                    &mut hasher,
+                    &proof,
+                    1,
+                    &ops,
+                    &root_hash
+                ));
             }
 
             // Changing the root digest should cause verification to fail
             {
-                assert!(!verify_proof(
+                assert!(!AnyTest::verify_proof(
                     &mut hasher,
                     &proof,
                     0,
@@ -2181,7 +2175,13 @@ pub(crate) mod test {
                 let mut proof = proof.clone();
                 proof.size = 100;
                 let root_hash = db.root(&mut hasher);
-                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
+                assert!(!AnyTest::verify_proof(
+                    &mut hasher,
+                    &proof,
+                    0,
+                    &ops,
+                    &root_hash
+                ));
             }
 
             db.destroy().await.unwrap();
@@ -2235,7 +2235,7 @@ pub(crate) mod test {
             let (original_proof, original_ops) = db.proof(proof_start, max_ops).await.unwrap();
 
             // Verify the proof works
-            assert!(verify_proof(
+            assert!(AnyTest::verify_proof(
                 &mut hasher,
                 &original_proof,
                 proof_start,
@@ -2361,4 +2361,3 @@ pub(crate) mod test {
         });
     }
 }
-*/

@@ -1,17 +1,17 @@
 //! Synchronize state between a server and client.
 //!
-//! This library how to use [sync](commonware_storage::adb::any::sync) to synchronize a client's
-//! [Any](commonware_storage::adb::any::Any) database to a server's database.
+//! This library how to use [commonware_storage::adb::any::sync] to synchronize a client's
+//! [Any] database to a server's database.
 //!
 //! It includes network protocols, database configuration, and utilities for creating test data.
 //!
 //! The sync example showcases how to:
-//! - Create and configure an [Any](commonware_storage::adb::any::Any) database
-//! - Implement a network-based [Resolver](commonware_storage::adb::sync::resolver::Resolver) for fetching operations
-//! - Use [sync](commonware_storage::adb::any::sync) to synchronize the client's database state with the server's state
+//! - Create and configure an [Any] database
+//! - Implement a network-based [commonware_storage::adb::any::sync::resolver::Resolver] for fetching operations
+//! - Use [commonware_storage::adb::any::sync] to synchronize the client's database state with the server's state
 
 use commonware_cryptography::Hasher as CryptoHasher;
-use commonware_storage::adb::any::Config;
+use commonware_storage::adb::any::fixed::{Any, Config};
 
 pub mod error;
 pub use error::Error;
@@ -30,7 +30,7 @@ pub type Key = commonware_cryptography::sha256::Digest;
 pub type Value = commonware_cryptography::sha256::Digest;
 
 /// Database type alias.
-pub type Database<E> = commonware_storage::adb::any::Any<E, Key, Value, Hasher, Translator>;
+pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
 pub type Operation = commonware_storage::store::operation::Fixed<Key, Value>;

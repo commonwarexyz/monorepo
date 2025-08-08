@@ -1,5 +1,5 @@
 use crate::{
-    adb::any::{sync::Error, Any},
+    adb::any::{fixed::Any, sync::Error},
     mmr::verification::Proof,
     store::operation::Fixed,
     translator::Translator,

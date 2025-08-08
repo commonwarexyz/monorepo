@@ -1,5 +1,5 @@
 use crate::{
-    adb::{any::verify_proof, sync},
+    adb::{any::fixed::verify_proof, sync},
     mmr::{hasher::Standard, iterator::leaf_num_to_pos, verification::Proof},
     store::operation::Fixed,
 };

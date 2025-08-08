@@ -245,7 +245,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             while let Some(result) = stream.next().await {
                 match result {
                     Err(e) => {
-                        return Err(Error::JournalError(e));
+                        return Err(Error::Journal(e));
                     }
                     Ok((section, offset, _, op)) => {
                         if oldest_retained_loc.is_none() {
@@ -353,7 +353,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.mmr
             .prune_to_pos(&mut self.hasher, leaf_num_to_pos(self.oldest_retained_loc))
             .await
-            .map_err(Error::MmrError)
+            .map_err(Error::Mmr)
     }
 
     /// Set the index of `key` in the snapshot. Assumes the key has not already been previously set
@@ -399,7 +399,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             Ok(offset) => {
                 return self.get_from_offset(key, loc, offset.into()).await;
             }
-            Err(e) => Err(Error::JournalError(e)),
+            Err(e) => Err(Error::Journal(e)),
         }
     }
 
@@ -546,9 +546,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
         let section = self.current_section();
         try_join!(
-            self.mmr.sync(&mut self.hasher).map_err(Error::MmrError),
-            self.log.sync(section).map_err(Error::JournalError),
-            self.locations.sync().map_err(Error::JournalError),
+            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
+            self.log.sync(section).map_err(Error::Journal),
+            self.locations.sync().map_err(Error::Journal),
         )?;
 
         Ok(())
@@ -557,9 +557,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Close the db. Operations that have not been committed will be lost.
     pub async fn close(mut self) -> Result<(), Error> {
         try_join!(
-            self.log.close().map_err(Error::JournalError),
-            self.mmr.close(&mut self.hasher).map_err(Error::MmrError),
-            self.locations.close().map_err(Error::JournalError),
+            self.log.close().map_err(Error::Journal),
+            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+            self.locations.close().map_err(Error::Journal),
         )?;
 
         Ok(())
@@ -568,9 +568,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         try_join!(
-            self.log.destroy().map_err(Error::JournalError),
-            self.mmr.destroy().map_err(Error::MmrError),
-            self.locations.destroy().map_err(Error::JournalError),
+            self.log.destroy().map_err(Error::Journal),
+            self.mmr.destroy().map_err(Error::Mmr),
+            self.locations.destroy().map_err(Error::Journal),
         )?;
 
         Ok(())
