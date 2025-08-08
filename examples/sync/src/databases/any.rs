@@ -1,16 +1,8 @@
 //! Any database types and helpers for the sync example.
 
+use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_storage::adb::any::Config;
-
-/// Hasher type used in the database.
-pub type Hasher = commonware_cryptography::sha256::Sha256;
-
-/// Key type used in the database.
-pub type Key = commonware_cryptography::sha256::Digest;
-
-/// Value type used in the database.
-pub type Value = commonware_cryptography::sha256::Digest;
 
 /// Database type alias.
 pub type Database<E> = commonware_storage::adb::any::Any<E, Key, Value, Hasher, Translator>;
@@ -18,11 +10,8 @@ pub type Database<E> = commonware_storage::adb::any::Any<E, Key, Value, Hasher, 
 /// Operation type alias.
 pub type Operation = commonware_storage::adb::operation::Fixed<Key, Value>;
 
-/// Translator type for the database.
-pub type Translator = commonware_storage::translator::EightCap;
-
 /// Create a database configuration with appropriate partitioning.
-pub fn create_any_config() -> Config<Translator> {
+pub fn create_config() -> Config<Translator> {
     Config {
         mmr_journal_partition: "mmr_journal".into(),
         mmr_metadata_partition: "mmr_metadata".into(),
@@ -43,7 +32,7 @@ pub fn create_any_config() -> Config<Translator> {
 /// This function creates a sequence of Update operations followed by
 /// periodic Commit operations. The operations are deterministic based
 /// on the count and seed parameters.
-pub fn create_any_test_operations(count: usize, seed: u64) -> Vec<Operation> {
+pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
     let mut operations = Vec::new();
     let mut hasher = <Hasher as CryptoHasher>::new();
 
@@ -78,7 +67,7 @@ mod tests {
 
     #[test]
     fn test_create_test_operations() {
-        let ops = create_any_test_operations(5, 12345);
+        let ops = create_test_operations(5, 12345);
         assert_eq!(ops.len(), 6);
 
         if let Operation::Commit(loc) = &ops[5] {
@@ -91,12 +80,12 @@ mod tests {
     #[test]
     fn test_deterministic_operations() {
         // Operations should be deterministic based on seed
-        let ops1 = create_any_test_operations(3, 12345);
-        let ops2 = create_any_test_operations(3, 12345);
+        let ops1 = create_test_operations(3, 12345);
+        let ops2 = create_test_operations(3, 12345);
         assert_eq!(ops1, ops2);
 
         // Different seeds should produce different operations
-        let ops3 = create_any_test_operations(3, 54321);
+        let ops3 = create_test_operations(3, 54321);
         assert_ne!(ops1, ops3);
     }
 }

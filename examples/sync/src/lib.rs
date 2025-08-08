@@ -22,3 +22,18 @@ pub use databases::immutable;
 pub fn crate_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
+
+/// Hasher type used in the database.
+pub type Hasher = commonware_cryptography::sha256::Sha256;
+
+/// Digest type used in the database.
+pub type Digest = commonware_cryptography::sha256::Digest;
+
+/// Key type used in the database.
+pub type Key = commonware_cryptography::sha256::Digest;
+
+/// Value type used in the database.
+pub type Value = commonware_cryptography::sha256::Digest;
+
+/// Translator type for the database.
+pub type Translator = commonware_storage::translator::EightCap;

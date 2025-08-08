@@ -6,17 +6,12 @@
 use clap::{Arg, Command};
 use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
 use commonware_storage::adb::sync::Target;
-use commonware_sync::{crate_version, Error};
-// Any example imports
-use commonware_sync::any::{
-    create_any_config, Database as AnyDb, Key as AnyDigest, Operation as AnyOp,
-};
-// Immutable example imports
-use commonware_sync::immutable as imm_mod;
+use commonware_sync::any::{create_config, Database as AnyDb, Operation as AnyOp};
 use commonware_sync::immutable::Operation as ImmOp;
-use commonware_sync::immutable::{create_immutable_config as create_imm_config, Database as ImmDb};
+use commonware_sync::immutable::{create_config as create_imm_config, Database as ImmDb};
 use commonware_sync::net::Resolver;
-// AnyDigest imported above from commonware_sync::any
+use commonware_sync::Digest;
+use commonware_sync::{crate_version, Error, Key};
 use commonware_utils::parse_duration;
 use futures::channel::mpsc;
 use rand::Rng;
@@ -124,14 +119,14 @@ where
     info!("starting Any database sync process");
     let mut iteration = 1u32;
     loop {
-        let resolver = Resolver::<_, AnyOp, AnyDigest>::new(context.clone(), config.server);
+        let resolver = Resolver::<_, AnyOp, Digest>::new(context.clone(), config.server);
 
         let initial_target = resolver
             .get_sync_target()
             .await
             .map_err(|e| e.to_string())?;
 
-        let db_config = create_any_config();
+        let db_config = create_config();
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {
@@ -149,7 +144,7 @@ where
             })
         };
 
-        let sync_config = EngineConfig::<AnyDb<_>, Resolver<_, AnyOp, AnyDigest>> {
+        let sync_config = EngineConfig::<AnyDb<_>, Resolver<_, AnyOp, Digest>> {
             context: context.clone(),
             db_config,
             fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
@@ -193,7 +188,7 @@ where
     info!("starting Immutable database sync process");
     let mut iteration = 1u32;
     loop {
-        let resolver = Resolver::<_, ImmOp, imm_mod::Key>::new(context.clone(), config.server);
+        let resolver = Resolver::<_, ImmOp, Key>::new(context.clone(), config.server);
 
         let initial_target = resolver
             .get_sync_target()
@@ -218,7 +213,7 @@ where
             })
         };
 
-        let sync_config = EngineConfig::<ImmDb<_>, Resolver<_, ImmOp, imm_mod::Key>> {
+        let sync_config = EngineConfig::<ImmDb<_>, Resolver<_, ImmOp, Key>> {
             context: context.clone(),
             db_config,
             fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
