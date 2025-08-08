@@ -141,6 +141,7 @@ pub trait WireMessage: Encode + Clone + Sized + Send + Sync + 'static {
 }
 
 pub mod client;
+pub mod wire;
 
 use commonware_cryptography::Digest as CryptoDigest;
 use commonware_storage::adb::sync::Target;

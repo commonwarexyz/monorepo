@@ -9,12 +9,11 @@ use commonware_runtime::{
 };
 use commonware_storage::{adb::sync::Target, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_sync::{
-    crate_version, create_adb_config, create_test_operations, Database, Error,
-    GetOperationsRequest, GetOperationsResponse, GetSyncTargetRequest,
-    GetSyncTargetResponse, Message, Operation,
-};
+use commonware_sync::net::wire;
 use commonware_sync::net::{ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE};
+use commonware_sync::{
+    crate_version, create_adb_config, create_test_operations, Database, Error, Message, Operation,
+};
 use commonware_utils::parse_duration;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::counter::Counter;
@@ -169,8 +168,8 @@ where
 /// Handle a request for sync target.
 async fn handle_get_sync_target<E>(
     state: &State<E>,
-    request: GetSyncTargetRequest,
-) -> Result<GetSyncTargetResponse, Error>
+    request: wire::GetSyncTargetRequest,
+) -> Result<wire::GetSyncTargetResponse<commonware_sync::Key>, Error>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
@@ -186,7 +185,7 @@ where
             database.op_count().saturating_sub(1),
         )
     };
-    let response = GetSyncTargetResponse {
+    let response = wire::GetSyncTargetResponse::<commonware_sync::Key> {
         request_id: request.request_id,
         target: Target {
             root,
@@ -202,8 +201,8 @@ where
 /// Handle a GetOperationsRequest and return operations with proof.
 async fn handle_get_operations<E>(
     state: &State<E>,
-    request: GetOperationsRequest,
-) -> Result<GetOperationsResponse, Error>
+    request: wire::GetOperationsRequest,
+) -> Result<wire::GetOperationsResponse<Operation, commonware_sync::Key>, Error>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
@@ -252,11 +251,13 @@ where
         "sending operations and proof"
     );
 
-    Ok(GetOperationsResponse {
-        request_id: request.request_id,
-        proof,
-        operations,
-    })
+    Ok(
+        wire::GetOperationsResponse::<Operation, commonware_sync::Key> {
+            request_id: request.request_id,
+            proof,
+            operations,
+        },
+    )
 }
 
 /// Handle a message from a client and return the appropriate response.
