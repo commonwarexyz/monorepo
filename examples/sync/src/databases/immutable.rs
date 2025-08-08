@@ -1,4 +1,4 @@
-//! Immutable example types and helpers mirroring the Any example.
+//! Immutable database types and helpers for the sync example.
 
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_storage::adb::immutable::Config;

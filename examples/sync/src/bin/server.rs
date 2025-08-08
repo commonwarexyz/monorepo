@@ -9,10 +9,12 @@ use commonware_runtime::{
 };
 use commonware_storage::{adb::sync::Target, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
+use commonware_sync::any::Key;
 use commonware_sync::net::wire;
 use commonware_sync::net::{ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE};
 use commonware_sync::{
-    crate_version, create_any_config, create_any_test_operations, Database, Error, Operation,
+    any::create_any_config, any::create_any_test_operations, any::Database, any::Operation,
+    crate_version, Error,
 };
 use commonware_utils::parse_duration;
 use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -169,7 +171,7 @@ where
 async fn handle_get_sync_target<E>(
     state: &State<E>,
     request: wire::GetSyncTargetRequest,
-) -> Result<wire::GetSyncTargetResponse<commonware_sync::Key>, Error>
+) -> Result<wire::GetSyncTargetResponse<Key>, Error>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
@@ -185,7 +187,7 @@ where
             database.op_count().saturating_sub(1),
         )
     };
-    let response = wire::GetSyncTargetResponse::<commonware_sync::Key> {
+    let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
         target: Target {
             root,
@@ -202,7 +204,7 @@ where
 async fn handle_get_operations<E>(
     state: &State<E>,
     request: wire::GetOperationsRequest,
-) -> Result<wire::GetOperationsResponse<Operation, commonware_sync::Key>, Error>
+) -> Result<wire::GetOperationsResponse<Operation, Key>, Error>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
@@ -251,20 +253,18 @@ where
         "sending operations and proof"
     );
 
-    Ok(
-        wire::GetOperationsResponse::<Operation, commonware_sync::Key> {
-            request_id: request.request_id,
-            proof,
-            operations,
-        },
-    )
+    Ok(wire::GetOperationsResponse::<Operation, Key> {
+        request_id: request.request_id,
+        proof,
+        operations,
+    })
 }
 
 /// Handle a message from a client and return the appropriate response.
 async fn handle_message<E>(
     state: Arc<State<E>>,
-    message: wire::Message<Operation, commonware_sync::Key>,
-) -> wire::Message<Operation, commonware_sync::Key>
+    message: wire::Message<Operation, Key>,
+) -> wire::Message<Operation, Key>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
@@ -329,14 +329,14 @@ where
 
     // Wait until we receive a message from the client or we have a response to send.
     let (response_sender, mut response_receiver) =
-        mpsc::channel::<wire::Message<Operation, commonware_sync::Key>>(RESPONSE_BUFFER_SIZE);
+        mpsc::channel::<wire::Message<Operation, Key>>(RESPONSE_BUFFER_SIZE);
     loop {
         select! {
             incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
                 match incoming {
                     Ok(message_data) => {
                         // Parse the message.
-                        let message: wire::Message<Operation, commonware_sync::Key> = match wire::Message::decode(&message_data[..]) {
+                        let message: wire::Message<Operation, Key> = match wire::Message::decode(&message_data[..]) {
                             Ok(msg) => msg,
                             Err(e) => {
                                 warn!(client_addr = %client_addr, error = %e, "failed to parse message");

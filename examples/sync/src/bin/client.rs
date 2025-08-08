@@ -8,13 +8,15 @@ use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
 use commonware_storage::adb::sync::Target;
 use commonware_sync::{crate_version, Error};
 // Any example imports
-use commonware_sync::{create_any_config, Database as AnyDb};
+use commonware_sync::any::{
+    create_any_config, Database as AnyDb, Key as AnyDigest, Operation as AnyOp,
+};
 // Immutable example imports
 use commonware_sync::immutable as imm_mod;
 use commonware_sync::immutable::Operation as ImmOp;
 use commonware_sync::immutable::{create_immutable_config as create_imm_config, Database as ImmDb};
 use commonware_sync::net::Resolver;
-use commonware_sync::Key as AnyDigest;
+// AnyDigest imported above from commonware_sync::any
 use commonware_utils::parse_duration;
 use futures::channel::mpsc;
 use rand::Rng;
@@ -122,10 +124,7 @@ where
     info!("starting Any database sync process");
     let mut iteration = 1u32;
     loop {
-        let resolver = Resolver::<_, commonware_sync::Operation, AnyDigest>::new(
-            context.clone(),
-            config.server,
-        );
+        let resolver = Resolver::<_, AnyOp, AnyDigest>::new(context.clone(), config.server);
 
         let initial_target = resolver
             .get_sync_target()
@@ -150,17 +149,16 @@ where
             })
         };
 
-        let sync_config =
-            EngineConfig::<AnyDb<_>, Resolver<_, commonware_sync::Operation, AnyDigest>> {
-                context: context.clone(),
-                db_config,
-                fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
-                target: initial_target,
-                resolver,
-                apply_batch_size: 1024,
-                max_outstanding_requests: config.max_outstanding_requests,
-                update_receiver: Some(update_receiver),
-            };
+        let sync_config = EngineConfig::<AnyDb<_>, Resolver<_, AnyOp, AnyDigest>> {
+            context: context.clone(),
+            db_config,
+            fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
+            target: initial_target,
+            resolver,
+            apply_batch_size: 1024,
+            max_outstanding_requests: config.max_outstanding_requests,
+            update_receiver: Some(update_receiver),
+        };
 
         let database: AnyDb<_> = sync::sync(sync_config).await.map_err(|e| format!("{e}"))?;
         let got_root = {
