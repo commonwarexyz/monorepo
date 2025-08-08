@@ -7,7 +7,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, sync::Arc};
 
 /// Network resolver that works directly with generic wire messages.
 #[derive(Clone)]
@@ -18,6 +18,7 @@ where
 {
     request_id_generator: request_id::Generator,
     request_tx: mpsc::Sender<io::Request<wire::Message<Op, D>>>,
+    handle: Arc<commonware_runtime::Handle<()>>,
 }
 
 impl<Op, D> Resolver<Op, D>
@@ -34,10 +35,11 @@ where
         E: commonware_runtime::Network + commonware_runtime::Spawner,
     {
         let (sink, stream) = context.dial(server_addr).await?;
-        let (request_tx, _) = io::start_io(context, sink, stream)?;
+        let (request_tx, handle) = io::start_io(context, sink, stream)?;
         Ok(Self {
             request_id_generator: request_id::Generator::new(),
             request_tx,
+            handle: Arc::new(handle),
         })
     }
 
@@ -118,5 +120,15 @@ where
             operations,
             success_tx: tx,
         })
+    }
+}
+
+impl<Op, D> Drop for Resolver<Op, D>
+where
+    Op: Clone + Send + Sync + 'static + ReadExt<Cfg = ()> + Write + EncodeSize,
+    D: Digest,
+{
+    fn drop(&mut self) {
+        self.handle.abort();
     }
 }
