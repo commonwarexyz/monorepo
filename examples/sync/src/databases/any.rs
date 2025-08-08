@@ -2,17 +2,17 @@
 
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
-use commonware_storage::adb::any::Config;
+use commonware_storage::{adb::any::fixed, store::operation};
 
 /// Database type alias.
-pub type Database<E> = commonware_storage::adb::any::Any<E, Key, Value, Hasher, Translator>;
+pub type Database<E> = fixed::Any<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = commonware_storage::store::operation::Fixed<Key, Value>;
+pub type Operation = operation::Fixed<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning.
-pub fn create_config() -> Config<Translator> {
-    Config {
+pub fn create_config() -> fixed::Config<Translator> {
+    fixed::Config {
         mmr_journal_partition: "mmr_journal".into(),
         mmr_metadata_partition: "mmr_metadata".into(),
         mmr_items_per_blob: 4096,

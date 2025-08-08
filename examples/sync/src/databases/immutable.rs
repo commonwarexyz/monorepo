@@ -2,14 +2,16 @@
 
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
-use commonware_storage::adb::immutable::Config;
+use commonware_storage::{
+    adb::immutable::{self, Config},
+    store::operation,
+};
 
 /// Database type alias.
-pub type Database<E> =
-    commonware_storage::adb::immutable::Immutable<E, Key, Value, Hasher, Translator>;
+pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = commonware_storage::store::operation::Variable<Key, Value>;
+pub type Operation = operation::Variable<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
 pub fn create_config() -> Config<Translator, ()> {

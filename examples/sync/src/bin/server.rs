@@ -1,15 +1,11 @@
 //! Server that serves operations and proofs to clients attempting to sync a
-//! [commonware_storage::adb::any::Any] database.
+//! [commonware_storage::adb::any::fixed::Any] database.
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_macros::select;
 use commonware_runtime::{tokio as tokio_runtime, Listener, Metrics as _, Runner, RwLock};
-use commonware_storage::{
-    adb::sync::Target,
-    mmr::hasher::Standard,
-    store::operation::{Fixed, Variable},
-};
+use commonware_storage::{adb::sync::Target, mmr::hasher::Standard, store::operation::Variable};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any::{create_config, create_test_operations, Database, Operation},
@@ -129,9 +125,9 @@ where
             let mut database = state.database.write().await;
             for operation in new_operations.iter() {
                 let result = match operation {
-                    Fixed::Delete(key) => database.delete(*key).await.map(|_| ()),
-                    Fixed::Update(key, value) => database.update(*key, *value).await.map(|_| ()),
-                    Fixed::CommitFloor(_) => database.commit().await.map(|_| ()),
+                    Operation::Update(key, value) => database.update(*key, *value).await,
+                    Operation::Delete(key) => database.delete(*key).await.map(|_| ()),
+                    Operation::CommitFloor(_) => database.commit().await,
                 };
 
                 if let Err(e) = result {

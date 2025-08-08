@@ -1,9 +1,9 @@
 use crate::{
     adb::{
-        any::{sync::verifier::Verifier, Any, SyncConfig},
-        sync::{Journal, Target},
+        any::{self, fixed::Any, sync::verifier::Verifier},
+        sync,
     },
-    journal::fixed,
+    journal,
     mmr::hasher::Standard,
     store::operation::Fixed,
     translator::Translator,
@@ -28,7 +28,7 @@ where
     type Journal = crate::journal::fixed::Journal<E, Fixed<K, V>>;
     type Verifier = Verifier<H>;
     type Error = crate::adb::Error;
-    type Config = crate::adb::any::Config<T>;
+    type Config = crate::adb::any::fixed::Config<T>;
     type Digest = H::Digest;
     type Context = E;
 
@@ -37,15 +37,15 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, <Self::Journal as Journal>::Error> {
-        let journal_config = fixed::Config {
+    ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
+        let journal_config = journal::fixed::Config {
             partition: config.log_journal_partition.clone(),
             items_per_blob: config.log_items_per_blob,
             write_buffer: config.log_write_buffer,
             buffer_pool: config.buffer_pool.clone(),
         };
 
-        fixed::Journal::<E, Fixed<K, V>>::init_sync(
+        journal::fixed::Journal::<E, Fixed<K, V>>::init_sync(
             context.with_label("log"),
             journal_config,
             lower_bound,
@@ -63,13 +63,13 @@ where
         db_config: Self::Config,
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        target: Target<Self::Digest>,
+        target: sync::Target<Self::Digest>,
         apply_batch_size: usize,
     ) -> Result<Self, Self::Error> {
         // Build the complete database from the journal
         let db = Any::init_synced(
             context,
-            SyncConfig {
+            any::fixed::SyncConfig {
                 db_config,
                 log: journal,
                 lower_bound: target.lower_bound_ops,
@@ -120,7 +120,9 @@ where
 mod tests {
     use crate::{
         adb::{
-            any::test::{apply_ops, create_test_config, create_test_db, create_test_ops, AnyTest},
+            any::fixed::test::{
+                apply_ops, create_test_config, create_test_db, create_test_ops, AnyTest,
+            },
             sync::{
                 self,
                 engine::{EngineConfig, NextStep},
@@ -219,7 +221,7 @@ mod tests {
             assert_eq!(got_db.inactivity_floor_loc, target_inactivity_floor);
             assert_eq!(got_db.log.size().await.unwrap(), target_log_size);
             assert_eq!(
-                got_db.ops.pruned_to_pos(),
+                got_db.mmr.pruned_to_pos(),
                 leaf_num_to_pos(target_inactivity_floor)
             );
 
@@ -267,7 +269,7 @@ mod tests {
             let final_synced_inactivity_floor = got_db.inactivity_floor_loc;
             let final_synced_log_size = got_db.log.size().await.unwrap();
             let final_synced_oldest_retained_loc = got_db.oldest_retained_loc();
-            let final_synced_pruned_to_pos = got_db.ops.pruned_to_pos();
+            let final_synced_pruned_to_pos = got_db.mmr.pruned_to_pos();
             let final_synced_root = got_db.root(&mut hasher);
 
             // Close the database
@@ -287,7 +289,7 @@ mod tests {
                 reopened_db.oldest_retained_loc(),
                 final_synced_oldest_retained_loc,
             );
-            assert_eq!(reopened_db.ops.pruned_to_pos(), final_synced_pruned_to_pos);
+            assert_eq!(reopened_db.mmr.pruned_to_pos(), final_synced_pruned_to_pos);
             assert_eq!(reopened_db.root(&mut hasher), final_synced_root);
 
             // Verify that the original key-value pairs are still correct
@@ -397,7 +399,7 @@ mod tests {
             assert_eq!(synced_db.inactivity_floor_loc, lower_bound_ops);
             assert_eq!(synced_db.oldest_retained_loc(), Some(lower_bound_ops));
             assert_eq!(
-                synced_db.ops.pruned_to_pos(),
+                synced_db.mmr.pruned_to_pos(),
                 leaf_num_to_pos(lower_bound_ops)
             );
             assert_eq!(synced_db.op_count(), upper_bound_ops + 1);
@@ -482,7 +484,7 @@ mod tests {
                 target_db.read().await.log.size().await.unwrap()
             );
             assert_eq!(
-                sync_db.ops.pruned_to_pos(),
+                sync_db.mmr.pruned_to_pos(),
                 leaf_num_to_pos(lower_bound_ops)
             );
             // Verify the root digest matches the target
@@ -581,7 +583,7 @@ mod tests {
                 target_db.log.size().await.unwrap()
             );
             assert_eq!(
-                sync_db.ops.pruned_to_pos(),
+                sync_db.mmr.pruned_to_pos(),
                 leaf_num_to_pos(lower_bound_ops)
             );
 
@@ -1048,9 +1050,9 @@ mod tests {
                 let expected = target_db.log.read(i).await.unwrap();
                 assert_eq!(got, expected);
             }
-            for i in synced_db.ops.oldest_retained_pos().unwrap()..synced_db.ops.size() {
-                let got = synced_db.ops.get_node(i).await.unwrap();
-                let expected = target_db.ops.get_node(i).await.unwrap();
+            for i in synced_db.mmr.oldest_retained_pos().unwrap()..synced_db.mmr.size() {
+                let got = synced_db.mmr.get_node(i).await.unwrap();
+                let expected = target_db.mmr.get_node(i).await.unwrap();
                 assert_eq!(got, expected);
             }
 
@@ -1159,9 +1161,9 @@ mod tests {
                 let expected = target_db.log.read(i).await.unwrap();
                 assert_eq!(got, expected);
             }
-            for i in synced_db.ops.oldest_retained_pos().unwrap()..synced_db.ops.size() {
-                let got = synced_db.ops.get_node(i).await.unwrap();
-                let expected = target_db.ops.get_node(i).await.unwrap();
+            for i in synced_db.mmr.oldest_retained_pos().unwrap()..synced_db.mmr.size() {
+                let got = synced_db.mmr.get_node(i).await.unwrap();
+                let expected = target_db.mmr.get_node(i).await.unwrap();
                 assert_eq!(got, expected);
             }
 
@@ -1216,7 +1218,7 @@ mod tests {
             let expected_op_count = synced_db.op_count();
             let expected_inactivity_floor_loc = synced_db.inactivity_floor_loc;
             let expected_oldest_retained_loc = synced_db.oldest_retained_loc();
-            let expected_pruned_to_pos = synced_db.ops.pruned_to_pos();
+            let expected_pruned_to_pos = synced_db.mmr.pruned_to_pos();
 
             // Close the database
             synced_db.close().await.unwrap();
@@ -1235,7 +1237,7 @@ mod tests {
                 reopened_db.oldest_retained_loc(),
                 expected_oldest_retained_loc
             );
-            assert_eq!(reopened_db.ops.pruned_to_pos(), expected_pruned_to_pos);
+            assert_eq!(reopened_db.mmr.pruned_to_pos(), expected_pruned_to_pos);
 
             // Cleanup
             Arc::try_unwrap(target_db)

@@ -5,7 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
     adb::{
-        any::{Any, Config},
+        any::fixed::{Any, Config},
         sync::{self, engine::EngineConfig, resolver::Resolver, Target},
     },
     mmr::hasher::Standard,

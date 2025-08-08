@@ -1,6 +1,6 @@
 use crate::{
     adb::{
-        any::{sync::Error, Any},
+        any::{fixed::Any, sync::Error},
         immutable::Immutable,
     },
     mmr::verification::Proof,
