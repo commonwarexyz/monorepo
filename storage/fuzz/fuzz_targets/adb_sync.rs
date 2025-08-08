@@ -11,7 +11,7 @@ use commonware_storage::{
     mmr::hasher::Standard,
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
 
@@ -42,13 +42,13 @@ fn test_config(test_name: &str, pruning_delay: u64) -> Config<TwoCap> {
         mmr_journal_partition: format!("{test_name}_mmr"),
         mmr_metadata_partition: format!("{test_name}_meta"),
         mmr_items_per_blob: 3,
-        mmr_write_buffer: 1024,
+        mmr_write_buffer: NZUsize!(1024),
         log_journal_partition: format!("{test_name}_log"),
         log_items_per_blob: 3,
-        log_write_buffer: 1024,
+        log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
         thread_pool: None,
-        buffer_pool: PoolRef::new(PAGE_SIZE, 1),
+        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(1)),
         pruning_delay: (pruning_delay % 1000) + 1,
     }
 }

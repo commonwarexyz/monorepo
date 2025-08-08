@@ -1,6 +1,6 @@
 use crate::{buffer::tip::Buffer, Blob, Error, RwLock};
 use commonware_utils::StableBuf;
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc};
 
 /// A writer that buffers content to a [Blob] to optimize the performance
 /// of appending or updating data.
@@ -9,6 +9,7 @@ use std::sync::Arc;
 ///
 /// ```
 /// use commonware_runtime::{Runner, buffer::{Write, Read}, Blob, Error, Storage, deterministic};
+/// use commonware_utils::NZUsize;
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
@@ -17,7 +18,7 @@ use std::sync::Arc;
 ///     assert_eq!(size, 0);
 ///
 ///     // Create a buffered writer with 16-byte buffer
-///     let mut blob = Write::new(blob, 0, 16);
+///     let mut blob = Write::new(blob, 0, NZUsize!(16));
 ///     blob.write_at(b"hello".to_vec(), 0).await.expect("write failed");
 ///     blob.sync().await.expect("sync failed");
 ///
@@ -28,7 +29,7 @@ use std::sync::Arc;
 ///
 ///     // Read back the data to verify
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
-///     let mut reader = Read::new(blob, size, 8);
+///     let mut reader = Read::new(blob, size, NZUsize!(8));
 ///     let mut buf = vec![0u8; size as usize];
 ///     reader.read_exact(&mut buf, size as usize).await.expect("read failed");
 ///     assert_eq!(&buf, b"hello world!");
@@ -50,9 +51,7 @@ impl<B: Blob> Write<B> {
     /// # Panics
     ///
     /// Panics if `capacity` is zero.
-    pub fn new(blob: B, size: u64, capacity: usize) -> Self {
-        assert!(capacity > 0, "buffer capacity must be greater than zero");
-
+    pub fn new(blob: B, size: u64, capacity: NonZeroUsize) -> Self {
         Self {
             blob,
             buffer: Arc::new(RwLock::new(Buffer::new(size, capacity))),

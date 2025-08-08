@@ -857,7 +857,7 @@ pub(crate) mod tests {
     use commonware_cryptography::{sha256::Digest, Digest as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
-    use commonware_utils::NZU64;
+    use commonware_utils::{NZUsize, NZU64};
     use futures::{channel::mpsc, SinkExt as _};
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
     use std::{
@@ -881,13 +881,13 @@ pub(crate) mod tests {
             mmr_journal_partition: format!("mmr_journal_{seed}"),
             mmr_metadata_partition: format!("mmr_metadata_{seed}"),
             mmr_items_per_blob: 1024,
-            mmr_write_buffer: 64,
+            mmr_write_buffer: NZUsize!(64),
             log_journal_partition: format!("log_journal_{seed}"),
             log_items_per_blob: 1024,
-            log_write_buffer: 64,
+            log_write_buffer: NZUsize!(64),
             translator: TestTranslator::default(),
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             pruning_delay: 100,
         }
     }

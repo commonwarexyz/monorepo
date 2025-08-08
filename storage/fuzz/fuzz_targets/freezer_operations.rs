@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::freezer::{Config, Freezer, Identifier};
-use commonware_utils::sequence::FixedBytes;
+use commonware_utils::{sequence::FixedBytes, NZUsize};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -35,13 +35,13 @@ fn fuzz(input: FuzzInput) {
         let cfg = Config {
             journal_partition: "fuzz_journal".into(),
             journal_compression: None,
-            journal_write_buffer: 1024 * 1024,
+            journal_write_buffer: NZUsize!(1024 * 1024),
             journal_target_size: 10 * 1024 * 1024,
             table_partition: "fuzz_table".into(),
             table_initial_size: 256,
             table_resize_frequency: 4,
             table_resize_chunk_size: 128,
-            table_replay_buffer: 64 * 1024,
+            table_replay_buffer: NZUsize!(64 * 1024),
             codec_config: (),
         };
         let mut freezer = Freezer::<_, FixedBytes<32>, i32>::init(context.clone(), cfg.clone())

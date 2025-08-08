@@ -61,7 +61,7 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_storage::ordinal::{Ordinal, Config};
-//! use commonware_utils::sequence::FixedBytes;
+//! use commonware_utils::{sequence::FixedBytes, NZUsize};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -69,8 +69,8 @@
 //!     let cfg = Config {
 //!         partition: "ordinal_store".into(),
 //!         items_per_blob: 10000,
-//!         write_buffer: 4096,
-//!         replay_buffer: 1024 * 1024,
+//!         write_buffer: NZUsize!(4096),
+//!         replay_buffer: NZUsize!(1024 * 1024),
 //!     };
 //!     let mut store = Ordinal::<_, FixedBytes<32>>::init(context, cfg).await.unwrap();
 //!
@@ -95,6 +95,7 @@
 
 mod storage;
 
+use std::num::NonZeroUsize;
 pub use storage::Ordinal;
 use thiserror::Error;
 
@@ -123,10 +124,10 @@ pub struct Config {
     pub items_per_blob: u64,
 
     /// The size of the write buffer to use when writing to the index.
-    pub write_buffer: usize,
+    pub write_buffer: NonZeroUsize,
 
     /// The size of the read buffer to use on restart.
-    pub replay_buffer: usize,
+    pub replay_buffer: NonZeroUsize,
 }
 
 #[cfg(test)]
@@ -134,7 +135,7 @@ mod tests {
     use super::*;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{sequence::FixedBytes, BitVec};
+    use commonware_utils::{sequence::FixedBytes, BitVec, NZUsize};
     use rand::RngCore;
     use std::collections::BTreeMap;
 
@@ -151,8 +152,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -210,8 +211,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -257,8 +258,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100, // Smaller blobs for testing
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -308,8 +309,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -356,8 +357,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Insert data and close
@@ -419,8 +420,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -472,8 +473,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -496,8 +497,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -542,8 +543,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -609,8 +610,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -670,8 +671,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 10, // Small blob size for testing
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data across multiple blobs
@@ -740,8 +741,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -814,8 +815,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create blob with zero-filled space
@@ -866,8 +867,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100, // Smaller blobs to test multiple blob handling
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Initialize the store
@@ -972,8 +973,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100, // Small blobs to test multiple blob handling
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1051,8 +1052,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1103,8 +1104,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1144,8 +1145,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1169,8 +1170,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store and add data
@@ -1233,8 +1234,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 50, // Smaller blobs for more granular testing
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1290,8 +1291,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1341,8 +1342,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1403,8 +1404,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -1455,8 +1456,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 10, // Small blob size for testing
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data across multiple sections
@@ -1524,8 +1525,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 10,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -1568,8 +1569,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 10,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data in multiple sections
@@ -1664,8 +1665,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 5,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with all records in a section
@@ -1717,8 +1718,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 5,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with missing record in a section
@@ -1763,8 +1764,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 5,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data in multiple sections
@@ -1850,8 +1851,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 5,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data and corrupt one record

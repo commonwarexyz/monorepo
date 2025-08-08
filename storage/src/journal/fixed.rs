@@ -69,7 +69,7 @@ use futures::{
     StreamExt,
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::{collections::BTreeMap, marker::PhantomData};
+use std::{collections::BTreeMap, marker::PhantomData, num::NonZeroUsize};
 use tracing::{debug, trace, warn};
 
 /// Configuration for `Journal` storage.
@@ -88,7 +88,7 @@ pub struct Config {
     pub buffer_pool: PoolRef,
 
     /// The size of the write buffer to use for each blob.
-    pub write_buffer: usize,
+    pub write_buffer: NonZeroUsize,
 }
 
 /// Implementation of `Journal` storage.
@@ -584,7 +584,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     /// If any corrupted data is found, the stream will return an error.
     pub async fn replay(
         &self,
-        buffer: usize,
+        buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
         if start_pos > self.size().await? {
@@ -741,6 +741,7 @@ mod tests {
         deterministic::{self, Context},
         Blob, Runner, Storage,
     };
+    use commonware_utils::NZUsize;
     use futures::{pin_mut, StreamExt};
 
     const PAGE_SIZE: usize = 44;
@@ -755,8 +756,8 @@ mod tests {
         Config {
             partition: "test_partition".into(),
             items_per_blob,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            write_buffer: 2048,
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            write_buffer: NZUsize!(2048),
         }
     }
 
@@ -890,7 +891,7 @@ mod tests {
 
             {
                 let stream = journal
-                    .replay(1024, 0)
+                    .replay(NZUsize!(1024), 0)
                     .await
                     .expect("failed to replay journal");
                 pin_mut!(stream);
@@ -977,7 +978,7 @@ mod tests {
             // Replay should return all items
             {
                 let stream = journal
-                    .replay(1024, 0)
+                    .replay(NZUsize!(1024), 0)
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -1031,7 +1032,7 @@ mod tests {
             // Replay all items, making sure the checksum mismatch error is handled correctly.
             {
                 let stream = journal
-                    .replay(1024, 0)
+                    .replay(NZUsize!(1024), 0)
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -1210,7 +1211,7 @@ mod tests {
             // Replay should return all items except the first `START_POS`.
             {
                 let stream = journal
-                    .replay(1024, START_POS)
+                    .replay(NZUsize!(1024), START_POS)
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -1600,8 +1601,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_fresh_start".into(),
                 items_per_blob: 5,
-                write_buffer: 1024,
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Initialize journal with sync boundaries when no existing data exists
@@ -1655,8 +1656,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_overlap".into(),
                 items_per_blob: 4,
-                write_buffer: 1024,
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with 20 operations
@@ -1729,8 +1730,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_exact_match".into(),
                 items_per_blob: 3,
-                write_buffer: 1024,
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with 20 operations (0-19)
@@ -1803,8 +1804,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_rewind".into(),
                 items_per_blob: 4,
-                write_buffer: 1024,
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with 30 operations (0-29)
@@ -1883,8 +1884,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_invalid_range".into(),
                 items_per_blob: 4,
-                write_buffer: 1024,
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             let lower_bound = 6;
@@ -1916,8 +1917,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_init_at_size".into(),
                 items_per_blob: 5,
-                write_buffer: 1024,
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Test 1: Initialize at size 0 (empty journal)

@@ -9,7 +9,7 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::sequence::FixedBytes;
+use commonware_utils::{sequence::FixedBytes, NZUsize};
 use libfuzzer_sys::fuzz_target;
 
 type Key = FixedBytes<16>;
@@ -46,9 +46,9 @@ fn fuzz(data: FuzzInput) {
         let cfg = Config {
             partition: "test".into(),
             items_per_section: 1024,
-            write_buffer: 1024,
+            write_buffer: NZUsize!(1024),
             translator: EightCap,
-            replay_buffer: 1024*1024,
+            replay_buffer: NZUsize!(1024*1024),
             compression: None,
             codec_config: (),
         };
