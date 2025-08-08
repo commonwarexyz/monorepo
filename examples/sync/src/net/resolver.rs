@@ -2,7 +2,7 @@ use super::{io, wire};
 use crate::net::request_id;
 use commonware_codec::{Encode, EncodeSize, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
-use commonware_storage::adb::sync::Target;
+use commonware_storage::adb::sync;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -41,7 +41,7 @@ where
         })
     }
 
-    pub async fn get_sync_target(&self) -> Result<Target<D>, crate::Error> {
+    pub async fn get_sync_target(&self) -> Result<sync::Target<D>, crate::Error> {
         let request_id = self.request_id_generator.next();
         let request =
             wire::Message::GetSyncTargetRequest(wire::GetSyncTargetRequest { request_id });
@@ -68,7 +68,7 @@ where
     }
 }
 
-impl<Op, D> commonware_storage::adb::sync::resolver::Resolver for Resolver<Op, D>
+impl<Op, D> sync::resolver::Resolver for Resolver<Op, D>
 where
     Op: Clone + Send + Sync + 'static + ReadExt<Cfg = ()> + Write + EncodeSize,
     D: Digest,
@@ -82,10 +82,7 @@ where
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<
-        commonware_storage::adb::sync::resolver::FetchResult<Self::Op, Self::Digest>,
-        Self::Error,
-    > {
+    ) -> Result<sync::resolver::FetchResult<Self::Op, Self::Digest>, Self::Error> {
         let request_id = self.request_id_generator.next();
         let request = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
             request_id,
@@ -116,7 +113,7 @@ where
             _ => return Err(crate::Error::UnexpectedResponse { request_id }),
         };
         let (tx, _rx) = oneshot::channel();
-        Ok(commonware_storage::adb::sync::resolver::FetchResult {
+        Ok(sync::resolver::FetchResult {
             proof,
             operations,
             success_tx: tx,
