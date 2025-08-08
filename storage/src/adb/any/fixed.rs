@@ -153,16 +153,6 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T:
     pub(crate) pruning_delay: u64,
 }
 
-/// The result of a database `update` operation.
-pub enum UpdateResult {
-    /// Tried to set a key to its current value.
-    NoOp,
-    /// Key was not previously in the snapshot & its new loc is the wrapped value.
-    Inserted(u64),
-    /// Key was previously in the snapshot & its (old, new) loc pair is wrapped.
-    Updated(u64, u64),
-}
-
 impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator>
     Any<E, K, V, H, T>
 {
@@ -397,17 +387,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                         }
                         Operation::Update(key, _) => {
                             let result =
-                                Any::<E, K, V, H, T>::update_loc(snapshot, log, &key, None, i)
-                                    .await?;
+                                Any::<E, K, V, H, T>::update_loc(snapshot, log, &key, i).await?;
                             if let Some(ref mut bitmap) = bitmap {
-                                match result {
-                                    UpdateResult::NoOp => unreachable!("unexpected no-op update"),
-                                    UpdateResult::Inserted(_) => bitmap.append(true),
-                                    UpdateResult::Updated(old_loc, _) => {
-                                        bitmap.set_bit(old_loc, false);
-                                        bitmap.append(true);
-                                    }
+                                if let Some(old_loc) = result {
+                                    bitmap.set_bit(old_loc, false);
                                 }
+                                bitmap.append(true);
                             }
                         }
                         Operation::CommitFloor(loc) => inactivity_floor_loc = loc,
@@ -427,44 +412,34 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     }
 
     /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or
-    /// insert it if the key isn't already present. If a `value` is provided, then it is used to see
-    /// if the key is already assigned that value, in which case there is no update and
-    /// UpdateResult::NoOp is returned.
+    /// insert it if the key isn't already present.
     async fn update_loc(
         snapshot: &mut Index<T, u64>,
         log: &Journal<E, Operation<K, V>>,
         key: &K,
-        value: Option<&V>,
         new_loc: u64,
-    ) -> Result<UpdateResult, Error> {
+    ) -> Result<Option<u64>, Error> {
         // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
         // cursor to look for the key.
         let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
-            return Ok(UpdateResult::Inserted(new_loc));
+            return Ok(None);
         };
 
         // Iterate over conflicts in the snapshot.
         while let Some(&loc) = cursor.next() {
-            let (k, v) = Self::get_update_op(log, loc).await?;
+            let (k, _) = Self::get_update_op(log, loc).await?;
             if k == *key {
                 // Found the key in the snapshot.
-                if let Some(value) = value {
-                    if v == *value {
-                        // The key value is the same as the previous one: treat as a no-op.
-                        return Ok(UpdateResult::NoOp);
-                    }
-                }
-
-                // Update its location to the given one.
                 assert!(new_loc > loc);
                 cursor.update(new_loc);
-                return Ok(UpdateResult::Updated(loc, new_loc));
+                return Ok(Some(loc));
             }
         }
 
         // The key wasn't in the snapshot, so add it to the cursor.
         cursor.insert(new_loc);
-        Ok(UpdateResult::Inserted(new_loc))
+
+        Ok(None)
     }
 
     /// Get the update operation corresponding to a location from the snapshot.
@@ -522,24 +497,20 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// Updates `key` to have value `value`. If the key already has this same value, then this is a
     /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
     /// next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
+    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        self.update_return_loc(key, value).await?;
+
+        Ok(())
+    }
+
+    pub(crate) async fn update_return_loc(
+        &mut self,
+        key: K,
+        value: V,
+    ) -> Result<Option<u64>, Error> {
         let new_loc = self.op_count();
-        let res = Any::<_, _, _, H, T>::update_loc(
-            &mut self.snapshot,
-            &self.log,
-            &key,
-            Some(&value),
-            new_loc,
-        )
-        .await?;
-        match res {
-            UpdateResult::NoOp => {
-                // The key already has this value, so this is a no-op.
-                return Ok(res);
-            }
-            UpdateResult::Inserted(_) => (),
-            UpdateResult::Updated(_, _) => (),
-        }
+        let res =
+            Any::<_, _, _, H, T>::update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
 
         let op = Operation::Update(key, value);
         self.apply_op(op).await?;
@@ -1011,34 +982,22 @@ pub(super) mod test {
             assert!(db.get(&d1).await.unwrap().is_none());
             assert!(db.get(&d2).await.unwrap().is_none());
 
-            assert!(matches!(
-                db.update(d1, d2).await.unwrap(),
-                UpdateResult::Inserted(0)
-            ));
+            db.update(d1, d2).await.unwrap();
             assert_eq!(db.get(&d1).await.unwrap().unwrap(), d2);
             assert!(db.get(&d2).await.unwrap().is_none());
 
-            assert!(matches!(
-                db.update(d2, d1).await.unwrap(),
-                UpdateResult::Inserted(1)
-            ));
+            db.update(d2, d1).await.unwrap();
             assert_eq!(db.get(&d1).await.unwrap().unwrap(), d2);
             assert_eq!(db.get(&d2).await.unwrap().unwrap(), d1);
 
-            assert!(matches!(db.delete(d1).await.unwrap(), Some(0)));
+            db.delete(d1).await.unwrap();
             assert!(db.get(&d1).await.unwrap().is_none());
             assert_eq!(db.get(&d2).await.unwrap().unwrap(), d1);
 
-            assert!(matches!(
-                db.update(d1, d1).await.unwrap(),
-                UpdateResult::Inserted(3)
-            ));
+            db.update(d1, d1).await.unwrap();
             assert_eq!(db.get(&d1).await.unwrap().unwrap(), d1);
 
-            assert!(matches!(
-                db.update(d2, d2).await.unwrap(),
-                UpdateResult::Updated(1, 4)
-            ));
+            db.update(d2, d2).await.unwrap();
             assert_eq!(db.get(&d2).await.unwrap().unwrap(), d2);
 
             assert_eq!(db.log.size().await.unwrap(), 5); // 4 updates, 1 deletion.
@@ -1051,24 +1010,10 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc, 3);
             assert_eq!(db.log.size().await.unwrap(), 6); // 4 updates, 1 deletion, 1 commit
             db.sync().await.unwrap();
-            let root = db.root(&mut hasher);
-
-            // Multiple assignments of the same value should be a no-op.
-            assert!(matches!(
-                db.update(d1, d1).await.unwrap(),
-                UpdateResult::NoOp
-            ));
-            assert!(matches!(
-                db.update(d2, d2).await.unwrap(),
-                UpdateResult::NoOp
-            ));
-            // Log and root should be unchanged.
-            assert_eq!(db.log.size().await.unwrap(), 6);
-            assert_eq!(db.root(&mut hasher), root);
 
             // Delete all keys.
-            assert!(matches!(db.delete(d1).await.unwrap(), Some(3)));
-            assert!(matches!(db.delete(d2).await.unwrap(), Some(4)));
+            db.delete(d1).await.unwrap();
+            db.delete(d2).await.unwrap();
             assert!(db.get(&d1).await.unwrap().is_none());
             assert!(db.get(&d2).await.unwrap().is_none());
             assert_eq!(db.log.size().await.unwrap(), 8); // 4 updates, 3 deletions, 1 commit
@@ -1078,7 +1023,7 @@ pub(super) mod test {
             let root = db.root(&mut hasher);
 
             // Multiple deletions of the same key should be a no-op.
-            assert!(db.delete(d1).await.unwrap().is_none());
+            db.delete(d1).await.unwrap();
             assert_eq!(db.log.size().await.unwrap(), 8);
             assert_eq!(db.root(&mut hasher), root);
 

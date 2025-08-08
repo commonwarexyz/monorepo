@@ -6,7 +6,7 @@
 
 use crate::{
     adb::{
-        any::fixed::{Any, Config as AConfig, UpdateResult},
+        any::fixed::{Any, Config as AConfig},
         Error,
     },
     index::Index,
@@ -272,18 +272,14 @@ impl<
     /// Updates `key` to have value `value`. If the key already has this same value, then this is a
     /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
     /// next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
-        let update_result = self.any.update(key, value).await?;
-        match update_result {
-            UpdateResult::NoOp => return Ok(update_result),
-            UpdateResult::Inserted(_) => (),
-            UpdateResult::Updated(old_loc, _) => {
-                self.status.set_bit(old_loc, false);
-            }
+    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        let update_result = self.any.update_return_loc(key, value).await?;
+        if let Some(old_loc) = update_result {
+            self.status.set_bit(old_loc, false);
         }
         self.status.append(true);
 
-        Ok(update_result)
+        Ok(())
     }
 
     /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
@@ -805,14 +801,6 @@ pub mod test {
             assert!(root1 != root0);
             db.close().await.unwrap();
             db = open_db(context.clone(), partition).await;
-            assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 2 moves.
-            assert_eq!(db.root(&mut hasher).await.unwrap(), root1);
-
-            // Repeated update should be no-op.
-            assert!(matches!(
-                db.update(k1, v1).await.unwrap(),
-                UpdateResult::NoOp
-            ));
             assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 2 moves.
             assert_eq!(db.root(&mut hasher).await.unwrap(), root1);
 

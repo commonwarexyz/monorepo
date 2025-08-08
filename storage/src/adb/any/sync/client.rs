@@ -2067,10 +2067,6 @@ pub(crate) mod tests {
                 target_db.inactivity_floor_loc
             );
             assert_eq!(
-                synced_db.oldest_retained_loc(),
-                target_db.oldest_retained_loc()
-            );
-            assert_eq!(
                 synced_db.oldest_retained_loc().unwrap(),
                 initial_lower_bound
             );
