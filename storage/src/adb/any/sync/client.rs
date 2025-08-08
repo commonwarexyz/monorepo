@@ -250,13 +250,13 @@ where
             config.target.upper_bound_ops,
         )
         .await
-        .map_err(adb::Error::JournalError)
+        .map_err(adb::Error::Journal)
         .map_err(Error::Adb)?;
 
         let log_size = log
             .size()
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::Adb(adb::Error::Journal(e)))?;
         assert!(log_size <= config.target.upper_bound_ops + 1);
 
         // Initialize metrics
@@ -440,7 +440,7 @@ where
             .log
             .size()
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::Adb(adb::Error::Journal(e)))?;
 
         for _ in 0..num_requests {
             // Find the next gap in the sync range that needs to be fetched.
@@ -506,7 +506,7 @@ where
             .log
             .size()
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::Adb(adb::Error::Journal(e)))?;
 
         // Remove any batches of operations with stale data.
         // That is, those whose last operation is before `next_loc`.
@@ -558,7 +558,7 @@ where
             self.log
                 .append(op)
                 .await
-                .map_err(adb::Error::JournalError)
+                .map_err(adb::Error::Journal)
                 .map_err(Error::Adb)?;
             // No need to sync here -- the log will periodically sync its storage
             // and we will also sync when we're done applying all operations.
@@ -609,7 +609,7 @@ where
             .log
             .size()
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::Adb(adb::Error::Journal(e)))?;
 
         // Calculate the target log size (upper bound is inclusive)
         let target_log_size = self.config.target.upper_bound_ops + 1;
@@ -773,12 +773,12 @@ where
     let log_size = log
         .size()
         .await
-        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+        .map_err(|e| Error::Adb(adb::Error::Journal(e)))?;
 
     if log_size <= lower_bound_ops {
         log.close()
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::Adb(adb::Error::Journal(e)))?;
         log = Journal::<E, Fixed<K, V>>::init_sync(
             context.clone().with_label("log"),
             JConfig {
@@ -791,13 +791,13 @@ where
             upper_bound_ops,
         )
         .await
-        .map_err(adb::Error::JournalError)
+        .map_err(adb::Error::Journal)
         .map_err(Error::Adb)?;
     } else {
         // Prune the log to the new lower bound
         log.prune(lower_bound_ops)
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::Adb(adb::Error::Journal(e)))?;
     }
 
     Ok(log)

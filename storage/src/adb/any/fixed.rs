@@ -225,11 +225,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             },
         )
         .await
-        .map_err(Error::MmrError)?;
+        .map_err(Error::Mmr)?;
 
         // Convert MMR size to number of operations.
         let Some(mmr_ops) = leaf_pos_to_num(mmr.size()) else {
-            return Err(Error::MmrError(crate::mmr::Error::InvalidSize(mmr.size())));
+            return Err(Error::Mmr(crate::mmr::Error::InvalidSize(mmr.size())));
         };
 
         // Apply the missing operations from the log to the MMR.
@@ -337,7 +337,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 mmr.add_batched(hasher, &op.encode()).await?;
                 next_mmr_leaf_num += 1;
             }
-            mmr.sync(hasher).await.map_err(Error::MmrError)?;
+            mmr.sync(hasher).await.map_err(Error::Mmr)?;
         }
 
         // At this point the MMR and log should be consistent.
@@ -371,7 +371,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         while let Some(result) = stream.next().await {
             match result {
                 Err(e) => {
-                    return Err(Error::JournalError(e));
+                    return Err(Error::Journal(e));
                 }
                 Ok((i, op)) => {
                     match op {
@@ -578,7 +578,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         self.uncommitted_ops += 1;
 
         // Append the operation to the log.
-        self.log.append(op).await.map_err(Error::JournalError)
+        self.log.append(op).await.map_err(Error::Journal)
     }
 
     /// Generate and return:
@@ -669,8 +669,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// parallelized if a thread pool is provided.
     pub(crate) async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
-            self.log.sync().map_err(Error::JournalError),
-            self.mmr.sync(&mut self.hasher).map_err(Error::MmrError),
+            self.log.sync().map_err(Error::Journal),
+            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
         )?;
 
         Ok(())
@@ -772,8 +772,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         }
 
         try_join!(
-            self.log.close().map_err(Error::JournalError),
-            self.mmr.close(&mut self.hasher).map_err(Error::MmrError),
+            self.log.close().map_err(Error::Journal),
+            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
         )?;
 
         Ok(())
@@ -782,8 +782,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         try_join!(
-            self.log.destroy().map_err(Error::JournalError),
-            self.mmr.destroy().map_err(Error::MmrError),
+            self.log.destroy().map_err(Error::Journal),
+            self.mmr.destroy().map_err(Error::Mmr),
         )?;
 
         Ok(())
@@ -2029,10 +2029,7 @@ pub(super) mod test {
             // Historical size > current database size is invalid
             let result = db.historical_proof(op_count + 1, op_count, 5).await;
             match result {
-                Err(Error::MmrError(crate::mmr::Error::HistoricalSizeTooLarge(
-                    requested,
-                    actual,
-                ))) => {
+                Err(Error::Mmr(crate::mmr::Error::HistoricalSizeTooLarge(requested, actual))) => {
                     assert_eq!(requested, leaf_num_to_pos(op_count + 1));
                     assert_eq!(actual, leaf_num_to_pos(op_count));
                 }
@@ -2056,10 +2053,7 @@ pub(super) mod test {
             // Historical size == start location is invalid
             let result = db.historical_proof(op_count, op_count, 5).await;
             match result {
-                Err(Error::MmrError(crate::mmr::Error::HistoricalSizeTooSmall(
-                    size,
-                    start_loc,
-                ))) => {
+                Err(Error::Mmr(crate::mmr::Error::HistoricalSizeTooSmall(size, start_loc))) => {
                     assert_eq!(size, leaf_num_to_pos(op_count));
                     assert_eq!(start_loc, leaf_num_to_pos(op_count));
                 }
@@ -2069,10 +2063,7 @@ pub(super) mod test {
             // Historical size < start location is invalid
             let result = db.historical_proof(op_count, op_count + 1, 5).await;
             match result {
-                Err(Error::MmrError(crate::mmr::Error::HistoricalSizeTooSmall(
-                    size,
-                    start_loc,
-                ))) => {
+                Err(Error::Mmr(crate::mmr::Error::HistoricalSizeTooSmall(size, start_loc))) => {
                     assert_eq!(size, leaf_num_to_pos(op_count));
                     assert_eq!(start_loc, leaf_num_to_pos(op_count + 1));
                 }
