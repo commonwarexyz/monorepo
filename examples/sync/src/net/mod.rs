@@ -110,7 +110,7 @@ pub trait WireMessage: Encode + Clone + Sized + Send + Sync + 'static {
     fn decode_from(bytes: &[u8]) -> Result<Self, commonware_codec::Error>;
 }
 
-pub mod client;
+pub mod io;
 pub mod resolver;
 pub mod wire;
 pub use resolver::Resolver;

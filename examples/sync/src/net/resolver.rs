@@ -1,9 +1,14 @@
+use super::{io, wire};
+use crate::net::request_id;
 use commonware_codec::{Encode, EncodeSize, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
 use commonware_storage::adb::sync::Target;
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt,
+};
+use std::marker::PhantomData;
 use std::num::NonZeroU64;
-
-use super::{client, wire};
 
 /// Network resolver that works directly with generic wire messages.
 #[derive(Clone)]
@@ -16,7 +21,9 @@ where
     Op: Read<Cfg = ()> + Write + EncodeSize + Encode + Clone + Send + Sync + 'static,
     D: Digest,
 {
-    client: client::Client<E, wire::Message<Op, D>>,
+    request_id_generator: request_id::Generator,
+    request_tx: mpsc::Sender<io::Request<wire::Message<Op, D>>>,
+    _phantom: PhantomData<E>,
 }
 
 impl<E, Op, D> Resolver<E, Op, D>
@@ -29,23 +36,37 @@ where
     D: Digest,
 {
     pub fn new(context: E, server_addr: std::net::SocketAddr) -> Self {
-        let client = client::Client::<E, wire::Message<Op, D>>::new(context, server_addr);
-        Self { client }
+        let (request_sender, _) = io::start_io::<E, wire::Message<Op, D>>(context, server_addr);
+        Self {
+            request_id_generator: request_id::Generator::new(),
+            request_tx: request_sender,
+            _phantom: PhantomData,
+        }
     }
 
     pub async fn get_sync_target(&self) -> Result<Target<D>, crate::Error> {
+        let request_id = self.request_id_generator.next();
         let request =
-            wire::Message::GetSyncTargetRequest(wire::GetSyncTargetRequest { request_id: 0 });
-        let response = self.client.send(request).await?;
+            wire::Message::GetSyncTargetRequest(wire::GetSyncTargetRequest { request_id });
+        let (tx, rx) = oneshot::channel();
+        self.request_tx
+            .clone()
+            .send(io::Request {
+                request,
+                response_tx: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::RequestChannelClosed)?;
+        let response = rx
+            .await
+            .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
         match response {
             wire::Message::GetSyncTargetResponse(r) => Ok(r.target),
             wire::Message::Error(err) => Err(crate::Error::Server {
                 code: err.error_code,
                 message: err.message,
             }),
-            other => Err(crate::Error::UnexpectedResponse {
-                request_id: other.request_id(),
-            }),
+            _ => Err(crate::Error::UnexpectedResponse { request_id }),
         }
     }
 }
@@ -72,13 +93,25 @@ where
         commonware_storage::adb::sync::resolver::FetchResult<Self::Op, Self::Digest>,
         Self::Error,
     > {
+        let request_id = self.request_id_generator.next();
         let request = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
-            request_id: 0,
+            request_id,
             size,
             start_loc,
             max_ops,
         });
-        let response = self.client.send(request).await?;
+        let (tx, rx) = futures::channel::oneshot::channel();
+        self.request_tx
+            .clone()
+            .send(io::Request {
+                request,
+                response_tx: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::RequestChannelClosed)?;
+        let response = rx
+            .await
+            .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
         let (proof, operations) = match response {
             wire::Message::GetOperationsResponse(r) => (r.proof, r.operations),
             wire::Message::Error(err) => {

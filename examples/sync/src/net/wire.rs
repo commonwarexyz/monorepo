@@ -1,3 +1,4 @@
+use crate::net::{ErrorResponse, RequestId, WireMessage};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
@@ -6,8 +7,6 @@ use commonware_cryptography::Digest;
 use commonware_storage::adb::sync::Target;
 use commonware_storage::mmr::verification::Proof;
 use std::num::NonZeroU64;
-
-use crate::net::{ErrorResponse, RequestId, WireMessage};
 
 /// Maximum number of digests in a proof (10k) for decoding bounds.
 pub const MAX_DIGESTS: usize = 10_000;
