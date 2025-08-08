@@ -5,7 +5,11 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_macros::select;
 use commonware_runtime::{tokio as tokio_runtime, Listener, Metrics as _, Runner, RwLock};
-use commonware_storage::{adb::sync::Target, mmr::hasher::Standard};
+use commonware_storage::{
+    adb::sync::Target,
+    mmr::hasher::Standard,
+    store::operation::{Fixed, Variable},
+};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any::{create_config, create_test_operations, Database, Operation},
@@ -125,11 +129,9 @@ where
             let mut database = state.database.write().await;
             for operation in new_operations.iter() {
                 let result = match operation {
-                    Operation::Update(key, value) => {
-                        database.update(*key, *value).await.map(|_| ())
-                    }
-                    Operation::Deleted(key) => database.delete(*key).await.map(|_| ()),
-                    Operation::Commit(_) => database.commit().await.map(|_| ()),
+                    Fixed::Delete(key) => database.delete(*key).await.map(|_| ()),
+                    Fixed::Update(key, value) => database.update(*key, *value).await.map(|_| ()),
+                    Fixed::CommitFloor(_) => database.commit().await.map(|_| ()),
                 };
 
                 if let Err(e) = result {
@@ -177,8 +179,9 @@ where
             let mut database = state.database.write().await;
             for operation in new_operations.iter() {
                 let result = match operation {
-                    ImmOperation::Set(key, value) => database.set(*key, *value).await.map(|_| ()),
-                    ImmOperation::Commit() => database.commit().await.map(|_| ()),
+                    Variable::Set(key, value) => database.set(*key, *value).await.map(|_| ()),
+                    Variable::Commit() => database.commit().await.map(|_| ()),
+                    _ => Ok(()),
                 };
 
                 if let Err(e) = result {
@@ -212,10 +215,10 @@ where
             Operation::Update(key, value) => {
                 database.update(key, value).await?;
             }
-            Operation::Deleted(key) => {
+            Operation::Delete(key) => {
                 database.delete(key).await?;
             }
-            Operation::Commit(_) => {
+            Operation::CommitFloor(_) => {
                 database.commit().await?;
             }
         }
@@ -239,6 +242,7 @@ where
             ImmOperation::Commit() => {
                 database.commit().await?;
             }
+            _ => {}
         }
     }
     Ok(())

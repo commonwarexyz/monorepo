@@ -8,7 +8,7 @@ use commonware_storage::adb::any::Config;
 pub type Database<E> = commonware_storage::adb::any::Any<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = commonware_storage::adb::operation::Fixed<Key, Value>;
+pub type Operation = commonware_storage::store::operation::Fixed<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning.
 pub fn create_config() -> Config<Translator> {
@@ -52,12 +52,12 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
         operations.push(Operation::Update(key, value));
 
         if (i + 1) % 10 == 0 {
-            operations.push(Operation::Commit(i as u64 + 1));
+            operations.push(Operation::CommitFloor(i as u64 + 1));
         }
     }
 
     // Always end with a commit
-    operations.push(Operation::Commit(count as u64));
+    operations.push(Operation::CommitFloor(count as u64));
     operations
 }
 
@@ -68,9 +68,9 @@ mod tests {
     #[test]
     fn test_create_test_operations() {
         let ops = create_test_operations(5, 12345);
-        assert_eq!(ops.len(), 6);
+        assert_eq!(ops.len(), 6); // 5 operations + 1 commit
 
-        if let Operation::Commit(loc) = &ops[5] {
+        if let Operation::CommitFloor(loc) = &ops[5] {
             assert_eq!(*loc, 5);
         } else {
             panic!("Last operation should be a commit");

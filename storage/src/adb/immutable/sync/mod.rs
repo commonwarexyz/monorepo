@@ -1,11 +1,11 @@
 use crate::{
     adb::{
         immutable,
-        operation::Variable,
         sync::{self, Journal as _},
     },
     journal::variable,
     mmr::hasher::Standard,
+    store::operation::Variable,
     translator::Translator,
 };
 use commonware_codec::Codec;
@@ -216,7 +216,6 @@ mod tests {
     use crate::{
         adb::{
             immutable,
-            operation::Variable,
             sync::{
                 self,
                 engine::{EngineConfig, NextStep},
@@ -224,6 +223,7 @@ mod tests {
             },
         },
         mmr::hasher::Standard,
+        store::operation::Variable,
     };
     use commonware_cryptography::{sha256, Digest, Sha256};
     use commonware_macros::test_traced;
@@ -307,6 +307,7 @@ mod tests {
                 Variable::Commit() => {
                     db.commit().await.unwrap();
                 }
+                _ => {}
             }
         }
     }

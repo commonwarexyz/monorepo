@@ -1,7 +1,4 @@
-use crate::{
-    adb::{operation::Variable, sync},
-    journal::variable,
-};
+use crate::{adb::sync, journal::variable, store::operation::Variable};
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;

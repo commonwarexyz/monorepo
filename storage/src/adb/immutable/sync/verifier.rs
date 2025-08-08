@@ -1,6 +1,7 @@
 use crate::{
-    adb::{operation::Variable, sync},
+    adb::sync,
     mmr::{hasher::Standard, verification::Proof},
+    store::operation::Variable,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;

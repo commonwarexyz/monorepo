@@ -1,6 +1,7 @@
 use crate::{
-    adb::{any::verify_proof, operation::Fixed, sync},
+    adb::{any::verify_proof, sync},
     mmr::{hasher::Standard, iterator::leaf_num_to_pos, verification::Proof},
+    store::operation::Fixed,
 };
 use commonware_cryptography::Hasher;
 use commonware_utils::Array;

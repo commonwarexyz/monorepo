@@ -9,7 +9,7 @@ pub type Database<E> =
     commonware_storage::adb::immutable::Immutable<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = commonware_storage::adb::operation::Variable<Key, Value>;
+pub type Operation = commonware_storage::store::operation::Variable<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
 pub fn create_config() -> Config<Translator, ()> {

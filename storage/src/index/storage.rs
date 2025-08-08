@@ -119,21 +119,21 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
     /// Pushes a `Record` to the end of `past`.
     ///
     /// If the record has a `next`, this function cannot be called again.
-    fn past_push(&mut self, mut next: Box<Record<V>>) {
+    fn past_push(&mut self, next: Box<Record<V>>) {
         // Ensure we only push a list once (`past_tail` becomes stale).
         assert!(!self.past_pushed_list);
         self.past_pushed_list = next.next.is_some();
 
         // Add `next` to the tail of `past`.
         if self.past_tail.is_none() {
-            self.past_tail = Some(&mut *next);
             self.past = Some(next);
+            self.past_tail = self.past.as_mut().map(|b| &mut **b as *mut Record<V>);
         } else {
             unsafe {
                 assert!((*self.past_tail.unwrap()).next.is_none());
-                let next_tail = &mut *next as *mut Record<V>;
                 (*self.past_tail.unwrap()).next = Some(next);
-                self.past_tail = Some(next_tail);
+                let tail_next = (*self.past_tail.unwrap()).next.as_mut().unwrap();
+                self.past_tail = Some(&mut **tail_next as *mut Record<V>);
             }
         }
     }
@@ -297,10 +297,19 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
     }
 }
 
-impl<T: Translator, V> Drop for Cursor<'_, T, V>
+unsafe impl<'a, T, V> Send for Cursor<'a, T, V>
 where
-    V: Eq,
+    T: Translator + Send,
+    T::Key: Send,
+    V: Eq + Send,
 {
+    // SAFETY: `Send` is safe because the raw pointer `past_tail` only ever points
+    // to heap memory owned by `self.past`. Since the pointer's referent is moved
+    // along with the `Cursor`, no data races can occur. The `where` clause
+    // ensures all generic parameters are also `Send`.
+}
+
+impl<T: Translator, V: Eq> Drop for Cursor<'_, T, V> {
     fn drop(&mut self) {
         // Take the entry.
         let mut entry = self.entry.take().unwrap();

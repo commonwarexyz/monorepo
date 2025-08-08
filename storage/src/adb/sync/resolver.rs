@@ -2,9 +2,9 @@ use crate::{
     adb::{
         any::{sync::Error, Any},
         immutable::Immutable,
-        operation::{Fixed, Variable},
     },
     mmr::verification::Proof,
+    store::operation::{Fixed, Variable},
     translator::Translator,
 };
 use commonware_cryptography::{Digest, Hasher};
