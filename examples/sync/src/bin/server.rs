@@ -12,7 +12,7 @@ use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::net::wire;
 use commonware_sync::net::{ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE};
 use commonware_sync::{
-    crate_version, create_adb_config, create_test_operations, Database, Error, Message, Operation,
+    crate_version, create_adb_config, create_test_operations, Database, Error, Operation,
 };
 use commonware_utils::parse_duration;
 use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -261,18 +261,21 @@ where
 }
 
 /// Handle a message from a client and return the appropriate response.
-async fn handle_message<E>(state: Arc<State<E>>, message: Message) -> Message
+async fn handle_message<E>(
+    state: Arc<State<E>>,
+    message: wire::Message<Operation, commonware_sync::Key>,
+) -> wire::Message<Operation, commonware_sync::Key>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
     let request_id = message.request_id();
     match message {
-        Message::GetOperationsRequest(request) => {
+        wire::Message::GetOperationsRequest(request) => {
             match handle_get_operations(&state, request).await {
-                Ok(response) => Message::GetOperationsResponse(response),
+                Ok(response) => wire::Message::GetOperationsResponse(response),
                 Err(e) => {
                     state.error_counter.inc();
-                    Message::Error(ErrorResponse {
+                    wire::Message::Error(ErrorResponse {
                         request_id,
                         error_code: e.to_error_code(),
                         message: e.to_string(),
@@ -281,12 +284,12 @@ where
             }
         }
 
-        Message::GetSyncTargetRequest(request) => {
+        wire::Message::GetSyncTargetRequest(request) => {
             match handle_get_sync_target(&state, request).await {
-                Ok(response) => Message::GetSyncTargetResponse(response),
+                Ok(response) => wire::Message::GetSyncTargetResponse(response),
                 Err(e) => {
                     state.error_counter.inc();
-                    Message::Error(ErrorResponse {
+                    wire::Message::Error(ErrorResponse {
                         request_id,
                         error_code: e.to_error_code(),
                         message: e.to_string(),
@@ -297,7 +300,7 @@ where
 
         _ => {
             state.error_counter.inc();
-            Message::Error(ErrorResponse {
+            wire::Message::Error(ErrorResponse {
                 request_id,
                 error_code: ErrorCode::InvalidRequest,
                 message: "unexpected message type".to_string(),
@@ -325,14 +328,15 @@ where
     info!(client_addr = %client_addr, "client connected");
 
     // Wait until we receive a message from the client or we have a response to send.
-    let (response_sender, mut response_receiver) = mpsc::channel::<Message>(RESPONSE_BUFFER_SIZE);
+    let (response_sender, mut response_receiver) =
+        mpsc::channel::<wire::Message<Operation, commonware_sync::Key>>(RESPONSE_BUFFER_SIZE);
     loop {
         select! {
             incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
                 match incoming {
                     Ok(message_data) => {
                         // Parse the message.
-                        let message: Message = match Message::decode(&message_data[..]) {
+                        let message: wire::Message<Operation, commonware_sync::Key> = match wire::Message::decode(&message_data[..]) {
                             Ok(msg) => msg,
                             Err(e) => {
                                 warn!(client_addr = %client_addr, error = %e, "failed to parse message");

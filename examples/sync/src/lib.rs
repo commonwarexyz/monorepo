@@ -15,8 +15,6 @@ use commonware_storage::adb::any::Config;
 
 pub mod error;
 pub use error::Error;
-pub mod protocol;
-pub use protocol::*;
 pub mod immutable;
 pub mod net;
 
