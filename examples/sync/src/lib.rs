@@ -1,12 +1,12 @@
 //! Synchronize state between a server and client.
 //!
 //! This library how to use [commonware_storage::adb::any::sync] to synchronize a client's
-//! [Any] database to a server's database.
+//! [commonware_storage::adb::any::fixed::Any] database to a server's database.
 //!
 //! It includes network protocols, database configuration, and utilities for creating test data.
 //!
 //! The sync example showcases how to:
-//! - Create and configure an [Any] database
+//! - Create and configure an [commonware_storage::adb::any::fixed::Any] database
 //! - Implement a network-based Resolver for fetching operations
 //! - Use [commonware_storage::adb::any::sync] to synchronize the client's database state with the server's state
 
