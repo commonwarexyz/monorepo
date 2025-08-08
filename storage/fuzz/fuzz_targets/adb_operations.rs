@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    adb::any::{Any, Config},
+    adb::any::fixed::{Any, Config},
     mmr::hasher::Standard,
     translator::EightCap,
 };
@@ -71,23 +71,10 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
                     let v = Value::new(*value);
 
-                    let update_result = adb.update(k, v).await.expect("update should not fail");
-
-                    match update_result {
-                        commonware_storage::adb::any::UpdateResult::Inserted(_) => {
-                            expected_state.insert(*key, Some(*value));
-                            all_keys.insert(*key);
-                            uncommitted_ops += 1;
-                        }
-                        commonware_storage::adb::any::UpdateResult::Updated(..) => {
-                            expected_state.insert(*key, Some(*value));
-                            all_keys.insert(*key);
-                            uncommitted_ops += 1;
-                        }
-                        commonware_storage::adb::any::UpdateResult::NoOp => {
-                            // The key already has this value, so this is a no-op.
-                        }
-                    }
+                    adb.update(k, v).await.expect("update should not fail");
+                    expected_state.insert(*key, Some(*value));
+                    all_keys.insert(*key);
+                    uncommitted_ops += 1;
                 }
 
                 AdbOperation::Delete { key } => {
