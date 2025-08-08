@@ -294,7 +294,7 @@ where
         let database = state.database.read().await;
         (
             database.root(&mut hasher),
-            0, // TODO fix this
+            database.oldest_retained_loc().unwrap_or(0),
             database.op_count().saturating_sub(1),
         )
     };
