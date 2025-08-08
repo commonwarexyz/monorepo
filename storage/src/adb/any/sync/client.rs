@@ -195,7 +195,7 @@ where
     }
 }
 
-/// Client that syncs an [adb::any::Any] database.
+/// Client that syncs an [adb::any::fixed::Any] database.
 pub(super) struct Client<E, K, V, H, T, R>
 where
     E: Storage + Clock + MetricsTrait,

@@ -137,7 +137,7 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T:
     ///
     /// # Invariant
     ///
-    /// Only references operations of type [Fixed::Update].
+    /// Only references operations of type [Operation::Update].
     pub(crate) snapshot: Index<T, u64>,
 
     /// The number of operations that are pending commit.
@@ -494,15 +494,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         self.inactivity_floor_loc
     }
 
-    /// Updates `key` to have value `value`. If the key already has this same value, then this is a
-    /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
-    /// next successful `commit`.
+    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
+    /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         self.update_return_loc(key, value).await?;
 
         Ok(())
     }
 
+    /// Updates `key` to have value `value`, returning the old location of the key if it was
+    /// previously assigned some value, and None otherwise.
     pub(crate) async fn update_return_loc(
         &mut self,
         key: K,

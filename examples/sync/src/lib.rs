@@ -6,7 +6,7 @@
 //! It includes network protocols, database configuration, and utilities for creating test data.
 //!
 //! The sync example showcases how to:
-//! - Create and configure a [commonware_storage::adb::any::Any] database
+//! - Create and configure an [Any] database
 //! - Implement a network-based [commonware_storage::adb::any::sync::resolver::Resolver] for fetching operations
 //! - Use [commonware_storage::adb::any::sync] to synchronize the client's database state with the server's state
 

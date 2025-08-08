@@ -1,8 +1,8 @@
 //! An authenticated database (ADB) that provides succinct proofs of _any_ value ever associated
 //! with a key, where values can have varying sizes.
 //!
-//! _If the values you wish to store all have the same size, use the [crate::adb::any::Any] db
-//! instead._
+//! _If the values you wish to store all have the same size, use the [crate::adb::any::fixed::Any]
+//! db instead._
 
 use crate::{
     adb::Error,
@@ -80,7 +80,7 @@ pub struct Config<T: Translator, C> {
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Variable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
+pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
@@ -134,9 +134,9 @@ pub struct Variable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHashe
 }
 
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    Variable<E, K, V, H, T>
+    Any<E, K, V, H, T>
 {
-    /// Returns a [Variable] adb initialized from `cfg`. Any uncommitted log operations will be
+    /// Returns a [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
         context: E,
@@ -182,7 +182,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let db = Variable {
+        let db = Self {
             mmr,
             log,
             log_size: 0,
@@ -809,7 +809,7 @@ pub(super) mod test {
     }
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type AnyTest = Variable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+    type AnyTest = Any<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
