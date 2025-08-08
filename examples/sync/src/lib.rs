@@ -19,7 +19,6 @@ pub mod protocol;
 pub use protocol::*;
 pub mod immutable;
 pub mod net;
-pub mod resolver;
 
 /// Hasher type used in the database.
 pub type Hasher = commonware_cryptography::sha256::Sha256;
