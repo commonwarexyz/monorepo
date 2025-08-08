@@ -119,7 +119,7 @@ where
     info!("starting Any database sync process");
     let mut iteration = 1u32;
     loop {
-        let resolver = Resolver::<_, AnyOp, Digest>::new(context.clone(), config.server);
+        let resolver = Resolver::<_, AnyOp, Digest>::new(context.clone(), config.server).await;
 
         let initial_target = resolver
             .get_sync_target()
@@ -188,7 +188,7 @@ where
     info!("starting Immutable database sync process");
     let mut iteration = 1u32;
     loop {
-        let resolver = Resolver::<_, ImmOp, Key>::new(context.clone(), config.server);
+        let resolver = Resolver::<_, ImmOp, Key>::new(context.clone(), config.server).await;
 
         let initial_target = resolver
             .get_sync_target()

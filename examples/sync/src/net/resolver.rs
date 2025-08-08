@@ -35,8 +35,10 @@ where
     Op: Clone + Send + Sync + 'static + ReadExt<Cfg = ()> + Write + EncodeSize,
     D: Digest,
 {
-    pub fn new(context: E, server_addr: std::net::SocketAddr) -> Self {
-        let (request_sender, _) = io::start_io::<E, wire::Message<Op, D>>(context, server_addr);
+    pub async fn new(context: E, server_addr: std::net::SocketAddr) -> Self {
+        let (request_sender, _) = io::start_io::<E, wire::Message<Op, D>>(context, server_addr)
+            .await
+            .unwrap();
         Self {
             request_id_generator: request_id::Generator::new(),
             request_tx: request_sender,
