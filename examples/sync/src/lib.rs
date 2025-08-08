@@ -33,7 +33,7 @@ pub type Value = commonware_cryptography::sha256::Digest;
 pub type Database<E> = commonware_storage::adb::any::Any<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = commonware_storage::adb::operation::Fixed<Key, Value>;
+pub type Operation = commonware_storage::store::operation::Fixed<Key, Value>;
 
 /// Translator type for the database.
 pub type Translator = commonware_storage::translator::EightCap;
@@ -86,12 +86,12 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
 
         // Add a commit operation every 10 operations
         if (i + 1) % 10 == 0 {
-            operations.push(Operation::Commit(i as u64 + 1));
+            operations.push(Operation::CommitFloor(i as u64 + 1));
         }
     }
 
     // Always end with a commit
-    operations.push(Operation::Commit(count as u64));
+    operations.push(Operation::CommitFloor(count as u64));
     operations
 }
 
@@ -105,7 +105,7 @@ mod tests {
         assert_eq!(ops.len(), 6); // 5 operations + 1 commit
 
         // Verify the last operation is a commit
-        if let Operation::Commit(loc) = &ops[5] {
+        if let Operation::CommitFloor(loc) = &ops[5] {
             assert_eq!(*loc, 5);
         } else {
             panic!("Last operation should be a commit");

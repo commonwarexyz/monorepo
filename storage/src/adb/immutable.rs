@@ -2,7 +2,7 @@
 //! deletions), where values can have varying sizes.
 
 use crate::{
-    adb::{operation::Variable, Error},
+    adb::Error,
     index::Index,
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},
@@ -14,6 +14,7 @@ use crate::{
         journaled::{Config as MmrConfig, Mmr},
         verification::Proof,
     },
+    store::operation::Variable,
     translator::Translator,
 };
 use commonware_codec::{Codec, Encode as _, Read};
@@ -282,6 +283,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                 end_loc = log_size;
                                 end_offset = offset;
                             }
+                            _ => {
+                                unreachable!(
+                                    "unsupported operation at offset {offset} in section {section}"
+                                );
+                            }
                         }
                     }
                 }
@@ -315,7 +321,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Returns the section of the log where we are currently writing new items.
-    pub fn current_section(&self) -> u64 {
+    fn current_section(&self) -> u64 {
         self.log_size / self.log_items_per_section
     }
 
@@ -391,7 +397,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         match self.locations.read(loc).await {
             Ok(offset) => {
-                return self.get_from_offset(key, loc, offset.to_u32()).await;
+                return self.get_from_offset(key, loc, offset.into()).await;
             }
             Err(e) => Err(Error::JournalError(e)),
         }
@@ -483,28 +489,28 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn historical_proof(
         &self,
         size: u64,
-        start_index: u64,
+        start_loc: u64,
         max_ops: u64,
     ) -> Result<(Proof<H::Digest>, Vec<Variable<K, V>>), Error> {
-        if start_index < self.oldest_retained_loc {
-            return Err(Error::OperationPruned(start_index));
+        if start_loc < self.oldest_retained_loc {
+            return Err(Error::OperationPruned(start_loc));
         }
 
-        let start_pos = leaf_num_to_pos(start_index);
-        let end_index = std::cmp::min(size - 1, start_index + max_ops - 1);
-        let end_pos = leaf_num_to_pos(end_index);
+        let start_pos = leaf_num_to_pos(start_loc);
+        let end_loc = std::cmp::min(size - 1, start_loc + max_ops - 1);
+        let end_pos = leaf_num_to_pos(end_loc);
         let mmr_size = leaf_num_to_pos(size);
 
         let proof = self
             .mmr
             .historical_range_proof(mmr_size, start_pos, end_pos)
             .await?;
-        let mut ops = Vec::with_capacity((end_index - start_index + 1) as usize);
-        for index in start_index..=end_index {
-            let section = index / self.log_items_per_section;
-            let offset = self.locations.read(index).await?.to_u32();
+        let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
+        for loc in start_loc..=end_loc {
+            let section = loc / self.log_items_per_section;
+            let offset = self.locations.read(loc).await?.into();
             let Some(op) = self.log.get(section, offset).await? else {
-                panic!("no log item at index {index}");
+                panic!("no log item at location {loc}");
             };
             ops.push(op);
         }

@@ -8,7 +8,7 @@
 //! and cannot be updated after.
 
 use crate::{
-    adb::{operation::Fixed, Error},
+    adb::Error,
     index::Index,
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
@@ -18,6 +18,7 @@ use crate::{
         journaled::{Config as MmrConfig, Mmr},
         verification::Proof,
     },
+    store::operation::Fixed,
     translator::Translator,
 };
 use commonware_codec::Encode as _;
@@ -31,6 +32,7 @@ use futures::{
 use tracing::{debug, warn};
 
 pub mod sync;
+pub mod variable;
 
 /// Indicator that the generic parameter N is unused by the call. N is only
 /// needed if the caller is providing the optional bitmap.
@@ -318,7 +320,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let mut log_size = log.size().await?;
         let mut rewind_leaf_num = log_size;
         while rewind_leaf_num > 0 {
-            if let Fixed::Commit(_) = log.read(rewind_leaf_num - 1).await? {
+            if let Fixed::CommitFloor(_) = log.read(rewind_leaf_num - 1).await? {
                 break;
             }
             rewind_leaf_num -= 1;
@@ -386,7 +388,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                 }
                 Ok((i, op)) => {
                     match op {
-                        Fixed::Deleted(key) => {
+                        Fixed::Delete(key) => {
                             let result =
                                 Any::<E, K, V, H, T>::delete_key(snapshot, log, &key, i).await?;
                             if let Some(ref mut bitmap) = bitmap {
@@ -411,7 +413,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
                                 }
                             }
                         }
-                        Fixed::Commit(loc) => inactivity_floor_loc = loc,
+                        Fixed::CommitFloor(loc) => inactivity_floor_loc = loc,
                     }
                     if let Some(ref mut bitmap) = bitmap {
                         // If we reach this point and a bit hasn't been added for the operation, then it's
@@ -555,7 +557,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         let loc = self.op_count();
         let r = Self::delete_key(&mut self.snapshot, &self.log, &key, loc).await?;
         if r.is_some() {
-            self.apply_op(Fixed::Deleted(key)).await?;
+            self.apply_op(Fixed::Delete(key)).await?;
         };
 
         Ok(r)
@@ -758,7 +760,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
             self.inactivity_floor_loc += 1;
         }
 
-        self.apply_op(Fixed::Commit(self.inactivity_floor_loc))
+        self.apply_op(Fixed::CommitFloor(self.inactivity_floor_loc))
             .await?;
 
         Ok(())
@@ -811,8 +813,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
 
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.log.destroy().await?;
-        self.ops.destroy().await?;
+        try_join!(
+            self.log.destroy().map_err(Error::JournalError),
+            self.ops.destroy().map_err(Error::MmrError),
+        )?;
 
         Ok(())
     }
@@ -821,7 +825,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening.
     #[cfg(test)]
     pub async fn simulate_failed_commit_mmr(mut self, write_limit: usize) -> Result<(), Error> {
-        self.apply_op(Fixed::Commit(self.inactivity_floor_loc))
+        self.apply_op(Fixed::CommitFloor(self.inactivity_floor_loc))
             .await?;
         self.log.close().await?;
         self.ops
@@ -835,7 +839,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     /// fully committing the log, requiring rollback of the MMR and log upon reopening.
     #[cfg(test)]
     pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error> {
-        self.apply_op(Fixed::Commit(self.inactivity_floor_loc))
+        self.apply_op(Fixed::CommitFloor(self.inactivity_floor_loc))
             .await?;
         self.ops.close(&mut self.hasher).await?;
         // Rewind the operation log over the commit op to force rollback to the previous commit.
@@ -929,7 +933,7 @@ pub(super) mod test {
         for i in 0..n {
             let key = Digest::random(&mut rng);
             if i % 10 == 0 && i > 0 {
-                ops.push(Fixed::Deleted(prev_key));
+                ops.push(Fixed::Delete(prev_key));
             } else {
                 let value = Digest::random(&mut rng);
                 ops.push(Fixed::Update(key, value));
@@ -946,10 +950,10 @@ pub(super) mod test {
                 Fixed::Update(key, value) => {
                     db.update(key, value).await.unwrap();
                 }
-                Fixed::Deleted(key) => {
+                Fixed::Delete(key) => {
                     db.delete(key).await.unwrap();
                 }
-                Fixed::Commit(_) => {
+                Fixed::CommitFloor(_) => {
                     db.commit().await.unwrap();
                 }
             }
@@ -1309,7 +1313,7 @@ pub(super) mod test {
                 new_db.update(k, v).await.unwrap();
             }
             new_db
-                .apply_op(Fixed::Commit(new_db.inactivity_floor_loc))
+                .apply_op(Fixed::CommitFloor(new_db.inactivity_floor_loc))
                 .await
                 .unwrap();
             new_db.sync().await.unwrap();
@@ -1643,7 +1647,7 @@ pub(super) mod test {
                 if let Fixed::Update(key, value) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
-                } else if let Fixed::Deleted(key) = op {
+                } else if let Fixed::Delete(key) = op {
                     expected_kvs.remove(key);
                     deleted_keys.insert(*key);
                 }
@@ -1740,7 +1744,7 @@ pub(super) mod test {
                     if let Fixed::Update(key, value) = op {
                         expected_kvs.insert(*key, *value);
                         deleted_keys.remove(key);
-                    } else if let Fixed::Deleted(key) = op {
+                    } else if let Fixed::Delete(key) = op {
                         expected_kvs.remove(key);
                         deleted_keys.insert(*key);
                     }
@@ -1845,7 +1849,7 @@ pub(super) mod test {
                 if let Fixed::Update(key, value) = op {
                     expected_kvs.insert(*key, *value);
                     deleted_keys.remove(key);
-                } else if let Fixed::Deleted(key) = op {
+                } else if let Fixed::Delete(key) = op {
                     expected_kvs.remove(key);
                     deleted_keys.insert(*key);
                 }
