@@ -550,7 +550,7 @@ where
     /// Gets a [Operation] from the log at the given location.
     async fn get_op(&self, location: u64) -> Result<Operation<K, V>, Error> {
         let section = location / self.log_items_per_section;
-        let offset = self.locations.read(location).await?.to_u32();
+        let offset = self.locations.read(location).await?.into();
 
         // Get the operation from the log at the specified section and offset.
         let Some(op) = self.log.get(section, offset).await? else {

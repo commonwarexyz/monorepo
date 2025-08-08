@@ -407,7 +407,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn get_from_loc(&self, key: &K, loc: u64) -> Result<Option<V>, Error> {
         match self.locations.read(loc).await {
             Ok(offset) => {
-                return self.get_from_offset(key, loc, offset.to_u32()).await;
+                return self.get_from_offset(key, loc, offset.into()).await;
             }
             Err(e) => Err(Error::JournalError(e)),
         }
@@ -419,7 +419,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             Ok(offset) => {
                 let section = loc / self.log_items_per_section;
                 self.log
-                    .get(section, offset.to_u32())
+                    .get(section, offset.into())
                     .await
                     .map_err(Error::JournalError)
             }
@@ -564,7 +564,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let mut ops = Vec::with_capacity((end_index - start_loc + 1) as usize);
         for loc in start_loc..=end_index {
             let section = loc / self.log_items_per_section;
-            let offset = self.locations.read(loc).await?.to_u32();
+            let offset = self.locations.read(loc).await?.into();
             let Some(op) = self.log.get(section, offset).await? else {
                 panic!("no log item at location {loc}");
             };
