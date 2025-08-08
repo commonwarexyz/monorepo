@@ -148,7 +148,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
             let bits = metadata.get(section).unwrap().ordinal();
 
             // Get section
-            let section = section.to_u64();
+            let section = section.value();
             section_bits.insert(section, bits);
         }
 

@@ -397,7 +397,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         match self.locations.read(loc).await {
             Ok(offset) => {
-                return self.get_from_offset(key, loc, offset.to_u32()).await;
+                return self.get_from_offset(key, loc, offset.into()).await;
             }
             Err(e) => Err(Error::JournalError(e)),
         }
@@ -508,7 +508,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
         for loc in start_loc..=end_loc {
             let section = loc / self.log_items_per_section;
-            let offset = self.locations.read(loc).await?.to_u32();
+            let offset = self.locations.read(loc).await?.into();
             let Some(op) = self.log.get(section, offset).await? else {
                 panic!("no log item at location {loc}");
             };
