@@ -121,7 +121,7 @@ const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error(transparent)]
-    JournalError(#[from] crate::journal::Error),
+    Journal(#[from] crate::journal::Error),
 
     /// The requested key was not found in the snapshot.
     #[error("key not found")]
@@ -398,7 +398,7 @@ where
             while let Some(result) = stream.next().await {
                 match result {
                     Err(e) => {
-                        return Err(Error::JournalError(e));
+                        return Err(Error::Journal(e));
                     }
                     Ok((section, offset, size, op)) => {
                         if !oldest_retained_loc_found {
@@ -677,7 +677,7 @@ where
         self.locations
             .prune(self.oldest_retained_loc)
             .await
-            .map_err(Error::JournalError)
+            .map_err(Error::Journal)
     }
 }
 

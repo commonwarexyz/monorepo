@@ -6,7 +6,7 @@
 
 use crate::{
     adb::{
-        any::{Any, Config as AConfig, UpdateResult},
+        any::fixed::{Any, Config as AConfig},
         Error,
     },
     index::Index,
@@ -122,7 +122,7 @@ impl<
     // A compile-time assertion that the chunk size is some multiple of digest size. A multiple of 1 is optimal with
     // respect to proof size, but a higher multiple allows for a smaller (RAM resident) merkle tree over the structure.
     const _CHUNK_SIZE_ASSERT: () = assert!(
-        N % H::Digest::SIZE == 0,
+        N.is_multiple_of(H::Digest::SIZE),
         "chunk size must be some multiple of the digest size",
     );
 
@@ -228,7 +228,7 @@ impl<
         }
 
         let any = Any {
-            ops: mmr,
+            mmr,
             log,
             snapshot,
             inactivity_floor_loc,
@@ -272,18 +272,14 @@ impl<
     /// Updates `key` to have value `value`. If the key already has this same value, then this is a
     /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
     /// next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
-        let update_result = self.any.update(key, value).await?;
-        match update_result {
-            UpdateResult::NoOp => return Ok(update_result),
-            UpdateResult::Inserted(_) => (),
-            UpdateResult::Updated(old_loc, _) => {
-                self.status.set_bit(old_loc, false);
-            }
+    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        let update_result = self.any.update_return_loc(key, value).await?;
+        if let Some(old_loc) = update_result {
+            self.status.set_bit(old_loc, false);
         }
         self.status.append(true);
 
-        Ok(update_result)
+        Ok(())
     }
 
     /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
@@ -356,7 +352,7 @@ impl<
 
         let mut grafter = Grafting::new(&mut self.any.hasher, Self::grafting_height());
         grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.ops)
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;
         self.status.sync(&mut grafter).await?;
 
@@ -389,7 +385,7 @@ impl<
             !self.status.is_dirty(),
             "must process updates before computing root"
         );
-        let ops = &self.any.ops;
+        let ops = &self.any.mmr;
         let height = Self::grafting_height();
         let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, ops, height);
         let mmr_root = grafted_mmr.root(hasher).await?;
@@ -435,7 +431,7 @@ impl<
             !self.status.is_dirty(),
             "must process updates before computing proofs"
         );
-        let mmr = &self.any.ops;
+        let mmr = &self.any.mmr;
         let start_pos = leaf_num_to_pos(start_loc);
         let end_pos_last = mmr.last_leaf_pos().unwrap();
         let end_pos_max = leaf_num_to_pos(start_loc + max_ops - 1);
@@ -569,7 +565,7 @@ impl<
         };
         let pos = leaf_num_to_pos(loc);
         let height = Self::grafting_height();
-        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.ops, height);
+        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
         let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, pos, pos).await?;
         let chunk = *self.status.get_chunk(loc);
@@ -682,7 +678,7 @@ impl<
 
         let pos = leaf_num_to_pos(loc);
         let height = Self::grafting_height();
-        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.ops, height);
+        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
         let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, pos, pos).await?;
         let chunk = *self.status.get_chunk(loc);
@@ -720,7 +716,7 @@ impl<
 
         let mut grafter = Grafting::new(&mut self.any.hasher, Self::grafting_height());
         grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.ops)
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;
         self.status.sync(&mut grafter).await?;
         let target_prune_loc = self
@@ -805,14 +801,6 @@ pub mod test {
             assert!(root1 != root0);
             db.close().await.unwrap();
             db = open_db(context.clone(), partition).await;
-            assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 2 moves.
-            assert_eq!(db.root(&mut hasher).await.unwrap(), root1);
-
-            // Repeated update should be no-op.
-            assert!(matches!(
-                db.update(k1, v1).await.unwrap(),
-                UpdateResult::NoOp
-            ));
             assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 2 moves.
             assert_eq!(db.root(&mut hasher).await.unwrap(), root1);
 
@@ -1014,7 +1002,7 @@ pub mod test {
             // retained op to tip.
             let max_ops = 4;
             let end_loc = db.op_count();
-            let start_pos = db.any.ops.pruned_to_pos();
+            let start_pos = db.any.mmr.pruned_to_pos();
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
 
             for i in start_loc..end_loc {

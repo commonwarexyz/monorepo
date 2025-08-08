@@ -1,8 +1,8 @@
 //! An authenticated database (ADB) that provides succinct proofs of _any_ value ever associated
 //! with a key, where values can have varying sizes.
 //!
-//! _If the values you wish to store all have the same size, use the [crate::adb::any::Any] db
-//! instead._
+//! _If the values you wish to store all have the same size, use the [crate::adb::any::fixed::Any]
+//! db instead._
 
 use crate::{
     adb::Error,
@@ -80,7 +80,7 @@ pub struct Config<T: Translator, C> {
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Variable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
+pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
@@ -134,9 +134,9 @@ pub struct Variable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHashe
 }
 
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    Variable<E, K, V, H, T>
+    Any<E, K, V, H, T>
 {
-    /// Returns a [Variable] adb initialized from `cfg`. Any uncommitted log operations will be
+    /// Returns a [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
         context: E,
@@ -182,7 +182,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let db = Variable {
+        let db = Self {
             mmr,
             log,
             log_size: 0,
@@ -242,7 +242,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             while let Some(result) = stream.next().await {
                 match result {
                     Err(e) => {
-                        return Err(Error::JournalError(e));
+                        return Err(Error::Journal(e));
                     }
                     Ok((section, offset, size, op)) => {
                         if !oldest_retained_loc_found {
@@ -413,7 +413,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             Ok(offset) => {
                 return self.get_from_offset(key, loc, offset.into()).await;
             }
-            Err(e) => Err(Error::JournalError(e)),
+            Err(e) => Err(Error::Journal(e)),
         }
     }
 
@@ -425,9 +425,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 self.log
                     .get(section, offset.into())
                     .await
-                    .map_err(Error::JournalError)
+                    .map_err(Error::Journal)
             }
-            Err(e) => Err(Error::JournalError(e)),
+            Err(e) => Err(Error::Journal(e)),
         }
     }
 
@@ -620,9 +620,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
         let section = self.current_section();
         try_join!(
-            self.mmr.sync(&mut self.hasher).map_err(Error::MmrError),
-            self.log.sync(section).map_err(Error::JournalError),
-            self.locations.sync().map_err(Error::JournalError),
+            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
+            self.log.sync(section).map_err(Error::Journal),
+            self.locations.sync().map_err(Error::Journal),
         )?;
 
         Ok(())
@@ -720,7 +720,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.mmr
             .prune_to_pos(&mut self.hasher, leaf_num_to_pos(self.oldest_retained_loc))
             .await
-            .map_err(Error::MmrError)
+            .map_err(Error::Mmr)
     }
 
     /// Close the db. Operations that have not been committed will be lost.
@@ -734,9 +734,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         let section = self.current_section();
         try_join!(
-            self.mmr.sync(&mut self.hasher).map_err(Error::MmrError),
-            self.log.sync(section).map_err(Error::JournalError),
-            self.locations.sync().map_err(Error::JournalError),
+            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
+            self.log.sync(section).map_err(Error::Journal),
+            self.locations.sync().map_err(Error::Journal),
         )?;
 
         Ok(())
@@ -745,9 +745,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         try_join!(
-            self.log.destroy().map_err(Error::JournalError),
-            self.mmr.destroy().map_err(Error::MmrError),
-            self.locations.destroy().map_err(Error::JournalError),
+            self.log.destroy().map_err(Error::Journal),
+            self.mmr.destroy().map_err(Error::Mmr),
+            self.locations.destroy().map_err(Error::Journal),
         )?;
 
         Ok(())
@@ -809,7 +809,7 @@ pub(super) mod test {
     }
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type AnyTest = Variable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+    type AnyTest = Any<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {

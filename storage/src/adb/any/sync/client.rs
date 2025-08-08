@@ -5,7 +5,10 @@ use super::{
 use crate::{
     adb::{
         self,
-        any::{sync::metrics::Metrics, SyncConfig},
+        any::{
+            fixed::{Any, Config as AnyConfig, SyncConfig},
+            sync::metrics::Metrics,
+        },
     },
     journal::fixed::{Config as JConfig, Journal},
     mmr::{self, iterator::leaf_num_to_pos, verification::Proof},
@@ -146,7 +149,7 @@ where
     pub update_receiver: Option<SyncTargetUpdateReceiver<H::Digest>>,
 
     /// Database configuration.
-    pub db_config: crate::adb::any::Config<T>,
+    pub db_config: AnyConfig<T>,
 
     /// Maximum operations to fetch per batch.
     pub fetch_batch_size: NonZeroU64,
@@ -192,7 +195,7 @@ where
     }
 }
 
-/// Client that syncs an [adb::any::Any] database.
+/// Client that syncs an [adb::any::fixed::Any] database.
 pub(super) struct Client<E, K, V, H, T, R>
 where
     E: Storage + Clock + MetricsTrait,
@@ -247,13 +250,13 @@ where
             config.target.upper_bound_ops,
         )
         .await
-        .map_err(adb::Error::JournalError)
+        .map_err(adb::Error::Journal)
         .map_err(Error::Adb)?;
 
         let log_size = log
             .size()
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::Adb(adb::Error::Journal(e)))?;
         assert!(log_size <= config.target.upper_bound_ops + 1);
 
         // Initialize metrics
@@ -276,7 +279,7 @@ where
     }
 
     /// Run sync to completion.
-    pub(super) async fn sync(mut self) -> Result<adb::any::Any<E, K, V, H, T>, Error> {
+    pub(super) async fn sync(mut self) -> Result<adb::any::fixed::Any<E, K, V, H, T>, Error> {
         loop {
             match self.step().await? {
                 StepResult::Continue(new_client) => self = new_client,
@@ -315,7 +318,7 @@ where
                     // Verify the proof
                     let proof_valid = {
                         let _timer = self.metrics.proof_verification_duration.timer();
-                        adb::any::Any::<E, K, V, H, T>::verify_proof(
+                        Any::<E, K, V, H, T>::verify_proof(
                             &mut self.config.hasher,
                             &proof,
                             start_loc,
@@ -369,7 +372,7 @@ where
 
     /// Execute one step of the sync process.
     /// Returns either a new client to continue with, or the final database if complete.
-    async fn step(mut self) -> Result<StepResult<Self, adb::any::Any<E, K, V, H, T>>, Error> {
+    async fn step(mut self) -> Result<StepResult<Self, Any<E, K, V, H, T>>, Error> {
         // Check if sync is complete
         if self.is_complete().await? {
             let target_root = self.config.target.root;
@@ -437,7 +440,7 @@ where
             .log
             .size()
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::Adb(adb::Error::Journal(e)))?;
 
         for _ in 0..num_requests {
             // Find the next gap in the sync range that needs to be fetched.
@@ -503,7 +506,7 @@ where
             .log
             .size()
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::Adb(adb::Error::Journal(e)))?;
 
         // Remove any batches of operations with stale data.
         // That is, those whose last operation is before `next_loc`.
@@ -555,7 +558,7 @@ where
             self.log
                 .append(op)
                 .await
-                .map_err(adb::Error::JournalError)
+                .map_err(adb::Error::Journal)
                 .map_err(Error::Adb)?;
             // No need to sync here -- the log will periodically sync its storage
             // and we will also sync when we're done applying all operations.
@@ -606,7 +609,7 @@ where
             .log
             .size()
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::Adb(adb::Error::Journal(e)))?;
 
         // Calculate the target log size (upper bound is inclusive)
         let target_log_size = self.config.target.upper_bound_ops + 1;
@@ -757,7 +760,7 @@ fn validate_target_update<H: Hasher>(
 async fn update_log_for_target_update<E, K, V, T>(
     mut log: Journal<E, Fixed<K, V>>,
     context: E,
-    db_config: &adb::any::Config<T>,
+    db_config: &AnyConfig<T>,
     lower_bound_ops: u64,
     upper_bound_ops: u64,
 ) -> Result<Journal<E, Fixed<K, V>>, Error>
@@ -770,12 +773,12 @@ where
     let log_size = log
         .size()
         .await
-        .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+        .map_err(|e| Error::Adb(adb::Error::Journal(e)))?;
 
     if log_size <= lower_bound_ops {
         log.close()
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::Adb(adb::Error::Journal(e)))?;
         log = Journal::<E, Fixed<K, V>>::init_sync(
             context.clone().with_label("log"),
             JConfig {
@@ -788,13 +791,13 @@ where
             upper_bound_ops,
         )
         .await
-        .map_err(adb::Error::JournalError)
+        .map_err(adb::Error::Journal)
         .map_err(Error::Adb)?;
     } else {
         // Prune the log to the new lower bound
         log.prune(lower_bound_ops)
             .await
-            .map_err(|e| Error::Adb(adb::Error::JournalError(e)))?;
+            .map_err(|e| Error::Adb(adb::Error::Journal(e)))?;
     }
 
     Ok(log)
@@ -805,7 +808,7 @@ async fn build_database<E, K, V, H, T, R>(
     config: Config<E, K, V, H, T, R>,
     log: Journal<E, Fixed<K, V>>,
     pinned_nodes: Option<Vec<H::Digest>>,
-) -> Result<adb::any::Any<E, K, V, H, T>, Error>
+) -> Result<Any<E, K, V, H, T>, Error>
 where
     E: Storage + Clock + MetricsTrait,
     K: Array,
@@ -815,7 +818,7 @@ where
     R: Resolver<Digest = H::Digest, Key = K, Value = V>,
 {
     // Build the complete database from the log
-    let db = adb::any::Any::init_synced(
+    let db = Any::init_synced(
         config.context.clone(),
         SyncConfig {
             db_config: config.db_config,
@@ -846,8 +849,8 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         adb::any::{
+            fixed::test::{apply_ops, create_test_db, create_test_ops},
             sync::{resolver::tests::FailResolver, sync},
-            test::{apply_ops, create_test_db, create_test_ops},
         },
         translator,
     };
@@ -873,8 +876,8 @@ pub(crate) mod tests {
         crate::mmr::hasher::Standard::<TestDigest>::new()
     }
 
-    fn create_test_config(seed: u64) -> adb::any::Config<TestTranslator> {
-        adb::any::Config {
+    fn create_test_config(seed: u64) -> AnyConfig<TestTranslator> {
+        AnyConfig {
             mmr_journal_partition: format!("mmr_journal_{seed}"),
             mmr_metadata_partition: format!("mmr_metadata_{seed}"),
             mmr_items_per_blob: 1024,
@@ -961,7 +964,7 @@ pub(crate) mod tests {
             assert_eq!(got_db.inactivity_floor_loc, target_inactivity_floor);
             assert_eq!(got_db.log.size().await.unwrap(), target_log_size);
             assert_eq!(
-                got_db.ops.pruned_to_pos(),
+                got_db.mmr.pruned_to_pos(),
                 leaf_num_to_pos(target_inactivity_floor)
             );
 
@@ -1009,18 +1012,17 @@ pub(crate) mod tests {
             let final_synced_inactivity_floor = got_db.inactivity_floor_loc;
             let final_synced_log_size = got_db.log.size().await.unwrap();
             let final_synced_oldest_retained_loc = got_db.oldest_retained_loc();
-            let final_synced_pruned_to_pos = got_db.ops.pruned_to_pos();
+            let final_synced_pruned_to_pos = got_db.mmr.pruned_to_pos();
             let final_synced_root = got_db.root(&mut hasher);
 
             // Close the database
             got_db.close().await.unwrap();
 
             // Reopen the database using the same configuration and verify the state is unchanged
-            let reopened_db = adb::any::Any::<_, Digest, Digest, TestDigest, TestTranslator>::init(
-                context, db_config,
-            )
-            .await
-            .unwrap();
+            let reopened_db =
+                Any::<_, Digest, Digest, TestDigest, TestTranslator>::init(context, db_config)
+                    .await
+                    .unwrap();
 
             // Compare state against the database state before closing
             assert_eq!(reopened_db.op_count(), final_synced_op_count);
@@ -1033,7 +1035,7 @@ pub(crate) mod tests {
                 reopened_db.oldest_retained_loc(),
                 final_synced_oldest_retained_loc,
             );
-            assert_eq!(reopened_db.ops.pruned_to_pos(), final_synced_pruned_to_pos);
+            assert_eq!(reopened_db.mmr.pruned_to_pos(), final_synced_pruned_to_pos);
             assert_eq!(reopened_db.root(&mut hasher), final_synced_root);
 
             // Verify that the original key-value pairs are still correct
@@ -1140,7 +1142,7 @@ pub(crate) mod tests {
             assert_eq!(synced_db.inactivity_floor_loc, lower_bound_ops);
             assert_eq!(synced_db.oldest_retained_loc(), Some(lower_bound_ops));
             assert_eq!(
-                synced_db.ops.pruned_to_pos(),
+                synced_db.mmr.pruned_to_pos(),
                 leaf_num_to_pos(lower_bound_ops)
             );
             assert_eq!(synced_db.op_count(), upper_bound_ops + 1);
@@ -1169,7 +1171,7 @@ pub(crate) mod tests {
             // Create two databases
             let mut target_db = create_test_db(context.clone()).await;
             let sync_db_config = create_test_config(1337);
-            let mut sync_db = adb::any::Any::init(context.clone(), sync_db_config.clone())
+            let mut sync_db = Any::init(context.clone(), sync_db_config.clone())
                 .await
                 .unwrap();
 
@@ -1224,7 +1226,7 @@ pub(crate) mod tests {
                 target_db.read().await.log.size().await.unwrap()
             );
             assert_eq!(
-                sync_db.ops.pruned_to_pos(),
+                sync_db.mmr.pruned_to_pos(),
                 leaf_num_to_pos(lower_bound_ops)
             );
             // Verify the root digest matches the target
@@ -1270,11 +1272,9 @@ pub(crate) mod tests {
 
             // Create two databases
             let target_config = create_test_config(context.next_u64());
-            let mut target_db = adb::any::Any::init(context.clone(), target_config)
-                .await
-                .unwrap();
+            let mut target_db = Any::init(context.clone(), target_config).await.unwrap();
             let sync_config = create_test_config(context.next_u64());
-            let mut sync_db = adb::any::Any::init(context.clone(), sync_config.clone())
+            let mut sync_db = Any::init(context.clone(), sync_config.clone())
                 .await
                 .unwrap();
 
@@ -1325,7 +1325,7 @@ pub(crate) mod tests {
                 target_db.log.size().await.unwrap()
             );
             assert_eq!(
-                sync_db.ops.pruned_to_pos(),
+                sync_db.mmr.pruned_to_pos(),
                 leaf_num_to_pos(lower_bound_ops)
             );
 
@@ -1966,9 +1966,9 @@ pub(crate) mod tests {
                 let expected = target_db.log.read(i).await.unwrap();
                 assert_eq!(got, expected);
             }
-            for i in synced_db.ops.oldest_retained_pos().unwrap()..synced_db.ops.size() {
-                let got = synced_db.ops.get_node(i).await.unwrap();
-                let expected = target_db.ops.get_node(i).await.unwrap();
+            for i in synced_db.mmr.oldest_retained_pos().unwrap()..synced_db.mmr.size() {
+                let got = synced_db.mmr.get_node(i).await.unwrap();
+                let expected = target_db.mmr.get_node(i).await.unwrap();
                 assert_eq!(got, expected);
             }
 
@@ -2067,10 +2067,6 @@ pub(crate) mod tests {
                 target_db.inactivity_floor_loc
             );
             assert_eq!(
-                synced_db.oldest_retained_loc(),
-                target_db.oldest_retained_loc()
-            );
-            assert_eq!(
                 synced_db.oldest_retained_loc().unwrap(),
                 initial_lower_bound
             );
@@ -2082,9 +2078,9 @@ pub(crate) mod tests {
                 let expected = target_db.log.read(i).await.unwrap();
                 assert_eq!(got, expected);
             }
-            for i in synced_db.ops.oldest_retained_pos().unwrap()..synced_db.ops.size() {
-                let got = synced_db.ops.get_node(i).await.unwrap();
-                let expected = target_db.ops.get_node(i).await.unwrap();
+            for i in synced_db.mmr.oldest_retained_pos().unwrap()..synced_db.mmr.size() {
+                let got = synced_db.mmr.get_node(i).await.unwrap();
+                let expected = target_db.mmr.get_node(i).await.unwrap();
                 assert_eq!(got, expected);
             }
 
@@ -2140,13 +2136,13 @@ pub(crate) mod tests {
             let expected_op_count = synced_db.op_count();
             let expected_inactivity_floor_loc = synced_db.inactivity_floor_loc;
             let expected_oldest_retained_loc = synced_db.oldest_retained_loc();
-            let expected_pruned_to_pos = synced_db.ops.pruned_to_pos();
+            let expected_pruned_to_pos = synced_db.mmr.pruned_to_pos();
 
             // Close the database
             synced_db.close().await.unwrap();
 
             // Re-open the database
-            let reopened_db = adb::any::Any::<_, Digest, Digest, TestDigest, TestTranslator>::init(
+            let reopened_db = Any::<_, Digest, Digest, TestDigest, TestTranslator>::init(
                 context_clone,
                 db_config,
             )
@@ -2164,7 +2160,7 @@ pub(crate) mod tests {
                 reopened_db.oldest_retained_loc(),
                 expected_oldest_retained_loc
             );
-            assert_eq!(reopened_db.ops.pruned_to_pos(), expected_pruned_to_pos);
+            assert_eq!(reopened_db.mmr.pruned_to_pos(), expected_pruned_to_pos);
 
             // Cleanup
             Arc::try_unwrap(target_db)

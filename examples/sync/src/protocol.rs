@@ -1,8 +1,8 @@
-//! Network protocol definitions for syncing a [commonware_storage::adb::any::Any] database.
+//! Network protocol definitions for syncing a [commonware_storage::adb::any::fixed::Any] database.
 //!
-//! This module defines the network protocol used for syncing a [commonware_storage::adb::any::Any]
-//! database to a server's database state. It includes message types, error handling, and validation
-//! logic for safe network communication.
+//! This module defines the network protocol used for syncing a
+//! [commonware_storage::adb::any::fixed::Any] database to a server's database state. It includes
+//! message types, error handling, and validation logic for safe network communication.
 //!
 //! The protocol supports:
 //! - Getting server metadata (database size, root digest, operation bounds)
@@ -56,7 +56,7 @@ impl Requester {
     }
 }
 
-/// Network protocol messages for syncing a [commonware_storage::adb::any::Any] database.
+/// Network protocol messages for syncing a [commonware_storage::adb::any::fixed::Any] database.
 #[derive(Debug, Clone)]
 pub enum Message {
     /// Request operations from the server.
