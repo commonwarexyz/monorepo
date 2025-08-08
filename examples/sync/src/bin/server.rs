@@ -115,11 +115,9 @@ where
                 let mut database = self.database.write().await;
                 for operation in new_operations.iter() {
                     let result = match operation {
-                        Operation::Update(key, value) => {
-                            database.update(*key, *value).await.map(|_| ())
-                        }
+                        Operation::Update(key, value) => database.update(*key, *value).await,
                         Operation::Delete(key) => database.delete(*key).await.map(|_| ()),
-                        Operation::CommitFloor(_) => database.commit().await.map(|_| ()),
+                        Operation::CommitFloor(_) => database.commit().await,
                     };
 
                     if let Err(e) = result {
