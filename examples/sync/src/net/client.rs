@@ -12,36 +12,38 @@ use crate::Error;
 
 const REQUEST_BUFFER_SIZE: usize = 64;
 
-/// Request data sent to the I/O task.
-pub struct IoRequest<M: WireMessage> {
+/// A request and callback for a response.
+pub struct Request<M: WireMessage> {
     pub message: M,
-    pub response_sender: oneshot::Sender<Result<M, Error>>,
+    pub response_tx: oneshot::Sender<Result<M, Error>>,
 }
 
-/// Generic I/O task for a wire message enum `M`.
-pub struct IoTask<E, M>
+/// Sends requests and handles responses.
+pub struct Requester<E, M>
 where
     E: commonware_runtime::Network + commonware_runtime::Spawner + commonware_runtime::Clock,
     M: WireMessage + Send + 'static,
 {
     pub context: E,
     pub server_addr: SocketAddr,
-    pub request_receiver: mpsc::Receiver<IoRequest<M>>,
+    /// Source of messages to send.
+    pub request_rx: mpsc::Receiver<Request<M>>,
+    /// Map of request IDs to response senders.
     pub pending_requests: HashMap<RequestId, oneshot::Sender<Result<M, Error>>>,
 }
 
-impl<E, M> IoTask<E, M>
+impl<E, M> Requester<E, M>
 where
     E: commonware_runtime::Network + commonware_runtime::Spawner + commonware_runtime::Clock,
     M: WireMessage + Send + 'static,
 {
+    /// Start sending and receiving messages.
     pub async fn run(mut self) {
         let (mut sink, mut stream) = match self.context.dial(self.server_addr).await {
             Ok((sink, stream)) => (sink, stream),
-            Err(_e) => {
-                // Connection failed; notify waiters generically
-                for (_, response_sender) in self.pending_requests.drain() {
-                    let _ = response_sender.send(Err(Error::RequestChannelClosed));
+            Err(_) => {
+                for (_, response_tx) in self.pending_requests.drain() {
+                    let _ = response_tx.send(Err(Error::RequestChannelClosed)); // TODO: Replace dummy error RequestChannelClosed with real error
                 }
                 return;
             }
@@ -49,11 +51,11 @@ where
 
         loop {
             select! {
-                outgoing = self.request_receiver.next() => {
+                outgoing = self.request_rx.next() => {
                     match outgoing {
-                        Some(IoRequest { message, response_sender }) => {
+                        Some(Request { message, response_tx }) => {
                             let request_id = message.request_id();
-                            self.pending_requests.insert(request_id, response_sender);
+                            self.pending_requests.insert(request_id, response_tx);
                             let data = message.encode().to_vec();
                             if let Err(e) = send_frame(&mut sink, &data, MAX_MESSAGE_SIZE).await {
                                 if let Some(sender) = self.pending_requests.remove(&request_id) {
@@ -101,7 +103,7 @@ where
         + Clone,
     M: WireMessage,
 {
-    request_sender: mpsc::Sender<IoRequest<M>>,
+    request_sender: mpsc::Sender<Request<M>>,
     _phantom: std::marker::PhantomData<(E, M)>,
 }
 
@@ -115,10 +117,10 @@ where
 {
     pub fn new(context: E, server_addr: SocketAddr) -> Self {
         let (request_sender, request_receiver) = mpsc::channel(REQUEST_BUFFER_SIZE);
-        let task = IoTask::<E, M> {
+        let task = Requester::<E, M> {
             context: context.clone(),
             server_addr,
-            request_receiver,
+            request_rx: request_receiver,
             pending_requests: HashMap::new(),
         };
         let _handle = context.spawn(move |_| async move {
@@ -134,9 +136,9 @@ where
         let (tx, rx) = oneshot::channel();
         self.request_sender
             .clone()
-            .send(IoRequest {
+            .send(Request {
                 message,
-                response_sender: tx,
+                response_tx: tx,
             })
             .await
             .map_err(|_| Error::RequestChannelClosed)?;

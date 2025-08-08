@@ -1,43 +1,13 @@
 use std::mem::size_of;
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write,
-};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt};
 
 /// Maximum message size in bytes (10MB).
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
-/// Unique identifier for correlating requests with responses.
-pub type RequestId = u64;
-
-/// A requester that generates monotonically increasing request IDs.
-#[derive(Debug, Clone)]
-pub struct Requester {
-    counter: Arc<AtomicU64>,
-}
-
-impl Default for Requester {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Requester {
-    pub fn new() -> Self {
-        Requester {
-            counter: Arc::new(AtomicU64::new(1)),
-        }
-    }
-
-    pub fn next(&self) -> RequestId {
-        self.counter.fetch_add(1, Ordering::Relaxed)
-    }
-}
+pub mod request_id;
+pub use request_id::{Generator, RequestId};
 
 /// Error codes for protocol errors.
 #[derive(Debug, Clone)]
@@ -54,7 +24,7 @@ pub enum ErrorCode {
     InternalError,
 }
 
-impl Write for ErrorCode {
+impl commonware_codec::Write for ErrorCode {
     fn write(&self, buf: &mut impl BufMut) {
         let discriminant = match self {
             ErrorCode::InvalidRequest => 0u8,
@@ -100,7 +70,7 @@ pub struct ErrorResponse {
     pub message: String,
 }
 
-impl Write for ErrorResponse {
+impl commonware_codec::Write for ErrorResponse {
     fn write(&self, buf: &mut impl BufMut) {
         self.request_id.write(buf);
         self.error_code.write(buf);
@@ -141,118 +111,19 @@ pub trait WireMessage: Encode + Clone + Sized + Send + Sync + 'static {
 }
 
 pub mod client;
+pub mod resolver;
 pub mod wire;
-
-use commonware_cryptography::Digest;
-use commonware_storage::adb::sync::Target;
-use std::num::NonZeroU64;
-
-/// Network resolver that works directly with generic wire messages.
-#[derive(Clone)]
-pub struct Resolver<E, Op, D>
-where
-    E: commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + commonware_runtime::Clock
-        + Clone,
-    Op: Read<Cfg = ()> + Write + EncodeSize + Encode + Clone + Send + Sync + 'static,
-    D: Digest,
-{
-    client: client::Client<E, wire::Message<Op, D>>,
-}
-
-impl<E, Op, D> Resolver<E, Op, D>
-where
-    E: commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + commonware_runtime::Clock
-        + Clone,
-    Op: Clone + Send + Sync + 'static + ReadExt<Cfg = ()> + Write + EncodeSize,
-    D: Digest,
-{
-    pub fn new(context: E, server_addr: std::net::SocketAddr) -> Self {
-        let client = client::Client::<E, wire::Message<Op, D>>::new(context, server_addr);
-        Self { client }
-    }
-
-    pub async fn get_sync_target(&self) -> Result<Target<D>, crate::Error> {
-        let request =
-            wire::Message::GetSyncTargetRequest(wire::GetSyncTargetRequest { request_id: 0 });
-        let response = self.client.send(request).await?;
-        match response {
-            wire::Message::GetSyncTargetResponse(r) => Ok(r.target),
-            wire::Message::Error(err) => Err(crate::Error::Server {
-                code: err.error_code,
-                message: err.message,
-            }),
-            other => Err(crate::Error::UnexpectedResponse {
-                request_id: other.request_id(),
-            }),
-        }
-    }
-}
-
-impl<E, Op, D> commonware_storage::adb::sync::resolver::Resolver for Resolver<E, Op, D>
-where
-    E: commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + commonware_runtime::Clock
-        + Clone,
-    Op: Clone + Send + Sync + 'static + ReadExt<Cfg = ()> + Write + EncodeSize,
-    D: Digest,
-{
-    type Digest = D;
-    type Op = Op;
-    type Error = crate::Error;
-
-    async fn get_operations(
-        &self,
-        size: u64,
-        start_loc: u64,
-        max_ops: NonZeroU64,
-    ) -> Result<
-        commonware_storage::adb::sync::resolver::FetchResult<Self::Op, Self::Digest>,
-        Self::Error,
-    > {
-        let request = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
-            request_id: 0,
-            size,
-            start_loc,
-            max_ops,
-        });
-        let response = self.client.send(request).await?;
-        let (proof, operations) = match response {
-            wire::Message::GetOperationsResponse(r) => (r.proof, r.operations),
-            wire::Message::Error(err) => {
-                return Err(crate::Error::Server {
-                    code: err.error_code,
-                    message: err.message,
-                })
-            }
-            other => {
-                return Err(crate::Error::UnexpectedResponse {
-                    request_id: other.request_id(),
-                })
-            }
-        };
-        let (tx, _rx) = futures::channel::oneshot::channel();
-        Ok(commonware_storage::adb::sync::resolver::FetchResult {
-            proof,
-            operations,
-            success_tx: tx,
-        })
-    }
-}
+pub use resolver::Resolver;
 
 #[cfg(test)]
 mod tests {
-    use crate::net::{wire::GetOperationsRequest, ErrorCode, Requester};
+    use crate::net::{request_id::Generator, wire::GetOperationsRequest, ErrorCode};
     use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_utils::NZU64;
 
     #[test]
     fn test_request_id_generation() {
-        let requester = Requester::new();
+        let requester = Generator::new();
         let id1 = requester.next();
         let id2 = requester.next();
         let id3 = requester.next();
@@ -298,7 +169,7 @@ mod tests {
     #[test]
     fn test_get_operations_request_validation() {
         // Valid request
-        let requester = Requester::new();
+        let requester = Generator::new();
         let request = GetOperationsRequest {
             request_id: requester.next(),
             size: 100,
