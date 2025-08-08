@@ -93,7 +93,7 @@ where
 
 /// Minimal generic network resolver facade over IoTask for a specific message type.
 #[derive(Clone)]
-pub struct NetworkClient<E, M>
+pub struct Client<E, M>
 where
     E: commonware_runtime::Network
         + commonware_runtime::Spawner
@@ -105,7 +105,7 @@ where
     _phantom: std::marker::PhantomData<(E, M)>,
 }
 
-impl<E, M> NetworkClient<E, M>
+impl<E, M> Client<E, M>
 where
     E: commonware_runtime::Network
         + commonware_runtime::Spawner

@@ -158,7 +158,7 @@ where
     Op: Read<Cfg = ()> + Write + EncodeSize + Encode + Clone + Send + Sync + 'static,
     D: Digest,
 {
-    client: client::NetworkClient<E, wire::Message<Op, D>>,
+    client: client::Client<E, wire::Message<Op, D>>,
 }
 
 impl<E, Op, D> Resolver<E, Op, D>
@@ -171,7 +171,7 @@ where
     D: Digest,
 {
     pub fn new(context: E, server_addr: std::net::SocketAddr) -> Self {
-        let client = client::NetworkClient::<E, wire::Message<Op, D>>::new(context, server_addr);
+        let client = client::Client::<E, wire::Message<Op, D>>::new(context, server_addr);
         Self { client }
     }
 
