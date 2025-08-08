@@ -13,10 +13,10 @@
 use crate::Operation;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, ReadRangeExt as _, Write,
+    EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, ReadRangeExt as _, Write,
 };
 use commonware_cryptography::sha256::Digest;
-use commonware_storage::{adb::any::sync::SyncTarget, mmr::verification::Proof};
+use commonware_storage::{adb::sync::Target, mmr::verification::Proof};
 use std::{
     mem::size_of,
     num::NonZeroU64,
@@ -124,7 +124,7 @@ pub struct GetSyncTargetResponse {
     /// Unique identifier matching the original request.
     pub request_id: RequestId,
     /// Sync target information.
-    pub target: SyncTarget<Digest>,
+    pub target: Target<Digest>,
 }
 
 /// Error response.
@@ -325,7 +325,7 @@ impl Read for GetSyncTargetResponse {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
-        let target = SyncTarget::read_cfg(buf, &())?;
+        let target = Target::read_cfg(buf, &())?;
         Ok(Self { request_id, target })
     }
 }

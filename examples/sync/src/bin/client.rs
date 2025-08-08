@@ -7,10 +7,16 @@ use clap::{Arg, Command};
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
 use commonware_storage::{
-    adb::any::sync::{self, client::Config as SyncConfig, SyncTarget},
+    adb::{
+        self,
+        any::fixed::Any,
+        sync::{self, engine::EngineConfig, Error as SyncError, Target},
+    },
     mmr::hasher::Standard,
 };
-use commonware_sync::{crate_version, create_adb_config, Error, Resolver};
+use commonware_sync::{
+    crate_version, create_adb_config, Error, Hasher, Key, Resolver, Translator, Value,
+};
 use commonware_utils::parse_duration;
 use futures::channel::mpsc;
 use rand::Rng;
@@ -54,9 +60,9 @@ struct Config {
 async fn target_update_task<E>(
     context: E,
     resolver: Resolver<E>,
-    update_sender: mpsc::Sender<SyncTarget<Digest>>,
+    update_sender: mpsc::Sender<Target<Digest>>,
     interval_duration: Duration,
-    initial_target: SyncTarget<Digest>,
+    initial_target: Target<Digest>,
 ) -> Result<(), Error>
 where
     E: commonware_runtime::Network + commonware_runtime::Clock + commonware_runtime::Spawner,
@@ -105,7 +111,11 @@ where
 }
 
 /// Perform a single sync by opening the database, syncing, and closing it.
-async fn sync<E>(context: &E, config: &Config, sync_iteration: u32) -> Result<(), Error>
+async fn sync<E>(
+    context: &E,
+    config: &Config,
+    sync_iteration: u32,
+) -> Result<(), SyncError<adb::Error, Error>>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
@@ -116,7 +126,10 @@ where
 {
     // Get initial sync target
     let resolver = Resolver::new(context.clone(), config.server);
-    let initial_target = resolver.get_sync_target().await?;
+    let initial_target = resolver
+        .get_sync_target()
+        .await
+        .map_err(SyncError::resolver)?;
     info!(
         sync_iteration,
         target = ?initial_target,
@@ -148,27 +161,19 @@ where
     });
 
     // Create sync configuration
-    let sync_config = SyncConfig::<
-        E,
-        commonware_sync::Key,
-        commonware_sync::Value,
-        commonware_sync::Hasher,
-        commonware_sync::Translator,
-        Resolver<E>,
-    > {
+    let sync_config = EngineConfig {
         context: context.clone(),
         db_config,
         fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
         target: initial_target,
         resolver,
-        hasher: Standard::new(),
         apply_batch_size: 1024,
         max_outstanding_requests: config.max_outstanding_requests,
         update_receiver: Some(update_receiver),
     };
 
     // Sync to the server's state
-    let database = sync::sync(sync_config).await?;
+    let database: Any<_, Key, Value, Hasher, Translator> = sync::sync(sync_config).await?;
 
     // Cancel the target update task since sync is complete
     target_update_handle.abort();
@@ -190,13 +195,13 @@ where
         database.op_count(),
         got_root
     );
-    database.close().await?;
+    database.close().await.map_err(SyncError::database)?;
 
     Ok(())
 }
 
 /// Continuously sync the database to the server's state.
-async fn run<E>(context: E, config: Config) -> Result<(), Error>
+async fn run<E>(context: E, config: Config) -> Result<(), SyncError<adb::Error, Error>>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock

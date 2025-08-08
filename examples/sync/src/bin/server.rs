@@ -7,7 +7,7 @@ use commonware_macros::select;
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Listener, Metrics as _, Network, Runner, RwLock, Spawner as _,
 };
-use commonware_storage::{adb::any::sync::SyncTarget, mmr::hasher::Standard};
+use commonware_storage::{adb::sync::Target, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     crate_version, create_adb_config, create_test_operations, Database, Error, ErrorCode,
@@ -185,7 +185,7 @@ where
     };
     let response = GetSyncTargetResponse {
         request_id: request.request_id,
-        target: SyncTarget {
+        target: Target {
             root,
             lower_bound_ops,
             upper_bound_ops,

@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    adb::any::fixed::{Any, Config},
+    adb::any::fixed::{verify_proof, Any, Config},
     mmr::hasher::Standard,
     translator::EightCap,
 };
@@ -157,7 +157,7 @@ fn fuzz(data: FuzzInput) {
                             .expect("proof should not fail");
 
                         assert!(
-                            Any::<deterministic::Context, _, _, _, EightCap>::verify_proof(
+                            verify_proof(
                                 &mut hasher,
                                 &proof,
                                 adjusted_start,

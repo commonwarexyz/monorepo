@@ -10,23 +10,31 @@ use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
-/// Result of a call to [Resolver::get_operations].
-pub struct GetOperationsResult<D: Digest, K: Array, V: Array> {
-    /// Proof that the operations are valid.
+/// Result from a fetch operation
+pub struct FetchResult<Op, D: Digest> {
+    /// The proof for the operations
     pub proof: Proof<D>,
-    /// The operations in the requested range.
-    pub operations: Vec<Fixed<K, V>>,
-    /// A channel to send the result of the proof verification.
-    /// Caller should send `true` if the proof is valid, `false` otherwise.
-    /// Caller should ignore error if the channel is closed.
+    /// The operations that were fetched
+    pub operations: Vec<Op>,
+    /// Channel to report success/failure back to resolver
     pub success_tx: oneshot::Sender<bool>,
+}
+
+impl<Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<Op, D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FetchResult")
+            .field("proof", &self.proof)
+            .field("operations", &self.operations)
+            .field("success_tx", &"<callback>")
+            .finish()
+    }
 }
 
 /// Trait for network communication with the sync server
 pub trait Resolver: Send + Sync + Clone + 'static {
     type Digest: Digest;
-    type Key: Array;
-    type Value: Array;
+    type Op;
+    type Error: std::error::Error + Send + 'static;
 
     /// Get the operations starting at `start_loc` in the database, up to `max_ops` operations.
     /// Returns the operations and a proof that they were present in the database when it had
@@ -37,9 +45,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error>>
-           + Send
-           + 'a;
+    ) -> impl Future<Output = Result<FetchResult<Self::Op, Self::Digest>, Self::Error>> + Send + 'a;
 }
 
 impl<E, K, V, H, T> Resolver for Arc<Any<E, K, V, H, T>>
@@ -52,19 +58,18 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Key = K;
-    type Value = V;
+    type Op = Fixed<K, V>;
+    type Error = Error;
 
     async fn get_operations(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error> {
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
         self.historical_proof(size, start_loc, max_ops.get())
             .await
-            .map_err(Error::Adb)
-            .map(|(proof, operations)| GetOperationsResult {
+            .map(|(proof, operations)| FetchResult {
                 proof,
                 operations,
                 // Result of proof verification isn't used by this implementation.
@@ -85,20 +90,19 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Key = K;
-    type Value = V;
+    type Op = Fixed<K, V>;
+    type Error = Error;
 
     async fn get_operations(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error> {
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Error> {
         let db = self.read().await;
         db.historical_proof(size, start_loc, max_ops.get())
             .await
-            .map_err(Error::Adb)
-            .map(|(proof, operations)| GetOperationsResult {
+            .map(|(proof, operations)| FetchResult {
                 proof,
                 operations,
                 // Result of proof verification isn't used by this implementation.
@@ -108,7 +112,7 @@ where
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::marker::PhantomData;
 
@@ -126,16 +130,16 @@ pub(super) mod tests {
         V: Array,
     {
         type Digest = D;
-        type Key = K;
-        type Value = V;
+        type Op = Fixed<K, V>;
+        type Error = Error;
 
         async fn get_operations(
             &self,
             _size: u64,
             _start_loc: u64,
             _max_ops: NonZeroU64,
-        ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, Error> {
-            Err(Error::AlreadyComplete)
+        ) -> Result<FetchResult<Self::Op, Self::Digest>, Error> {
+            Err(Error::KeyNotFound) // Arbitrary dummy error
         }
     }
 

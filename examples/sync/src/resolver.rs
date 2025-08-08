@@ -8,9 +8,9 @@ use crate::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
-use commonware_storage::adb::any::sync::{
-    resolver::{GetOperationsResult, Resolver as ResolverTrait},
-    Error as SyncError, SyncTarget,
+use commonware_storage::adb::sync::{
+    resolver::{FetchResult, Resolver as ResolverTrait},
+    Target,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::{
@@ -77,7 +77,7 @@ where
                                 error!(error = %e, "failed to send request, exiting");
                                 // Notify the pending request of the error
                                 if let Some(response_sender) = self.pending_requests.remove(&request_id) {
-                                    let _ = response_sender.send(Err(Error::Stream(e)));
+                                    let _ = response_sender.send(Err(Error::Network(e)));
                                 }
                                 return;
                             } else {
@@ -168,7 +168,7 @@ where
         }
     }
 
-    pub async fn get_sync_target(&self) -> Result<SyncTarget<Digest>, Error> {
+    pub async fn get_sync_target(&self) -> Result<Target<Digest>, Error> {
         let request_id = self.requester.next();
         let request = GetSyncTargetRequest { request_id };
 
@@ -179,7 +179,7 @@ where
             Message::GetSyncTargetResponse(response) => Ok(response.target),
             Message::Error(err) => {
                 error!(error = %err.message, "server error");
-                Err(Error::ServerError {
+                Err(Error::Server {
                     code: err.error_code,
                     message: err.message,
                 })
@@ -220,15 +220,15 @@ where
         + Clone,
 {
     type Digest = Digest;
-    type Key = crate::Key;
-    type Value = crate::Value;
+    type Op = crate::Operation;
+    type Error = Error;
 
     async fn get_operations(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<GetOperationsResult<Self::Digest, Self::Key, Self::Value>, SyncError> {
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
         let request_id = self.requester.next();
         let request = GetOperationsRequest {
             request_id,
@@ -240,20 +240,21 @@ where
         let response = self
             .send_request(Message::GetOperationsRequest(request))
             .await?;
+
         match response {
             Message::GetOperationsResponse(response) => {
                 let (success_tx, _success_rx) = oneshot::channel();
-                Ok(GetOperationsResult {
+                Ok(FetchResult {
                     operations: response.operations,
                     proof: response.proof,
                     success_tx,
                 })
             }
-            Message::Error(err) => Err(SyncError::from(Error::ServerError {
+            Message::Error(err) => Err(Error::Server {
                 code: err.error_code,
                 message: err.message,
-            })),
-            _ => Err(SyncError::from(Error::UnexpectedResponse { request_id })),
+            }),
+            _ => Err(Error::UnexpectedResponse { request_id }),
         }
     }
 }

@@ -7,7 +7,7 @@
 //!
 //! The sync example showcases how to:
 //! - Create and configure an [Any] database
-//! - Implement a network-based [commonware_storage::adb::any::sync::resolver::Resolver] for fetching operations
+//! - Implement a network-based Resolver for fetching operations
 //! - Use [commonware_storage::adb::any::sync] to synchronize the client's database state with the server's state
 
 use commonware_cryptography::Hasher as CryptoHasher;

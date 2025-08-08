@@ -632,22 +632,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         Ok((proof, ops))
     }
 
-    /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
-    /// the log with the provided root.
-    pub fn verify_proof(
-        hasher: &mut Standard<H>,
-        proof: &Proof<H::Digest>,
-        start_loc: u64,
-        ops: &[Operation<K, V>],
-        root: &H::Digest,
-    ) -> bool {
-        let start_pos = leaf_num_to_pos(start_loc);
-
-        let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
-
-        proof.verify_range_inclusion(hasher, &elements, start_pos, root)
-    }
-
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Also raises the inactivity floor according to the schedule,
     /// and prunes those operations below it. Batch operations will be parallelized if a thread pool
@@ -819,6 +803,27 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
     }
 }
 
+/// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
+/// the log with the provided root.
+pub fn verify_proof<H, K, V>(
+    hasher: &mut Standard<H>,
+    proof: &Proof<H::Digest>,
+    start_loc: u64,
+    ops: &[Operation<K, V>],
+    root: &H::Digest,
+) -> bool
+where
+    H: CHasher,
+    K: Array,
+    V: Array,
+{
+    let start_pos = leaf_num_to_pos(start_loc);
+
+    let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
+
+    proof.verify_range_inclusion(hasher, &elements, start_pos, root)
+}
+
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
@@ -861,7 +866,7 @@ pub(super) mod test {
     }
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    pub type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
@@ -870,7 +875,7 @@ pub(super) mod test {
             .unwrap()
     }
 
-    fn create_test_config(seed: u64) -> Config<TwoCap> {
+    pub(crate) fn create_test_config(seed: u64) -> Config<TwoCap> {
         Config {
             mmr_journal_partition: format!("mmr_journal_{seed}"),
             mmr_metadata_partition: format!("mmr_metadata_{seed}"),
@@ -1185,7 +1190,7 @@ pub(super) mod test {
 
             for i in start_loc..end_loc {
                 let (proof, log) = db.proof(i, max_ops).await.unwrap();
-                assert!(AnyTest::verify_proof(&mut hasher, &proof, i, &log, &root));
+                assert!(verify_proof(&mut hasher, &proof, i, &log, &root));
             }
 
             db.destroy().await.unwrap();
@@ -1885,7 +1890,7 @@ pub(super) mod test {
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
             assert_eq!(historical_ops, ops[5..15]);
-            assert!(AnyTest::verify_proof(
+            assert!(verify_proof(
                 &mut hasher,
                 &historical_proof,
                 5,
@@ -1906,7 +1911,7 @@ pub(super) mod test {
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(AnyTest::verify_proof(
+            assert!(verify_proof(
                 &mut hasher,
                 &historical_proof,
                 5,
@@ -1941,7 +1946,7 @@ pub(super) mod test {
             single_db.sync().await.unwrap();
             let single_root = single_db.root(&mut hasher);
 
-            assert!(AnyTest::verify_proof(
+            assert!(verify_proof(
                 &mut hasher,
                 &single_proof,
                 0,
@@ -2002,7 +2007,7 @@ pub(super) mod test {
 
                 // Verify proof against reference root
                 let ref_root = ref_db.root(&mut hasher);
-                assert!(AnyTest::verify_proof(
+                assert!(verify_proof(
                     &mut hasher,
                     &historical_proof,
                     start_loc,
@@ -2095,25 +2100,13 @@ pub(super) mod test {
                 let mut proof = proof.clone();
                 proof.digests[0] = hash(b"invalid");
                 let root_hash = db.root(&mut hasher);
-                assert!(!AnyTest::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    0,
-                    &ops,
-                    &root_hash
-                ));
+                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
             }
             {
                 let mut proof = proof.clone();
                 proof.digests.push(hash(b"invalid"));
                 let root_hash = db.root(&mut hasher);
-                assert!(!AnyTest::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    0,
-                    &ops,
-                    &root_hash
-                ));
+                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
             }
 
             // Changing the ops should cause verification to fail
@@ -2121,42 +2114,24 @@ pub(super) mod test {
                 let mut ops = ops.clone();
                 ops[0] = Operation::Update(hash(b"key1"), hash(b"value1"));
                 let root_hash = db.root(&mut hasher);
-                assert!(!AnyTest::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    0,
-                    &ops,
-                    &root_hash
-                ));
+                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
             }
             {
                 let mut ops = ops.clone();
                 ops.push(Operation::Update(hash(b"key1"), hash(b"value1")));
                 let root_hash = db.root(&mut hasher);
-                assert!(!AnyTest::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    0,
-                    &ops,
-                    &root_hash
-                ));
+                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
             }
 
             // Changing the start location should cause verification to fail
             {
                 let root_hash = db.root(&mut hasher);
-                assert!(!AnyTest::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    1,
-                    &ops,
-                    &root_hash
-                ));
+                assert!(!verify_proof(&mut hasher, &proof, 1, &ops, &root_hash));
             }
 
             // Changing the root digest should cause verification to fail
             {
-                assert!(!AnyTest::verify_proof(
+                assert!(!verify_proof(
                     &mut hasher,
                     &proof,
                     0,
@@ -2170,13 +2145,7 @@ pub(super) mod test {
                 let mut proof = proof.clone();
                 proof.size = 100;
                 let root_hash = db.root(&mut hasher);
-                assert!(!AnyTest::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    0,
-                    &ops,
-                    &root_hash
-                ));
+                assert!(!verify_proof(&mut hasher, &proof, 0, &ops, &root_hash));
             }
 
             db.destroy().await.unwrap();
@@ -2230,7 +2199,7 @@ pub(super) mod test {
             let (original_proof, original_ops) = db.proof(proof_start, max_ops).await.unwrap();
 
             // Verify the proof works
-            assert!(AnyTest::verify_proof(
+            assert!(verify_proof(
                 &mut hasher,
                 &original_proof,
                 proof_start,
@@ -2254,7 +2223,7 @@ pub(super) mod test {
             assert_eq!(original_proof.digests, reopened_proof.digests);
             assert_eq!(original_ops, reopened_ops);
 
-            assert!(AnyTest::verify_proof(
+            assert!(verify_proof(
                 &mut hasher,
                 &reopened_proof,
                 proof_start,
