@@ -24,11 +24,12 @@ use crate::{
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
-use commonware_utils::Array;
+use commonware_utils::{Array, NZUsize};
 use futures::{
     future::{try_join_all, TryFutureExt},
     pin_mut, try_join, StreamExt,
 };
+use std::num::NonZeroUsize;
 use tracing::{debug, warn};
 
 /// Indicator that the generic parameter N is unused by the call. N is only
@@ -49,7 +50,7 @@ pub struct Config<T: Translator> {
     pub mmr_items_per_blob: u64,
 
     /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer: usize,
+    pub mmr_write_buffer: NonZeroUsize,
 
     /// The name of the [RStorage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
@@ -61,7 +62,7 @@ pub struct Config<T: Translator> {
     pub log_items_per_blob: u64,
 
     /// The size of the write buffer to use for each blob in the log journal.
-    pub log_write_buffer: usize,
+    pub log_write_buffer: NonZeroUsize,
 
     /// The translator used by the compressed index.
     pub translator: T,
@@ -365,7 +366,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translato
         }
 
         let stream = log
-            .replay(SNAPSHOT_READ_BUFFER_SIZE, start_leaf_num)
+            .replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE), start_leaf_num)
             .await?;
         pin_mut!(stream);
         while let Some(result) = stream.next().await {
@@ -849,13 +850,13 @@ pub(super) mod test {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
             mmr_items_per_blob: 11,
-            mmr_write_buffer: 1024,
+            mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: format!("log_journal_{suffix}"),
             log_items_per_blob: 7,
-            log_write_buffer: 1024,
+            log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             pruning_delay: 10,
         }
     }
@@ -875,13 +876,13 @@ pub(super) mod test {
             mmr_journal_partition: format!("mmr_journal_{seed}"),
             mmr_metadata_partition: format!("mmr_metadata_{seed}"),
             mmr_items_per_blob: 1024,
-            mmr_write_buffer: 64,
+            mmr_write_buffer: NZUsize!(64),
             log_journal_partition: format!("log_journal_{seed}"),
             log_items_per_blob: 1024,
-            log_write_buffer: 64,
+            log_write_buffer: NZUsize!(64),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             pruning_delay: 10,
         }
     }
@@ -1463,8 +1464,8 @@ pub(super) mod test {
                 JConfig {
                     partition: "sync_basic_log".into(),
                     items_per_blob: 1000,
-                    write_buffer: 1024,
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    write_buffer: NZUsize!(1024),
+                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 },
             )
             .await
@@ -1540,8 +1541,8 @@ pub(super) mod test {
                 JConfig {
                     partition: format!("ops_log_{}", context.next_u64()),
                     items_per_blob: 1024,
-                    write_buffer: 64,
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    write_buffer: NZUsize!(64),
+                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 },
                 lower_bound_ops,
                 upper_bound_ops,
@@ -1633,8 +1634,8 @@ pub(super) mod test {
                     JConfig {
                         partition: format!("boundary_log_{}_{}", lower_bound, context.next_u64()),
                         items_per_blob: 1024,
-                        write_buffer: 64,
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        write_buffer: NZUsize!(64),
+                        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                     },
                     lower_bound,
                     upper_bound,

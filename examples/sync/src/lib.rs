@@ -11,6 +11,7 @@
 //! - Use [commonware_storage::adb::any::sync] to synchronize the client's database state with the server's state
 
 use commonware_cryptography::Hasher as CryptoHasher;
+use commonware_runtime::buffer::PoolRef;
 use commonware_storage::adb::any::fixed::{Any, Config};
 
 pub mod error;
