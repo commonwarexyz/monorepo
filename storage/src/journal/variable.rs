@@ -646,7 +646,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             ))
             .map(|(&section, _)| section)
             .collect();
-        for index in &trailing {
+        for index in trailing.iter().rev() {
             // Remove the underlying blob from storage.
             let blob = self.blobs.remove(index).unwrap();
 
@@ -716,9 +716,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Prunes all `sections` less than `min`.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
-        // Check if we already ran this prune
-        self.prune_guard(min, true)?;
-
         // Prune any blobs that are smaller than the minimum
         while let Some((&section, _)) = self.blobs.first_key_value() {
             // Stop pruning if we reach the minimum
@@ -963,15 +960,12 @@ mod tests {
             // Prune blobs with indices less than 3
             journal.prune(3).await.expect("Failed to prune blobs");
 
-            // Prune again with a section less than the previous one
-            let result = journal.prune(2).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
-
-            // Prune again with the same section
-            let result = journal.prune(3).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
-
             // Check metrics
+            let buffer = context.encode();
+            assert!(buffer.contains("pruned_total 2"));
+
+            // Prune again with a section less than the previous one, should be a no-op
+            journal.prune(2).await.expect("Failed to no-op prune");
             let buffer = context.encode();
             assert!(buffer.contains("pruned_total 2"));
 

@@ -1,11 +1,11 @@
 use crate::{
     adb::{
         any::{sync::verifier::Verifier, Any, SyncConfig},
-        operation::Fixed,
         sync::{Journal, Target},
     },
     journal::fixed,
     mmr::hasher::Standard,
+    store::operation::Fixed,
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
@@ -121,7 +121,6 @@ mod tests {
     use crate::{
         adb::{
             any::test::{apply_ops, create_test_config, create_test_db, create_test_ops, AnyTest},
-            operation::Fixed,
             sync::{
                 self,
                 engine::{EngineConfig, NextStep},
@@ -130,6 +129,7 @@ mod tests {
             },
         },
         mmr::{hasher::Standard, iterator::leaf_num_to_pos},
+        store::operation::Fixed,
     };
     use commonware_cryptography::{sha256, Digest, Sha256};
     use commonware_macros::test_traced;
@@ -184,11 +184,13 @@ mod tests {
                             deleted_keys.remove(key);
                         }
                     }
-                    Fixed::Deleted(key) => {
+                    Fixed::Delete(key) => {
                         expected_kvs.remove(key);
                         deleted_keys.insert(*key);
                     }
-                    _ => {}
+                    Fixed::CommitFloor(_) => {
+                        // Ignore
+                    }
                 }
             }
 

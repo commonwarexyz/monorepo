@@ -118,8 +118,8 @@ where
                         Operation::Update(key, value) => {
                             database.update(*key, *value).await.map(|_| ())
                         }
-                        Operation::Deleted(key) => database.delete(*key).await.map(|_| ()),
-                        Operation::Commit(_) => database.commit().await.map(|_| ()),
+                        Operation::Delete(key) => database.delete(*key).await.map(|_| ()),
+                        Operation::CommitFloor(_) => database.commit().await.map(|_| ()),
                     };
 
                     if let Err(e) = result {
@@ -154,10 +154,10 @@ where
             Operation::Update(key, value) => {
                 database.update(key, value).await?;
             }
-            Operation::Deleted(key) => {
+            Operation::Delete(key) => {
                 database.delete(key).await?;
             }
-            Operation::Commit(_) => {
+            Operation::CommitFloor(_) => {
                 database.commit().await?;
             }
         }

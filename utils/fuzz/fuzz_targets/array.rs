@@ -30,14 +30,14 @@ fn fuzz(input: FuzzInput) {
 
         FuzzInput::TestU64 { value } => {
             let u64_array = U64::new(value);
-            assert_eq!(u64_array.to_u64(), value);
+            assert_eq!(u64_array, value.into());
 
             let from_u64: U64 = value.into();
-            assert_eq!(from_u64.to_u64(), value);
+            assert_eq!(from_u64, value.into());
 
             let bytes = value.to_be_bytes();
             let from_bytes: U64 = bytes.into();
-            assert_eq!(from_bytes.to_u64(), value);
+            assert_eq!(from_bytes, value.into());
 
             let as_ref: &[u8] = u64_array.as_ref();
             assert_eq!(as_ref.len(), 8);
@@ -47,7 +47,7 @@ fn fuzz(input: FuzzInput) {
             assert_eq!(encoded.len(), U64::SIZE);
 
             let decoded = U64::decode(&encoded[..]).unwrap();
-            assert_eq!(decoded.to_u64(), value);
+            assert_eq!(decoded, value.into());
 
             let short_data = &encoded[..encoded.len().saturating_sub(1)];
             assert!(U64::decode(short_data).is_err());
@@ -56,7 +56,7 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::TestPrefixed { prefix, value } => {
             let prefixed = PrefixedU64::new(prefix, value);
             assert_eq!(prefixed.prefix(), prefix);
-            assert_eq!(prefixed.to_u64(), value);
+            assert_eq!(prefixed.value(), value);
 
             let as_ref: &[u8] = prefixed.as_ref();
             assert_eq!(as_ref.len(), 9);
@@ -68,7 +68,7 @@ fn fuzz(input: FuzzInput) {
 
             let decoded = PrefixedU64::decode(&encoded[..]).unwrap();
             assert_eq!(decoded.prefix(), prefix);
-            assert_eq!(decoded.to_u64(), value);
+            assert_eq!(decoded.value(), value);
 
             let short_data = &encoded[..encoded.len().saturating_sub(1)];
             assert!(PrefixedU64::decode(short_data).is_err());

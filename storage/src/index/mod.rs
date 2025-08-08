@@ -23,7 +23,11 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Metrics};
     use rand::Rng;
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+        thread,
+    };
 
     #[test_traced]
     fn test_index_basic() {
@@ -939,5 +943,55 @@ mod tests {
         }
 
         // Should not stack overflow (using default Rust drop, it will)
+    }
+
+    #[test_traced]
+    fn test_cursor_across_threads() {
+        let ctx = deterministic::Context::default();
+        let index = Arc::new(Mutex::new(Index::init(ctx, TwoCap)));
+
+        // Insert some initial data
+        {
+            let mut index = index.lock().unwrap();
+            index.insert(b"test_key1", 100);
+            index.insert(b"test_key2", 200);
+        }
+
+        // Spawn a thread that will get a cursor and modify values
+        let index_clone = Arc::clone(&index);
+        let handle = thread::spawn(move || {
+            // Get a cursor for test_key and use it within the same scope
+            let mut index = index_clone.lock().unwrap();
+            let result = if let Some(mut cursor) = index.get_mut(b"test_key2") {
+                // Find and update the value 200
+                let mut found = false;
+                while let Some(value) = cursor.next() {
+                    if *value == 200 {
+                        cursor.update(250);
+                        found = true;
+                        break;
+                    }
+                }
+                found
+            } else {
+                false
+            };
+
+            // Return the result after cursor is dropped
+            result
+        });
+
+        // Wait for the thread to complete
+        let result = handle.join().unwrap();
+        assert!(result);
+
+        // Verify the update was applied
+        {
+            let index = index.lock().unwrap();
+            let values: Vec<u64> = index.get(b"test_key2").copied().collect();
+            assert!(values.contains(&100)); // Colliding value
+            assert!(values.contains(&250)); // Updated value
+            assert!(!values.contains(&200)); // Old value should be gone
+        }
     }
 }
