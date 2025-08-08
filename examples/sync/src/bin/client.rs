@@ -8,11 +8,11 @@ use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
 use commonware_storage::adb::sync::Target;
 use commonware_sync::{crate_version, Error};
 // Any example imports
-use commonware_sync::{create_adb_config, Database as AnyDb};
+use commonware_sync::{create_any_config, Database as AnyDb};
 // Immutable example imports
 use commonware_sync::immutable as imm_mod;
 use commonware_sync::immutable::Operation as ImmOp;
-use commonware_sync::immutable::{create_adb_config as create_imm_config, Database as ImmDb};
+use commonware_sync::immutable::{create_immutable_config as create_imm_config, Database as ImmDb};
 use commonware_sync::net::Resolver;
 use commonware_sync::Key as AnyDigest;
 use commonware_utils::parse_duration;
@@ -54,25 +54,30 @@ struct Config {
 }
 
 /// Periodically request target updates from server and send them to sync client on `update_sender`.
-async fn target_update_task<E, D, FT, Fut>(
+async fn target_update_task<E, Op, D>(
     context: E,
-    mut fetch_target: FT,
+    resolver: Resolver<E, Op, D>,
     update_sender: mpsc::Sender<Target<D>>,
     interval_duration: Duration,
     initial_target: Target<D>,
 ) -> Result<(), Error>
 where
     E: commonware_runtime::Network + commonware_runtime::Clock + commonware_runtime::Spawner,
+    Op: commonware_codec::Read<Cfg = ()>
+        + commonware_codec::Write
+        + commonware_codec::EncodeSize
+        + Clone
+        + Send
+        + Sync
+        + 'static,
     D: commonware_cryptography::Digest,
-    FT: FnMut() -> Fut + Send + 'static,
-    Fut: core::future::Future<Output = Result<Target<D>, Error>> + Send + 'static,
 {
     let mut current_target = initial_target;
 
     loop {
         context.sleep(interval_duration).await;
 
-        match fetch_target().await {
+        match resolver.get_sync_target().await {
             Ok(new_target) => {
                 if new_target.root != current_target.root {
                     match update_sender.clone().try_send(new_target.clone()) {
@@ -102,15 +107,8 @@ where
     }
 }
 
-/// Generic continuous sync loop shared by Any and Immutable.
-async fn run_generic<E, DB, R, FCfg, FRes, FMake, FT, Fut, FPost, FPostFut>(
-    context: E,
-    config: Config,
-    create_db_config: FCfg,
-    create_resolver: FRes,
-    make_fetch_target: FMake,
-    post_sync: FPost,
-) -> Result<(), String>
+/// Run sync for Any database.
+async fn run_any<E>(context: E, config: Config) -> Result<(), String>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
@@ -118,48 +116,111 @@ where
         + commonware_runtime::Network
         + commonware_runtime::Spawner
         + Clone,
-    DB: commonware_storage::adb::sync::Database<Context = E> + 'static,
-    R: commonware_storage::adb::sync::resolver::Resolver<
-            Op = DB::Op,
-            Digest = DB::Digest,
-            Error = Error,
-        > + Clone
-        + 'static,
-    FCfg: Fn() -> DB::Config,
-    FRes: Fn(E, SocketAddr) -> R,
-    FMake: Fn(R) -> FT,
-    FT: FnMut() -> Fut + Send + 'static,
-    Fut: core::future::Future<Output = Result<Target<DB::Digest>, Error>> + Send + 'static,
-    FPost: Fn(DB) -> FPostFut,
-    FPostFut: core::future::Future<Output = Result<(), String>>,
 {
     use commonware_storage::adb::sync::{self, engine::EngineConfig};
 
-    info!("starting continuous sync process");
+    info!("starting Any database sync process");
     let mut iteration = 1u32;
     loop {
-        let resolver = create_resolver(context.clone(), config.server);
-        // Build a closure to fetch targets using this resolver
-        let mut fetch_target = make_fetch_target(resolver.clone());
+        let resolver = Resolver::<_, commonware_sync::Operation, AnyDigest>::new(
+            context.clone(),
+            config.server,
+        );
 
-        let initial_target = fetch_target().await.map_err(|e| e.to_string())?;
+        let initial_target = resolver
+            .get_sync_target()
+            .await
+            .map_err(|e| e.to_string())?;
 
-        let db_config = create_db_config();
+        let db_config = create_any_config();
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
-        let target_update_interval = config.target_update_interval;
-        let initial_target_clone = initial_target.clone();
-        let target_update_handle = context.with_label("target-update").spawn(move |context| {
-            target_update_task::<_, DB::Digest, _, _>(
-                context,
-                fetch_target,
-                update_sender,
-                target_update_interval,
-                initial_target_clone,
-            )
-        });
+        let target_update_handle = {
+            let resolver = resolver.clone();
+            let initial_target_clone = initial_target.clone();
+            let target_update_interval = config.target_update_interval;
+            context.with_label("target-update").spawn(move |context| {
+                target_update_task(
+                    context,
+                    resolver,
+                    update_sender,
+                    target_update_interval,
+                    initial_target_clone,
+                )
+            })
+        };
 
-        let sync_config = EngineConfig::<DB, R> {
+        let sync_config =
+            EngineConfig::<AnyDb<_>, Resolver<_, commonware_sync::Operation, AnyDigest>> {
+                context: context.clone(),
+                db_config,
+                fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
+                target: initial_target,
+                resolver,
+                apply_batch_size: 1024,
+                max_outstanding_requests: config.max_outstanding_requests,
+                update_receiver: Some(update_receiver),
+            };
+
+        let database: AnyDb<_> = sync::sync(sync_config).await.map_err(|e| format!("{e}"))?;
+        let got_root = {
+            let mut hasher = commonware_storage::mmr::hasher::Standard::new();
+            database.root(&mut hasher)
+        };
+        info!(
+            sync_iteration = iteration,
+            root = %got_root,
+            sync_interval = ?config.sync_interval,
+            "✅ Any sync completed successfully"
+        );
+        database.close().await.map_err(|e| format!("{e}"))?;
+        target_update_handle.abort();
+        context.sleep(config.sync_interval).await;
+        iteration += 1;
+    }
+}
+
+/// Run sync for Immutable database.
+async fn run_immutable<E>(context: E, config: Config) -> Result<(), String>
+where
+    E: commonware_runtime::Storage
+        + commonware_runtime::Clock
+        + commonware_runtime::Metrics
+        + commonware_runtime::Network
+        + commonware_runtime::Spawner
+        + Clone,
+{
+    use commonware_storage::adb::sync::{self, engine::EngineConfig};
+
+    info!("starting Immutable database sync process");
+    let mut iteration = 1u32;
+    loop {
+        let resolver = Resolver::<_, ImmOp, imm_mod::Key>::new(context.clone(), config.server);
+
+        let initial_target = resolver
+            .get_sync_target()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let db_config = create_imm_config();
+        let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
+
+        let target_update_handle = {
+            let resolver = resolver.clone();
+            let initial_target_clone = initial_target.clone();
+            let target_update_interval = config.target_update_interval;
+            context.with_label("target-update").spawn(move |context| {
+                target_update_task(
+                    context,
+                    resolver,
+                    update_sender,
+                    target_update_interval,
+                    initial_target_clone,
+                )
+            })
+        };
+
+        let sync_config = EngineConfig::<ImmDb<_>, Resolver<_, ImmOp, imm_mod::Key>> {
             context: context.clone(),
             db_config,
             fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
@@ -170,16 +231,18 @@ where
             update_receiver: Some(update_receiver),
         };
 
-        let database: DB = sync::sync(sync_config).await.map_err(|e| format!("{e}"))?;
-        let got_root = <DB as commonware_storage::adb::sync::Database>::root(&database);
+        let database: ImmDb<_> = sync::sync(sync_config).await.map_err(|e| format!("{e}"))?;
+        let got_root = {
+            let mut hasher = commonware_storage::mmr::hasher::Standard::new();
+            database.root(&mut hasher)
+        };
         info!(
             sync_iteration = iteration,
             root = %got_root,
             sync_interval = ?config.sync_interval,
-            "✅ sync completed successfully"
+            "✅ Immutable sync completed successfully"
         );
-        // Database-specific post-sync (e.g., close)
-        post_sync(database).await?;
+        database.close().await.map_err(|e| format!("{e}"))?;
         target_update_handle.abort();
         context.sleep(config.sync_interval).await;
         iteration += 1;
@@ -340,66 +403,11 @@ fn main() {
             None,
         );
 
-        // Dispatch based on db flag using a shared generic run loop
+        // Dispatch based on db flag
         let db_choice = matches.get_one::<String>("db").unwrap().as_str();
         let result = match db_choice {
-            "any" => {
-                run_generic::<
-                    _,
-                    AnyDb<_>,
-                    Resolver<_, commonware_sync::Operation, AnyDigest>,
-                    _,
-                    _,
-                    _,
-                    _,
-                    _,
-                    _,
-                    _,
-                >(
-                    context.with_label("sync"),
-                    config,
-                    create_adb_config,
-                    |ctx, addr| {
-                        Resolver::<_, commonware_sync::Operation, AnyDigest>::new(ctx, addr)
-                    },
-                    |resolver| {
-                        let r = resolver.clone();
-                        move || {
-                            let r2 = r.clone();
-                            async move { r2.get_sync_target().await }
-                        }
-                    },
-                    |database| async move {
-                        let got_root =
-                            <AnyDb<_> as commonware_storage::adb::sync::Database>::root(&database);
-                        info!(root = %got_root, "✅ sync completed successfully");
-                        database.close().await.map_err(|e| format!("{e}"))
-                    },
-                )
-                .await
-            }
-            "immutable" => {
-                run_generic::<_, ImmDb<_>, Resolver<_, ImmOp, imm_mod::Key>, _, _, _, _, _, _, _>(
-                    context.with_label("sync"),
-                    config,
-                    create_imm_config,
-                    |ctx, addr| Resolver::<_, ImmOp, imm_mod::Key>::new(ctx, addr),
-                    |resolver| {
-                        let r = resolver.clone();
-                        move || {
-                            let r2 = r.clone();
-                            async move { r2.get_sync_target().await }
-                        }
-                    },
-                    |database| async move {
-                        let got_root =
-                            <ImmDb<_> as commonware_storage::adb::sync::Database>::root(&database);
-                        info!(root = %got_root, "✅ immutable sync completed successfully");
-                        database.close().await.map_err(|e| format!("{e}"))
-                    },
-                )
-                .await
-            }
+            "any" => run_any(context.with_label("sync"), config).await,
+            "immutable" => run_immutable(context.with_label("sync"), config).await,
             other => Err(format!("unsupported --db value: {other}")),
         };
 
@@ -409,5 +417,3 @@ fn main() {
         }
     });
 }
-
-// (duplicated specific run loops replaced by run_generic)

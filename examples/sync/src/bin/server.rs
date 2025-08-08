@@ -12,7 +12,7 @@ use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::net::wire;
 use commonware_sync::net::{ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE};
 use commonware_sync::{
-    crate_version, create_adb_config, create_test_operations, Database, Error, Operation,
+    crate_version, create_any_config, create_any_test_operations, Database, Error, Operation,
 };
 use commonware_utils::parse_duration;
 use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -108,7 +108,7 @@ where
 
             // Generate new operations
             let new_operations =
-                create_test_operations(config.ops_per_interval, context.next_u64());
+                create_any_test_operations(config.ops_per_interval, context.next_u64());
 
             // Add operations to database and get the new root
             let root = {
@@ -527,14 +527,14 @@ fn main() {
         info!(%db_choice, "initializing database");
         let mut database = match db_choice {
             "any" => {
-                let db_config = create_adb_config();
+                let db_config = create_any_config();
                 match Database::init(context.with_label("database"), db_config).await {
                     Ok(db) => db,
                     Err(e) => { error!(error = %e, "❌ failed to initialize any db"); return; }
                 }
             }
             "immutable" => {
-                use commonware_sync::immutable::{create_adb_config as create_imm_config, Database as ImmDb};
+                use commonware_sync::immutable::{create_immutable_config as create_imm_config, Database as ImmDb};
                 let cfg = create_imm_config();
                 match ImmDb::init(context.with_label("database"), cfg).await {
                     Ok(db) => {
@@ -556,7 +556,7 @@ fn main() {
         };
 
         // Create and add initial operations
-        let initial_ops = create_test_operations(config.initial_ops, context.next_u64());
+        let initial_ops = create_any_test_operations(config.initial_ops, context.next_u64());
         info!(operations_len = initial_ops.len(), "creating initial operations");
         if let Err(e) = add_operations(&mut database, initial_ops).await {
             error!(error = %e, "❌ failed to add initial operations");

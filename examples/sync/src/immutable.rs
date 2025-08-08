@@ -23,7 +23,7 @@ pub type Operation = commonware_storage::adb::operation::Variable<Key, Value>;
 pub type Translator = commonware_storage::translator::TwoCap;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
-pub fn create_adb_config() -> Config<Translator, ()> {
+pub fn create_immutable_config() -> Config<Translator, ()> {
     Config {
         mmr_journal_partition: "mmr_journal".into(),
         mmr_metadata_partition: "mmr_metadata".into(),
@@ -44,7 +44,7 @@ pub fn create_adb_config() -> Config<Translator, ()> {
 
 /// Create deterministic test operations for demonstration purposes.
 /// Generates Set operations and periodic Commit operations.
-pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
+pub fn create_test_immutable_operations(count: usize, seed: u64) -> Vec<Operation> {
     let mut operations = Vec::new();
     let mut hasher = <Hasher as CryptoHasher>::new();
 
