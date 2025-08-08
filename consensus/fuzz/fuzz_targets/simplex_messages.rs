@@ -69,7 +69,13 @@ fn fuzzer(input: FuzzInput) {
             jitter: 0.0,
             success_rate: 1.0,
         };
-        link_validators(&mut oracle, &validators, Action::Link(link), input.partition.create()).await;
+        link_validators(
+            &mut oracle,
+            &validators,
+            Action::Link(link),
+            input.partition.create(),
+        )
+        .await;
 
         // Create engines
         let relay = Arc::new(relay::Relay::new());
