@@ -8,10 +8,10 @@ use commonware_storage::adb::sync::Target;
 use commonware_storage::mmr::verification::Proof;
 use std::num::NonZeroU64;
 
-/// Maximum number of digests in a proof (10k) for decoding bounds.
+/// Maximum number of digests in a proof.
 pub const MAX_DIGESTS: usize = 10_000;
 
-/// Generic request for operations from the server.
+/// Request for operations from the server.
 #[derive(Debug, Clone)]
 pub struct GetOperationsRequest {
     pub request_id: RequestId,
@@ -20,11 +20,10 @@ pub struct GetOperationsRequest {
     pub max_ops: NonZeroU64,
 }
 
-/// Generic response with operations and proof.
-#[derive(Debug, Clone)]
+/// Response with operations and proof.
+#[derive(Debug)]
 pub struct GetOperationsResponse<Op, D>
 where
-    Op: Clone,
     D: Digest,
 {
     pub request_id: RequestId,
@@ -32,13 +31,13 @@ where
     pub operations: Vec<Op>,
 }
 
-/// Generic request for sync target from server.
+/// Request for sync target from server.
 #[derive(Debug, Clone)]
 pub struct GetSyncTargetRequest {
     pub request_id: RequestId,
 }
 
-/// Generic response with sync target.
+/// Response with sync target.
 #[derive(Debug, Clone)]
 pub struct GetSyncTargetResponse<D>
 where
@@ -48,11 +47,10 @@ where
     pub target: Target<D>,
 }
 
-/// Generic wire message used by both Any and Immutable protocols.
-#[derive(Debug, Clone)]
+/// Messages that can be sent over the wire.
+#[derive(Debug)]
 pub enum Message<Op, D>
 where
-    Op: Clone,
     D: Digest,
 {
     GetOperationsRequest(GetOperationsRequest),
@@ -64,7 +62,6 @@ where
 
 impl<Op, D> Message<Op, D>
 where
-    Op: Clone,
     D: Digest,
 {
     pub fn request_id(&self) -> RequestId {
@@ -80,7 +77,7 @@ where
 
 impl<Op, D> WireMessage for Message<Op, D>
 where
-    Op: Clone + Write + EncodeSize + Read<Cfg = ()> + Send + Sync + 'static,
+    Op: Write + EncodeSize + Read<Cfg = ()> + Send + Sync + 'static,
     D: Digest,
 {
     fn request_id(&self) -> RequestId {
@@ -93,7 +90,7 @@ where
 
 impl<Op, D> Write for Message<Op, D>
 where
-    Op: Clone + Write + EncodeSize,
+    Op: Write,
     D: Digest,
 {
     fn write(&self, buf: &mut impl BufMut) {
@@ -124,7 +121,7 @@ where
 
 impl<Op, D> EncodeSize for Message<Op, D>
 where
-    Op: Clone + Write + EncodeSize,
+    Op: EncodeSize,
     D: Digest,
 {
     fn encode_size(&self) -> usize {
@@ -140,7 +137,7 @@ where
 
 impl<Op, D> Read for Message<Op, D>
 where
-    Op: Clone + Read<Cfg = ()>,
+    Op: Read<Cfg = ()>,
     D: Digest,
 {
     type Cfg = ();
@@ -220,7 +217,7 @@ impl GetOperationsRequest {
 
 impl<Op, D> Write for GetOperationsResponse<Op, D>
 where
-    Op: Clone + Write + EncodeSize,
+    Op: Write,
     D: Digest,
 {
     fn write(&self, buf: &mut impl BufMut) {
@@ -232,7 +229,7 @@ where
 
 impl<Op, D> EncodeSize for GetOperationsResponse<Op, D>
 where
-    Op: Clone + EncodeSize,
+    Op: EncodeSize,
     D: Digest,
 {
     fn encode_size(&self) -> usize {
@@ -242,7 +239,7 @@ where
 
 impl<Op, D> Read for GetOperationsResponse<Op, D>
 where
-    Op: Clone + Read<Cfg = ()>,
+    Op: Read<Cfg = ()>,
     D: Digest,
 {
     type Cfg = ();

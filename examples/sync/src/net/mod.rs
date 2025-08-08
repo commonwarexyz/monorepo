@@ -105,7 +105,7 @@ impl Read for ErrorResponse {
 }
 
 /// Trait that both Message enums (Any/Immutable) implement so shared networking can be reused.
-pub trait WireMessage: Encode + Clone + Sized + Send + Sync + 'static {
+pub trait WireMessage: Encode + Sized + Send + Sync + 'static {
     fn request_id(&self) -> RequestId;
     fn decode_from(bytes: &[u8]) -> Result<Self, commonware_codec::Error>;
 }
