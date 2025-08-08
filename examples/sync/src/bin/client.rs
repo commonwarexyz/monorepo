@@ -53,7 +53,7 @@ struct Config {
 /// Periodically request target updates from server and send them to sync client on `update_sender`.
 async fn target_update_task<E, Op, D>(
     context: E,
-    resolver: Resolver<E, Op, D>,
+    resolver: Resolver<Op, D>,
     update_sender: mpsc::Sender<Target<D>>,
     interval_duration: Duration,
     initial_target: Target<D>,
@@ -119,7 +119,7 @@ where
     info!("starting Any database sync process");
     let mut iteration = 1u32;
     loop {
-        let resolver = Resolver::<_, AnyOp, Digest>::connect(context.clone(), config.server)
+        let resolver = Resolver::<AnyOp, Digest>::connect(context.clone(), config.server)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -146,7 +146,7 @@ where
             })
         };
 
-        let sync_config = EngineConfig::<AnyDb<_>, Resolver<_, AnyOp, Digest>> {
+        let sync_config = EngineConfig::<AnyDb<_>, Resolver<AnyOp, Digest>> {
             context: context.clone(),
             db_config,
             fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
@@ -190,7 +190,7 @@ where
     info!("starting Immutable database sync process");
     let mut iteration = 1u32;
     loop {
-        let resolver = Resolver::<_, ImmOp, Key>::connect(context.clone(), config.server)
+        let resolver = Resolver::<ImmOp, Key>::connect(context.clone(), config.server)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -217,7 +217,7 @@ where
             })
         };
 
-        let sync_config = EngineConfig::<ImmDb<_>, Resolver<_, ImmOp, Key>> {
+        let sync_config = EngineConfig::<ImmDb<_>, Resolver<ImmOp, Key>> {
             context: context.clone(),
             db_config,
             fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),

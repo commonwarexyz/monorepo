@@ -7,45 +7,37 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
-use std::marker::PhantomData;
 use std::num::NonZeroU64;
 
 /// Network resolver that works directly with generic wire messages.
 #[derive(Clone)]
-pub struct Resolver<E, Op, D>
+pub struct Resolver<Op, D>
 where
-    E: commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + commonware_runtime::Clock
-        + Clone,
     Op: Read<Cfg = ()> + Write + EncodeSize + Encode + Clone + Send + Sync + 'static,
     D: Digest,
 {
     request_id_generator: request_id::Generator,
     request_tx: mpsc::Sender<io::Request<wire::Message<Op, D>>>,
-    _phantom: PhantomData<E>,
 }
 
-impl<E, Op, D> Resolver<E, Op, D>
+impl<Op, D> Resolver<Op, D>
 where
-    E: commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + commonware_runtime::Clock
-        + Clone,
     Op: Clone + Send + Sync + 'static + ReadExt<Cfg = ()> + Write + EncodeSize,
     D: Digest,
 {
     /// Returns a resolver connected to the server at the given address.
-    pub async fn connect(
+    pub async fn connect<E>(
         context: E,
         server_addr: std::net::SocketAddr,
-    ) -> Result<Self, commonware_runtime::Error> {
+    ) -> Result<Self, commonware_runtime::Error>
+    where
+        E: commonware_runtime::Network + commonware_runtime::Spawner,
+    {
         let (sink, stream) = context.dial(server_addr).await?;
         let (request_tx, _) = io::start_io(context, sink, stream)?;
         Ok(Self {
             request_id_generator: request_id::Generator::new(),
             request_tx,
-            _phantom: PhantomData,
         })
     }
 
@@ -76,12 +68,8 @@ where
     }
 }
 
-impl<E, Op, D> commonware_storage::adb::sync::resolver::Resolver for Resolver<E, Op, D>
+impl<Op, D> commonware_storage::adb::sync::resolver::Resolver for Resolver<Op, D>
 where
-    E: commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + commonware_runtime::Clock
-        + Clone,
     Op: Clone + Send + Sync + 'static + ReadExt<Cfg = ()> + Write + EncodeSize,
     D: Digest,
 {
