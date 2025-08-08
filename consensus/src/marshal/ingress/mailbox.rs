@@ -1,8 +1,4 @@
-use crate::{
-    threshold_simplex::types::{Activity, Finalization, Notarization},
-    Block, Reporter,
-};
-use commonware_cryptography::bls12381::primitives::variant::Variant;
+use crate::{Artifact, Artifactable, Block, Collection, Reporter};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -13,7 +9,7 @@ use tracing::error;
 ///
 /// These messages are sent from the consensus engine and other parts of the
 /// system to drive the state of the marshal.
-pub(crate) enum Message<V: Variant, B: Block> {
+pub(crate) enum Message<B: Block, Co: Collection<Commitment = B::Commitment>> {
     // -------------------- Application Messages --------------------
     /// A request to retrieve a block by its digest.
     Get {
@@ -49,24 +45,24 @@ pub(crate) enum Message<V: Variant, B: Block> {
     /// A notarization from the consensus engine.
     Notarization {
         /// The notarization.
-        notarization: Notarization<V, B::Commitment>,
+        notarization: Co::Notarization,
     },
     /// A finalization from the consensus engine.
     Finalization {
         /// The finalization.
-        finalization: Finalization<V, B::Commitment>,
+        finalization: Co::Finalization,
     },
 }
 
 /// A mailbox for sending messages to the marshal [Actor](super::super::actor::Actor).
 #[derive(Clone)]
-pub struct Mailbox<V: Variant, B: Block> {
-    sender: mpsc::Sender<Message<V, B>>,
+pub struct Mailbox<B: Block, Co: Collection<Commitment = B::Commitment>> {
+    sender: mpsc::Sender<Message<B, Co>>,
 }
 
-impl<V: Variant, B: Block> Mailbox<V, B> {
+impl<B: Block, Co: Collection<Commitment = B::Commitment>> Mailbox<B, Co> {
     /// Creates a new mailbox.
-    pub(crate) fn new(sender: mpsc::Sender<Message<V, B>>) -> Self {
+    pub(crate) fn new(sender: mpsc::Sender<Message<B, Co>>) -> Self {
         Self { sender }
     }
 
@@ -143,14 +139,23 @@ impl<V: Variant, B: Block> Mailbox<V, B> {
     }
 }
 
-impl<V: Variant, B: Block> Reporter for Mailbox<V, B> {
-    type Activity = Activity<V, B::Commitment>;
+impl<
+        B: Block,
+        Co: Collection<Commitment = B::Commitment>,
+        Ar: Artifactable<ArtifactCollection = Co>,
+    > Reporter for Mailbox<B, Co>
+{
+    type Activity = Ar;
 
     async fn report(&mut self, activity: Self::Activity) {
-        let message = match activity {
-            Activity::Notarization(notarization) => Message::Notarization { notarization },
-            Activity::Finalization(finalization) => Message::Finalization { finalization },
-            _ => {
+        let message = match activity.artifact() {
+            Some(Artifact::Notarization(notarization)) => Message::Notarization { notarization },
+            Some(Artifact::Finalization(finalization)) => Message::Finalization { finalization },
+            Some(Artifact::Nullification(_)) => {
+                // Ignore nullifications
+                return;
+            }
+            None => {
                 // Ignore other activity types
                 return;
             }

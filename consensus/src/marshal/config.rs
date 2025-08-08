@@ -1,16 +1,16 @@
-use crate::Block;
-use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
+use crate::{Block, Collection};
+use commonware_cryptography::PublicKey;
 use commonware_resolver::p2p::Coordinator;
 use governor::Quota;
 
 /// Marshal configuration.
 #[derive(Debug)]
-pub struct Config<V: Variant, P: PublicKey, Z: Coordinator<PublicKey = P>, B: Block> {
+pub struct Config<P: PublicKey, Z: Coordinator<PublicKey = P>, B: Block, Ar: Collection> {
     /// The public key of the validator.
     pub public_key: P,
 
     /// The identity of the network.
-    pub identity: V::Public,
+    pub identity: Ar::Context,
 
     /// The coordinator for the resolvers.
     pub coordinator: Z,
@@ -61,7 +61,10 @@ pub struct Config<V: Variant, P: PublicKey, Z: Coordinator<PublicKey = P>, B: Bl
     pub write_buffer: usize,
 
     /// Codec configuration for block type.
-    pub codec_config: B::Cfg,
+    pub block_codec_cfg: B::Cfg,
+
+    /// Codec configuration for artifact type.
+    pub artifact_codec_cfg: Ar::CodecCfg,
 
     /// Maximum number of blocks to repair at once
     pub max_repair: u64,
