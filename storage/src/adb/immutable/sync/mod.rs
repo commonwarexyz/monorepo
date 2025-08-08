@@ -11,7 +11,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
+use commonware_utils::{Array, NZU64};
 use futures::{pin_mut, StreamExt};
 
 mod journal;
@@ -54,7 +54,7 @@ where
             journal_config,
             lower_bound,
             upper_bound,
-            std::num::NonZeroU64::new(config.log_items_per_section).unwrap(),
+            NZU64!(config.log_items_per_section),
         )
         .await?;
 

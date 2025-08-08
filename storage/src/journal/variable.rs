@@ -264,83 +264,66 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // Initialize the base journal to see what existing data we have
         let mut journal = Self::init(context.clone(), cfg.clone()).await?;
 
-        // Determine the range of existing data by finding the highest section with data
-        let existing_sections: Vec<u64> = journal.blobs.keys().cloned().collect();
-        let max_existing_section = existing_sections.last().copied();
+        let last_section = journal.blobs.last_key_value().map(|(&s, _)| s);
 
-        debug!(
-            existing_sections = ?existing_sections,
-            max_existing_section,
-            "Analyzed existing journal data"
-        );
-
-        // Handle sync logic based on existing data
-        let journal = if existing_sections.is_empty() {
+        // No existing data
+        let Some(last_section) = last_section else {
             debug!("No existing journal data, creating fresh journal ready for sync");
-            // No existing data - journal is ready for sync operations starting at lower_bound
-            journal
-        } else if let Some(max_section) = max_existing_section {
-            if max_section < lower_section {
-                debug!(
-                    max_section,
-                    lower_section,
-                    "Existing journal data is stale (all before lower bound), re-initializing"
-                );
-                // All existing data is before our sync range - destroy and recreate
-                journal.destroy().await?;
-                Self::init(context, cfg).await?
-            } else {
-                // We have existing data that overlaps with our sync range
-                // Always prune to lower bound first
-                if lower_section > 0 {
-                    journal.prune(lower_section).await?;
+            return Ok(journal);
+        };
+
+        // If all existing data is before our sync range, destroy and recreate fresh
+        if last_section < lower_section {
+            debug!(
+                last_section,
+                lower_section,
+                "Existing journal data is stale (all before lower bound), re-initializing"
+            );
+            journal.destroy().await?;
+            return Self::init(context, cfg).await;
+        }
+
+        // We have overlap with the sync range. First prune sections below the lower bound.
+        if lower_section > 0 {
+            journal.prune(lower_section).await?;
+        }
+
+        // Remove any sections beyond the upper bound
+        if last_section > upper_section {
+            debug!(
+                last_section,
+                lower_section,
+                upper_section,
+                "Existing journal data exceeds sync range, removing sections beyond upper bound"
+            );
+
+            use std::ops::Bound::{Excluded, Unbounded};
+            let sections_to_remove: Vec<u64> = journal
+                .blobs
+                .range((Excluded(upper_section), Unbounded))
+                .map(|(&section, _)| section)
+                .collect();
+
+            for section in sections_to_remove {
+                debug!(section, "Removing section beyond upper bound");
+                if let Some(blob) = journal.blobs.remove(&section) {
+                    drop(blob);
+                    let name = section.to_be_bytes();
+                    journal
+                        .context
+                        .remove(&journal.cfg.partition, Some(&name))
+                        .await?;
+                    journal.tracked.dec();
                 }
-
-                // Only remove sections beyond upper_section if they actually exceed our target range
-                if max_section > upper_section {
-                    debug!(
-                        max_section,
-                        lower_section,
-                        upper_section,
-                        "Existing journal data exceeds sync range, removing sections beyond upper bound"
-                    );
-
-                    // For sections beyond upper_section, we need to remove them entirely
-                    let sections_to_remove: Vec<u64> = journal
-                        .blobs
-                        .keys()
-                        .filter(|&&section| section > upper_section)
-                        .cloned()
-                        .collect();
-
-                    for section in sections_to_remove {
-                        debug!(section, "Removing section beyond upper bound");
-                        if let Some(blob) = journal.blobs.remove(&section) {
-                            // Drop the blob and remove it from storage
-                            drop(blob);
-                            let name = section.to_be_bytes();
-                            journal
-                                .context
-                                .remove(&journal.cfg.partition, Some(&name))
-                                .await?;
-                            journal.tracked.dec();
-                        }
-                    }
-                } else {
-                    debug!(
-                        max_section,
-                        lower_section,
-                        upper_section,
-                        "Existing journal data within sync range, no section removal needed"
-                    );
-                }
-
-                journal
             }
         } else {
-            // This shouldn't happen since we checked for empty sections above
-            journal
-        };
+            debug!(
+                last_section,
+                lower_section,
+                upper_section,
+                "Existing journal data within sync range, no section removal needed"
+            );
+        }
 
         Ok(journal)
     }
