@@ -15,8 +15,7 @@ pub use error::Error;
 pub mod databases;
 pub mod net;
 
-pub use databases::any;
-pub use databases::immutable;
+pub use databases::{any, immutable};
 
 /// Returns the version of the crate.
 pub fn crate_version() -> &'static str {

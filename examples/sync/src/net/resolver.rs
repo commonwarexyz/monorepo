@@ -1,6 +1,6 @@
 use super::{io, wire};
 use crate::net::request_id;
-use commonware_codec::{Encode, EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{Encode, Read};
 use commonware_cryptography::Digest;
 use commonware_storage::adb::sync;
 use futures::{
@@ -13,7 +13,7 @@ use std::num::NonZeroU64;
 #[derive(Clone)]
 pub struct Resolver<Op, D>
 where
-    Op: Read<Cfg = ()> + Write + EncodeSize + Encode + Clone + Send + Sync + 'static,
+    Op: Read<Cfg = ()> + Encode + Send + Sync + 'static,
     D: Digest,
 {
     request_id_generator: request_id::Generator,
@@ -22,7 +22,7 @@ where
 
 impl<Op, D> Resolver<Op, D>
 where
-    Op: Clone + Send + Sync + 'static + ReadExt<Cfg = ()> + Write + EncodeSize,
+    Op: Send + Sync + 'static + Read<Cfg = ()> + Encode,
     D: Digest,
 {
     /// Returns a resolver connected to the server at the given address.
@@ -71,7 +71,7 @@ where
 
 impl<Op, D> sync::resolver::Resolver for Resolver<Op, D>
 where
-    Op: Clone + Send + Sync + 'static + ReadExt<Cfg = ()> + Write + EncodeSize,
+    Op: Clone + Send + Sync + 'static + Read<Cfg = ()> + Encode,
     D: Digest,
 {
     type Digest = D;

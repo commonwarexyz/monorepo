@@ -7,15 +7,14 @@ use commonware_macros::select;
 use commonware_runtime::{tokio as tokio_runtime, Listener, Metrics as _, Runner, RwLock};
 use commonware_storage::{adb::sync::Target, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_sync::immutable::{
-    create_config as create_imm_config, create_test_operations as create_imm_test_operations,
-    Database as ImmDatabase, Operation as ImmOperation,
-};
-
-use commonware_sync::net::wire;
-use commonware_sync::net::{ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE};
 use commonware_sync::{
-    any::create_config, any::create_test_operations, any::Database, any::Operation, crate_version,
+    any::{create_config, create_test_operations, Database, Operation},
+    crate_version,
+    immutable::{
+        create_config as create_imm_config, create_test_operations as create_imm_test_operations,
+        Database as ImmDatabase, Operation as ImmOperation,
+    },
+    net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
 };
 use commonware_utils::parse_duration;
@@ -37,7 +36,7 @@ const MAX_BATCH_SIZE: u64 = 100;
 const RESPONSE_BUFFER_SIZE: usize = 64;
 
 /// Server configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Config {
     /// Port to listen on.
     port: u16,
@@ -542,8 +541,7 @@ where
         + commonware_runtime::Clock
         + commonware_runtime::Metrics
         + commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + Clone,
+        + commonware_runtime::Spawner,
 {
     info!(client_addr = %client_addr, "client connected");
 
@@ -617,8 +615,7 @@ where
         + commonware_runtime::Clock
         + commonware_runtime::Metrics
         + commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + Clone,
+        + commonware_runtime::Spawner,
 {
     info!(client_addr = %client_addr, "Immutable client connected");
 
@@ -687,7 +684,6 @@ where
         + commonware_runtime::Metrics
         + commonware_runtime::Network
         + commonware_runtime::Spawner
-        + Clone
         + rand::RngCore,
 {
     info!("starting Any database server");
@@ -772,7 +768,6 @@ where
         + commonware_runtime::Metrics
         + commonware_runtime::Network
         + commonware_runtime::Spawner
-        + Clone
         + rand::RngCore,
 {
     info!("starting Immutable database server");

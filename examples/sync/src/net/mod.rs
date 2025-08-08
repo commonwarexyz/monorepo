@@ -1,13 +1,16 @@
-use std::mem::size_of;
-
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt};
+use std::mem::size_of;
 
 /// Maximum message size in bytes (10MB).
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
 pub mod request_id;
 pub use request_id::{Generator, RequestId};
+pub mod io;
+pub mod resolver;
+pub mod wire;
+pub use resolver::Resolver;
 
 /// Error codes for protocol errors.
 #[derive(Debug, Clone)]
@@ -104,16 +107,11 @@ impl Read for ErrorResponse {
     }
 }
 
-/// Trait that both Message enums (Any/Immutable) implement so shared networking can be reused.
+/// A message that can be sent over the wire.
 pub trait WireMessage: Encode + Sized + Send + Sync + 'static {
     fn request_id(&self) -> RequestId;
     fn decode_from(bytes: &[u8]) -> Result<Self, commonware_codec::Error>;
 }
-
-pub mod io;
-pub mod resolver;
-pub mod wire;
-pub use resolver::Resolver;
 
 #[cfg(test)]
 mod tests {

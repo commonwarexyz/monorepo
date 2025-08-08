@@ -223,6 +223,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// An [Immutable] db populated with the state from `cfg.lower_bound` to `cfg.upper_bound`, inclusive.
     /// The pruning boundary is set to `cfg.lower_bound`.
+    #[allow(clippy::type_complexity)]
     pub async fn init_synced(
         context: E,
         mut cfg: sync::ImmutableSyncConfig<E, K, V, T, H::Digest, <Variable<K, V> as Read>::Cfg>,

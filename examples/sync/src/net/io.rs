@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-
-use crate::net::{request_id::RequestId, WireMessage, MAX_MESSAGE_SIZE};
-use crate::Error;
+use crate::{
+    net::{request_id::RequestId, WireMessage, MAX_MESSAGE_SIZE},
+    Error,
+};
 use commonware_macros::select;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
@@ -9,6 +9,7 @@ use futures::{
     channel::{mpsc, oneshot},
     StreamExt,
 };
+use std::collections::HashMap;
 
 const REQUEST_BUFFER_SIZE: usize = 64;
 
@@ -27,7 +28,7 @@ async fn run<Si, St, M>(
 ) where
     Si: Sink,
     St: Stream,
-    M: WireMessage + Send + 'static,
+    M: WireMessage,
 {
     loop {
         select! {
@@ -84,7 +85,7 @@ where
     E: commonware_runtime::Spawner,
     Si: Sink,
     St: Stream,
-    M: WireMessage + Send + 'static,
+    M: WireMessage,
 {
     let (request_tx, request_rx) = mpsc::channel(REQUEST_BUFFER_SIZE);
     let handle = context.spawn(move |_| run(sink, stream, request_rx, HashMap::new()));

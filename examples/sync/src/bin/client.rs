@@ -5,13 +5,14 @@
 
 use clap::{Arg, Command};
 use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
-use commonware_storage::adb::sync::Target;
-use commonware_sync::any::{create_config, Database as AnyDb, Operation as AnyOp};
-use commonware_sync::immutable::Operation as ImmOp;
-use commonware_sync::immutable::{create_config as create_imm_config, Database as ImmDb};
-use commonware_sync::net::Resolver;
-use commonware_sync::Digest;
-use commonware_sync::{crate_version, Error, Key};
+use commonware_storage::adb::sync::{self, engine::EngineConfig, Target};
+use commonware_sync::{
+    any::{create_config, Database as AnyDb, Operation as AnyOp},
+    crate_version,
+    immutable::{create_config as create_imm_config, Database as ImmDb, Operation as ImmOp},
+    net::Resolver,
+    Digest, Error, Key,
+};
 use commonware_utils::parse_duration;
 use futures::channel::mpsc;
 use rand::Rng;
@@ -63,7 +64,6 @@ where
     Op: commonware_codec::Read<Cfg = ()>
         + commonware_codec::Write
         + commonware_codec::EncodeSize
-        + Clone
         + Send
         + Sync
         + 'static,
@@ -111,11 +111,8 @@ where
         + commonware_runtime::Clock
         + commonware_runtime::Metrics
         + commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + Clone,
+        + commonware_runtime::Spawner,
 {
-    use commonware_storage::adb::sync::{self, engine::EngineConfig};
-
     info!("starting Any database sync process");
     let mut iteration = 1u32;
     loop {
@@ -182,11 +179,8 @@ where
         + commonware_runtime::Clock
         + commonware_runtime::Metrics
         + commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + Clone,
+        + commonware_runtime::Spawner,
 {
-    use commonware_storage::adb::sync::{self, engine::EngineConfig};
-
     info!("starting Immutable database sync process");
     let mut iteration = 1u32;
     loop {

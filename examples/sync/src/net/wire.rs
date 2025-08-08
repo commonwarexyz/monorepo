@@ -1,18 +1,17 @@
 use crate::net::{ErrorResponse, RequestId, WireMessage};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    DecodeExt, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    DecodeExt, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::Digest;
-use commonware_storage::adb::sync::Target;
-use commonware_storage::mmr::verification::Proof;
+use commonware_storage::{adb::sync::Target, mmr::verification::Proof};
 use std::num::NonZeroU64;
 
 /// Maximum number of digests in a proof.
 pub const MAX_DIGESTS: usize = 10_000;
 
 /// Request for operations from the server.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct GetOperationsRequest {
     pub request_id: RequestId,
     pub size: u64,
@@ -32,13 +31,13 @@ where
 }
 
 /// Request for sync target from server.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct GetSyncTargetRequest {
     pub request_id: RequestId,
 }
 
 /// Response with sync target.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct GetSyncTargetResponse<D>
 where
     D: Digest,
@@ -77,7 +76,7 @@ where
 
 impl<Op, D> WireMessage for Message<Op, D>
 where
-    Op: Write + EncodeSize + Read<Cfg = ()> + Send + Sync + 'static,
+    Op: Encode + Read<Cfg = ()> + Send + Sync + 'static,
     D: Digest,
 {
     fn request_id(&self) -> RequestId {
