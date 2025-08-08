@@ -147,9 +147,9 @@ use commonware_cryptography::Digest;
 use commonware_storage::adb::sync::Target;
 use std::num::NonZeroU64;
 
-/// Generic network resolver that works directly with generic wire messages.
+/// Network resolver that works directly with generic wire messages.
 #[derive(Clone)]
-pub struct GenericResolver<E, Op, D>
+pub struct Resolver<E, Op, D>
 where
     E: commonware_runtime::Network
         + commonware_runtime::Spawner
@@ -161,7 +161,7 @@ where
     client: client::NetworkClient<E, wire::Message<Op, D>>,
 }
 
-impl<E, Op, D> GenericResolver<E, Op, D>
+impl<E, Op, D> Resolver<E, Op, D>
 where
     E: commonware_runtime::Network
         + commonware_runtime::Spawner
@@ -192,7 +192,7 @@ where
     }
 }
 
-impl<E, Op, D> commonware_storage::adb::sync::resolver::Resolver for GenericResolver<E, Op, D>
+impl<E, Op, D> commonware_storage::adb::sync::resolver::Resolver for Resolver<E, Op, D>
 where
     E: commonware_runtime::Network
         + commonware_runtime::Spawner

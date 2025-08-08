@@ -13,7 +13,7 @@ use commonware_sync::{create_adb_config, Database as AnyDb};
 use commonware_sync::immutable as imm_mod;
 use commonware_sync::immutable::Operation as ImmOp;
 use commonware_sync::immutable::{create_adb_config as create_imm_config, Database as ImmDb};
-use commonware_sync::net::GenericResolver;
+use commonware_sync::net::Resolver;
 use commonware_sync::Key as AnyDigest;
 use commonware_utils::parse_duration;
 use futures::channel::mpsc;
@@ -347,7 +347,7 @@ fn main() {
                 run_generic::<
                     _,
                     AnyDb<_>,
-                    GenericResolver<_, commonware_sync::Operation, AnyDigest>,
+                    Resolver<_, commonware_sync::Operation, AnyDigest>,
                     _,
                     _,
                     _,
@@ -360,7 +360,7 @@ fn main() {
                     config,
                     create_adb_config,
                     |ctx, addr| {
-                        GenericResolver::<_, commonware_sync::Operation, AnyDigest>::new(ctx, addr)
+                        Resolver::<_, commonware_sync::Operation, AnyDigest>::new(ctx, addr)
                     },
                     |resolver| {
                         let r = resolver.clone();
@@ -379,22 +379,11 @@ fn main() {
                 .await
             }
             "immutable" => {
-                run_generic::<
-                    _,
-                    ImmDb<_>,
-                    GenericResolver<_, ImmOp, imm_mod::Key>,
-                    _,
-                    _,
-                    _,
-                    _,
-                    _,
-                    _,
-                    _,
-                >(
+                run_generic::<_, ImmDb<_>, Resolver<_, ImmOp, imm_mod::Key>, _, _, _, _, _, _, _>(
                     context.with_label("sync"),
                     config,
                     create_imm_config,
-                    |ctx, addr| GenericResolver::<_, ImmOp, imm_mod::Key>::new(ctx, addr),
+                    |ctx, addr| Resolver::<_, ImmOp, imm_mod::Key>::new(ctx, addr),
                     |resolver| {
                         let r = resolver.clone();
                         move || {
