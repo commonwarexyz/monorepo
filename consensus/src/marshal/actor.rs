@@ -27,6 +27,7 @@ use commonware_storage::{
 };
 use futures::{
     channel::{mpsc, oneshot},
+    stream::FuturesUnordered,
     try_join, StreamExt,
 };
 use governor::{clock::Clock as GClock, Quota};
@@ -39,27 +40,20 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
-/// A waiter for a block.
-struct Waiter<B: Block> {
-    // The receiver registered with the buffer
-    receiver: oneshot::Receiver<B>,
-    // The responders to the request
-    responders: Vec<oneshot::Sender<B>>,
+/// Result of a waiter future completion.
+enum WaiterResult<B: Block> {
+    /// A block was received for the given commitment.
+    Block(B::Commitment, B),
+    /// The waiter was canceled for the given commitment.
+    Canceled(B::Commitment),
 }
 
-impl<B: Block> Waiter<B> {
-    /// Create a new waiter.
-    fn new(receiver: oneshot::Receiver<B>, responder: oneshot::Sender<B>) -> Self {
-        Self {
-            receiver,
-            responders: vec![responder],
-        }
-    }
-
-    /// Add a responder to the waiter.
-    fn add_responder(&mut self, responder: oneshot::Sender<B>) {
-        self.responders.push(responder);
-    }
+/// A waiter entry that can be canceled.
+struct WaiterEntry<B: Block> {
+    // The responders to the request
+    responders: Vec<oneshot::Sender<B>>,
+    // Sender to cancel the waiter future
+    cancellation_tx: oneshot::Sender<()>,
 }
 
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
@@ -115,7 +109,7 @@ pub struct Actor<
     last_processed_view: u64,
 
     // Outstanding waiters for blocks
-    waiters: BTreeMap<B::Commitment, Waiter<B>>,
+    waiters: BTreeMap<B::Commitment, WaiterEntry<B>>,
 
     // ---------- Prunable Storage ----------
     // Verified blocks stored by view
@@ -333,31 +327,51 @@ impl<
             .with_label("finalizer")
             .spawn(|_| finalizer.run());
 
+        // Create a local pool for waiter futures
+        let mut waiter_futures = FuturesUnordered::<
+            std::pin::Pin<Box<dyn std::future::Future<Output = WaiterResult<B>> + Send>>,
+        >::new();
+
         // Handle messages
         loop {
-            // Check for completed waiters
-            self.waiters.retain(|_, waiter| {
-                // Check for any canceled requests
-                waiter.responders.retain(|tx| !tx.is_canceled());
-                if waiter.responders.is_empty() {
-                    return false;
-                }
-
-                // Check for any completed receivers
-                match waiter.receiver.try_recv() {
-                    Ok(Some(block)) => {
-                        for responder in waiter.responders.drain(..) {
-                            let _ = responder.send(block.clone());
-                        }
-                        false
-                    }
-                    Ok(None) => true, // Block not ready, keep waiting
-                    Err(oneshot::Canceled) => false,
-                }
-            });
-
             // Select messages
             select! {
+                // Handle waiter completions first (only if there are active waiters)
+                waiter_result = waiter_futures.next() => {
+                    if let Some(waiter_result) = waiter_result {
+                        match waiter_result {
+                            WaiterResult::Block(commitment, block) => {
+                                if let Some(mut waiter) = self.waiters.remove(&commitment) {
+                                    for responder in waiter.responders.drain(..) {
+                                        let _ = responder.send(block.clone());
+                                    }
+                                }
+                            }
+                            WaiterResult::Canceled(commitment) => {
+                                // Just remove the waiter entry, nothing to respond to
+                                self.waiters.remove(&commitment);
+                            }
+                        }
+
+                        // Check for waiters with canceled responders and cancel them
+                        let mut to_cancel = Vec::new();
+                        self.waiters.retain(|commitment, waiter| {
+                            waiter.responders.retain(|tx| !tx.is_canceled());
+                            if waiter.responders.is_empty() {
+                                to_cancel.push(*commitment);
+                                false
+                            } else {
+                                true
+                            }
+                        });
+
+                        for commitment in to_cancel {
+                            if let Some(waiter) = self.waiters.remove(&commitment) {
+                                let _ = waiter.cancellation_tx.send(());
+                            }
+                        }
+                    }
+                },
                 // Handle consensus before finalizer or backfiller
                 mailbox_message = self.mailbox.next() => {
                     let Some(message) = mailbox_message else {
@@ -440,12 +454,34 @@ impl<
                             debug!(view, ?commitment, "registering waiter");
                             match self.waiters.entry(commitment) {
                                 Entry::Occupied(mut entry) => {
-                                    entry.get_mut().add_responder(response);
+                                    entry.get_mut().responders.push(response);
                                 }
                                 Entry::Vacant(entry) => {
                                     let (tx, rx) = oneshot::channel();
                                     buffer.subscribe_prepared(None, commitment, None, tx).await;
-                                    entry.insert(Waiter::new(rx, response));
+
+                                    let (cancel_tx, cancel_rx) = oneshot::channel();
+                                    let waiter_future = {
+                                        async move {
+                                            select! {
+                                                result = rx => {
+                                                    match result {
+                                                        Ok(block) => WaiterResult::Block(commitment, block),
+                                                        Err(_) => WaiterResult::Canceled(commitment),
+                                                    }
+                                                },
+                                                _ = cancel_rx => {
+                                                    WaiterResult::Canceled(commitment)
+                                                },
+                                            }
+                                        }
+                                    };
+
+                                    waiter_futures.push(Box::pin(waiter_future));
+                                    entry.insert(WaiterEntry {
+                                        responders: vec![response],
+                                        cancellation_tx: cancel_tx,
+                                    });
                                 }
                             }
                         }
@@ -719,7 +755,7 @@ impl<
 
     // -------------------- Waiters --------------------
 
-    /// Remove a waiter for a digest and send the block to all responders.
+    /// Resolve any waiters for the given commitment with the provided block.
     async fn resolve_waiter(&mut self, commitment: B::Commitment, block: &B) {
         if let Some(mut waiter) = self.waiters.remove(&commitment) {
             for responder in waiter.responders.drain(..) {
