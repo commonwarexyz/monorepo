@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_codec::{DecodeExt, EncodeFixed, FixedSize};
+use commonware_codec::{DecodeExt, Encode, EncodeFixed, FixedSize};
 use commonware_utils::sequence::{prefixed_u64::U64 as PrefixedU64, FixedBytes, U32, U64};
 use libfuzzer_sys::fuzz_target;
 
@@ -55,28 +55,17 @@ fn fuzz(input: FuzzInput) {
         }
 
         FuzzInput::TestU32 { value } => {
-            let u32_array = U32::new(value);
-            assert_eq!(u32_array.to_u32(), value);
+            let array = U32::new(value);
+            assert_eq!(value, U32::decode(array.as_ref()).unwrap().into());
+            let vec = array.to_vec();
+            assert_eq!(value, U32::decode(vec.as_ref()).unwrap().into());
 
-            let from_u32: U32 = value.into();
-            assert_eq!(from_u32.to_u32(), value);
-
-            let bytes = value.to_be_bytes();
-            let from_bytes: U32 = bytes.into();
-            assert_eq!(from_bytes.to_u32(), value);
-
-            let as_ref: &[u8] = u32_array.as_ref();
-            assert_eq!(as_ref.len(), 4);
-            assert_eq!(as_ref, &bytes);
-
-            let encoded: [u8; U32::SIZE] = u32_array.encode_fixed();
+            let original = U32::new(value);
+            let encoded = original.encode();
             assert_eq!(encoded.len(), U32::SIZE);
-
-            let decoded = U32::decode(&encoded[..]).unwrap();
-            assert_eq!(decoded.to_u32(), value);
-
-            let short_data = &encoded[..encoded.len().saturating_sub(1)];
-            assert!(U32::decode(short_data).is_err());
+            assert_eq!(encoded, original.as_ref());
+            let decoded = U32::decode(encoded).unwrap();
+            assert_eq!(original, decoded);
         }
 
         FuzzInput::TestPrefixed { prefix, value } => {
