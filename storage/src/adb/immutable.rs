@@ -21,7 +21,7 @@ use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::{sequence::U32, Array};
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
-use tracing::warn;
+use tracing::{debug, warn};
 
 pub mod sync;
 
@@ -367,7 +367,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                 "section {section} did not match expected session {expected} from location {loc}");
 
                         if log_size > mmr_leaves {
-                            warn!(
+                            debug!(
                                 section,
                                 offset, "operation was missing from MMR/location map"
                             );
