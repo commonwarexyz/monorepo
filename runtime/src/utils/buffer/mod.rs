@@ -874,8 +874,8 @@ mod tests {
             writer.write_at(b"pending".to_vec(), 0).await.unwrap();
             assert_eq!(writer.size().await, 7);
 
-            // Close should flush and sync data
-            writer.close().await.unwrap();
+            // Sync writer to persist data
+            writer.sync().await.unwrap();
 
             // Verify data persistence
             let (blob_check, size_check) = context.open("partition", b"write_close").await.unwrap();

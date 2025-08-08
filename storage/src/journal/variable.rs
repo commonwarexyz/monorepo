@@ -45,7 +45,7 @@
 //!
 //! Data written to `Journal` may not be immediately persisted to `Storage`. It is up to the caller
 //! to determine when to force pending data to be written to `Storage` using the `sync` method. When
-//! calling `close`, all pending data is automatically synced and any open blobs are closed.
+//! calling `close`, all pending data is automatically synced and any open blobs are dropped.
 //!
 //! # Pruning
 //!
@@ -646,12 +646,12 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             ))
             .map(|(&section, _)| section)
             .collect();
-        for index in &trailing {
+        for index in trailing.iter().rev() {
             // Remove the underlying blob from storage.
             let blob = self.blobs.remove(index).unwrap();
 
             // Destroy the blob
-            blob.close().await?;
+            drop(blob);
             self.context
                 .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
                 .await?;
@@ -716,9 +716,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Prunes all `sections` less than `min`.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
-        // Check if we already ran this prune
-        self.prune_guard(min, true)?;
-
         // Prune any blobs that are smaller than the minimum
         while let Some((&section, _)) = self.blobs.first_key_value() {
             // Stop pruning if we reach the minimum
@@ -726,10 +723,10 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 break;
             }
 
-            // Remove and close blob
+            // Remove blob
             let blob = self.blobs.remove(&section).unwrap();
             let size = blob.size().await;
-            blob.close().await?;
+            drop(blob);
 
             // Remove blob from storage
             self.context
@@ -745,21 +742,21 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         Ok(())
     }
 
-    /// Closes all open sections.
+    /// Syncs and closes all open sections.
     pub async fn close(self) -> Result<(), Error> {
         for (section, blob) in self.blobs.into_iter() {
             let size = blob.size().await;
-            blob.close().await?;
-            debug!(blob = section, size, "closed blob");
+            blob.sync().await?;
+            debug!(blob = section, size, "synced blob");
         }
         Ok(())
     }
 
-    /// Close and remove any underlying blobs created by the journal.
+    /// Remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
             let size = blob.size().await;
-            blob.close().await?;
+            drop(blob);
             debug!(blob = i, size, "destroyed blob");
             self.context
                 .remove(&self.cfg.partition, Some(&i.to_be_bytes()))
@@ -963,15 +960,12 @@ mod tests {
             // Prune blobs with indices less than 3
             journal.prune(3).await.expect("Failed to prune blobs");
 
-            // Prune again with a section less than the previous one
-            let result = journal.prune(2).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
-
-            // Prune again with the same section
-            let result = journal.prune(3).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
-
             // Check metrics
+            let buffer = context.encode();
+            assert!(buffer.contains("pruned_total 2"));
+
+            // Prune again with a section less than the previous one, should be a no-op
+            journal.prune(2).await.expect("Failed to no-op prune");
             let buffer = context.encode();
             assert!(buffer.contains("pruned_total 2"));
 
@@ -1042,7 +1036,7 @@ mod tests {
                 .open(&cfg.partition, invalid_blob_name)
                 .await
                 .expect("Failed to create blob with invalid name");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Attempt to initialize the journal
             let result = Journal::<_, u64>::init(context, cfg).await;
@@ -1080,7 +1074,7 @@ mod tests {
             blob.write_at(incomplete_data, 0)
                 .await
                 .expect("Failed to write incomplete data");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
             let journal = Journal::init(context, cfg)
@@ -1133,7 +1127,7 @@ mod tests {
             blob.write_at(buf, 0)
                 .await
                 .expect("Failed to write item size");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
             let journal = Journal::init(context, cfg)
@@ -1194,7 +1188,7 @@ mod tests {
                 .expect("Failed to write item data");
             // Do not write checksum (omit it)
 
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
             let journal = Journal::init(context, cfg)
@@ -1263,7 +1257,7 @@ mod tests {
                 .await
                 .expect("Failed to write incorrect checksum");
 
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
             let journal = Journal::init(context.clone(), cfg.clone())
@@ -1338,7 +1332,7 @@ mod tests {
             blob.resize(blob_size - 4)
                 .await
                 .expect("Failed to corrupt blob");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
             let journal = Journal::init(context.clone(), cfg.clone())
@@ -1499,7 +1493,7 @@ mod tests {
             blob.resize(blob_size - 4)
                 .await
                 .expect("Failed to corrupt blob");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
             let mut journal = Journal::init(context.clone(), cfg.clone())
@@ -1626,7 +1620,7 @@ mod tests {
             blob.write_at(vec![0u8; 16], blob_size)
                 .await
                 .expect("Failed to add extra data");
-            blob.close().await.expect("Failed to close blob");
+            blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
             let journal = Journal::init(context, cfg)
@@ -1672,10 +1666,6 @@ mod tests {
         }
 
         async fn sync(&self) -> Result<(), RError> {
-            Ok(())
-        }
-
-        async fn close(self) -> Result<(), RError> {
             Ok(())
         }
     }

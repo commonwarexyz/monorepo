@@ -691,7 +691,7 @@ mod tests {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Write incomplete table entry (only 10 bytes instead of 24)
                 blob.write_at(vec![0xFF; 10], 0).await.unwrap();
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
             }
 
             // Reopen and verify it handles the corruption
@@ -754,7 +754,7 @@ mod tests {
                 // Corrupt the CRC (last 4 bytes of the entry)
                 corrupted[20] ^= 0xFF;
                 blob.write_at(corrupted, 0).await.unwrap();
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
             }
 
             // Reopen and verify it handles invalid CRC
@@ -815,7 +815,7 @@ mod tests {
                 blob.write_at(vec![0xDE, 0xAD, 0xBE, 0xEF], size)
                     .await
                     .unwrap();
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
             }
 
             // Reopen and verify it handles extra bytes gracefully

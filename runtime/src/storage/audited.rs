@@ -101,14 +101,6 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         });
         self.inner.sync().await
     }
-
-    async fn close(self) -> Result<(), Error> {
-        self.auditor.event(b"close", |hasher| {
-            hasher.update(self.partition.as_bytes());
-            hasher.update(&self.name);
-        });
-        self.inner.close().await
-    }
 }
 
 #[cfg(test)]
@@ -195,13 +187,14 @@ mod tests {
             "Hashes do not match after sync"
         );
 
-        // Close the blobs
-        blob1.close().await.unwrap();
-        blob2.close().await.unwrap();
+        // Drop the blobs
+        drop(blob1);
+        drop(blob2);
+
         assert_eq!(
             auditor1.state(),
             auditor2.state(),
-            "Hashes do not match after close"
+            "Hashes do not match after drop"
         );
 
         // Remove the blobs

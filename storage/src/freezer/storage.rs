@@ -987,7 +987,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         let checkpoint = self.sync().await?;
 
         self.journal.close().await?;
-        self.table.close().await?;
+        self.table.sync().await?;
         Ok(checkpoint)
     }
 
@@ -997,7 +997,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         self.journal.destroy().await?;
 
         // Destroy the table
-        self.table.close().await?;
+        drop(self.table);
         self.context
             .remove(&self.table_partition, Some(TABLE_BLOB_NAME))
             .await?;

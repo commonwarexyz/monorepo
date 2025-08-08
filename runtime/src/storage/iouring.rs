@@ -334,11 +334,6 @@ impl crate::Blob for Blob {
             return Ok(());
         }
     }
-
-    /// Drop all references to self.fd to close that resource.
-    async fn close(self) -> Result<(), Error> {
-        self.sync().await
-    }
 }
 
 #[cfg(test)]
