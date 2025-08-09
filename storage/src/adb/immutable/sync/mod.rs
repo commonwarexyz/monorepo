@@ -28,7 +28,7 @@ where
     T: Translator,
 {
     type Op = Variable<K, V>;
-    type Journal = journal::ImmutableSyncJournal<E, K, V>;
+    type Journal = journal::Journal<E, K, V>;
     type Verifier = verifier::Verifier<H>;
     type Error = crate::adb::Error;
     type Config = immutable::Config<T, V::Cfg>;
@@ -58,30 +58,44 @@ where
         )
         .await?;
 
-        // Count existing operations in the retained range to continue from the correct location
-        let mut existing_ops: u64 = 0;
+        // Compute next append location based on logical locations within [lower_bound, upper_bound]
+        let mut size = lower_bound;
         {
+            let items_per_section = config.log_items_per_section;
+            let mut current_section: Option<u64> = None;
+            let mut index_in_section: u64 = 0;
             let stream = variable_journal.replay(1024).await?;
             pin_mut!(stream);
             while let Some(item) = stream.next().await {
                 match item {
-                    Ok(_) => existing_ops += 1,
+                    Ok((section, _offset, _size, _op)) => {
+                        if current_section != Some(section) {
+                            current_section = Some(section);
+                            index_in_section = 0;
+                        }
+                        let loc = section
+                            .saturating_mul(items_per_section)
+                            .saturating_add(index_in_section);
+                        if loc < lower_bound {
+                            index_in_section = index_in_section.saturating_add(1);
+                            continue;
+                        }
+                        if loc > upper_bound {
+                            break;
+                        }
+                        size = loc.saturating_add(1);
+                        index_in_section = index_in_section.saturating_add(1);
+                    }
                     Err(e) => return Err(<Self::Journal as sync::Journal>::Error::from(e)),
                 }
             }
         }
 
-        // Wrap it in our sync journal wrapper
-        // The current_size should be lower_bound + existing_ops so we advance sections correctly
-        let sync_journal = journal::ImmutableSyncJournal::new(
+        Ok(journal::Journal::new(
             variable_journal,
             config.log_items_per_section,
-            lower_bound,
-            upper_bound,
-            lower_bound.saturating_add(existing_ops),
-        );
-
-        Ok(sync_journal)
+            size,
+        ))
     }
 
     fn create_verifier() -> Self::Verifier {
@@ -137,37 +151,51 @@ where
             let mut variable_journal = journal.into_inner();
 
             // Use Variable journal's section-based pruning
-            let items_per_section =
-                std::num::NonZeroU64::new(config.log_items_per_section).unwrap();
+            let items_per_section = NZU64!(config.log_items_per_section);
             let lower_section = lower_bound / items_per_section.get();
             variable_journal
                 .prune(lower_section)
                 .await
                 .map_err(crate::adb::Error::from)?;
 
-            // Count existing operations after pruning to set the correct current_size
-            let mut existing_ops: u64 = 0;
+            // Compute next append location based on logical locations within [lower_bound, upper_bound]
+            let mut size = lower_bound;
             {
+                let items_per_section = config.log_items_per_section;
+                let mut current_section: Option<u64> = None;
+                let mut index_in_section: u64 = 0;
                 let stream = variable_journal.replay(1024).await?;
                 pin_mut!(stream);
                 while let Some(item) = stream.next().await {
                     match item {
-                        Ok(_) => existing_ops += 1,
+                        Ok((section, _offset, _size, _op)) => {
+                            if current_section != Some(section) {
+                                current_section = Some(section);
+                                index_in_section = 0;
+                            }
+                            let loc = section
+                                .saturating_mul(items_per_section)
+                                .saturating_add(index_in_section);
+                            if loc < lower_bound {
+                                index_in_section = index_in_section.saturating_add(1);
+                                continue;
+                            }
+                            if loc > upper_bound {
+                                break;
+                            }
+                            size = loc.saturating_add(1);
+                            index_in_section = index_in_section.saturating_add(1);
+                        }
                         Err(e) => return Err(e.into()),
                     }
                 }
             }
 
-            // Wrap the pruned journal back in our sync wrapper
-            let sync_journal = journal::ImmutableSyncJournal::new(
+            Ok(journal::Journal::new(
                 variable_journal,
                 config.log_items_per_section,
-                lower_bound,
-                upper_bound,
-                lower_bound.saturating_add(existing_ops),
-            );
-
-            Ok(sync_journal)
+                size,
+            ))
         }
     }
 }
