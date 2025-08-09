@@ -9,7 +9,7 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 
 type Key = FixedBytes<16>;
@@ -45,7 +45,7 @@ fn fuzz(data: FuzzInput) {
     runner.start(|context| async move {
         let cfg = Config {
             partition: "test".into(),
-            items_per_section: 1024,
+            items_per_section: NZU64!(1024),
             write_buffer: NZUsize!(1024),
             translator: EightCap,
             replay_buffer: NZUsize!(1024*1024),
@@ -185,7 +185,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 ArchiveOperation::Prune(min) => {
-                    let min = min - min % cfg.items_per_section;
+                    let min = min - min % cfg.items_per_section.get();
                     archive.prune(min).await.expect("prune failed");
                     match oldest_allowed {
                         None => {

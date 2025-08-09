@@ -61,14 +61,14 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_storage::ordinal::{Ordinal, Config};
-//! use commonware_utils::{sequence::FixedBytes, NZUsize};
+//! use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
 //!     // Create a store for 32-byte values
 //!     let cfg = Config {
 //!         partition: "ordinal_store".into(),
-//!         items_per_blob: 10000,
+//!         items_per_blob: NZU64!(10000),
 //!         write_buffer: NZUsize!(4096),
 //!         replay_buffer: NZUsize!(1024 * 1024),
 //!     };
@@ -95,7 +95,7 @@
 
 mod storage;
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 pub use storage::Ordinal;
 use thiserror::Error;
 
@@ -121,7 +121,7 @@ pub struct Config {
     pub partition: String,
 
     /// The maximum number of items to store in each index blob.
-    pub items_per_blob: u64,
+    pub items_per_blob: NonZeroU64,
 
     /// The size of the write buffer to use when writing to the index.
     pub write_buffer: NonZeroUsize,
@@ -135,7 +135,7 @@ mod tests {
     use super::*;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{sequence::FixedBytes, BitVec, NZUsize};
+    use commonware_utils::{sequence::FixedBytes, BitVec, NZUsize, NZU64};
     use rand::RngCore;
     use std::collections::BTreeMap;
 
@@ -151,7 +151,7 @@ mod tests {
             // Initialize the store
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -210,7 +210,7 @@ mod tests {
             // Initialize the store
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -257,7 +257,7 @@ mod tests {
             // Initialize the store
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100, // Smaller blobs for testing
+                items_per_blob: NZU64!(100), // Smaller blobs for testing
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -308,7 +308,7 @@ mod tests {
             // Initialize the store
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -356,7 +356,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -419,7 +419,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -472,7 +472,7 @@ mod tests {
             // Initialize the store
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -496,7 +496,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -542,7 +542,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -609,7 +609,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -670,7 +670,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 10, // Small blob size for testing
+                items_per_blob: NZU64!(10), // Small blob size for testing
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -740,7 +740,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -814,7 +814,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: DEFAULT_ITEMS_PER_BLOB,
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -866,7 +866,7 @@ mod tests {
         executor.start(|mut context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100, // Smaller blobs to test multiple blob handling
+                items_per_blob: NZU64!(100), // Smaller blobs to test multiple blob handling
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -972,7 +972,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100, // Small blobs to test multiple blob handling
+                items_per_blob: NZU64!(100), // Small blobs to test multiple blob handling
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -1051,7 +1051,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100,
+                items_per_blob: NZU64!(100),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -1103,7 +1103,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100,
+                items_per_blob: NZU64!(100),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -1144,7 +1144,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100,
+                items_per_blob: NZU64!(100),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -1169,7 +1169,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100,
+                items_per_blob: NZU64!(100),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -1233,7 +1233,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 50, // Smaller blobs for more granular testing
+                items_per_blob: NZU64!(50), // Smaller blobs for more granular testing
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -1290,7 +1290,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100,
+                items_per_blob: NZU64!(100),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -1341,7 +1341,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100,
+                items_per_blob: NZU64!(100),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -1403,7 +1403,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 100,
+                items_per_blob: NZU64!(100),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -1455,7 +1455,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 10, // Small blob size for testing
+                items_per_blob: NZU64!(10), // Small blob size for testing
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -1524,7 +1524,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 10,
+                items_per_blob: NZU64!(10),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -1568,7 +1568,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 10,
+                items_per_blob: NZU64!(10),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -1664,7 +1664,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 5,
+                items_per_blob: NZU64!(5),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -1717,7 +1717,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 5,
+                items_per_blob: NZU64!(5),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -1763,7 +1763,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 5,
+                items_per_blob: NZU64!(5),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
@@ -1850,7 +1850,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
-                items_per_blob: 5,
+                items_per_blob: NZU64!(5),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };

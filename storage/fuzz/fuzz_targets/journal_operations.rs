@@ -10,7 +10,7 @@ use commonware_storage::journal::{
     },
     Error,
 };
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, NZU64};
 use futures::{pin_mut, StreamExt};
 use libfuzzer_sys::fuzz_target;
 
@@ -74,13 +74,13 @@ fn fuzz(input: FuzzInput) {
         let cfg = match input.journal_type {
             JournalType::Fixed => FixedConfig {
                 partition: "fixed_journal_operations_fuzz_test".to_string(),
-                items_per_blob: 3,
+                items_per_blob: NZU64!(3),
                 write_buffer: NZUsize!(MAX_WRITE_BUF),
                 buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             },
             JournalType::Variable => VariableConfig {
                 partition: "variable_journal_operations_fuzz_test".to_string(),
-                items_per_blob: 3,
+                items_per_blob: NZU64!(3),
                 write_buffer: NZUsize!(MAX_WRITE_BUF),
                 buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             },

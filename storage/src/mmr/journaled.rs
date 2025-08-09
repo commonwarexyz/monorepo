@@ -21,7 +21,10 @@ use commonware_codec::DecodeExt;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::sequence::prefixed_u64::U64;
-use std::{collections::HashMap, num::NonZeroUsize};
+use std::{
+    collections::HashMap,
+    num::{NonZeroU64, NonZeroUsize},
+};
 use tracing::{debug, error, warn};
 
 /// Configuration for a journal-backed MMR.
@@ -37,7 +40,7 @@ pub struct Config {
     pub metadata_partition: String,
 
     /// The maximum number of items to store in each blob in the backing journal.
-    pub items_per_blob: u64,
+    pub items_per_blob: NonZeroU64,
 
     /// The size of the write buffer to use for each blob in the backing journal.
     pub write_buffer: NonZeroUsize,
@@ -700,7 +703,7 @@ mod tests {
     use commonware_cryptography::{hash, sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
-    use commonware_utils::{hex, NZUsize};
+    use commonware_utils::{hex, NZUsize, NZU64};
 
     fn test_digest(v: usize) -> Digest {
         hash(&v.to_be_bytes())
@@ -713,7 +716,7 @@ mod tests {
         Config {
             journal_partition: "journal_partition".into(),
             metadata_partition: "metadata_partition".into(),
-            items_per_blob: 7,
+            items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             thread_pool: None,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
@@ -994,7 +997,7 @@ mod tests {
             let cfg_unpruned = Config {
                 journal_partition: "unpruned_journal_partition".into(),
                 metadata_partition: "unpruned_metadata_partition".into(),
-                items_per_blob: 7,
+                items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
                 thread_pool: None,
                 buffer_pool: cfg_pruned.buffer_pool.clone(),
@@ -1233,7 +1236,7 @@ mod tests {
                 Config {
                     journal_partition: "ref_journal_pruned".into(),
                     metadata_partition: "ref_metadata_pruned".into(),
-                    items_per_blob: 7,
+                    items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
                     buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
@@ -1285,7 +1288,7 @@ mod tests {
                 Config {
                     journal_partition: "server_journal".into(),
                     metadata_partition: "server_metadata".into(),
-                    items_per_blob: 7,
+                    items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
                     buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
@@ -1311,7 +1314,7 @@ mod tests {
                 Config {
                     journal_partition: "client_journal".into(),
                     metadata_partition: "client_metadata".into(),
-                    items_per_blob: 7,
+                    items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
                     buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),

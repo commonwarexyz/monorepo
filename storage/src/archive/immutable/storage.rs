@@ -176,7 +176,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         context.register("syncs", "Number of syncs called", syncs.clone());
 
         Ok(Self {
-            items_per_section: cfg.items_per_section,
+            items_per_section: cfg.items_per_section.get(),
             metadata,
             freezer,
             ordinal,

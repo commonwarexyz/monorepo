@@ -41,10 +41,10 @@ fn test_config(test_name: &str, pruning_delay: u64) -> Config<TwoCap> {
     Config {
         mmr_journal_partition: format!("{test_name}_mmr"),
         mmr_metadata_partition: format!("{test_name}_meta"),
-        mmr_items_per_blob: 3,
+        mmr_items_per_blob: NZU64!(3),
         mmr_write_buffer: NZUsize!(1024),
         log_journal_partition: format!("{test_name}_log"),
-        log_items_per_blob: 3,
+        log_items_per_blob: NZU64!(3),
         log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
         thread_pool: None,

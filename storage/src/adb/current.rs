@@ -25,7 +25,7 @@ use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::future::try_join_all;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
 /// Configuration for a [Current] authenticated db.
@@ -35,7 +35,7 @@ pub struct Config<T: Translator> {
     pub mmr_journal_partition: String,
 
     /// The items per blob configuration value used by the MMR journal.
-    pub mmr_items_per_blob: u64,
+    pub mmr_items_per_blob: NonZeroU64,
 
     /// The size of the write buffer to use for each blob in the MMR journal.
     pub mmr_write_buffer: NonZeroUsize,
@@ -47,7 +47,7 @@ pub struct Config<T: Translator> {
     pub log_journal_partition: String,
 
     /// The items per blob configuration value used by the log journal.
-    pub log_items_per_blob: u64,
+    pub log_items_per_blob: NonZeroU64,
 
     /// The size of the write buffer to use for each blob in the log journal.
     pub log_write_buffer: NonZeroUsize,
@@ -743,7 +743,7 @@ pub mod test {
     use commonware_cryptography::{hash, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, NZU64};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
 
     const PAGE_SIZE: usize = 88;
@@ -753,10 +753,10 @@ pub mod test {
         Config {
             mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
             mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
-            mmr_items_per_blob: 11,
+            mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: format!("{partition_prefix}_partition_prefix"),
-            log_items_per_blob: 7,
+            log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: TwoCap,

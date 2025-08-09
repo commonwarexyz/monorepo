@@ -1,6 +1,6 @@
 use commonware_runtime::{buffer::PoolRef, tokio::Context};
 use commonware_storage::journal::fixed::{Config as JConfig, Journal};
-use commonware_utils::{sequence::FixedBytes, NZUsize};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use criterion::criterion_main;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
@@ -35,7 +35,7 @@ async fn get_journal<const ITEM_SIZE: usize>(
     // Initialize the journal at the given partition.
     let journal_config = JConfig {
         partition: partition_name.to_string(),
-        items_per_blob,
+        items_per_blob: NZU64!(items_per_blob),
         write_buffer: NZUsize!(WRITE_BUFFER),
         buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
     };

@@ -32,7 +32,7 @@
 //!         immutable::{Archive, Config},
 //!     },
 //! };
-//! use commonware_utils::NZUsize;
+//! use commonware_utils::{NZUsize, NZU64};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -47,7 +47,7 @@
 //!         freezer_journal_target_size: 1024,
 //!         freezer_journal_compression: Some(3),
 //!         ordinal_partition: "ordinal".into(),
-//!         items_per_section: 1024,
+//!         items_per_section: NZU64!(1024),
 //!         write_buffer: NZUsize!(1024),
 //!         replay_buffer: NZUsize!(1024),
 //!         codec_config: (),
@@ -62,7 +62,7 @@
 //! });
 
 mod storage;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 pub use storage::Archive;
 
 /// Configuration for [Archive] storage.
@@ -96,7 +96,7 @@ pub struct Config<C> {
     pub ordinal_partition: String,
 
     /// The number of items per section.
-    pub items_per_section: u64,
+    pub items_per_section: NonZeroU64,
 
     /// The amount of bytes that can be buffered in a section before being written to a
     /// [commonware_runtime::Blob].
@@ -115,7 +115,7 @@ mod tests {
     use crate::archive::Archive as ArchiveTrait;
     use commonware_cryptography::{hash, sha256::Digest};
     use commonware_runtime::{deterministic, Runner};
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, NZU64};
 
     #[test]
     fn test_unclean_shutdown() {
@@ -131,7 +131,7 @@ mod tests {
                 freezer_journal_target_size: 1024 * 1024,
                 freezer_journal_compression: Some(3),
                 ordinal_partition: "test_ordinal2".into(),
-                items_per_section: 512,
+                items_per_section: NZU64!(512),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 codec_config: (),

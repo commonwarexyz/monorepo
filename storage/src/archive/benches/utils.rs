@@ -5,7 +5,7 @@ use commonware_storage::{
     archive::{immutable, prunable, Archive as ArchiveTrait, Identifier},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 /// Number of bytes that can be buffered in a section before being written to a
@@ -60,7 +60,7 @@ impl Archive {
                     freezer_journal_target_size: 1024 * 1024 * 10, // 10MB
                     freezer_journal_compression: compression,
                     ordinal_partition: "archive_bench_ordinal".into(),
-                    items_per_section: ITEMS_PER_SECTION,
+                    items_per_section: NZU64!(ITEMS_PER_SECTION),
                     write_buffer: NZUsize!(WRITE_BUFFER),
                     replay_buffer: NZUsize!(REPLAY_BUFFER),
                     codec_config: (),
@@ -73,7 +73,7 @@ impl Archive {
                     translator: TwoCap,
                     compression,
                     codec_config: (),
-                    items_per_section: ITEMS_PER_SECTION,
+                    items_per_section: NZU64!(ITEMS_PER_SECTION),
                     write_buffer: NZUsize!(WRITE_BUFFER),
                     replay_buffer: NZUsize!(REPLAY_BUFFER),
                 };
