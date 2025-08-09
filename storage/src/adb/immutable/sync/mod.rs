@@ -19,6 +19,50 @@ mod verifier;
 
 pub type Error = crate::adb::Error;
 
+// Compute the next append location (size) by scanning the variable journal and
+// counting only items whose logical location is within [lower_bound, upper_bound].
+async fn compute_size<E, K, V>(
+    journal: &variable::Journal<E, Variable<K, V>>,
+    items_per_section: u64,
+    lower_bound: u64,
+    upper_bound: u64,
+) -> Result<u64, crate::journal::Error>
+where
+    E: Storage + Metrics,
+    K: Array,
+    V: Codec,
+{
+    let mut size = lower_bound;
+    let mut current_section: Option<u64> = None;
+    let mut index_in_section: u64 = 0;
+    let stream = journal.replay(1024).await?;
+    pin_mut!(stream);
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok((section, _offset, _size, _op)) => {
+                if current_section != Some(section) {
+                    current_section = Some(section);
+                    index_in_section = 0;
+                }
+                let loc = section
+                    .saturating_mul(items_per_section)
+                    .saturating_add(index_in_section);
+                if loc < lower_bound {
+                    index_in_section = index_in_section.saturating_add(1);
+                    continue;
+                }
+                if loc > upper_bound {
+                    return Ok(size);
+                }
+                size = loc.saturating_add(1);
+                index_in_section = index_in_section.saturating_add(1);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(size)
+}
+
 impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
@@ -38,61 +82,35 @@ where
     async fn create_journal(
         context: Self::Context,
         config: &Self::Config,
-        lower_bound: u64,
-        upper_bound: u64,
+        lower_bound_loc: u64,
+        upper_bound_loc: u64,
     ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
-        let journal_config = variable::Config {
-            partition: config.log_journal_partition.clone(),
-            compression: config.log_compression,
-            codec_config: config.log_codec_config.clone(),
-            write_buffer: config.log_write_buffer,
-        };
-
-        // Create the Variable journal using init_sync
-        let variable_journal = variable::Journal::init_sync(
+        // Open the journal and discard operations outside the sync range.
+        let journal = variable::Journal::init_sync(
             context.with_label("log"),
-            journal_config,
-            lower_bound,
-            upper_bound,
+            variable::Config {
+                partition: config.log_journal_partition.clone(),
+                compression: config.log_compression,
+                codec_config: config.log_codec_config.clone(),
+                write_buffer: config.log_write_buffer,
+            },
+            lower_bound_loc,
+            upper_bound_loc,
             NZU64!(config.log_items_per_section),
         )
         .await?;
 
         // Compute next append location based on logical locations within [lower_bound, upper_bound]
-        let mut size = lower_bound;
-        {
-            let items_per_section = config.log_items_per_section;
-            let mut current_section: Option<u64> = None;
-            let mut index_in_section: u64 = 0;
-            let stream = variable_journal.replay(1024).await?;
-            pin_mut!(stream);
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok((section, _offset, _size, _op)) => {
-                        if current_section != Some(section) {
-                            current_section = Some(section);
-                            index_in_section = 0;
-                        }
-                        let loc = section
-                            .saturating_mul(items_per_section)
-                            .saturating_add(index_in_section);
-                        if loc < lower_bound {
-                            index_in_section = index_in_section.saturating_add(1);
-                            continue;
-                        }
-                        if loc > upper_bound {
-                            break;
-                        }
-                        size = loc.saturating_add(1);
-                        index_in_section = index_in_section.saturating_add(1);
-                    }
-                    Err(e) => return Err(<Self::Journal as sync::Journal>::Error::from(e)),
-                }
-            }
-        }
+        let size = compute_size(
+            &journal,
+            config.log_items_per_section,
+            lower_bound_loc,
+            upper_bound_loc,
+        )
+        .await?;
 
         Ok(journal::Journal::new(
-            variable_journal,
+            journal,
             config.log_items_per_section,
             size,
         ))
@@ -110,19 +128,15 @@ where
         target: sync::Target<Self::Digest>,
         apply_batch_size: usize,
     ) -> Result<Self, Self::Error> {
-        // Extract the Variable journal from the wrapper
-        let variable_journal = journal.into_inner();
-
-        // Create a SyncConfig-like structure for init_synced
+        let journal = journal.into_inner();
         let sync_config = Config {
             db_config,
-            log: variable_journal,
+            log: journal,
             lower_bound: target.lower_bound_ops,
             upper_bound: target.upper_bound_ops,
             pinned_nodes,
             apply_batch_size,
         };
-
         Self::init_synced(context, sync_config).await
     }
 
@@ -159,37 +173,14 @@ where
                 .map_err(crate::adb::Error::from)?;
 
             // Compute next append location based on logical locations within [lower_bound, upper_bound]
-            let mut size = lower_bound;
-            {
-                let items_per_section = config.log_items_per_section;
-                let mut current_section: Option<u64> = None;
-                let mut index_in_section: u64 = 0;
-                let stream = variable_journal.replay(1024).await?;
-                pin_mut!(stream);
-                while let Some(item) = stream.next().await {
-                    match item {
-                        Ok((section, _offset, _size, _op)) => {
-                            if current_section != Some(section) {
-                                current_section = Some(section);
-                                index_in_section = 0;
-                            }
-                            let loc = section
-                                .saturating_mul(items_per_section)
-                                .saturating_add(index_in_section);
-                            if loc < lower_bound {
-                                index_in_section = index_in_section.saturating_add(1);
-                                continue;
-                            }
-                            if loc > upper_bound {
-                                break;
-                            }
-                            size = loc.saturating_add(1);
-                            index_in_section = index_in_section.saturating_add(1);
-                        }
-                        Err(e) => return Err(e.into()),
-                    }
-                }
-            }
+            let size = compute_size(
+                &variable_journal,
+                config.log_items_per_section,
+                lower_bound,
+                upper_bound,
+            )
+            .await
+            .map_err(crate::adb::Error::from)?;
 
             Ok(journal::Journal::new(
                 variable_journal,

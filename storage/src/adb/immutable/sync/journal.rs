@@ -1,3 +1,11 @@
+//! Sync-facing journal wrapper for the Immutable database.
+//!
+//! - Sync engine uses `size` and `append` to update the journal.
+//! - This wrapper tracks a synthetic global `size` (next append location) and maps it to
+//!   sections via `items_per_section` when appending.
+//! - Callers must prepare the variable journal (e.g., `init_sync`) and compute the initial
+//!   `size` from a replay that considers only `[lower_bound, upper_bound]`.
+//! - No pruning/bound checks are done here; the sync engine handles range validation.
 use crate::{adb::sync, journal::variable, store::operation::Variable};
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
@@ -13,13 +21,14 @@ where
     K: Array,
     V: Codec,
 {
-    /// The underlying Variable journal that stores the actual operations
+    /// Underlying variable journal storing the operations.
     inner: variable::Journal<E, Variable<K, V>>,
 
-    /// Number of operations per section (from database configuration)
+    /// Logical operations per storage section.
     items_per_section: u64,
 
-    /// Number of operations in the journal
+    /// Logical next append location (number of ops present).
+    /// Invariant: computed by caller so `lower_bound <= size <= upper_bound + 1`.
     size: u64,
 }
 
@@ -34,10 +43,8 @@ where
     /// # Arguments
     /// * `inner` - The wrapped [variable::Journal], whose logical last operation location is
     ///   `size - 1`.
-    /// * `items_per_section` - Number of operations per section in the wrapped journal.
-    /// * `lower_bound` - Lower bound of sync range (inclusive)
-    /// * `upper_bound` - Upper bound of sync range (inclusive)
-    /// * `size` - Number of operations in the journal
+    /// * `items_per_section` - Operations per section.
+    /// * `size` - Logical next append location to report.
     pub fn new(
         inner: variable::Journal<E, Variable<K, V>>,
         items_per_section: u64,

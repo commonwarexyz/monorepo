@@ -4,7 +4,6 @@ use std::future::Future;
 
 /// A database that can be synced
 pub trait Database: Sized {
-    // Core associated types - determined by database implementation
     type Op;
     type Journal: Journal<Op = Self::Op>;
     type Verifier: Verifier<Self::Op, Self::Digest>;
@@ -16,7 +15,12 @@ pub trait Database: Sized {
         + commonware_runtime::Metrics
         + Clone;
 
-    /// Create a journal for syncing with the given bounds
+    /// Prepare/open a journal for syncing range [lower_bound, upper_bound].
+    ///
+    /// The implementation must:
+    /// - Reuse any on-disk data whose logical locations lie within [lower_bound, upper_bound].
+    /// - Discard/ignore any data strictly below `lower_bound` and strictly above `upper_bound`.
+    /// - Report `size()` equal to the next location to be filled.
     fn create_journal(
         context: Self::Context,
         config: &Self::Config,
@@ -40,8 +44,13 @@ pub trait Database: Sized {
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
 
-    /// Resize journal for target update - close and recreate if needed, prune otherwise.
-    // TODO should this be a method on the journal?
+    /// Resize an existing journal to a new inclusive range [lower_bound, upper_bound].
+    ///
+    /// The implementation must:
+    /// - If current `size() <= lower_bound`: close the journal and return a newly prepared one
+    ///   (equivalent to `create_journal`).
+    /// - Else: prune/discard data strictly below `lower_bound` and strictly above `upper_bound`.
+    /// - Report `size()` as the next location to be filled.
     fn resize_journal(
         journal: Self::Journal,
         context: Self::Context,
