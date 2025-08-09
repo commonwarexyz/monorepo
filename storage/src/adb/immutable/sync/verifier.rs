@@ -1,6 +1,6 @@
 use crate::{
     adb::sync,
-    mmr::{hasher::Standard, verification::Proof},
+    mmr::{hasher::Standard, iterator::leaf_num_to_pos, verification::Proof},
     store::operation::Variable,
 };
 use commonware_codec::Codec;
@@ -49,8 +49,6 @@ where
         start_loc: u64,
         operations_len: u64,
     ) -> Result<Option<Vec<H::Digest>>, Self::Error> {
-        // Always try to extract pinned nodes - the engine will decide when to use them
-        use crate::mmr::iterator::leaf_num_to_pos;
         let start_pos_mmr = leaf_num_to_pos(start_loc);
         let end_pos_mmr = leaf_num_to_pos(start_loc + operations_len - 1);
         proof
