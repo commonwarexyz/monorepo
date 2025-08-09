@@ -8,8 +8,6 @@ pub use error::Error;
 mod gaps;
 mod journal;
 pub use journal::Journal;
-mod verifier;
-pub use verifier::{extract_pinned_nodes, verify_proof};
 mod database;
 pub use database::Database;
 pub mod resolver;

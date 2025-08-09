@@ -1,6 +1,7 @@
-use crate::mmr::{hasher::Standard, iterator::leaf_num_to_pos, verification::Proof};
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
+
+use crate::mmr::{hasher::Standard, iterator::leaf_num_to_pos, verification::Proof};
 
 /// Verify that a proof is valid for a range of operations and a target root
 pub fn verify_proof<Op, H, D>(

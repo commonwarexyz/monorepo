@@ -587,11 +587,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         ops: &[Operation<K, V>],
         root: &H::Digest,
     ) -> bool {
-        let start_pos = leaf_num_to_pos(start_loc);
-
-        let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
-
-        proof.verify_range_inclusion(hasher, &elements, start_pos, root)
+        crate::adb::verify_proof::<Operation<K, V>, H, H::Digest>(
+            hasher, proof, start_loc, ops, root,
+        )
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable

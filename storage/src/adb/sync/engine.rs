@@ -1,10 +1,9 @@
 //! Core sync engine components that are shared across sync clients.
 
 use crate::adb::sync::{
-    extract_pinned_nodes,
     requests::Requests,
     resolver::{FetchResult, Resolver},
-    verify_proof, Database, Error, Journal, Target,
+    Database, Error, Journal, Target,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
@@ -406,7 +405,7 @@ where
                     let _ = success_tx.send(false);
                 } else {
                     // Verify the proof
-                    let proof_valid = verify_proof(
+                    let proof_valid = crate::adb::verify_proof(
                         &mut self.hasher,
                         &proof,
                         start_loc,
@@ -421,7 +420,7 @@ where
                         // Extract pinned nodes if we don't have them and this is the first batch
                         if self.pinned_nodes.is_none() && start_loc == self.target.lower_bound_ops {
                             if let Ok(nodes) =
-                                extract_pinned_nodes(&proof, start_loc, operations_len)
+                                crate::adb::extract_pinned_nodes(&proof, start_loc, operations_len)
                             {
                                 self.pinned_nodes = Some(nodes);
                             }
