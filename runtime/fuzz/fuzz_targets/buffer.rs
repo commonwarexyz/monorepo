@@ -223,9 +223,7 @@ fn fuzz(input: FuzzInput) {
                         if let Some(pool_page_size) = pool_page_size_ref {
                             let aligned_offset = (offset / pool_page_size.get() as u64)
                                 * pool_page_size.get() as u64;
-                            let _ = pool
-                                .cache(blob_id as u64, &*data, aligned_offset as u64)
-                                .await;
+                            let _ = pool.cache(blob_id as u64, &data, aligned_offset).await;
                         }
                     }
                 }
