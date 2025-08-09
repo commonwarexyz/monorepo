@@ -15,7 +15,6 @@ use commonware_utils::{Array, NZU64};
 use futures::{pin_mut, StreamExt};
 
 mod journal;
-mod verifier;
 
 pub type Error = crate::adb::Error;
 
@@ -73,7 +72,7 @@ where
 {
     type Op = Variable<K, V>;
     type Journal = journal::Journal<E, K, V>;
-    type Verifier = verifier::Verifier<H>;
+    type Hasher = H;
     type Error = crate::adb::Error;
     type Config = immutable::Config<T, V::Cfg>;
     type Digest = H::Digest;
@@ -116,8 +115,8 @@ where
         ))
     }
 
-    fn create_verifier() -> Self::Verifier {
-        verifier::Verifier::new(Standard::<H>::new())
+    fn create_hasher() -> Standard<H> {
+        Standard::<H>::new()
     }
 
     async fn from_sync_result(

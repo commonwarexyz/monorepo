@@ -1,24 +1,32 @@
-use crate::mmr::verification::Proof;
-use commonware_cryptography::Digest;
+use crate::mmr::{hasher::Standard, iterator::leaf_num_to_pos, verification::Proof};
+use commonware_codec::Encode;
+use commonware_cryptography::{Digest, Hasher};
 
-/// Verifies proofs over operation batches
-pub trait Verifier<Op, D: Digest> {
-    type Error: std::error::Error + Send + 'static;
+/// Verify that a proof is valid for a range of operations and a target root
+pub fn verify_proof<Op, H, D>(
+    hasher: &mut Standard<H>,
+    proof: &Proof<D>,
+    start_loc: u64,
+    operations: &[Op],
+    target_root: &D,
+) -> bool
+where
+    Op: Encode,
+    H: Hasher<Digest = D>,
+    D: Digest,
+{
+    let start_pos = leaf_num_to_pos(start_loc);
+    let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
+    proof.verify_range_inclusion(hasher, &elements, start_pos, target_root)
+}
 
-    /// Verify that a proof is valid for the given operations and target root
-    fn verify_proof(
-        &mut self,
-        proof: &Proof<D>,
-        start_loc: u64,
-        operations: &[Op],
-        target_root: &D,
-    ) -> bool;
-
-    /// Extract pinned nodes from a proof if needed for future verifications
-    fn extract_pinned_nodes(
-        &mut self,
-        proof: &Proof<D>,
-        start_loc: u64,
-        operations_len: u64,
-    ) -> Result<Option<Vec<D>>, Self::Error>;
+/// Extract pinned nodes from the proof starting at `start_loc`.
+pub fn extract_pinned_nodes<D: Digest>(
+    proof: &Proof<D>,
+    start_loc: u64,
+    operations_len: u64,
+) -> Result<Vec<D>, crate::mmr::Error> {
+    let start_pos_mmr = leaf_num_to_pos(start_loc);
+    let end_pos_mmr = leaf_num_to_pos(start_loc + operations_len - 1);
+    proof.extract_pinned_nodes(start_pos_mmr, end_pos_mmr)
 }

@@ -1,4 +1,4 @@
-use crate::adb::sync::{Journal, Target, Verifier};
+use crate::adb::sync::{Journal, Target};
 use commonware_cryptography::Digest;
 use std::future::Future;
 
@@ -6,7 +6,6 @@ use std::future::Future;
 pub trait Database: Sized {
     type Op;
     type Journal: Journal<Op = Self::Op>;
-    type Verifier: Verifier<Self::Op, Self::Digest>;
     type Error: std::error::Error + Send + From<<Self::Journal as Journal>::Error> + 'static;
     type Config;
     type Digest: Digest;
@@ -14,6 +13,7 @@ pub trait Database: Sized {
         + commonware_runtime::Clock
         + commonware_runtime::Metrics
         + Clone;
+    type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
 
     /// Prepare/open a journal for syncing range [lower_bound, upper_bound].
     ///
@@ -29,7 +29,8 @@ pub trait Database: Sized {
     ) -> impl Future<Output = Result<Self::Journal, <Self::Journal as Journal>::Error>>;
 
     /// Create a verifier for proof validation  
-    fn create_verifier() -> Self::Verifier;
+    /// Create a hasher instance for proof verification.
+    fn create_hasher() -> crate::mmr::hasher::Standard<Self::Hasher>;
 
     /// Build a database from a completed sync journal and configuration
     fn from_sync_result(

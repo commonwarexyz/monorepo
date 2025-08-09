@@ -1,6 +1,6 @@
 use crate::{
     adb::{
-        any::{self, fixed::Any, sync::verifier::Verifier},
+        any::{self, fixed::Any},
         sync,
     },
     journal,
@@ -11,8 +11,6 @@ use crate::{
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
-
-mod verifier;
 
 pub type Error = crate::adb::Error;
 
@@ -26,7 +24,7 @@ where
 {
     type Op = Fixed<K, V>;
     type Journal = crate::journal::fixed::Journal<E, Fixed<K, V>>;
-    type Verifier = Verifier<H>;
+    type Hasher = H;
     type Error = crate::adb::Error;
     type Config = crate::adb::any::fixed::Config<T>;
     type Digest = H::Digest;
@@ -54,8 +52,8 @@ where
         .await
     }
 
-    fn create_verifier() -> Self::Verifier {
-        Verifier::new(Standard::<H>::new())
+    fn create_hasher() -> Standard<H> {
+        Standard::<H>::new()
     }
 
     async fn from_sync_result(

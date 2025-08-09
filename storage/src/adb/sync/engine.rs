@@ -1,10 +1,12 @@
 //! Core sync engine components that are shared across sync clients.
 
 use crate::adb::sync::{
+    extract_pinned_nodes,
     requests::Requests,
     resolver::{FetchResult, Resolver},
-    Database, Error, Journal, Target, Verifier,
+    verify_proof, Database, Error, Journal, Target,
 };
+use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_utils::NZU64;
@@ -84,7 +86,12 @@ pub struct EngineConfig<DB: Database, R: Resolver<Op = DB::Op, Digest = DB::Dige
     pub update_receiver: Option<mpsc::Receiver<Target<DB::Digest>>>,
 }
 /// A shared sync engine that manages the core synchronization state and operations.
-pub struct Engine<DB: Database, R: Resolver<Op = DB::Op, Digest = DB::Digest>> {
+pub struct Engine<DB: Database, R: Resolver<Op = DB::Op, Digest = DB::Digest>>
+where
+    DB: Database,
+    R: Resolver<Op = DB::Op, Digest = DB::Digest>,
+    DB::Op: Encode,
+{
     /// Tracks outstanding fetch requests and their futures
     outstanding_requests: Requests<DB::Op, DB::Digest, R::Error>,
 
@@ -112,8 +119,8 @@ pub struct Engine<DB: Database, R: Resolver<Op = DB::Op, Digest = DB::Digest>> {
     /// Resolver for fetching operations and proofs from the sync source
     pub resolver: R,
 
-    /// Verifier for validating proofs and extracting pinned nodes
-    pub verifier: DB::Verifier,
+    /// Hasher used for proof verification
+    pub hasher: crate::mmr::hasher::Standard<DB::Hasher>,
 
     /// Runtime context for database operations
     pub context: DB::Context,
@@ -128,9 +135,8 @@ pub struct Engine<DB: Database, R: Resolver<Op = DB::Op, Digest = DB::Digest>> {
 impl<DB, R> Engine<DB, R>
 where
     DB: Database,
-    DB::Error: From<<DB::Journal as Journal>::Error>,
-    DB::Context: Clone,
     R: Resolver<Op = DB::Op, Digest = DB::Digest>,
+    DB::Op: Encode,
 {
     /// Create a new sync engine with the given configuration
     pub async fn new(config: EngineConfig<DB, R>) -> Result<Self, Error<DB::Error, R::Error>> {
@@ -151,7 +157,7 @@ where
         .await
         .map_err(Error::database)?;
 
-        let verifier = DB::create_verifier();
+        let hasher = DB::create_hasher();
 
         let mut engine = Self {
             outstanding_requests: Requests::new(),
@@ -163,7 +169,7 @@ where
             apply_batch_size: config.apply_batch_size,
             journal,
             resolver: config.resolver.clone(),
-            verifier,
+            hasher,
             context: config.context,
             config: config.db_config,
             update_receiver: config.update_receiver,
@@ -266,7 +272,7 @@ where
             apply_batch_size: self.apply_batch_size,
             journal,
             resolver: self.resolver,
-            verifier: self.verifier,
+            hasher: self.hasher,
             context: self.context,
             config: self.config,
             update_receiver: self.update_receiver,
@@ -400,7 +406,8 @@ where
                     let _ = success_tx.send(false);
                 } else {
                     // Verify the proof
-                    let proof_valid = self.verifier.verify_proof(
+                    let proof_valid = verify_proof(
+                        &mut self.hasher,
                         &proof,
                         start_loc,
                         &operations,
@@ -413,11 +420,9 @@ where
                     if proof_valid {
                         // Extract pinned nodes if we don't have them and this is the first batch
                         if self.pinned_nodes.is_none() && start_loc == self.target.lower_bound_ops {
-                            if let Ok(Some(nodes)) = self.verifier.extract_pinned_nodes(
-                                &proof,
-                                start_loc,
-                                operations_len,
-                            ) {
+                            if let Ok(nodes) =
+                                extract_pinned_nodes(&proof, start_loc, operations_len)
+                            {
                                 self.pinned_nodes = Some(nodes);
                             }
                         }
