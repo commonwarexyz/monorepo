@@ -1361,6 +1361,7 @@ version = "0.0.57"
 dependencies = [
  "arbitrary",
  "commonware-runtime",
+ "commonware-utils",
  "libfuzzer-sys",
  "rand 0.8.5",
 ]

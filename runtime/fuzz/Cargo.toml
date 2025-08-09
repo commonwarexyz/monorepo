@@ -10,7 +10,8 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 libfuzzer-sys = { workspace = true }
-commonware-runtime = { path = ".." }
+commonware-runtime = { workspace = true }
+commonware-utils = {workspace = true }
 rand = { workspace = true }
 
 [[bin]]

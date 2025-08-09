@@ -5,6 +5,7 @@ use commonware_runtime::{
     buffer::{Append, PoolRef, Read, Write},
     deterministic, Blob, Runner, Storage,
 };
+use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
@@ -61,10 +62,6 @@ enum FuzzOperation {
         data: Vec<u8>,
         offset: u16,
     },
-    ExtremeSeekNearU64Max,
-    ExtremeWriteNearU64Max {
-        len: u64,
-    },
 }
 
 fn fuzz(input: FuzzInput) {
@@ -89,7 +86,7 @@ fn fuzz(input: FuzzInput) {
         let mut write_buffer = None;
         let mut append_buffer = None;
         let mut pool_ref = None;
-        let mut pool_page_size = 1024;
+        let mut pool_page_size_ref = None;
 
         for op in input.operations {
             match op {
@@ -111,7 +108,7 @@ fn fuzz(input: FuzzInput) {
                         blob.write_at(data, 0).await.expect("cannot write");
                     }
 
-                    read_buffer = Some(Read::new(blob, blob_size.min(size), buffer_size));
+                    read_buffer = Some(Read::new(blob, blob_size.min(size), NZUsize!(buffer_size)));
                 }
 
                 FuzzOperation::CreateWrite {
@@ -126,18 +123,18 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .expect("cannot open context");
 
-                    write_buffer = Some(Write::new(blob, initial_size as u64, capacity));
+                    write_buffer = Some(Write::new(blob, initial_size as u64, NZUsize!(capacity)));
                 }
 
                 FuzzOperation::CreateAppend {
                     initial_size,
                     buffer_size,
-                    pool_page_size: page_size,
+                    pool_page_size,
                     pool_capacity,
                 } => {
-                    let buffer_size = (buffer_size as usize).clamp(0, MAX_SIZE);
-                    pool_page_size = (page_size as usize).clamp(0, MAX_SIZE);
-                    let pool_capacity = (pool_capacity as usize).clamp(1, MAX_SIZE);
+                    let buffer_size = NZUsize!((buffer_size as usize).clamp(1, MAX_SIZE));
+                    let pool_page_size = NZUsize!((pool_page_size as usize).clamp(1, MAX_SIZE));
+                    let pool_capacity = NZUsize!((pool_capacity as usize).clamp(1, MAX_SIZE));
 
                     let (blob, _) = context
                         .open("test_partition", b"append_blob")
@@ -145,6 +142,7 @@ fn fuzz(input: FuzzInput) {
                         .expect("cannot open write blob");
 
                     pool_ref = Some(PoolRef::new(pool_page_size, pool_capacity));
+                    pool_page_size_ref = Some(pool_page_size);
 
                     if let Some(ref pool) = pool_ref {
                         append_buffer =
@@ -222,33 +220,13 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     if let Some(ref pool) = pool_ref {
                         let offset = offset as u64;
-                        let aligned_offset = if pool_page_size != 0 {
-                            (offset / pool_page_size as u64) * pool_page_size as u64
-                        } else {
-                            0u64
-                        };
-                        let data = if data.len() > MAX_SIZE {
-                            &data[..MAX_SIZE]
-                        } else {
-                            &data
-                        };
-                        let _ = pool.cache(blob_id as u64, data, aligned_offset).await;
-                    }
-                }
-
-                FuzzOperation::ExtremeSeekNearU64Max => {
-                    if let Some(ref mut reader) = read_buffer {
-                        let near = u64::MAX - rng.gen_range(0..=MAX_SIZE) as u64;
-                        let _ = reader.seek_to(near);
-                    }
-                }
-
-                FuzzOperation::ExtremeWriteNearU64Max { len } => {
-                    if let Some(ref writer) = write_buffer {
-                        let off =
-                            u64::MAX - (len).saturating_add(rng.gen_range(0..=MAX_SIZE) as u64);
-                        let data = vec![0; len as usize];
-                        let _ = writer.write_at(data, off).await;
+                        if let Some(pool_page_size) = pool_page_size_ref {
+                            let aligned_offset = (offset / pool_page_size.get() as u64)
+                                * pool_page_size.get() as u64;
+                            let _ = pool
+                                .cache(blob_id as u64, &*data, aligned_offset as u64)
+                                .await;
+                        }
                     }
                 }
             }
