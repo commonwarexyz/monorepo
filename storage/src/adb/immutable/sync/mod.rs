@@ -220,10 +220,11 @@ mod tests {
         },
         mmr::hasher::Standard,
         store::operation::Variable,
+        translator::TwoCap,
     };
     use commonware_cryptography::{sha256, Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _, RwLock};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, RwLock};
     use commonware_utils::NZU64;
     use futures::{channel::mpsc, SinkExt as _};
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
@@ -245,9 +246,6 @@ mod tests {
 
     /// Create a simple config for sync tests
     fn create_sync_config(suffix: &str) -> immutable::Config<crate::translator::TwoCap, ()> {
-        use crate::translator::TwoCap;
-        use commonware_runtime::buffer::PoolRef;
-
         const PAGE_SIZE: usize = 77;
         const PAGE_CACHE_SIZE: usize = 9;
         const ITEMS_PER_SECTION: u64 = 5;
@@ -636,6 +634,533 @@ mod tests {
 
             synced_db.destroy().await.unwrap();
             target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that invalid bounds are rejected
+    #[test]
+    fn test_sync_invalid_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let target_db = create_test_db(context.clone()).await;
+            let db_config = create_sync_config(&format!("invalid_bounds_{}", context.next_u64()));
+            let config = EngineConfig {
+                db_config,
+                fetch_batch_size: NZU64!(10),
+                target: Target {
+                    root: sha256::Digest::from([1u8; 32]),
+                    lower_bound_ops: 31,
+                    upper_bound_ops: 30,
+                },
+                context,
+                resolver: Arc::new(commonware_runtime::RwLock::new(target_db)),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 1,
+                update_receiver: None,
+            };
+            let result: Result<ImmutableSyncTest, _> = sync::sync(config).await;
+            assert!(matches!(
+                result,
+                Err(sync::Error::InvalidTarget {
+                    lower_bound_pos: 31,
+                    upper_bound_pos: 30,
+                })
+            ));
+        });
+    }
+
+    /// Test that sync works when target database has operations beyond the requested range
+    /// of operations to sync.
+    #[test]
+    fn test_sync_subset_of_target_database() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(30);
+            // Apply all but the last operation
+            apply_ops(&mut target_db, target_ops[..29].to_vec()).await;
+            target_db.commit().await.unwrap();
+
+            let mut hasher = test_hasher();
+            let target_root = target_db.root(&mut hasher);
+            let lower_bound_ops = target_db.oldest_retained_loc;
+            let upper_bound_ops = target_db.op_count() - 1; // exclude final op
+
+            // Add final op after capturing the range
+            apply_ops(&mut target_db, target_ops[29..].to_vec()).await;
+            target_db.commit().await.unwrap();
+
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let config = EngineConfig {
+                db_config: create_sync_config(&format!("subset_{}", context.next_u64())),
+                fetch_batch_size: NZU64!(10),
+                target: Target {
+                    root: target_root,
+                    lower_bound_ops,
+                    upper_bound_ops,
+                },
+                context,
+                resolver: target_db.clone(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 1,
+                update_receiver: None,
+            };
+            let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+
+            // Verify state matches the specified range
+            let mut hasher = test_hasher();
+            assert_eq!(synced_db.root(&mut hasher), target_root);
+            assert_eq!(synced_db.op_count(), upper_bound_ops + 1);
+
+            synced_db.destroy().await.unwrap();
+            let target_db =
+                Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
+            let inner = target_db.into_inner();
+            inner.destroy().await.unwrap();
+        });
+    }
+
+    // Test syncing where the sync client has some but not all of the operations in the target
+    // database.
+    #[test]
+    fn test_sync_use_existing_db_partial_match() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let original_ops = create_test_ops(50);
+
+            // Create two databases
+            let mut target_db = create_test_db(context.clone()).await;
+            let sync_db_config = create_sync_config(&format!("partial_{}", context.next_u64()));
+            let mut sync_db: ImmutableSyncTest =
+                immutable::Immutable::init(context.clone(), sync_db_config.clone())
+                    .await
+                    .unwrap();
+
+            // Apply the same operations to both databases
+            apply_ops(&mut target_db, original_ops.clone()).await;
+            apply_ops(&mut sync_db, original_ops.clone()).await;
+            target_db.commit().await.unwrap();
+            sync_db.commit().await.unwrap();
+
+            // Close sync_db
+            sync_db.close().await.unwrap();
+
+            // Add one more operation and commit the target database
+            let last_op = create_test_ops(1);
+            apply_ops(&mut target_db, last_op.clone()).await;
+            target_db.commit().await.unwrap();
+            let mut hasher = test_hasher();
+            let root = target_db.root(&mut hasher);
+            let lower_bound_ops = target_db.oldest_retained_loc;
+            let upper_bound_ops = target_db.op_count() - 1; // Up to the last operation
+
+            // Reopen the sync database and sync it to the target database
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let config = EngineConfig {
+                db_config: sync_db_config, // Use same config as before
+                fetch_batch_size: NZU64!(10),
+                target: Target {
+                    root,
+                    lower_bound_ops,
+                    upper_bound_ops,
+                },
+                context: context.clone(),
+                resolver: target_db.clone(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 1,
+                update_receiver: None,
+            };
+            let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+
+            // Verify database state
+            let mut hasher = test_hasher();
+            assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
+            assert_eq!(sync_db.root(&mut hasher), root);
+
+            sync_db.destroy().await.unwrap();
+            let target_db =
+                Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
+            let inner = target_db.into_inner();
+            inner.destroy().await.unwrap();
+        });
+    }
+
+    /// Test case where existing database on disk exactly matches the sync target
+    #[test]
+    fn test_sync_use_existing_db_exact_match() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let target_ops = create_test_ops(40);
+
+            // Create two databases
+            let mut target_db = create_test_db(context.clone()).await;
+            let sync_config = create_sync_config(&format!("exact_{}", context.next_u64()));
+            let mut sync_db: ImmutableSyncTest =
+                immutable::Immutable::init(context.clone(), sync_config.clone())
+                    .await
+                    .unwrap();
+
+            // Apply the same operations to both databases
+            apply_ops(&mut target_db, target_ops.clone()).await;
+            apply_ops(&mut sync_db, target_ops.clone()).await;
+            target_db.commit().await.unwrap();
+            sync_db.commit().await.unwrap();
+
+            // Close sync_db
+            sync_db.close().await.unwrap();
+
+            // Prepare target
+            let mut hasher = test_hasher();
+            let root = target_db.root(&mut hasher);
+            let lower_bound_ops = target_db.oldest_retained_loc;
+            let upper_bound_ops = target_db.op_count() - 1;
+
+            // Sync should complete immediately without fetching
+            let resolver = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let config = EngineConfig {
+                db_config: sync_config,
+                fetch_batch_size: NZU64!(10),
+                target: Target {
+                    root,
+                    lower_bound_ops,
+                    upper_bound_ops,
+                },
+                context,
+                resolver: resolver.clone(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 1,
+                update_receiver: None,
+            };
+            let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+
+            assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
+            let mut hasher = test_hasher();
+            assert_eq!(sync_db.root(&mut hasher), root);
+
+            sync_db.destroy().await.unwrap();
+            let target_db =
+                Arc::try_unwrap(resolver).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
+            let inner = target_db.into_inner();
+            inner.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that the client fails to sync if the lower bound is decreased
+    #[test_traced("WARN")]
+    fn test_target_update_lower_bound_decrease() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate target database
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(100);
+            apply_ops(&mut target_db, target_ops).await;
+            target_db.commit().await.unwrap();
+
+            target_db.prune(10).await.unwrap();
+
+            // Capture initial target state
+            let mut hasher = test_hasher();
+            let initial_lower_bound = target_db.oldest_retained_loc;
+            let initial_upper_bound = target_db.op_count() - 1;
+            let initial_root = target_db.root(&mut hasher);
+
+            // Create client with initial target
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let config = EngineConfig {
+                context: context.clone(),
+                db_config: create_sync_config(&format!("lb_dec_{}", context.next_u64())),
+                fetch_batch_size: NZU64!(5),
+                target: Target {
+                    root: initial_root,
+                    lower_bound_ops: initial_lower_bound,
+                    upper_bound_ops: initial_upper_bound,
+                },
+                resolver: target_db.clone(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 10,
+                update_receiver: Some(update_receiver),
+            };
+            let client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
+
+            // Send target update with decreased lower bound
+            update_sender
+                .send(Target {
+                    root: initial_root,
+                    lower_bound_ops: initial_lower_bound.saturating_sub(1),
+                    upper_bound_ops: initial_upper_bound,
+                })
+                .await
+                .unwrap();
+
+            let result = client.step().await;
+            assert!(matches!(
+                result,
+                Err(sync::Error::SyncTargetMovedBackward { .. })
+            ));
+
+            let target_db =
+                Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
+            let inner = target_db.into_inner();
+            inner.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that the client fails to sync if the upper bound is decreased
+    #[test_traced("WARN")]
+    fn test_target_update_upper_bound_decrease() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate target database
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(50);
+            apply_ops(&mut target_db, target_ops).await;
+            target_db.commit().await.unwrap();
+
+            // Capture initial target state
+            let mut hasher = test_hasher();
+            let initial_lower_bound = target_db.oldest_retained_loc;
+            let initial_upper_bound = target_db.op_count() - 1;
+            let initial_root = target_db.root(&mut hasher);
+
+            // Create client with initial target
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let config = EngineConfig {
+                context: context.clone(),
+                db_config: create_sync_config(&format!("ub_dec_{}", context.next_u64())),
+                fetch_batch_size: NZU64!(5),
+                target: Target {
+                    root: initial_root,
+                    lower_bound_ops: initial_lower_bound,
+                    upper_bound_ops: initial_upper_bound,
+                },
+                resolver: target_db.clone(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 10,
+                update_receiver: Some(update_receiver),
+            };
+            let client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
+
+            // Send target update with decreased upper bound
+            update_sender
+                .send(Target {
+                    root: initial_root,
+                    lower_bound_ops: initial_lower_bound,
+                    upper_bound_ops: initial_upper_bound.saturating_sub(1),
+                })
+                .await
+                .unwrap();
+
+            let result = client.step().await;
+            assert!(matches!(
+                result,
+                Err(sync::Error::SyncTargetMovedBackward { .. })
+            ));
+
+            let target_db =
+                Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
+            let inner = target_db.into_inner();
+            inner.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that the client succeeds when bounds are updated
+    #[test_traced("WARN")]
+    fn test_target_update_bounds_increase() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate target database
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(100);
+            apply_ops(&mut target_db, target_ops.clone()).await;
+            target_db.commit().await.unwrap();
+
+            // Capture initial target state
+            let mut hasher = test_hasher();
+            let initial_lower_bound = target_db.oldest_retained_loc;
+            let initial_upper_bound = target_db.op_count() - 1;
+            let initial_root = target_db.root(&mut hasher);
+
+            // Apply more operations to the target database
+            let more_ops = create_test_ops(5);
+            apply_ops(&mut target_db, more_ops.clone()).await;
+            target_db.commit().await.unwrap();
+
+            target_db.prune(10).await.unwrap();
+            target_db.commit().await.unwrap();
+
+            // Capture final target state
+            let mut hasher = test_hasher();
+            let final_lower_bound = target_db.oldest_retained_loc;
+            let final_upper_bound = target_db.op_count() - 1;
+            let final_root = target_db.root(&mut hasher);
+
+            // Assert we're actually updating the bounds
+            assert_ne!(final_lower_bound, initial_lower_bound);
+            assert_ne!(final_upper_bound, initial_upper_bound);
+
+            // Create client with initial target
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let config = EngineConfig {
+                context: context.clone(),
+                db_config: create_sync_config(&format!("bounds_inc_{}", context.next_u64())),
+                fetch_batch_size: NZU64!(1),
+                target: Target {
+                    root: initial_root,
+                    lower_bound_ops: initial_lower_bound,
+                    upper_bound_ops: initial_upper_bound,
+                },
+                resolver: target_db.clone(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 1,
+                update_receiver: Some(update_receiver),
+            };
+
+            // Send target update with increased bounds
+            update_sender
+                .send(Target {
+                    root: final_root,
+                    lower_bound_ops: final_lower_bound,
+                    upper_bound_ops: final_upper_bound,
+                })
+                .await
+                .unwrap();
+
+            // Complete the sync
+            let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+
+            // Verify the synced database has the expected state
+            let mut hasher = test_hasher();
+            assert_eq!(synced_db.root(&mut hasher), final_root);
+            assert_eq!(synced_db.op_count(), final_upper_bound + 1);
+            assert_eq!(synced_db.oldest_retained_loc, final_lower_bound);
+
+            synced_db.destroy().await.unwrap();
+            let target_db =
+                Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
+            let inner = target_db.into_inner();
+            inner.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that the client fails to sync with invalid bounds (lower > upper)
+    #[test_traced("WARN")]
+    fn test_target_update_invalid_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate target database
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(25);
+            apply_ops(&mut target_db, target_ops).await;
+            target_db.commit().await.unwrap();
+
+            // Capture initial target state
+            let mut hasher = test_hasher();
+            let initial_lower_bound = target_db.oldest_retained_loc;
+            let initial_upper_bound = target_db.op_count() - 1;
+            let initial_root = target_db.root(&mut hasher);
+
+            // Create client with initial target
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let config = EngineConfig {
+                context: context.clone(),
+                db_config: create_sync_config(&format!("invalid_update_{}", context.next_u64())),
+                fetch_batch_size: NZU64!(5),
+                target: Target {
+                    root: initial_root,
+                    lower_bound_ops: initial_lower_bound,
+                    upper_bound_ops: initial_upper_bound,
+                },
+                resolver: target_db.clone(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 10,
+                update_receiver: Some(update_receiver),
+            };
+            let client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
+
+            // Send target update with invalid bounds (lower > upper)
+            update_sender
+                .send(Target {
+                    root: initial_root,
+                    lower_bound_ops: initial_upper_bound,
+                    upper_bound_ops: initial_lower_bound,
+                })
+                .await
+                .unwrap();
+
+            let result = client.step().await;
+            assert!(matches!(result, Err(sync::Error::InvalidTarget { .. })));
+
+            let target_db =
+                Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
+            let inner = target_db.into_inner();
+            inner.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that target updates can be sent even after the client is done
+    #[test_traced("WARN")]
+    fn test_target_update_on_done_client() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate target database
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(10);
+            apply_ops(&mut target_db, target_ops).await;
+            target_db.commit().await.unwrap();
+
+            // Capture target state
+            let mut hasher = test_hasher();
+            let lower_bound = target_db.oldest_retained_loc;
+            let upper_bound = target_db.op_count() - 1;
+            let root = target_db.root(&mut hasher);
+
+            // Create client with target that will complete immediately
+            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let config = EngineConfig {
+                context: context.clone(),
+                db_config: create_sync_config(&format!("done_{}", context.next_u64())),
+                fetch_batch_size: NZU64!(20),
+                target: Target {
+                    root,
+                    lower_bound_ops: lower_bound,
+                    upper_bound_ops: upper_bound,
+                },
+                resolver: target_db.clone(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 10,
+                update_receiver: Some(update_receiver),
+            };
+
+            // Complete the sync
+            let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+
+            // Attempt to apply a target update after sync is complete to verify we don't panic
+            let _ = update_sender
+                .send(Target {
+                    root: sha256::Digest::from([2u8; 32]),
+                    lower_bound_ops: lower_bound + 1,
+                    upper_bound_ops: upper_bound + 1,
+                })
+                .await;
+
+            // Verify the synced database has the expected state
+            let mut hasher = test_hasher();
+            assert_eq!(synced_db.root(&mut hasher), root);
+            assert_eq!(synced_db.op_count(), upper_bound + 1);
+            assert_eq!(synced_db.oldest_retained_loc, lower_bound);
+
+            synced_db.destroy().await.unwrap();
+            Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+                .into_inner()
+                .destroy()
+                .await
+                .unwrap();
         });
     }
 }
