@@ -12,15 +12,17 @@
 
 use super::variant::Variant;
 use blst::{
-    blst_bendian_from_scalar, blst_fp12, blst_fr, blst_fr_add, blst_fr_from_scalar,
-    blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul, blst_fr_sub, blst_hash_to_g1,
-    blst_hash_to_g2, blst_keygen, blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_compress,
-    blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
-    blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof, blst_p2,
-    blst_p2_add_or_double, blst_p2_affine, blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2,
-    blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
-    blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar, blst_scalar_from_bendian,
-    blst_scalar_from_fr, blst_sk_check, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr, blst_fr_add,
+    blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul, blst_fr_sub,
+    blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1, blst_p1_add_or_double, blst_p1_affine,
+    blst_p1_compress, blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult,
+    blst_p1_to_affine, blst_p1_uncompress, blst_p1s_mult_pippenger,
+    blst_p1s_mult_pippenger_scratch_sizeof, blst_p2, blst_p2_add_or_double, blst_p2_affine,
+    blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult,
+    blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
+    blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar, blst_scalar_from_be_bytes,
+    blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check, BLS12_381_G1, BLS12_381_G2,
+    BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -89,7 +91,7 @@ pub struct Scalar(blst_fr);
 ///
 /// Because `r` is only 255 bits wide, the most‑significant byte is always in
 /// the range `0x00‥=0x7f`, leaving the top bit clear.
-const SCALAR_LENGTH: usize = 32;
+pub const SCALAR_LENGTH: usize = 32;
 
 /// Effective bit‑length of the field modulus `r` (`⌈log_2 r⌉ = 255`).
 ///
@@ -160,8 +162,33 @@ pub const G2_MESSAGE: DST = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 ///
 /// This is an element in the extension field `F_p^12` and is
 /// produced as the result of a pairing operation.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Copy)]
+#[repr(transparent)]
 pub struct GT(blst_fp12);
+
+/// The size in bytes of an encoded GT element.
+///
+/// GT is a 12-tuple of Fp elements, each 48 bytes.
+pub const GT_ELEMENT_BYTE_LENGTH: usize = 576;
+
+impl GT {
+    /// Create GT from blst_fp12.
+    pub(crate) fn from_blst_fp12(fp12: blst_fp12) -> Self {
+        GT(fp12)
+    }
+
+    /// Converts the GT element to its byte representation.
+    pub fn as_slice(&self) -> [u8; GT_ELEMENT_BYTE_LENGTH] {
+        let mut slice = [0u8; GT_ELEMENT_BYTE_LENGTH];
+        unsafe {
+            // GT (Fp12) consists of 12 field elements, each 48 bytes
+            // We need to serialize it properly
+            let fp12_ptr = &self.0 as *const blst_fp12 as *const u8;
+            std::ptr::copy_nonoverlapping(fp12_ptr, slice.as_mut_ptr(), GT_ELEMENT_BYTE_LENGTH);
+        }
+        slice
+    }
+}
 
 /// The private key type.
 pub type Private = Scalar;
@@ -171,7 +198,7 @@ pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
     /// Generates a random scalar using the provided RNG.
-    pub fn rand<R: RngCore>(rng: &mut R) -> Self {
+    pub fn from_rand<R: RngCore>(rng: &mut R) -> Self {
         // Generate a random 64 byte buffer
         let mut ikm = [0u8; 64];
         rng.fill_bytes(&mut ikm);
@@ -186,17 +213,66 @@ impl Scalar {
 
         // Zeroize the ikm buffer
         ikm.zeroize();
+
         Self(ret)
     }
 
-    /// Sets the scalar to be the provided integer.
-    pub fn set_int(&mut self, i: u32) {
+    /// Maps arbitrary bytes to a scalar using RFC9380 hash-to-field.
+    pub fn map(dst: DST, msg: &[u8]) -> Self {
+        // The BLS12-381 scalar field has a modulus of approximately 255 bits.
+        // According to RFC9380, when mapping to a field element, we need to
+        // generate uniform bytes with length L = ceil((ceil(log2(p)) + k) / 8),
+        // where p is the field modulus and k is the security parameter.
+        //
+        // For BLS12-381's scalar field:
+        // - log2(p) ≈ 255 bits
+        // - k = 128 bits (for 128-bit security)
+        // - L = ceil((255 + 128) / 8) = ceil(383 / 8) = 48 bytes
+        //
+        // These 48 bytes provide sufficient entropy to ensure uniform distribution
+        // in the scalar field after modular reduction, maintaining the security
+        // properties required by the hash-to-field construction.
+        const L: usize = 48;
+        let mut uniform_bytes = [0u8; L];
+        unsafe {
+            blst_expand_message_xmd(
+                uniform_bytes.as_mut_ptr(),
+                L,
+                msg.as_ptr(),
+                msg.len(),
+                dst.as_ptr(),
+                dst.len(),
+            );
+        }
+
+        // Transform expanded bytes with modular reduction
+        let mut fr = blst_fr::default();
+        unsafe {
+            let mut scalar = blst_scalar::default();
+            blst_scalar_from_be_bytes(&mut scalar, uniform_bytes.as_ptr(), L);
+            blst_fr_from_scalar(&mut fr, &scalar);
+        }
+
+        Self(fr)
+    }
+
+    /// Creates a new scalar from the provided integer.
+    fn from_u64(i: u64) -> Self {
+        // Create a new scalar
+        let mut ret = blst_fr::default();
+
         // blst requires a buffer of 4 uint64 values. Failure to provide one will
         // result in unexpected behavior (will read past the provided buffer).
         //
         // Reference: https://github.com/supranational/blst/blob/415d4f0e2347a794091836a3065206edfd9c72f3/bindings/blst.h#L102
-        let buffer = [i as u64, 0, 0, 0];
-        unsafe { blst_fr_from_uint64(&mut self.0, buffer.as_ptr()) };
+        let buffer = [i, 0, 0, 0];
+        unsafe { blst_fr_from_uint64(&mut ret, buffer.as_ptr()) };
+        Self(ret)
+    }
+
+    /// Creates a new scalar from the provided index (a scalar offset by 1).
+    pub fn from_index(i: u32) -> Self {
+        Self::from(i as u64 + 1)
     }
 
     /// Computes the inverse of the scalar.
@@ -230,6 +306,18 @@ impl Scalar {
         let mut scalar = blst_scalar::default();
         unsafe { blst_scalar_from_fr(&mut scalar, &self.0) };
         scalar
+    }
+}
+
+impl From<u32> for Scalar {
+    fn from(i: u32) -> Self {
+        Self::from(i as u64)
+    }
+}
+
+impl From<u64> for Scalar {
+    fn from(i: u64) -> Self {
+        Self::from_u64(i)
     }
 }
 
@@ -818,7 +906,7 @@ mod tests {
     #[test]
     fn basic_group() {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/curve/bls12381.rs#L200-L220
-        let s = Scalar::rand(&mut thread_rng());
+        let s = Scalar::from_rand(&mut thread_rng());
         let mut e1 = s.clone();
         let e2 = s.clone();
         let mut s2 = s.clone();
@@ -840,7 +928,7 @@ mod tests {
 
     #[test]
     fn test_scalar_codec() {
-        let original = Scalar::rand(&mut thread_rng());
+        let original = Scalar::from_rand(&mut thread_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), Scalar::SIZE);
         let decoded = Scalar::decode(&mut encoded).unwrap();
@@ -850,7 +938,7 @@ mod tests {
     #[test]
     fn test_g1_codec() {
         let mut original = G1::one();
-        original.mul(&Scalar::rand(&mut thread_rng()));
+        original.mul(&Scalar::from_rand(&mut thread_rng()));
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G1::SIZE);
         let decoded = G1::decode(&mut encoded).unwrap();
@@ -860,7 +948,7 @@ mod tests {
     #[test]
     fn test_g2_codec() {
         let mut original = G2::one();
-        original.mul(&Scalar::rand(&mut thread_rng()));
+        original.mul(&Scalar::from_rand(&mut thread_rng()));
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G2::SIZE);
         let decoded = G2::decode(&mut encoded).unwrap();
@@ -892,11 +980,11 @@ mod tests {
         let points_g1: Vec<G1> = (0..n)
             .map(|_| {
                 let mut point = G1::one();
-                point.mul(&Scalar::rand(&mut rng));
+                point.mul(&Scalar::from_rand(&mut rng));
                 point
             })
             .collect();
-        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
+        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::from_rand(&mut rng)).collect();
         let expected_g1 = naive_msm(&points_g1, &scalars);
         let result_g1 = G1::msm(&points_g1, &scalars);
         assert_eq!(expected_g1, result_g1, "G1 MSM basic case failed");
@@ -973,11 +1061,11 @@ mod tests {
         let points_g1: Vec<G1> = (0..50_000)
             .map(|_| {
                 let mut point = G1::one();
-                point.mul(&Scalar::rand(&mut rng));
+                point.mul(&Scalar::from_rand(&mut rng));
                 point
             })
             .collect();
-        let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::rand(&mut rng)).collect();
+        let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::from_rand(&mut rng)).collect();
         let expected_g1 = naive_msm(&points_g1, &scalars);
         let result_g1 = G1::msm(&points_g1, &scalars);
         assert_eq!(expected_g1, result_g1, "G1 MSM basic case failed");
@@ -992,11 +1080,11 @@ mod tests {
         let points_g2: Vec<G2> = (0..n)
             .map(|_| {
                 let mut point = G2::one();
-                point.mul(&Scalar::rand(&mut rng));
+                point.mul(&Scalar::from_rand(&mut rng));
                 point
             })
             .collect();
-        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::rand(&mut rng)).collect();
+        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::from_rand(&mut rng)).collect();
         let expected_g2 = naive_msm(&points_g2, &scalars);
         let result_g2 = G2::msm(&points_g2, &scalars);
         assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
@@ -1073,11 +1161,11 @@ mod tests {
         let points_g2: Vec<G2> = (0..50_000)
             .map(|_| {
                 let mut point = G2::one();
-                point.mul(&Scalar::rand(&mut rng));
+                point.mul(&Scalar::from_rand(&mut rng));
                 point
             })
             .collect();
-        let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::rand(&mut rng)).collect();
+        let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::from_rand(&mut rng)).collect();
         let expected_g2 = naive_msm(&points_g2, &scalars);
         let result_g2 = G2::msm(&points_g2, &scalars);
         assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
@@ -1093,7 +1181,7 @@ mod tests {
         let mut g2_set = BTreeSet::new();
         let mut share_set = BTreeSet::new();
         while scalar_set.len() < NUM_ITEMS {
-            let scalar = Scalar::rand(&mut rng);
+            let scalar = Scalar::from_rand(&mut rng);
             let mut g1 = G1::one();
             g1.mul(&scalar);
             let mut g2 = G2::one();
@@ -1136,5 +1224,56 @@ mod tests {
         assert_eq!(g1_map.len(), NUM_ITEMS);
         assert_eq!(g2_map.len(), NUM_ITEMS);
         assert_eq!(share_map.len(), NUM_ITEMS);
+    }
+
+    #[test]
+    fn test_scalar_map() {
+        // Test 1: Basic functionality
+        let msg = b"test message";
+        let dst = b"TEST_DST";
+        let scalar1 = Scalar::map(dst, msg);
+        let scalar2 = Scalar::map(dst, msg);
+        assert_eq!(scalar1, scalar2, "Same input should produce same output");
+
+        // Test 2: Different messages produce different scalars
+        let msg2 = b"different message";
+        let scalar3 = Scalar::map(dst, msg2);
+        assert_ne!(
+            scalar1, scalar3,
+            "Different messages should produce different scalars"
+        );
+
+        // Test 3: Different DSTs produce different scalars
+        let dst2 = b"DIFFERENT_DST";
+        let scalar4 = Scalar::map(dst2, msg);
+        assert_ne!(
+            scalar1, scalar4,
+            "Different DSTs should produce different scalars"
+        );
+
+        // Test 4: Empty message
+        let empty_msg = b"";
+        let scalar_empty = Scalar::map(dst, empty_msg);
+        assert_ne!(
+            scalar_empty,
+            Scalar::zero(),
+            "Empty message should not produce zero"
+        );
+
+        // Test 5: Large message
+        let large_msg = vec![0x42u8; 1000];
+        let scalar_large = Scalar::map(dst, &large_msg);
+        assert_ne!(
+            scalar_large,
+            Scalar::zero(),
+            "Large message should not produce zero"
+        );
+
+        // Test 6: Verify the scalar is valid (not zero)
+        assert_ne!(
+            scalar1,
+            Scalar::zero(),
+            "Hash should not produce zero scalar"
+        );
     }
 }

@@ -2,7 +2,7 @@
 name = "commonware-resolver"
 edition = "2021"
 publish = true
-version = "0.0.54"
+version = "0.0.57"
 license = "MIT OR Apache-2.0"
 description = "Resolve data identified by a fixed-length key."
 readme = "README.md"
@@ -32,3 +32,6 @@ tracing-subscriber = { workspace = true }
 
 [lib]
 bench = false
+
+[features]
+mocks = []

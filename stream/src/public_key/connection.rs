@@ -1004,8 +1004,8 @@ mod tests {
             };
 
             // Set up mock channels (not fully utilized due to early error).
-            let (dialer_sink, _unused_stream) = mocks::Channel::init();
-            let (_unused_sink, dialer_stream) = mocks::Channel::init();
+            let (dialer_sink, _) = mocks::Channel::init();
+            let (_, dialer_stream) = mocks::Channel::init();
 
             // Attempt to upgrade dialer connection, targeting self.
             let result = Connection::upgrade_dialer(

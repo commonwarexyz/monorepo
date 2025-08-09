@@ -1,0 +1,11 @@
+# Echo
+
+## Propose a message
+propose{0}
+
+## Immediately reply to proposal
+wait{0, threshold=1}
+reply{1}
+
+## Wait for 67% of the network to reply
+collect{1, threshold=67%}

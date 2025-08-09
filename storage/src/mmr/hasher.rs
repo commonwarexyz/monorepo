@@ -20,7 +20,7 @@ pub trait Hasher<H: CHasher>: Send + Sync {
 
     /// Computes the root for an MMR given its size and an iterator over the digests of its peaks in
     /// decreasing order of height.
-    fn root_digest<'a>(
+    fn root<'a>(
         &mut self,
         size: u64,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
@@ -95,7 +95,7 @@ impl<H: CHasher> Hasher<H> for Standard<H> {
         self.finalize()
     }
 
-    fn root_digest<'a>(
+    fn root<'a>(
         &mut self,
         size: u64,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
@@ -347,13 +347,12 @@ impl<H: CHasher> Hasher<H> for Grafting<'_, H> {
             .node_digest(self.destination_pos(pos), left_digest, right_digest)
     }
 
-    fn root_digest<'a>(
+    fn root<'a>(
         &mut self,
         size: u64,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        self.hasher
-            .root_digest(self.destination_pos(size), peak_digests)
+        self.hasher.root(self.destination_pos(size), peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -398,13 +397,13 @@ impl<H: CHasher> Hasher<H> for GraftingFork<'_, H> {
             .node_digest(destination_pos(pos, self.height), left_digest, right_digest)
     }
 
-    fn root_digest<'a>(
+    fn root<'a>(
         &mut self,
         size: u64,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
         self.hasher
-            .root_digest(destination_pos(size, self.height), peak_digests)
+            .root(destination_pos(size, self.height), peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -505,12 +504,12 @@ impl<H: CHasher> Hasher<H> for GraftingVerifier<'_, H> {
         self.hasher.finalize()
     }
 
-    fn root_digest<'a>(
+    fn root<'a>(
         &mut self,
         size: u64,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        self.hasher.root_digest(size, peak_digests)
+        self.hasher.root(size, peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -548,8 +547,8 @@ mod tests {
     }
 
     #[test]
-    fn test_root_digest_sha256() {
-        test_root_digest::<Sha256>();
+    fn test_root_sha256() {
+        test_root::<Sha256>();
     }
 
     fn test_digest<H: CHasher>(value: u8) -> H::Digest {
@@ -616,7 +615,7 @@ mod tests {
         );
     }
 
-    fn test_root_digest<H: CHasher>() {
+    fn test_root<H: CHasher>() {
         let mut mmr_hasher: Standard<H> = Standard::new();
         // input digests to use
         let d1 = test_digest::<H>(1);
@@ -625,7 +624,7 @@ mod tests {
         let d4 = test_digest::<H>(4);
 
         let empty_vec: Vec<H::Digest> = Vec::new();
-        let empty_out = mmr_hasher.root_digest(0, empty_vec.iter());
+        let empty_out = mmr_hasher.root(0, empty_vec.iter());
         assert_ne!(
             empty_out,
             test_digest::<H>(0),
@@ -633,22 +632,22 @@ mod tests {
         );
 
         let digests = [d1, d2, d3, d4];
-        let out = mmr_hasher.root_digest(10, digests.iter());
+        let out = mmr_hasher.root(10, digests.iter());
         assert_ne!(out, test_digest::<H>(0), "root should be non-zero");
         assert_ne!(out, empty_out, "root should differ from empty MMR");
 
-        let mut out2 = mmr_hasher.root_digest(10, digests.iter());
+        let mut out2 = mmr_hasher.root(10, digests.iter());
         assert_eq!(out, out2, "root should be computed consistently");
 
-        out2 = mmr_hasher.root_digest(11, digests.iter());
+        out2 = mmr_hasher.root(11, digests.iter());
         assert_ne!(out, out2, "root should change with different position");
 
         let digests = [d1, d2, d4, d3];
-        out2 = mmr_hasher.root_digest(10, digests.iter());
+        out2 = mmr_hasher.root(10, digests.iter());
         assert_ne!(out, out2, "root should change with different digest order");
 
         let digests = [d1, d2, d3];
-        out2 = mmr_hasher.root_digest(10, digests.iter());
+        out2 = mmr_hasher.root(10, digests.iter());
         assert_ne!(
             out, out2,
             "root should change with different number of hashes"

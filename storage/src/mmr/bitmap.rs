@@ -24,7 +24,7 @@ use crate::{
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
-use commonware_utils::array::prefixed_u64::U64;
+use commonware_utils::sequence::prefixed_u64::U64;
 use std::collections::{HashSet, VecDeque};
 use tracing::{debug, error, warn};
 
@@ -311,7 +311,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// - Assumes self.next_bit is currently byte aligned, and panics otherwise.
     pub fn append_byte_unchecked(&mut self, byte: u8) {
         assert!(
-            self.next_bit % 8 == 0,
+            self.next_bit.is_multiple_of(8),
             "cannot add byte when not byte aligned"
         );
 
@@ -569,13 +569,13 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     }
 
     /// Verify whether `proof` proves that the `chunk` containing the referenced bit belongs to the
-    /// bitmap corresponding to `root_digest`.
+    /// bitmap corresponding to `root`.
     pub fn verify_bit_inclusion(
         hasher: &mut impl Hasher<H>,
         proof: &Proof<H::Digest>,
         chunk: &[u8; N],
         bit_offset: u64,
-        root_digest: &H::Digest,
+        root: &H::Digest,
     ) -> bool {
         let bit_count = proof.size;
         if bit_offset >= bit_count {
@@ -590,7 +590,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         };
 
         if bit_count % Self::CHUNK_SIZE_BITS == 0 {
-            return mmr_proof.verify_element_inclusion(hasher, chunk, leaf_pos, root_digest);
+            return mmr_proof.verify_element_inclusion(hasher, chunk, leaf_pos, root);
         }
 
         if proof.digests.is_empty() {
@@ -618,7 +618,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
                 next_bit,
                 &last_chunk_digest,
             );
-            return reconstructed_root == *root_digest;
+            return reconstructed_root == *root;
         };
 
         // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
@@ -635,7 +635,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         let reconstructed_root =
             Self::partial_chunk_root(hasher.inner(), &mmr_root, next_bit, &last_digest);
 
-        reconstructed_root == *root_digest
+        reconstructed_root == *root
     }
 }
 

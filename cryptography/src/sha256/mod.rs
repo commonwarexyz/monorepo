@@ -23,7 +23,7 @@
 use crate::Hasher;
 use bytes::{Buf, BufMut};
 use commonware_codec::{DecodeExt, Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_utils::{hex, Array};
+use commonware_utils::{hex, Array, Span};
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
 use std::{
@@ -101,7 +101,7 @@ impl Hasher for Sha256 {
 /// Digest of a SHA-256 hashing operation.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
-pub struct Digest([u8; DIGEST_LENGTH]);
+pub struct Digest(pub [u8; DIGEST_LENGTH]);
 
 impl Write for Digest {
     fn write(&self, buf: &mut impl BufMut) {
@@ -121,6 +121,8 @@ impl Read for Digest {
 impl FixedSize for Digest {
     const SIZE: usize = DIGEST_LENGTH;
 }
+
+impl Span for Digest {}
 
 impl Array for Digest {}
 

@@ -2,7 +2,7 @@ use super::types::{Activity, Context, View};
 use crate::{Automaton, Relay, Reporter, Supervisor};
 use commonware_cryptography::{Digest, Signer};
 use governor::Quota;
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the consensus engine.
 pub struct Config<
@@ -42,10 +42,10 @@ pub struct Config<
     pub namespace: Vec<u8>,
 
     /// Number of bytes to buffer when replaying during startup.
-    pub replay_buffer: usize,
+    pub replay_buffer: NonZeroUsize,
 
     /// The size of the write buffer to use for each blob in the journal.
-    pub write_buffer: usize,
+    pub write_buffer: NonZeroUsize,
 
     /// Amount of time to wait for a leader to propose a payload
     /// in a view.

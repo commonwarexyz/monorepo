@@ -4,7 +4,7 @@ use commonware_runtime::{
     tokio::Context,
 };
 use commonware_storage::journal::fixed::Journal;
-use commonware_utils::array::FixedBytes;
+use commonware_utils::sequence::FixedBytes;
 use criterion::{black_box, criterion_group, Criterion};
 use std::time::{Duration, Instant};
 

@@ -29,7 +29,7 @@ pub fn compute_public<V: Variant>(private: &Scalar) -> V::Public {
 
 /// Returns a new keypair derived from the provided randomness.
 pub fn keypair<R: RngCore, V: Variant>(rng: &mut R) -> (group::Private, V::Public) {
-    let private = group::Private::rand(rng);
+    let private = group::Private::from_rand(rng);
     let public = compute_public::<V>(&private);
     (private, public)
 }
@@ -468,6 +468,7 @@ where
 pub fn threshold_signature_recover_multiple<'a, V, I>(
     threshold: u32,
     mut many_evals: Vec<I>,
+    concurrency: usize,
 ) -> Result<Vec<V::Signature>, Error>
 where
     V: Variant,
@@ -498,18 +499,37 @@ where
         .collect::<Vec<_>>();
     let weights = compute_weights(indices)?;
 
-    // Recover signatures
-    let mut signatures = Vec::with_capacity(prepared_evals.len());
-    for evals in prepared_evals {
-        let signature = threshold_signature_recover_with_weights::<V, _>(&weights, evals)?;
-        signatures.push(signature);
+    // If concurrency is not required, recover signatures sequentially
+    let concurrency = std::cmp::min(concurrency, prepared_evals.len());
+    if concurrency == 1 {
+        return prepared_evals
+            .iter()
+            .map(|evals| {
+                threshold_signature_recover_with_weights::<V, _>(&weights, evals.iter().cloned())
+            })
+            .collect();
     }
-    Ok(signatures)
+
+    // Build a thread pool with the specified concurrency
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(concurrency)
+        .build()
+        .expect("Unable to build thread pool");
+
+    // Recover signatures
+    pool.install(move || {
+        prepared_evals
+            .par_iter()
+            .map(|evals| {
+                threshold_signature_recover_with_weights::<V, _>(&weights, evals.iter().cloned())
+            })
+            .collect()
+    })
 }
 
 /// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
 ///
-/// This is just a wrapper around `threshold_signature_recover_multiple`.
+/// This is just a wrapper around `threshold_signature_recover_multiple` with concurrency set to 2.
 pub fn threshold_signature_recover_pair<'a, V, I>(
     threshold: u32,
     first: I,
@@ -520,7 +540,7 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
 {
-    let mut sigs = threshold_signature_recover_multiple::<V, _>(threshold, vec![first, second])?;
+    let mut sigs = threshold_signature_recover_multiple::<V, _>(threshold, vec![first, second], 2)?;
     let second_sig = sigs.pop().unwrap();
     let first_sig = sigs.pop().unwrap();
     Ok((first_sig, second_sig))
@@ -1595,7 +1615,7 @@ mod tests {
 
         // Corrupt a share
         let share = shares.get_mut(3).unwrap();
-        share.private = Private::rand(&mut rand::thread_rng());
+        share.private = Private::from_rand(&mut rand::thread_rng());
 
         // Generate the partial signatures
         let namespace = Some(&b"test"[..]);
@@ -1660,7 +1680,7 @@ mod tests {
 
         // Corrupt the second share's private key
         let corrupted_index = 1;
-        shares[corrupted_index].private = Private::rand(&mut rng);
+        shares[corrupted_index].private = Private::from_rand(&mut rng);
 
         // Generate partial signatures
         let partials: Vec<_> = shares
@@ -1707,7 +1727,7 @@ mod tests {
         // Corrupt shares at indices 1 and 3
         let corrupted_indices = vec![1, 3];
         for &idx in &corrupted_indices {
-            shares[idx].private = Private::rand(&mut rng);
+            shares[idx].private = Private::from_rand(&mut rng);
         }
 
         // Generate partial signatures
@@ -1820,7 +1840,7 @@ mod tests {
         let namespace = Some(&b"test"[..]);
         let msg = b"hello";
 
-        shares[0].private = Private::rand(&mut rng);
+        shares[0].private = Private::from_rand(&mut rng);
 
         let partials: Vec<_> = shares
             .iter()
@@ -1856,7 +1876,7 @@ mod tests {
         let msg = b"hello";
 
         let corrupted_index = n - 1;
-        shares[corrupted_index as usize].private = Private::rand(&mut rng);
+        shares[corrupted_index as usize].private = Private::from_rand(&mut rng);
 
         let partials: Vec<_> = shares
             .iter()
@@ -2376,16 +2396,14 @@ mod tests {
 
     fn threshold_derive_missing_partials<V: Variant>() {
         // Helper to compute the Lagrange basis polynomial l_i(x) evaluated at a specific point `eval_at_x`.
-        fn lagrange_coeff(eval_at_x: u32, i_x: u32, x_coords: &[u32]) -> Scalar {
+        fn lagrange_coeff(eval_x: u32, i_x: u32, x_coords: &[u32]) -> Scalar {
             // Initialize the numerator and denominator.
             let mut num = Scalar::one();
             let mut den = Scalar::one();
 
             // Initialize the evaluation point and the index.
-            let mut eval_at_scalar = Scalar::zero();
-            eval_at_scalar.set_int(eval_at_x + 1);
-            let mut xi = Scalar::zero();
-            xi.set_int(i_x + 1);
+            let eval_x = Scalar::from_index(eval_x);
+            let xi = Scalar::from_index(i_x);
 
             // Compute the Lagrange coefficients.
             for &j_x in x_coords {
@@ -2395,11 +2413,10 @@ mod tests {
                 }
 
                 // Initialize the other index.
-                let mut xj = Scalar::zero();
-                xj.set_int(j_x + 1);
+                let xj = Scalar::from_index(j_x);
 
-                // Numerator: product over j!=i of (eval_at - x_j)
-                let mut term = eval_at_scalar.clone();
+                // Numerator: product over j!=i of (eval_x - x_j)
+                let mut term = eval_x.clone();
                 term.sub(&xj);
                 num.mul(&term);
 

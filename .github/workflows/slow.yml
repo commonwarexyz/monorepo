@@ -62,6 +62,10 @@ jobs:
             cargo_flags: ""
             file_suffix: ""
             benchmark_name: "commonware-stream"
+          - package: commonware-coding
+            cargo_flags: ""
+            file_suffix: ""
+            benchmark_name: "commonware-coding"
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -80,7 +84,7 @@ jobs:
     timeout-minutes: 180
     strategy:
       matrix:
-        fuzz_dir: [codec/fuzz, cryptography/fuzz, storage/fuzz, stream/fuzz]
+        fuzz_dir: [codec/fuzz, coding/fuzz, cryptography/fuzz, storage/fuzz, stream/fuzz, utils/fuzz]
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4

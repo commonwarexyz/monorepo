@@ -13,6 +13,8 @@ _Primitives are designed for deployment in adversarial environments. If you find
 
 * [broadcast](./broadcast/README.md): Disseminate data over a wide-area network.
 * [codec](./codec/README.md): Serialize structured data.
+* [coding](./coding/README.md): Encode data to enable recovery from a subset of fragments.
+* [collector](./collector/README.md): Collect responses to committable requests.
 * [consensus](./consensus/README.md): Order opaque messages in a Byzantine environment.
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify signatures.
 * [deployer](./deployer/README.md): Deploy infrastructure across cloud providers.
@@ -29,8 +31,10 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 * [alto](https://github.com/commonwarexyz/alto): A minimal (and wicked fast) blockchain built with the Commonware Library.
 * [bridge](./examples/bridge/README.md): Send succinct consensus certificates between two networks.
 * [chat](./examples/chat/README.md): Send encrypted messages to a group of friends.
+* [estimator](./examples/estimator/README.md): Simulate mechanism performance under realistic network conditions.
 * [flood](./examples/flood/README.md): Spam peers deployed to AWS EC2 with random messages.
 * [log](./examples/log/README.md): Commit to a secret log and agree to its hash.
+* [sync](./examples/sync/README.md): Synchronize state between a server and client.
 * [vrf](./examples/vrf/README.md): Generate bias-resistant randomness with untrusted contributors.
 
 ## Miscellaneous

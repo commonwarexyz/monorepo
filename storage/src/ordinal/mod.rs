@@ -61,7 +61,7 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_storage::ordinal::{Ordinal, Config};
-//! use commonware_utils::array::FixedBytes;
+//! use commonware_utils::{sequence::FixedBytes, NZUsize};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -69,8 +69,8 @@
 //!     let cfg = Config {
 //!         partition: "ordinal_store".into(),
 //!         items_per_blob: 10000,
-//!         write_buffer: 4096,
-//!         replay_buffer: 1024 * 1024,
+//!         write_buffer: NZUsize!(4096),
+//!         replay_buffer: NZUsize!(1024 * 1024),
 //!     };
 //!     let mut store = Ordinal::<_, FixedBytes<32>>::init(context, cfg).await.unwrap();
 //!
@@ -95,6 +95,7 @@
 
 mod storage;
 
+use std::num::NonZeroUsize;
 pub use storage::Ordinal;
 use thiserror::Error;
 
@@ -109,6 +110,8 @@ pub enum Error {
     InvalidBlobName(String),
     #[error("invalid record: {0}")]
     InvalidRecord(u64),
+    #[error("missing record at {0}")]
+    MissingRecord(u64),
 }
 
 /// Configuration for [Ordinal] storage.
@@ -121,10 +124,10 @@ pub struct Config {
     pub items_per_blob: u64,
 
     /// The size of the write buffer to use when writing to the index.
-    pub write_buffer: usize,
+    pub write_buffer: NonZeroUsize,
 
     /// The size of the read buffer to use on restart.
-    pub replay_buffer: usize,
+    pub replay_buffer: NonZeroUsize,
 }
 
 #[cfg(test)]
@@ -132,15 +135,16 @@ mod tests {
     use super::*;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::array::FixedBytes;
+    use commonware_utils::{sequence::FixedBytes, BitVec, NZUsize};
     use rand::RngCore;
+    use std::collections::BTreeMap;
 
     const DEFAULT_ITEMS_PER_BLOB: u64 = 1000;
     const DEFAULT_WRITE_BUFFER: usize = 4096;
     const DEFAULT_REPLAY_BUFFER: usize = 1024 * 1024;
 
     #[test_traced]
-    fn test_store_put_get() {
+    fn test_put_get() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -148,8 +152,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -199,7 +203,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_multiple_indices() {
+    fn test_multiple_indices() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -207,8 +211,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -246,7 +250,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_sparse_indices() {
+    fn test_sparse_indices() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -254,8 +258,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100, // Smaller blobs for testing
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -297,7 +301,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_next_gap() {
+    fn test_next_gap() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -305,8 +309,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -346,15 +350,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_restart() {
+    fn test_restart() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Insert data and close
@@ -409,15 +413,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_invalid_record() {
+    fn test_invalid_record() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -441,7 +445,7 @@ mod tests {
                     .unwrap();
                 // Corrupt the CRC by changing a byte
                 blob.write_at(vec![0xFF], 32).await.unwrap();
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
             }
 
             // Reopen and try to read corrupted data
@@ -461,7 +465,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_get_nonexistent() {
+    fn test_get_nonexistent() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -469,8 +473,8 @@ mod tests {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
@@ -486,15 +490,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_destroy() {
+    fn test_destroy() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -532,15 +536,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_partial_record_write() {
+    fn test_partial_record_write() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -568,7 +572,7 @@ mod tests {
                     .unwrap();
                 // Overwrite second record with partial data (32 bytes instead of 36)
                 blob.write_at(vec![0xFF; 32], 36).await.unwrap();
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
             }
 
             // Reopen and verify it handles partial write gracefully
@@ -599,15 +603,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_corrupted_value() {
+    fn test_corrupted_value() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -637,7 +641,7 @@ mod tests {
                 blob.write_at(vec![0xFF, 0xFF, 0xFF, 0xFF], 10)
                     .await
                     .unwrap();
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
             }
 
             // Reopen and verify it detects corruption
@@ -660,15 +664,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_crc_corruptions() {
+    fn test_crc_corruptions() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 10, // Small blob size for testing
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data across multiple blobs
@@ -693,7 +697,7 @@ mod tests {
                     .await
                     .unwrap();
                 blob.write_at(vec![0xFF], 32).await.unwrap(); // Corrupt CRC of index 0
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
 
                 // Corrupt value in second blob (which will invalidate CRC)
                 let (blob, _) = context
@@ -701,7 +705,7 @@ mod tests {
                     .await
                     .unwrap();
                 blob.write_at(vec![0xFF; 4], 5).await.unwrap(); // Corrupt value of index 10
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
             }
 
             // Reopen and verify handling of CRC corruptions
@@ -730,15 +734,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_extra_bytes_in_blob() {
+    fn test_extra_bytes_in_blob() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store with data
@@ -771,7 +775,7 @@ mod tests {
                 garbage.extend_from_slice(&invalid_crc.to_be_bytes());
                 assert_eq!(garbage.len(), 36); // Full record size
                 blob.write_at(garbage, size).await.unwrap();
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
             }
 
             // Reopen and verify it handles extra bytes
@@ -804,15 +808,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_zero_filled_records() {
+    fn test_zero_filled_records() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: DEFAULT_ITEMS_PER_BLOB,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create blob with zero-filled space
@@ -832,7 +836,7 @@ mod tests {
                 valid_record.extend_from_slice(&crc.to_be_bytes());
                 blob.write_at(valid_record, 36 * 5).await.unwrap();
 
-                blob.close().await.unwrap();
+                blob.sync().await.unwrap();
             }
 
             // Initialize store and verify it handles zero-filled records
@@ -856,15 +860,15 @@ mod tests {
         });
     }
 
-    fn test_store_operations_and_restart(num_values: usize) -> String {
+    fn test_operations_and_restart(num_values: usize) -> String {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100, // Smaller blobs to test multiple blob handling
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Initialize the store
@@ -956,21 +960,21 @@ mod tests {
     #[test_traced]
     #[ignore]
     fn test_determinism() {
-        let state1 = test_store_operations_and_restart(100);
-        let state2 = test_store_operations_and_restart(100);
+        let state1 = test_operations_and_restart(100);
+        let state2 = test_operations_and_restart(100);
         assert_eq!(state1, state2);
     }
 
     #[test_traced]
-    fn test_store_prune_basic() {
+    fn test_prune_basic() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100, // Small blobs to test multiple blob handling
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1041,15 +1045,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_prune_with_gaps() {
+    fn test_prune_with_gaps() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1093,15 +1097,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_prune_no_op() {
+    fn test_prune_no_op() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1134,15 +1138,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_prune_empty_store() {
+    fn test_prune_empty_store() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1159,15 +1163,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_prune_after_restart() {
+    fn test_prune_after_restart() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             // Create store and add data
@@ -1223,15 +1227,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_prune_multiple_operations() {
+    fn test_prune_multiple_operations() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 50, // Smaller blobs for more granular testing
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1280,15 +1284,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_prune_blob_boundaries() {
+    fn test_prune_blob_boundaries() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1331,15 +1335,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_prune_non_contiguous_sections() {
+    fn test_prune_non_contiguous_sections() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
@@ -1393,17 +1397,16 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_store_prune_removes_correct_pending() {
+    fn test_prune_removes_correct_pending() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_ordinal".into(),
                 items_per_blob: 100,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
-
             let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to initialize store");
@@ -1442,6 +1445,462 @@ mod tests {
                 store.get(110).await.unwrap().unwrap(),
                 FixedBytes::new([110u8; 32])
             );
+        });
+    }
+
+    #[test_traced]
+    fn test_init_with_bits_none() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 10, // Small blob size for testing
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+
+            // Create store with data across multiple sections
+            {
+                let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Section 0 (indices 0-9)
+                store.put(0, FixedBytes::new([0u8; 32])).await.unwrap();
+                store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
+                store.put(9, FixedBytes::new([9u8; 32])).await.unwrap();
+
+                // Section 1 (indices 10-19)
+                store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
+                store.put(15, FixedBytes::new([15u8; 32])).await.unwrap();
+
+                // Section 2 (indices 20-29)
+                store.put(25, FixedBytes::new([25u8; 32])).await.unwrap();
+
+                store.close().await.unwrap();
+            }
+
+            // Reinitialize with bits = None (should behave like regular init)
+            {
+                let store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
+                    context.clone(),
+                    cfg.clone(),
+                    None,
+                )
+                .await
+                .expect("Failed to initialize store with bits");
+
+                // All records should be available
+                assert!(store.has(0));
+                assert!(store.has(5));
+                assert!(store.has(9));
+                assert!(store.has(10));
+                assert!(store.has(15));
+                assert!(store.has(25));
+
+                // Non-existent records should not be available
+                assert!(!store.has(1));
+                assert!(!store.has(11));
+                assert!(!store.has(20));
+
+                // Verify values
+                assert_eq!(
+                    store.get(0).await.unwrap().unwrap(),
+                    FixedBytes::new([0u8; 32])
+                );
+                assert_eq!(
+                    store.get(15).await.unwrap().unwrap(),
+                    FixedBytes::new([15u8; 32])
+                );
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_init_with_bits_empty_hashmap() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 10,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+
+            // Create store with data
+            {
+                let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                store.put(0, FixedBytes::new([0u8; 32])).await.unwrap();
+                store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
+                store.put(20, FixedBytes::new([20u8; 32])).await.unwrap();
+
+                store.close().await.unwrap();
+            }
+
+            // Reinitialize with empty HashMap - should skip all sections
+            {
+                let bits: BTreeMap<u64, &Option<BitVec>> = BTreeMap::new();
+                let store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
+                    context.clone(),
+                    cfg.clone(),
+                    Some(bits),
+                )
+                .await
+                .expect("Failed to initialize store with bits");
+
+                // No records should be available since no sections were in the bits map
+                assert!(!store.has(0));
+                assert!(!store.has(10));
+                assert!(!store.has(20));
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_init_with_bits_selective_sections() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 10,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+
+            // Create store with data in multiple sections
+            {
+                let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Section 0 (indices 0-9)
+                for i in 0..10 {
+                    store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+                }
+
+                // Section 1 (indices 10-19)
+                for i in 10..20 {
+                    store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+                }
+
+                // Section 2 (indices 20-29)
+                for i in 20..30 {
+                    store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+                }
+
+                store.close().await.unwrap();
+            }
+
+            // Reinitialize with bits for only section 1
+            {
+                let mut bits_map: BTreeMap<u64, &Option<BitVec>> = BTreeMap::new();
+
+                // Create a BitVec that marks indices 12, 15, and 18 as present
+                let mut bitvec = BitVec::zeroes(10);
+                bitvec.set(2); // Index 12 (offset 2 in section 1)
+                bitvec.set(5); // Index 15 (offset 5 in section 1)
+                bitvec.set(8); // Index 18 (offset 8 in section 1)
+                let bitvec_option = Some(bitvec);
+
+                bits_map.insert(1, &bitvec_option);
+
+                let store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
+                    context.clone(),
+                    cfg.clone(),
+                    Some(bits_map),
+                )
+                .await
+                .expect("Failed to initialize store with bits");
+
+                // Only specified indices from section 1 should be available
+                assert!(store.has(12));
+                assert!(store.has(15));
+                assert!(store.has(18));
+
+                // Other indices from section 1 should not be available
+                assert!(!store.has(10));
+                assert!(!store.has(11));
+                assert!(!store.has(13));
+                assert!(!store.has(14));
+                assert!(!store.has(16));
+                assert!(!store.has(17));
+                assert!(!store.has(19));
+
+                // All indices from sections 0 and 2 should not be available
+                for i in 0..10 {
+                    assert!(!store.has(i));
+                }
+                for i in 20..30 {
+                    assert!(!store.has(i));
+                }
+
+                // Verify the available values
+                assert_eq!(
+                    store.get(12).await.unwrap().unwrap(),
+                    FixedBytes::new([12u8; 32])
+                );
+                assert_eq!(
+                    store.get(15).await.unwrap().unwrap(),
+                    FixedBytes::new([15u8; 32])
+                );
+                assert_eq!(
+                    store.get(18).await.unwrap().unwrap(),
+                    FixedBytes::new([18u8; 32])
+                );
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_init_with_bits_none_option_all_records_exist() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 5,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+
+            // Create store with all records in a section
+            {
+                let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Fill section 1 completely (indices 5-9)
+                for i in 5..10 {
+                    store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+                }
+
+                store.close().await.unwrap();
+            }
+
+            // Reinitialize with None option for section 1 (expects all records)
+            {
+                let mut bits_map: BTreeMap<u64, &Option<BitVec>> = BTreeMap::new();
+                let none_option: Option<BitVec> = None;
+                bits_map.insert(1, &none_option);
+
+                let store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
+                    context.clone(),
+                    cfg.clone(),
+                    Some(bits_map),
+                )
+                .await
+                .expect("Failed to initialize store with bits");
+
+                // All records in section 1 should be available
+                for i in 5..10 {
+                    assert!(store.has(i));
+                    assert_eq!(
+                        store.get(i).await.unwrap().unwrap(),
+                        FixedBytes::new([i as u8; 32])
+                    );
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "Failed to initialize store with bits: MissingRecord(6)")]
+    fn test_init_with_bits_none_option_missing_record_panics() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 5,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+
+            // Create store with missing record in a section
+            {
+                let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Fill section 1 partially (skip index 6)
+                store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
+                // Skip index 6
+                store.put(7, FixedBytes::new([7u8; 32])).await.unwrap();
+                store.put(8, FixedBytes::new([8u8; 32])).await.unwrap();
+                store.put(9, FixedBytes::new([9u8; 32])).await.unwrap();
+
+                store.close().await.unwrap();
+            }
+
+            // Reinitialize with None option for section 1 (expects all records)
+            // This should panic because index 6 is missing
+            {
+                let mut bits_map: BTreeMap<u64, &Option<BitVec>> = BTreeMap::new();
+                let none_option: Option<BitVec> = None;
+                bits_map.insert(1, &none_option);
+
+                let _store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
+                    context.clone(),
+                    cfg.clone(),
+                    Some(bits_map),
+                )
+                .await
+                .expect("Failed to initialize store with bits");
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_init_with_bits_mixed_sections() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 5,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+
+            // Create store with data in multiple sections
+            {
+                let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Section 0: indices 0-4 (fill completely)
+                for i in 0..5 {
+                    store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+                }
+
+                // Section 1: indices 5-9 (fill partially)
+                store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
+                store.put(7, FixedBytes::new([7u8; 32])).await.unwrap();
+                store.put(9, FixedBytes::new([9u8; 32])).await.unwrap();
+
+                // Section 2: indices 10-14 (fill completely)
+                for i in 10..15 {
+                    store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+                }
+
+                store.close().await.unwrap();
+            }
+
+            // Reinitialize with mixed bits configuration
+            {
+                let mut bits_map: BTreeMap<u64, &Option<BitVec>> = BTreeMap::new();
+
+                // Section 0: None option (expects all records)
+                let none_option: Option<BitVec> = None;
+                bits_map.insert(0, &none_option);
+
+                // Section 1: BitVec with specific indices
+                let mut bitvec1 = BitVec::zeroes(5);
+                bitvec1.set(0); // Index 5
+                bitvec1.set(2); // Index 7
+                                // Note: not setting bit for index 9, so it should be ignored
+                let bitvec1_option = Some(bitvec1);
+                bits_map.insert(1, &bitvec1_option);
+
+                // Section 2: Not in map, should be skipped entirely
+
+                let store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
+                    context.clone(),
+                    cfg.clone(),
+                    Some(bits_map),
+                )
+                .await
+                .expect("Failed to initialize store with bits");
+
+                // All records from section 0 should be available
+                for i in 0..5 {
+                    assert!(store.has(i));
+                    assert_eq!(
+                        store.get(i).await.unwrap().unwrap(),
+                        FixedBytes::new([i as u8; 32])
+                    );
+                }
+
+                // Only specified records from section 1 should be available
+                assert!(store.has(5));
+                assert!(store.has(7));
+                assert!(!store.has(6));
+                assert!(!store.has(8));
+                assert!(!store.has(9)); // Not set in bitvec
+
+                // No records from section 2 should be available
+                for i in 10..15 {
+                    assert!(!store.has(i));
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "Failed to initialize store with bits: MissingRecord(2)")]
+    fn test_init_with_bits_corrupted_records() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: 5,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+
+            // Create store with data and corrupt one record
+            {
+                let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Section 0: indices 0-4
+                for i in 0..5 {
+                    store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+                }
+
+                store.close().await.unwrap();
+            }
+
+            // Corrupt record at index 2
+            {
+                let (blob, _) = context
+                    .open("test_ordinal", &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                // Corrupt the CRC of record at index 2
+                let offset = 2 * 36 + 32; // 2 * record_size + value_size
+                blob.write_at(vec![0xFF], offset).await.unwrap();
+                blob.sync().await.unwrap();
+            }
+
+            // Reinitialize with bits that include the corrupted record
+            {
+                let mut bits_map: BTreeMap<u64, &Option<BitVec>> = BTreeMap::new();
+
+                // Create a BitVec that includes the corrupted record
+                let mut bitvec = BitVec::zeroes(5);
+                bitvec.set(0); // Index 0
+                bitvec.set(2); // Index 2 (corrupted) - this will cause a panic
+                bitvec.set(4); // Index 4
+                let bitvec_option = Some(bitvec);
+                bits_map.insert(0, &bitvec_option);
+
+                let _store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
+                    context.clone(),
+                    cfg.clone(),
+                    Some(bits_map),
+                )
+                .await
+                .expect("Failed to initialize store with bits");
+            }
         });
     }
 }

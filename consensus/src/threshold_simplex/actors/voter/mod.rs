@@ -12,7 +12,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::Blocker;
 pub use ingress::{Mailbox, Message};
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<
     C: Signer,
@@ -39,17 +39,20 @@ pub struct Config<
     pub notarization_timeout: Duration,
     pub nullify_retry: Duration,
     pub activity_timeout: View,
-    pub replay_buffer: usize,
-    pub write_buffer: usize,
+    pub replay_buffer: NonZeroUsize,
+    pub write_buffer: NonZeroUsize,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::threshold_simplex::{
-        actors::{batcher, resolver},
-        mocks,
-        types::{Finalization, Finalize, Notarization, Notarize, Proposal, Viewable, Voter},
+    use crate::{
+        threshold_simplex::{
+            actors::{batcher, resolver},
+            mocks,
+            types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
+        },
+        Viewable,
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
@@ -65,7 +68,7 @@ mod tests {
         Receiver, Recipients, Sender,
     };
     use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
-    use commonware_utils::quorum;
+    use commonware_utils::{quorum, NZUsize};
     use futures::{channel::mpsc, StreamExt};
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -148,8 +151,8 @@ mod tests {
                 notarization_timeout: Duration::from_secs(5),
                 nullify_retry: Duration::from_secs(5),
                 activity_timeout: 10,
-                replay_buffer: 1024 * 1024,
-                write_buffer: 1024 * 1024,
+                replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
+                write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
@@ -456,8 +459,8 @@ mod tests {
                 notarization_timeout: Duration::from_millis(1000),
                 nullify_retry: Duration::from_millis(1000),
                 activity_timeout,
-                replay_buffer: 10240,
-                write_buffer: 10240,
+                replay_buffer: NZUsize!(10240),
+                write_buffer: NZUsize!(10240),
             };
             let (actor, _mailbox) = Actor::new(context.clone(), voter_config);
 

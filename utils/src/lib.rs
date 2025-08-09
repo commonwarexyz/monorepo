@@ -2,13 +2,14 @@
 
 use bytes::{BufMut, BytesMut};
 use commonware_codec::{EncodeSize, Write};
+use std::time::Duration;
 
-pub mod array;
-pub use array::Array;
+pub mod sequence;
+pub use sequence::{Array, Span};
 mod bitvec;
 pub use bitvec::{BitIterator, BitVec};
 mod time;
-pub use time::SystemTimeExt;
+pub use time::{parse_duration, SystemTimeExt};
 mod priority_set;
 pub use priority_set::PrioritySet;
 pub mod futures;
@@ -26,13 +27,13 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// Converts a hexadecimal string to bytes.
 pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
 
     (0..hex.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
         .collect()
 }
 
@@ -113,6 +114,22 @@ macro_rules! NZUsize {
     };
 }
 
+/// A macro to create a `NonZeroU8` from a value, panicking if the value is zero.
+#[macro_export]
+macro_rules! NZU8 {
+    ($val:expr) => {
+        std::num::NonZeroU8::new($val).expect("value must be non-zero")
+    };
+}
+
+/// A macro to create a `NonZeroU16` from a value, panicking if the value is zero.
+#[macro_export]
+macro_rules! NZU16 {
+    ($val:expr) => {
+        std::num::NonZeroU16::new($val).expect("value must be non-zero")
+    };
+}
+
 /// A macro to create a `NonZeroU32` from a value, panicking if the value is zero.
 #[macro_export]
 macro_rules! NZU32 {
@@ -130,6 +147,46 @@ macro_rules! NZU64 {
         // This will panic at runtime if $val is zero.
         // For literals, the compiler *might* optimize, but the check is still conceptually there.
         std::num::NonZeroU64::new($val).expect("value must be non-zero")
+    };
+}
+
+/// A wrapper around `Duration` that guarantees the duration is non-zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NonZeroDuration(Duration);
+
+impl NonZeroDuration {
+    /// Creates a `NonZeroDuration` if the given duration is non-zero.
+    pub fn new(duration: Duration) -> Option<Self> {
+        if duration == Duration::ZERO {
+            None
+        } else {
+            Some(Self(duration))
+        }
+    }
+
+    /// Creates a `NonZeroDuration` from the given duration, panicking if it's zero.
+    pub fn new_panic(duration: Duration) -> Self {
+        Self::new(duration).expect("duration must be non-zero")
+    }
+
+    /// Returns the wrapped `Duration`.
+    pub fn get(self) -> Duration {
+        self.0
+    }
+}
+
+impl From<NonZeroDuration> for Duration {
+    fn from(nz_duration: NonZeroDuration) -> Self {
+        nz_duration.0
+    }
+}
+
+/// A macro to create a `NonZeroDuration` from a duration, panicking if the duration is zero.
+#[macro_export]
+macro_rules! NZDuration {
+    ($val:expr) => {
+        // This will panic at runtime if $val is zero.
+        $crate::NonZeroDuration::new_panic($val)
     };
 }
 
@@ -208,6 +265,15 @@ mod tests {
         let h = "    \n\n0x\r\n01
                             02\t03\n";
         assert_eq!(from_hex_formatted(h).unwrap(), b.to_vec());
+    }
+
+    #[test]
+    fn test_from_hex_utf8_char_boundaries() {
+        const MISALIGNMENT_CASE: &str = "쀘\n";
+
+        // Ensure that `from_hex` can handle misaligned UTF-8 character boundaries.
+        let b = from_hex(MISALIGNMENT_CASE);
+        assert!(b.is_none());
     }
 
     #[test]
@@ -366,10 +432,35 @@ mod tests {
         assert!(std::panic::catch_unwind(|| NZUsize!(0)).is_err());
         assert!(std::panic::catch_unwind(|| NZU32!(0)).is_err());
         assert!(std::panic::catch_unwind(|| NZU64!(0)).is_err());
+        assert!(std::panic::catch_unwind(|| NZDuration!(Duration::ZERO)).is_err());
 
         // Test case 1: non-zero value
         assert_eq!(NZUsize!(1).get(), 1);
         assert_eq!(NZU32!(2).get(), 2);
         assert_eq!(NZU64!(3).get(), 3);
+        assert_eq!(
+            NZDuration!(Duration::from_secs(1)).get(),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn test_non_zero_duration() {
+        // Test case 0: zero duration
+        assert!(NonZeroDuration::new(Duration::ZERO).is_none());
+
+        // Test case 1: non-zero duration
+        let duration = Duration::from_millis(100);
+        let nz_duration = NonZeroDuration::new(duration).unwrap();
+        assert_eq!(nz_duration.get(), duration);
+        assert_eq!(Duration::from(nz_duration), duration);
+
+        // Test case 2: panic on zero
+        assert!(std::panic::catch_unwind(|| NonZeroDuration::new_panic(Duration::ZERO)).is_err());
+
+        // Test case 3: ordering
+        let d1 = NonZeroDuration::new(Duration::from_millis(100)).unwrap();
+        let d2 = NonZeroDuration::new(Duration::from_millis(200)).unwrap();
+        assert!(d1 < d2);
     }
 }

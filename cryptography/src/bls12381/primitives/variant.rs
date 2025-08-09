@@ -3,11 +3,15 @@
 use super::{
     group::{
         Point, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION,
+        GT,
     },
     Error,
 };
 use crate::bls12381::primitives::group::{Element, Scalar};
-use blst::{Pairing as blst_pairing, BLS12_381_NEG_G1, BLS12_381_NEG_G2};
+use blst::{
+    blst_final_exp, blst_fp12, blst_miller_loop, Pairing as blst_pairing, BLS12_381_NEG_G1,
+    BLS12_381_NEG_G2,
+};
 use commonware_codec::FixedSize;
 use rand::{CryptoRng, RngCore};
 use std::{fmt::Debug, hash::Hash};
@@ -40,6 +44,9 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         hms: &[Self::Signature],
         signatures: &[Self::Signature],
     ) -> Result<(), Error>;
+
+    /// Compute the pairing `e(G1, G2) -> GT`.
+    fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT;
 }
 
 /// A [Variant] with a public key of type [G1] and a signature of type [G2].
@@ -131,7 +138,7 @@ impl Variant for MinPk {
         // Generate random non-zero scalars.
         let scalars: Vec<Scalar> = (0..publics.len())
             .map(|_| loop {
-                let scalar = Scalar::rand(rng);
+                let scalar = Scalar::from_rand(rng);
                 if scalar != Scalar::zero() {
                     return scalar;
                 }
@@ -165,6 +172,20 @@ impl Variant for MinPk {
             return Err(Error::InvalidSignature);
         }
         Ok(())
+    }
+
+    /// Compute the pairing `e(public, signature) -> GT`.
+    fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT {
+        let p1_affine = public.as_blst_p1_affine();
+        let p2_affine = signature.as_blst_p2_affine();
+
+        let mut result = blst_fp12::default();
+        unsafe {
+            blst_miller_loop(&mut result, &p2_affine, &p1_affine);
+            blst_final_exp(&mut result, &result);
+        }
+
+        GT::from_blst_fp12(result)
     }
 }
 
@@ -263,7 +284,7 @@ impl Variant for MinSig {
         // Generate random non-zero scalars.
         let scalars: Vec<Scalar> = (0..publics.len())
             .map(|_| loop {
-                let scalar = Scalar::rand(rng);
+                let scalar = Scalar::from_rand(rng);
                 if scalar != Scalar::zero() {
                     return scalar;
                 }
@@ -297,6 +318,20 @@ impl Variant for MinSig {
             return Err(Error::InvalidSignature);
         }
         Ok(())
+    }
+
+    /// Compute the pairing `e(signature, public) -> GT`.
+    fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT {
+        let p1_affine = signature.as_blst_p1_affine();
+        let p2_affine = public.as_blst_p2_affine();
+
+        let mut result = blst_fp12::default();
+        unsafe {
+            blst_miller_loop(&mut result, &p2_affine, &p1_affine);
+            blst_final_exp(&mut result, &result);
+        }
+
+        GT::from_blst_fp12(result)
     }
 }
 

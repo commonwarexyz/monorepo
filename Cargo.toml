@@ -2,6 +2,8 @@
 members = [
     "broadcast",
     "codec",
+    "coding",
+    "collector",
     "consensus",
     "cryptography",
     "deployer",
@@ -13,34 +15,41 @@ members = [
     "utils",
     "examples/bridge",
     "examples/chat",
+    "examples/estimator",
     "examples/flood",
     "examples/log",
+    "examples/sync",
     "examples/vrf",
 
     # Fuzz builds
     "codec/fuzz",
+    "coding/fuzz",
     "cryptography/fuzz",
     "stream/fuzz",
-    "storage/fuzz"
+    "storage/fuzz",
+    "utils/fuzz"
 ]
 resolver = "2"
 
 [workspace.dependencies]
-commonware-broadcast = { version = "0.0.54", path = "broadcast" }
-commonware-codec = { version = "0.0.54", path = "codec" }
-commonware-consensus = { version = "0.0.54", path = "consensus" }
-commonware-cryptography = { version = "0.0.54", path = "cryptography" }
-commonware-deployer = { version = "0.0.54", path = "deployer", default-features = false }
-commonware-macros = { version = "0.0.54", path = "macros" }
-commonware-p2p = { version = "0.0.54", path = "p2p" }
-commonware-resolver = { version = "0.0.54", path = "resolver" }
-commonware-runtime = { version = "0.0.54", path = "runtime" }
-commonware-storage = { version = "0.0.54", path = "storage" }
-commonware-stream = { version = "0.0.54", path = "stream" }
-commonware-utils = { version = "0.0.54", path = "utils" }
+commonware-broadcast = { version = "0.0.57", path = "broadcast" }
+commonware-codec = { version = "0.0.57", path = "codec" }
+commonware-coding = { version = "0.0.57", path = "coding" }
+commonware-collector = { version = "0.0.57", path = "collector" }
+commonware-consensus = { version = "0.0.57", path = "consensus" }
+commonware-cryptography = { version = "0.0.57", path = "cryptography" }
+commonware-deployer = { version = "0.0.57", path = "deployer", default-features = false }
+commonware-macros = { version = "0.0.57", path = "macros" }
+commonware-p2p = { version = "0.0.57", path = "p2p" }
+commonware-resolver = { version = "0.0.57", path = "resolver" }
+commonware-runtime = { version = "0.0.57", path = "runtime" }
+commonware-storage = { version = "0.0.57", path = "storage" }
+commonware-stream = { version = "0.0.57", path = "stream" }
+commonware-utils = { version = "0.0.57", path = "utils" }
 thiserror = "2.0.12"
 bytes = "1.7.1"
 sha2 = "0.10.8"
+blake3 = "1.8.2"
 rand = "0.8.5"
 rand_distr = "0.4.3"
 futures = "0.3.31"
@@ -79,6 +88,7 @@ libc = "0.2.172"
 zeroize = "1.5.7"
 blst = "0.3.13"
 p256 = "0.13.2"
+test-case = "3.3.1"
 chacha20poly1305 = "0.10.1"
 
 # Fuzz deps

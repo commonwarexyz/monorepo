@@ -32,9 +32,11 @@ jobs:
     - name: Remove fuzz
       run: |
         rm -rf codec/fuzz
+        rm -rf coding/fuzz
         rm -rf cryptography/fuzz
         rm -rf storage/fuzz
         rm -rf stream/fuzz
+        rm -rf utils/fuzz
     - name: Remove fuzz targets from Cargo.toml
       run: |
         sed -i.bak '/fuzz/d' Cargo.toml

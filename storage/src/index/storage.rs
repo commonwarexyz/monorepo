@@ -1,4 +1,4 @@
-use crate::index::Translator;
+use crate::translator::Translator;
 use commonware_runtime::Metrics;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{
@@ -8,7 +8,7 @@ use std::collections::{
 
 /// The initial capacity of the internal hashmap. This is a guess at the number of unique keys we will
 /// encounter. The hashmap will grow as needed, but this is a good starting point (covering
-/// the entire [super::translator::OneCap] range).
+/// the entire [crate::translator::OneCap] range).
 const INITIAL_CAPACITY: usize = 256;
 
 /// Panic message shown when `next()` is not called after `Cursor` creation or after `insert()` or ``delete()`.
@@ -119,21 +119,21 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
     /// Pushes a `Record` to the end of `past`.
     ///
     /// If the record has a `next`, this function cannot be called again.
-    fn past_push(&mut self, mut next: Box<Record<V>>) {
+    fn past_push(&mut self, next: Box<Record<V>>) {
         // Ensure we only push a list once (`past_tail` becomes stale).
         assert!(!self.past_pushed_list);
         self.past_pushed_list = next.next.is_some();
 
         // Add `next` to the tail of `past`.
         if self.past_tail.is_none() {
-            self.past_tail = Some(&mut *next);
             self.past = Some(next);
+            self.past_tail = self.past.as_mut().map(|b| &mut **b as *mut Record<V>);
         } else {
             unsafe {
                 assert!((*self.past_tail.unwrap()).next.is_none());
-                let next_tail = &mut *next as *mut Record<V>;
                 (*self.past_tail.unwrap()).next = Some(next);
-                self.past_tail = Some(next_tail);
+                let tail_next = (*self.past_tail.unwrap()).next.as_mut().unwrap();
+                self.past_tail = Some(&mut **tail_next as *mut Record<V>);
             }
         }
     }
@@ -297,10 +297,19 @@ impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
     }
 }
 
-impl<T: Translator, V> Drop for Cursor<'_, T, V>
+unsafe impl<'a, T, V> Send for Cursor<'a, T, V>
 where
-    V: Eq,
+    T: Translator + Send,
+    T::Key: Send,
+    V: Eq + Send,
 {
+    // SAFETY: `Send` is safe because the raw pointer `past_tail` only ever points
+    // to heap memory owned by `self.past`. Since the pointer's referent is moved
+    // along with the `Cursor`, no data races can occur. The `where` clause
+    // ensures all generic parameters are also `Send`.
+}
+
+impl<T: Translator, V: Eq> Drop for Cursor<'_, T, V> {
     fn drop(&mut self) {
         // Take the entry.
         let mut entry = self.entry.take().unwrap();
@@ -409,6 +418,13 @@ impl<T: Translator, V: Eq> Index<T, V> {
         self.map.len()
     }
 
+    /// Returns the number of items in the index, for use in testing. The number of items is always
+    /// at least as large as the number of keys, but may be larger in the case of collisions.
+    #[cfg(test)]
+    pub fn items(&self) -> usize {
+        self.items.get() as usize
+    }
+
     /// Returns an iterator over all values associated with a translated key.
     pub fn get(&self, key: &[u8]) -> impl Iterator<Item = &V> {
         let k = self.translator.transform(key);
@@ -420,12 +436,15 @@ impl<T: Translator, V: Eq> Index<T, V> {
     }
 
     /// Provides mutable access to the values associated with a translated key, if the key exists.
-    pub fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<T, V>> {
+    pub fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<'_, T, V>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => {
-                Some(Cursor::new(entry, &self.keys, &self.items, &self.pruned))
-            }
+            Entry::Occupied(entry) => Some(Cursor::<'_, T, V>::new(
+                entry,
+                &self.keys,
+                &self.items,
+                &self.pruned,
+            )),
             Entry::Vacant(_) => None,
         }
     }
@@ -442,12 +461,15 @@ impl<T: Translator, V: Eq> Index<T, V> {
 
     /// Provides mutable access to the values associated with a translated key (if the key exists), otherwise
     /// inserts a new value and returns `None`.
-    pub fn get_mut_or_insert(&mut self, key: &[u8], v: V) -> Option<Cursor<T, V>> {
+    pub fn get_mut_or_insert(&mut self, key: &[u8], v: V) -> Option<Cursor<'_, T, V>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => {
-                Some(Cursor::new(entry, &self.keys, &self.items, &self.pruned))
-            }
+            Entry::Occupied(entry) => Some(Cursor::<'_, T, V>::new(
+                entry,
+                &self.keys,
+                &self.items,
+                &self.pruned,
+            )),
             Entry::Vacant(entry) => {
                 Self::create(&self.keys, &self.items, entry, v);
                 None
@@ -531,6 +553,19 @@ impl<T: Translator, V: Eq> Index<T, V> {
                 }
             }
             Entry::Vacant(_) => {}
+        }
+    }
+}
+
+impl<T: Translator, V: Eq> Drop for Index<T, V> {
+    /// To avoid stack overflow on keys with many collisions, we implement an iterative
+    /// drop (in lieu of Rust's default recursive drop).
+    fn drop(&mut self) {
+        for (_, mut record) in self.map.drain() {
+            let mut next = record.next.take();
+            while let Some(mut record) = next {
+                next = record.next.take();
+            }
         }
     }
 }

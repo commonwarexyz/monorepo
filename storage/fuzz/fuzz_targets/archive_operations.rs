@@ -3,10 +3,13 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
-    archive::{Archive, Config, Identifier},
-    index::translator::EightCap,
+    archive::{
+        prunable::{Archive, Config},
+        Archive as _, Identifier,
+    },
+    translator::EightCap,
 };
-use commonware_utils::array::FixedBytes;
+use commonware_utils::{sequence::FixedBytes, NZUsize};
 use libfuzzer_sys::fuzz_target;
 
 type Key = FixedBytes<16>;
@@ -42,11 +45,10 @@ fn fuzz(data: FuzzInput) {
     runner.start(|context| async move {
         let cfg = Config {
             partition: "test".into(),
-            section_mask: 0xffff_ffff_ffff_ff00u64,
-            pending_writes: 1000, // Flush after 1000 writes
-            write_buffer: 1024,
+            items_per_section: 1024,
+            write_buffer: NZUsize!(1024),
             translator: EightCap,
-            replay_buffer: 1024*1024,
+            replay_buffer: NZUsize!(1024*1024),
             compression: None,
             codec_config: (),
         };
@@ -174,7 +176,6 @@ fn fuzz(data: FuzzInput) {
 
                     // Verify the result against our tracked items
                     if let Ok(has) = result {
-                        //println!("items {:?}", items);
                         if has {
                             assert!(our_result.is_some(), "stub archive doesn't have key {key_data:?} that we added");
                         } else {
@@ -184,7 +185,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 ArchiveOperation::Prune(min) => {
-                    let min = cfg.section_mask & min;
+                    let min = min - min % cfg.items_per_section;
                     archive.prune(min).await.expect("prune failed");
                     match oldest_allowed {
                         None => {

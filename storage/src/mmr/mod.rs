@@ -84,7 +84,8 @@ pub mod verification;
 
 /// A trait for building an MMR and computing the root.
 pub trait Builder<H: CHasher>: Send + Sync {
-    /// Add an element to the MMR.
+    /// Add `element` to the MMR and return its position within it. The element can be an arbitrary
+    /// byte slice, and need not be converted to a digest first.
     fn add(
         &mut self,
         hasher: &mut impl Hasher<H>,
@@ -110,4 +111,14 @@ pub enum Error {
     Empty,
     #[error("invalid update")]
     InvalidUpdate,
+    #[error("invalid proof length")]
+    InvalidProofLength,
+    #[error("proof missing digest at position: {0}")]
+    MissingDigest(u64),
+    #[error("given historical size >= database size: ({0}) >= ({1})")]
+    HistoricalSizeTooLarge(u64, u64),
+    #[error("given historical size <= start location: ({0}) <= ({1})")]
+    HistoricalSizeTooSmall(u64, u64),
+    #[error("invalid size: {0}")]
+    InvalidSize(u64),
 }

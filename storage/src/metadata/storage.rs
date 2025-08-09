@@ -1,6 +1,6 @@
 use super::{Config, Error};
 use bytes::BufMut;
-use commonware_codec::{Codec, EncodeSize, FixedSize, ReadExt};
+use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_runtime::{Blob, Clock, Error as RError, Metrics, Storage};
 use commonware_utils::Array;
 use futures::future::try_join_all;
@@ -258,15 +258,46 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         self.keys.set(self.map.len() as i64);
     }
 
+    /// Perform a [Self::put] and [Self::sync] in a single operation.
+    pub async fn put_sync(&mut self, key: K, value: V) -> Result<(), Error> {
+        self.put(key, value);
+        self.sync().await
+    }
+
     /// Remove a value from [Metadata] (if it exists).
-    pub fn remove(&mut self, key: &K) {
+    pub fn remove(&mut self, key: &K) -> Option<V> {
         // Get value
-        let exists = self.map.remove(key).is_some();
+        let past = self.map.remove(key);
 
         // Mark key as modified.
-        if exists {
+        if past.is_some() {
             self.key_order_changed = self.next_version;
         }
+        self.keys.set(self.map.len() as i64);
+
+        past
+    }
+
+    /// Iterate over all keys in metadata, optionally filtered by prefix.
+    ///
+    /// If a prefix is provided, only keys that start with the prefix bytes will be returned.
+    pub fn keys<'a>(&'a self, prefix: Option<&'a [u8]>) -> impl Iterator<Item = &'a K> + 'a {
+        self.map.keys().filter(move |key| {
+            if let Some(prefix_bytes) = prefix {
+                key.as_ref().starts_with(prefix_bytes)
+            } else {
+                true
+            }
+        })
+    }
+
+    /// Remove all keys that start with the given prefix.
+    pub fn remove_prefix(&mut self, prefix: &[u8]) {
+        // Retain only keys that do not start with the prefix
+        self.map.retain(|key, _| !key.as_ref().starts_with(prefix));
+
+        // Mark key order as changed since we may have removed keys
+        self.key_order_changed = self.next_version;
         self.keys.set(self.map.len() as i64);
     }
 
@@ -369,18 +400,18 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
 
     /// Sync outstanding data and close [Metadata].
     pub async fn close(mut self) -> Result<(), Error> {
-        // Sync and close blobs
+        // Sync and drop blobs
         self.sync().await?;
         for wrapper in self.blobs.into_iter() {
-            wrapper.blob.close().await?;
+            wrapper.blob.sync().await?;
         }
         Ok(())
     }
 
-    /// Close and remove the underlying blobs.
+    /// Remove the underlying blobs for this [Metadata].
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, wrapper) in self.blobs.into_iter().enumerate() {
-            wrapper.blob.close().await?;
+            drop(wrapper.blob);
             self.context
                 .remove(&self.partition, Some(BLOB_NAMES[i]))
                 .await?;

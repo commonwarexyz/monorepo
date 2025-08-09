@@ -8,7 +8,7 @@ use crate::{
 pub use actor::Actor;
 use commonware_cryptography::{Digest, Signer};
 pub use ingress::{Mailbox, Message};
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<
     C: Signer,
@@ -34,17 +34,20 @@ pub struct Config<
     pub max_participants: usize,
     pub activity_timeout: View,
     pub skip_timeout: View,
-    pub replay_buffer: usize,
-    pub write_buffer: usize,
+    pub replay_buffer: NonZeroUsize,
+    pub write_buffer: NonZeroUsize,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::{
-        actors::resolver,
-        mocks,
-        types::{Finalization, Finalize, Notarization, Notarize, Proposal, Viewable, Voter},
+    use crate::{
+        simplex::{
+            actors::resolver,
+            mocks,
+            types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
+        },
+        Viewable,
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{ed25519, hash, PrivateKeyExt as _, Sha256};
@@ -54,7 +57,7 @@ mod tests {
         Receiver, Recipients, Sender,
     };
     use commonware_runtime::{deterministic, Metrics, Runner, Spawner};
-    use commonware_utils::quorum;
+    use commonware_utils::{quorum, NZUsize};
     use futures::{channel::mpsc, StreamExt};
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -131,8 +134,8 @@ mod tests {
                 max_participants: n as usize,
                 activity_timeout: 10,
                 skip_timeout: 10,
-                replay_buffer: 1024 * 1024,
-                write_buffer: 1024 * 1024,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
@@ -327,8 +330,8 @@ mod tests {
                 max_participants: n as usize,
                 activity_timeout,
                 skip_timeout: 10,
-                replay_buffer: 1024 * 1024,
-                write_buffer: 1024 * 1024,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
             };
             let (actor, _mailbox) = Actor::new(context.clone(), cfg);
 

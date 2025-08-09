@@ -2,13 +2,13 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    adb::any::{Any, Config},
-    index::translator::EightCap,
+    adb::any::fixed::{Any, Config},
     mmr::hasher::Standard,
+    translator::EightCap,
 };
-use commonware_utils::array::FixedBytes;
+use commonware_utils::{sequence::FixedBytes, NZUsize};
 use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet};
 
@@ -34,6 +34,9 @@ struct FuzzInput {
     operations: Vec<AdbOperation>,
 }
 
+const PAGE_SIZE: usize = 555;
+const PAGE_CACHE_SIZE: usize = 100;
+
 fn fuzz(data: FuzzInput) {
     let mut hasher = Standard::<Sha256>::new();
     let runner = deterministic::Runner::default();
@@ -42,13 +45,15 @@ fn fuzz(data: FuzzInput) {
         let cfg = Config::<EightCap> {
             mmr_journal_partition: "test_adb_mmr_journal".into(),
             mmr_items_per_blob: 500000,
-            mmr_write_buffer: 1024,
+            mmr_write_buffer: NZUsize!(1024),
             mmr_metadata_partition: "test_adb_mmr_metadata".into(),
             log_journal_partition: "test_adb_log_journal".into(),
             log_items_per_blob: 500000,
-            log_write_buffer: 1024,
+            log_write_buffer: NZUsize!(1024),
             translator: EightCap,
-            pool: None,
+            thread_pool: None,
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            pruning_delay: 10,
         };
 
         let mut adb = Any::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
@@ -66,23 +71,10 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
                     let v = Value::new(*value);
 
-                    let update_result = adb.update(k, v).await.expect("update should not fail");
-
-                    match update_result {
-                        commonware_storage::adb::any::UpdateResult::Inserted(_) => {
-                            expected_state.insert(*key, Some(*value));
-                            all_keys.insert(*key);
-                            uncommitted_ops += 1;
-                        }
-                        commonware_storage::adb::any::UpdateResult::Updated(..) => {
-                            expected_state.insert(*key, Some(*value));
-                            all_keys.insert(*key);
-                            uncommitted_ops += 1;
-                        }
-                        commonware_storage::adb::any::UpdateResult::NoOp => {
-                            // The key already has this value, so this is a no-op.
-                        }
-                    }
+                    adb.update(k, v).await.expect("update should not fail");
+                    expected_state.insert(*key, Some(*value));
+                    all_keys.insert(*key);
+                    uncommitted_ops += 1;
                 }
 
                 AdbOperation::Delete { key } => {
@@ -118,7 +110,7 @@ fn fuzz(data: FuzzInput) {
                         assert!(oldest_loc.is_some(), "Expected Some oldest location when operations exist");
                         if let Some(loc) = oldest_loc {
                             assert!(loc < actual_op_count,
-                                "Oldest retained location {loc} should be less than op count {actual_op_count}", 
+                                "Oldest retained location {loc} should be less than op count {actual_op_count}",
                             );
                         }
                     }
@@ -246,7 +238,9 @@ fn fuzz(data: FuzzInput) {
             }
         }
 
-        adb.close().await.expect("close should not fail");
+        adb.destroy().await.expect("destroy should not fail");
+        expected_state.clear();
+        all_keys.clear();
     });
 }
 

@@ -2,7 +2,7 @@
 name = "commonware-storage"
 edition = "2021"
 publish = true
-version = "0.0.54"
+version = "0.0.57"
 license = "MIT OR Apache-2.0"
 description = "Persist and retrieve data from an abstract store."
 readme = "README.md"
@@ -30,6 +30,7 @@ rayon = { workspace = true }
 tracing-subscriber = { workspace = true }
 rand = { workspace = true }
 criterion = { workspace = true }
+test-case = { workspace = true }
 
 [lib]
 bench = false
@@ -49,6 +50,11 @@ path = "src/archive/benches/bench.rs"
 name="bmt"
 harness = false
 path = "src/bmt/benches/bench.rs"
+
+[[bench]]
+name="freezer"
+harness = false
+path = "src/freezer/benches/bench.rs"
 
 [[bench]]
 name="index"
@@ -79,3 +85,8 @@ path = "src/metadata/benches/bench.rs"
 name="rmap"
 harness = false
 path = "src/rmap/benches/bench.rs"
+
+[[bench]]
+name="store"
+harness = false
+path = "src/store/benches/bench.rs"

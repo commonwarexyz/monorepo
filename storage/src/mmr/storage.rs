@@ -82,7 +82,7 @@ impl<'a, H: CHasher, S1: Storage<H::Digest>, S2: Storage<H::Digest>> Grafting<'a
         let peak_futures = PeakIterator::new(size).map(|(peak_pos, _)| self.get_node(peak_pos));
         let peaks = try_join_all(peak_futures).await?;
         let unwrapped_peaks = peaks.iter().map(|p| p.as_ref().unwrap());
-        let digest = hasher.root_digest(self.base_mmr.size(), unwrapped_peaks);
+        let digest = hasher.root(self.base_mmr.size(), unwrapped_peaks);
 
         Ok(digest)
     }

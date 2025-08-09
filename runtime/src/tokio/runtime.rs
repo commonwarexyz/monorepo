@@ -10,10 +10,11 @@ use crate::{
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
 use crate::{
-    network::metered::Network as MeteredNetwork, storage::metered::Storage as MeteredStorage,
-    telemetry::metrics::task::Label, utils::Signaler, Clock, Error, Handle, Signal, SinkOf,
-    StreamOf, METRICS_PREFIX,
+    network::metered::Network as MeteredNetwork, signal::Signal,
+    storage::metered::Storage as MeteredStorage, telemetry::metrics::task::Label,
+    utils::signal::Stopper, Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
 };
+use commonware_macros::select;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::text::encode,
@@ -210,8 +211,7 @@ pub struct Executor {
     registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
-    signaler: Mutex<Signaler>,
-    signal: Signal,
+    shutdown: Mutex<Stopper>,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -252,7 +252,6 @@ impl crate::Runner for Runner {
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
-        let (signaler, signal) = Signaler::new();
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
@@ -310,8 +309,7 @@ impl crate::Runner for Runner {
             registry: Mutex::new(registry),
             metrics,
             runtime,
-            signaler: Mutex::new(signaler),
-            signal,
+            shutdown: Mutex::new(Stopper::default()),
         });
 
         // Get metrics
@@ -471,12 +469,30 @@ impl crate::Spawner for Context {
         }
     }
 
-    fn stop(&self, value: i32) {
-        self.executor.signaler.lock().unwrap().signal(value);
+    async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
+        let stop_resolved = {
+            let mut shutdown = self.executor.shutdown.lock().unwrap();
+            shutdown.stop(value)
+        };
+
+        // Wait for all tasks to complete or the timeout to fire
+        let timeout_future = match timeout {
+            Some(duration) => futures::future::Either::Left(self.sleep(duration)),
+            None => futures::future::Either::Right(futures::future::pending()),
+        };
+        select! {
+            result = stop_resolved => {
+                result.map_err(|_| Error::Closed)?;
+                Ok(())
+            },
+            _ = timeout_future => {
+                Err(Error::Timeout)
+            }
+        }
     }
 
     fn stopped(&self) -> Signal {
-        self.executor.signal.clone()
+        self.executor.shutdown.lock().unwrap().stopped()
     }
 }
 

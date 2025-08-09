@@ -30,6 +30,9 @@ pub struct Logging {
 }
 
 /// Initialize telemetry with the given configuration.
+///
+/// If `metrics` is provided, starts serving metrics at the given address at `/metrics`.
+/// If `traces` is provided, enables OpenTelemetry trace export.
 pub fn init(
     context: Context,
     logging: Logging,
@@ -50,7 +53,7 @@ pub fn init(
     let log_layer = if logging.json {
         log_layer.json().boxed()
     } else {
-        log_layer.pretty().boxed()
+        log_layer.compact().boxed()
     };
 
     // Create OpenTelemetry layer for tracing

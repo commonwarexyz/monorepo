@@ -63,7 +63,7 @@ pub struct Mmr<H: CHasher> {
     dirty_digest: H::Digest,
 
     /// Thread pool to use for parallelizing updates.
-    pub(super) pool: Option<ThreadPool>,
+    pub(super) thread_pool: Option<ThreadPool>,
 }
 
 impl<H: CHasher> Default for Mmr<H> {
@@ -94,7 +94,7 @@ impl<H: CHasher> Mmr<H> {
             pinned_nodes: HashMap::new(),
             dirty_nodes: HashSet::new(),
             dirty_digest: Self::dirty_digest(),
-            pool: None,
+            thread_pool: None,
         }
     }
 
@@ -112,7 +112,7 @@ impl<H: CHasher> Mmr<H> {
             pinned_nodes: HashMap::new(),
             dirty_nodes: HashSet::new(),
             dirty_digest: Self::dirty_digest(),
-            pool: config.pool,
+            thread_pool: config.pool,
         };
         if mmr.size() == 0 {
             return mmr;
@@ -191,7 +191,8 @@ impl<H: CHasher> Mmr<H> {
         (pos - self.pruned_to_pos) as usize
     }
 
-    /// Add an element to the MMR and return its position in the MMR.
+    /// Add `element` to the MMR and return its position in the MMR. The element can be an arbitrary
+    /// byte slice, and need not be converted to a digest first.
     ///
     /// # Warning
     ///
@@ -204,8 +205,9 @@ impl<H: CHasher> Mmr<H> {
         leaf_pos
     }
 
-    /// Add an element to the MMR and return its position in the MMR, but without updating ancestors
-    /// until `sync` is called. Returns the position of the leaf in the MMR.
+    /// Add `element` to the MMR and return its position in the MMR, but without updating ancestors
+    /// until `sync` is called. The element can be an arbitrary byte slice, and need not be
+    /// converted to a digest first.
     pub fn add_batched(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> u64 {
         let leaf_pos = self.size();
         let digest = hasher.leaf_digest(leaf_pos, element);
@@ -342,7 +344,7 @@ impl<H: CHasher> Mmr<H> {
         hasher: &mut impl Hasher<H>,
         updates: &[(u64, T)],
     ) {
-        if updates.len() >= MIN_TO_PARALLELIZE && self.pool.is_some() {
+        if updates.len() >= MIN_TO_PARALLELIZE && self.thread_pool.is_some() {
             self.update_leaf_parallel(hasher, updates);
             return;
         }
@@ -397,7 +399,7 @@ impl<H: CHasher> Mmr<H> {
         hasher: &mut impl Hasher<H>,
         updates: &[(u64, T)],
     ) {
-        let pool = self.pool.as_ref().unwrap().clone();
+        let pool = self.thread_pool.as_ref().unwrap().clone();
         pool.install(|| {
             let digests: Vec<(u64, H::Digest)> = updates
                 .par_iter()
@@ -428,7 +430,7 @@ impl<H: CHasher> Mmr<H> {
         if self.dirty_nodes.is_empty() {
             return;
         }
-        if self.dirty_nodes.len() >= MIN_TO_PARALLELIZE && self.pool.is_some() {
+        if self.dirty_nodes.len() >= MIN_TO_PARALLELIZE && self.thread_pool.is_some() {
             self.sync_parallel(hasher, MIN_TO_PARALLELIZE);
             return;
         }
@@ -457,10 +459,10 @@ impl<H: CHasher> Mmr<H> {
     /// Process any pending batched updates, using parallel hash workers as long as the number of
     /// computations that can be parallelized exceeds `min_to_parallelize`.
     ///
-    /// This implementation parallelizes the digest of computations of nodes at the same height,
-    /// starting from the bottom and working up to the peaks. If ever the number of remaining digest
-    /// computations is less than the `min_to_parallelize`, it switches to the serial
-    /// implementation.
+    /// This implementation parallelizes the computation of digests across all nodes at the same
+    /// height, starting from the bottom and working up to the peaks. If ever the number of
+    /// remaining digest computations is less than the `min_to_parallelize`, it switches to the
+    /// serial implementation.
     ///
     /// # Warning
     ///
@@ -514,7 +516,7 @@ impl<H: CHasher> Mmr<H> {
         height: u32,
     ) {
         let two_h = 1 << height;
-        let pool = self.pool.as_ref().unwrap().clone();
+        let pool = self.thread_pool.as_ref().unwrap().clone();
         pool.install(|| {
             let computed_digests: Vec<(usize, H::Digest)> = same_height
                 .par_iter()
@@ -554,7 +556,7 @@ impl<H: CHasher> Mmr<H> {
             .peak_iterator()
             .map(|(peak_pos, _)| self.get_node_unchecked(peak_pos));
         let size = self.size();
-        hasher.root_digest(size, peaks)
+        hasher.root(size, peaks)
     }
 
     /// Return an inclusion proof for the specified element. Returns ElementPruned error if some
@@ -704,7 +706,7 @@ mod tests {
             mmr.prune_all();
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
 
-            assert_eq!(mmr.root(&mut hasher), hasher.root_digest(0, [].iter()));
+            assert_eq!(mmr.root(&mut hasher), hasher.root(0, [].iter()));
 
             let clone = mmr.clone_pruned();
             assert_eq!(clone.size(), 0);
@@ -787,7 +789,7 @@ mod tests {
             // verify root
             let root = mmr.root(&mut hasher);
             let peak_digests = [digest14, digest17, mmr.nodes[18]];
-            let expected_root = hasher.root_digest(19, peak_digests.iter());
+            let expected_root = hasher.root(19, peak_digests.iter());
             assert_eq!(root, expected_root, "incorrect root");
 
             // pruning tests

@@ -204,7 +204,7 @@ impl<E: Clock + Rng + Spawner, C: Signer> Contributor<E, C> {
                     // If we are corrupt, randomly modify the share.
                     share = group::Share {
                         index: share.index,
-                        private: group::Scalar::rand(&mut self.context),
+                        private: group::Scalar::from_rand(&mut self.context),
                     };
                     warn!(round, ?player, "modified share");
                 }

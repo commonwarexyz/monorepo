@@ -94,6 +94,26 @@ jobs:
     - name: Check for unused dependencies
       run: cargo +nightly udeps --all-targets
 
+  Lock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Build entire workspace
+      run: cargo build --workspace --all-targets
+    - name: Check Cargo.lock unchanged
+      run: |
+        if ! git diff --exit-code Cargo.lock; then
+          echo "ERROR: Cargo.lock was modified during build!"
+          echo "This suggests that the Cargo.lock file in the repository is not up to date."
+          echo "Please run 'cargo build' locally and commit the updated Cargo.lock."
+          exit 1
+        fi
+        echo "✓ Cargo.lock remained unchanged after building everything"
+
   WASM:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -116,6 +136,24 @@ jobs:
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path consensus/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_consensus.wasm
     - name: Build storage
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path storage/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_storage.wasm
+
+  Unsafe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Install miri
+      run: |
+        rustup toolchain install nightly --component miri
+        rustup override set nightly
+        cargo miri setup
+    - name: Run miri tests for storage::index
+      run: |
+        cd storage
+        MIRIFLAGS="-Zmiri-disable-isolation" cargo miri test --lib index::
 
   Scripts:
     runs-on: ubuntu-latest

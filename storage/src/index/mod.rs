@@ -15,35 +15,19 @@
 
 mod storage;
 pub use storage::{Cursor, Index};
-pub mod translator;
-
-use std::hash::{BuildHasher, Hash};
-
-/// Translate keys into an internal representation used by `Index`.
-///
-/// # Warning
-///
-/// The output of `transform` is used as the key in a hash table. If the output is not uniformly
-/// distributed, the performance of [Index] will degrade substantially.
-pub trait Translator: Clone + BuildHasher {
-    /// The type of the internal representation of keys.
-    ///
-    /// Although `Translator` is a [BuildHasher], the `Key` type must still implement [Hash] for compatibility
-    /// with the [std::collections::HashMap] used internally by [Index].
-    type Key: Eq + Hash + Copy;
-
-    /// Transform a key into its internal representation.
-    fn transform(&self, key: &[u8]) -> Self::Key;
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::translator::TwoCap;
+    use crate::translator::TwoCap;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Metrics};
     use rand::Rng;
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+        thread,
+    };
 
     #[test_traced]
     fn test_index_basic() {
@@ -946,5 +930,68 @@ mod tests {
 
         assert!(ctx.encode().contains("keys 1"));
         assert!(ctx.encode().contains("items 1"));
+    }
+
+    #[test_traced]
+    fn test_index_large_collision_chain_stack_overflow() {
+        let context = deterministic::Context::default();
+        let mut index = Index::init(context, TwoCap);
+
+        // Create a large collision chain with 50,000 items on the same key
+        for i in 0..50000 {
+            index.insert(b"", i as u64);
+        }
+
+        // Should not stack overflow (using default Rust drop, it will)
+    }
+
+    #[test_traced]
+    fn test_cursor_across_threads() {
+        let ctx = deterministic::Context::default();
+        let index = Arc::new(Mutex::new(Index::init(ctx, TwoCap)));
+
+        // Insert some initial data
+        {
+            let mut index = index.lock().unwrap();
+            index.insert(b"test_key1", 100);
+            index.insert(b"test_key2", 200);
+        }
+
+        // Spawn a thread that will get a cursor and modify values
+        let index_clone = Arc::clone(&index);
+        let handle = thread::spawn(move || {
+            // Get a cursor for test_key and use it within the same scope
+            let mut index = index_clone.lock().unwrap();
+            let result = if let Some(mut cursor) = index.get_mut(b"test_key2") {
+                // Find and update the value 200
+                let mut found = false;
+                while let Some(value) = cursor.next() {
+                    if *value == 200 {
+                        cursor.update(250);
+                        found = true;
+                        break;
+                    }
+                }
+                found
+            } else {
+                false
+            };
+
+            // Return the result after cursor is dropped
+            result
+        });
+
+        // Wait for the thread to complete
+        let result = handle.join().unwrap();
+        assert!(result);
+
+        // Verify the update was applied
+        {
+            let index = index.lock().unwrap();
+            let values: Vec<u64> = index.get(b"test_key2").copied().collect();
+            assert!(values.contains(&100)); // Colliding value
+            assert!(values.contains(&250)); // Updated value
+            assert!(!values.contains(&200)); // Old value should be gone
+        }
     }
 }

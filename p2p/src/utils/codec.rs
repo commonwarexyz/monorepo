@@ -20,6 +20,7 @@ pub fn wrap<S: Sender, R: Receiver, V: Codec>(
 pub type WrappedMessage<P, V> = (P, Result<V, Error>);
 
 /// Wrapper around a [Sender] that encodes messages using a [Codec].
+#[derive(Clone)]
 pub struct WrappedSender<S: Sender, V: Codec> {
     sender: S,
 

@@ -1,153 +1,6 @@
-use crate::{Blob, Error, RwLock};
+use crate::{buffer::tip::Buffer, Blob, Error, RwLock};
 use commonware_utils::StableBuf;
-use std::sync::Arc;
-
-/// The state of the buffered data yet to be appended to the blob wrapped by a [Write].
-///
-/// The buffer always represents data at the "tip" of the logical blob, starting at `offset` and
-/// extending for `data.len()` bytes.
-struct Buffer {
-    /// The data to be written to the blob.
-    data: Vec<u8>,
-    /// The offset in the blob where the buffered data starts.
-    ///
-    /// This represents the logical position in the blob where `data[0]` would be written. The
-    /// buffer is maintained at the "tip" to support efficient size calculation and appends.
-    offset: u64,
-    /// The maximum size of the buffer.
-    capacity: usize,
-}
-
-impl Buffer {
-    /// Creates a new buffer with the provided `size` and `capacity`.
-    fn new(size: u64, capacity: usize) -> Self {
-        Self {
-            data: Vec::with_capacity(capacity),
-            offset: size,
-            capacity,
-        }
-    }
-
-    /// Returns the current logical size of the blob including any buffered data.
-    fn size(&self) -> u64 {
-        self.offset + self.data.len() as u64
-    }
-
-    /// Returns true if the buffer is empty.
-    fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
-    /// Resizes the buffer to the provided `len`.
-    ///
-    /// If the new size is greater than the current size, the existing buffer is
-    /// returned (to be flushed to the underlying blob) and the buffer is reset to
-    /// the empty state with an updated offset positioned at the end of the logical
-    /// blob.
-    ///
-    /// If the new size is less than the current size (but still greater than current
-    /// offset), the buffer is truncated to the new size.
-    ///
-    /// If the new size is less than the current offset, the buffer is reset to the empty
-    /// state with an updated offset positioned at the end of the logical blob.
-    fn resize(&mut self, len: u64) -> Option<(Vec<u8>, u64)> {
-        // Handle case where the buffer is empty.
-        if self.is_empty() {
-            self.offset = len;
-            return None;
-        }
-
-        // Handle case where there is some data in the buffer.
-        if len >= self.size() {
-            let previous = (
-                std::mem::replace(&mut self.data, Vec::with_capacity(self.capacity)),
-                self.offset,
-            );
-            self.offset = len;
-            Some(previous)
-        } else if len >= self.offset {
-            self.data.truncate((len - self.offset) as usize);
-            None
-        } else {
-            self.data.clear();
-            self.offset = len;
-            None
-        }
-    }
-
-    /// Returns the buffered data and its blob offset, or returns `None` if the buffer is
-    /// already empty.
-    ///
-    /// The buffer is reset to the empty state with an updated offset positioned at
-    /// the end of the logical blob.
-    fn take(&mut self) -> Option<(Vec<u8>, u64)> {
-        if self.is_empty() {
-            return None;
-        }
-        let buf = std::mem::replace(&mut self.data, Vec::with_capacity(self.capacity));
-        let offset = self.offset;
-        self.offset += buf.len() as u64;
-        Some((buf, offset))
-    }
-
-    /// Extract and return any data from the blob range `[offset,offset+buf.len)` that is contained
-    /// in the buffer, returning the number of bytes that could not be extracted. (Any bytes
-    /// that could not be extracted must reside at the beginning of the range.)
-    ///
-    /// # Panics
-    ///
-    /// Panics if the end offset of the requested data falls outside the range of the logical blob.
-    fn extract(&self, buf: &mut [u8], offset: u64) -> usize {
-        assert!(offset + buf.len() as u64 <= self.size());
-        if offset + buf.len() as u64 <= self.offset {
-            // Range does not overlap with the buffer.
-            return buf.len();
-        }
-
-        let (start, remaining) = if offset < self.offset {
-            // Some data is before the buffer.
-            (0, (self.offset - offset) as usize)
-        } else {
-            // Can read entirely from the buffer.
-            ((offset - self.offset) as usize, 0)
-        };
-
-        let end = start + buf.len() - remaining;
-        assert!(end <= self.data.len());
-
-        // Copy the requested buffered data into the appropriate part of the user-provided slice.
-        buf[remaining..].copy_from_slice(&self.data[start..end]);
-
-        remaining
-    }
-
-    /// Merges the provided `data` into the buffer at the provided blob `offset` if it falls
-    /// entirely within the range `[buffer.offset,buffer.offset+capacity)`.
-    ///
-    /// The buffer will be expanded if necessary to accommodate the new data, and any gaps that
-    /// may result are filled with zeros. Returns `true` if the merge was performed, otherwise the
-    /// caller is responsible for continuing to manage the data.
-    fn merge(&mut self, data: &[u8], offset: u64) -> bool {
-        let end_offset = offset + data.len() as u64;
-        let can_merge_into_buffer =
-            offset >= self.offset && end_offset <= self.offset + self.capacity as u64;
-        if !can_merge_into_buffer {
-            return false;
-        }
-        let start = (offset - self.offset) as usize;
-        let end = start + data.len();
-
-        // Expand buffer if necessary (fills with zeros).
-        if end > self.data.len() {
-            self.data.resize(end, 0);
-        }
-
-        // Copy the provided data into the buffer.
-        self.data[start..end].copy_from_slice(data.as_ref());
-
-        true
-    }
-}
+use std::{num::NonZeroUsize, sync::Arc};
 
 /// A writer that buffers content to a [Blob] to optimize the performance
 /// of appending or updating data.
@@ -156,6 +9,7 @@ impl Buffer {
 ///
 /// ```
 /// use commonware_runtime::{Runner, buffer::{Write, Read}, Blob, Error, Storage, deterministic};
+/// use commonware_utils::NZUsize;
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
@@ -164,7 +18,7 @@ impl Buffer {
 ///     assert_eq!(size, 0);
 ///
 ///     // Create a buffered writer with 16-byte buffer
-///     let mut blob = Write::new(blob, 0, 16);
+///     let mut blob = Write::new(blob, 0, NZUsize!(16));
 ///     blob.write_at(b"hello".to_vec(), 0).await.expect("write failed");
 ///     blob.sync().await.expect("sync failed");
 ///
@@ -175,7 +29,7 @@ impl Buffer {
 ///
 ///     // Read back the data to verify
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
-///     let mut reader = Read::new(blob, size, 8);
+///     let mut reader = Read::new(blob, size, NZUsize!(8));
 ///     let mut buf = vec![0u8; size as usize];
 ///     reader.read_exact(&mut buf, size as usize).await.expect("read failed");
 ///     assert_eq!(&buf, b"hello world!");
@@ -197,9 +51,7 @@ impl<B: Blob> Write<B> {
     /// # Panics
     ///
     /// Panics if `capacity` is zero.
-    pub fn new(blob: B, size: u64, capacity: usize) -> Self {
-        assert!(capacity > 0, "buffer capacity must be greater than zero");
-
+    pub fn new(blob: B, size: u64, capacity: NonZeroUsize) -> Self {
         Self {
             blob,
             buffer: Arc::new(RwLock::new(Buffer::new(size, capacity))),
@@ -318,10 +170,5 @@ impl<B: Blob> Blob for Write<B> {
             self.blob.write_at(buf, offset).await?;
         }
         self.blob.sync().await
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        self.sync().await?;
-        self.blob.close().await
     }
 }

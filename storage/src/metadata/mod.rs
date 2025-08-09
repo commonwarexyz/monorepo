@@ -40,7 +40,7 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_storage::metadata::{Metadata, Config};
-//! use commonware_utils::array::U64;
+//! use commonware_utils::sequence::U64;
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -93,7 +93,7 @@ mod tests {
     use super::*;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::array::U64;
+    use commonware_utils::sequence::U64;
     use rand::{Rng, RngCore};
 
     #[test_traced]
@@ -318,7 +318,7 @@ mod tests {
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
             blob.write_at(b"corrupted".to_vec(), 0).await.unwrap();
-            blob.close().await.unwrap();
+            blob.sync().await.unwrap();
 
             // Reopen the metadata store
             let cfg = Config {
@@ -372,10 +372,10 @@ mod tests {
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
             blob.write_at(b"corrupted".to_vec(), 0).await.unwrap();
-            blob.close().await.unwrap();
+            blob.sync().await.unwrap();
             let (blob, _) = context.open("test", b"right").await.unwrap();
             blob.write_at(b"corrupted".to_vec(), 0).await.unwrap();
-            blob.close().await.unwrap();
+            blob.sync().await.unwrap();
 
             // Reopen the metadata store
             let cfg = Config {
@@ -433,7 +433,7 @@ mod tests {
             // Corrupt the metadata store
             let (blob, len) = context.open("test", b"left").await.unwrap();
             blob.resize(len - 8).await.unwrap();
-            blob.close().await.unwrap();
+            blob.sync().await.unwrap();
 
             // Reopen the metadata store
             let cfg = Config {
@@ -485,7 +485,7 @@ mod tests {
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
             blob.resize(5).await.unwrap();
-            blob.close().await.unwrap();
+            blob.sync().await.unwrap();
 
             // Reopen the metadata store
             let cfg = Config {
@@ -1048,5 +1048,129 @@ mod tests {
         let state1 = test_metadata_operations_and_restart(1_000);
         let state2 = test_metadata_operations_and_restart(1_000);
         assert_eq!(state1, state2);
+    }
+
+    #[test_traced]
+    fn test_keys_iterator() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a metadata store
+            let cfg = Config {
+                partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
+
+            // Add some keys with different prefixes
+            metadata.put(U64::new(0x1000), b"value1".to_vec());
+            metadata.put(U64::new(0x1001), b"value2".to_vec());
+            metadata.put(U64::new(0x1002), b"value3".to_vec());
+            metadata.put(U64::new(0x2000), b"value4".to_vec());
+            metadata.put(U64::new(0x2001), b"value5".to_vec());
+            metadata.put(U64::new(0x3000), b"value6".to_vec());
+
+            // Test iterating over all keys
+            let all_keys: Vec<_> = metadata.keys(None).cloned().collect();
+            assert_eq!(all_keys.len(), 6);
+            assert!(all_keys.contains(&U64::new(0x1000)));
+            assert!(all_keys.contains(&U64::new(0x3000)));
+
+            // Test iterating with prefix 0x10
+            let prefix = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10];
+            let prefix_keys: Vec<_> = metadata.keys(Some(&prefix)).cloned().collect();
+            assert_eq!(prefix_keys.len(), 3);
+            assert!(prefix_keys.contains(&U64::new(0x1000)));
+            assert!(prefix_keys.contains(&U64::new(0x1001)));
+            assert!(prefix_keys.contains(&U64::new(0x1002)));
+            assert!(!prefix_keys.contains(&U64::new(0x2000)));
+
+            // Test iterating with prefix 0x20
+            let prefix = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20];
+            let prefix_keys: Vec<_> = metadata.keys(Some(&prefix)).cloned().collect();
+            assert_eq!(prefix_keys.len(), 2);
+            assert!(prefix_keys.contains(&U64::new(0x2000)));
+            assert!(prefix_keys.contains(&U64::new(0x2001)));
+
+            // Test with non-matching prefix
+            let prefix = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40];
+            let prefix_keys: Vec<_> = metadata.keys(Some(&prefix)).cloned().collect();
+            assert_eq!(prefix_keys.len(), 0);
+
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_remove_prefix() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create a metadata store
+            let cfg = Config {
+                partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
+
+            // Add some keys with different prefixes
+            metadata.put(U64::new(0x1000), b"value1".to_vec());
+            metadata.put(U64::new(0x1001), b"value2".to_vec());
+            metadata.put(U64::new(0x1002), b"value3".to_vec());
+            metadata.put(U64::new(0x2000), b"value4".to_vec());
+            metadata.put(U64::new(0x2001), b"value5".to_vec());
+            metadata.put(U64::new(0x3000), b"value6".to_vec());
+
+            // Check initial metrics
+            let buffer = context.encode();
+            assert!(buffer.contains("keys 6"));
+
+            // Remove keys with prefix 0x10
+            let prefix = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10];
+            metadata.remove_prefix(&prefix);
+
+            // Check metrics after removal
+            let buffer = context.encode();
+            assert!(buffer.contains("keys 3"));
+
+            // Verify remaining keys
+            assert!(metadata.get(&U64::new(0x1000)).is_none());
+            assert!(metadata.get(&U64::new(0x1001)).is_none());
+            assert!(metadata.get(&U64::new(0x1002)).is_none());
+            assert!(metadata.get(&U64::new(0x2000)).is_some());
+            assert!(metadata.get(&U64::new(0x2001)).is_some());
+            assert!(metadata.get(&U64::new(0x3000)).is_some());
+
+            // Sync and reopen to ensure persistence
+            metadata.sync().await.unwrap();
+            metadata.close().await.unwrap();
+            let cfg = Config {
+                partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
+
+            // Verify keys are still removed after restart
+            assert!(metadata.get(&U64::new(0x1000)).is_none());
+            assert!(metadata.get(&U64::new(0x2000)).is_some());
+            assert_eq!(metadata.keys(None).count(), 3);
+
+            // Remove non-existing prefix
+            let prefix = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40];
+            metadata.remove_prefix(&prefix);
+
+            // Remove all remaining keys
+            let prefix = vec![]; // Empty prefix matches all
+            metadata.remove_prefix(&prefix);
+            assert_eq!(metadata.keys(None).count(), 0);
+
+            metadata.destroy().await.unwrap();
+        });
     }
 }
