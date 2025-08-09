@@ -436,12 +436,15 @@ impl<T: Translator, V: Eq> Index<T, V> {
     }
 
     /// Provides mutable access to the values associated with a translated key, if the key exists.
-    pub fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<T, V>> {
+    pub fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<'_, T, V>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => {
-                Some(Cursor::new(entry, &self.keys, &self.items, &self.pruned))
-            }
+            Entry::Occupied(entry) => Some(Cursor::<'_, T, V>::new(
+                entry,
+                &self.keys,
+                &self.items,
+                &self.pruned,
+            )),
             Entry::Vacant(_) => None,
         }
     }
@@ -458,12 +461,15 @@ impl<T: Translator, V: Eq> Index<T, V> {
 
     /// Provides mutable access to the values associated with a translated key (if the key exists), otherwise
     /// inserts a new value and returns `None`.
-    pub fn get_mut_or_insert(&mut self, key: &[u8], v: V) -> Option<Cursor<T, V>> {
+    pub fn get_mut_or_insert(&mut self, key: &[u8], v: V) -> Option<Cursor<'_, T, V>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => {
-                Some(Cursor::new(entry, &self.keys, &self.items, &self.pruned))
-            }
+            Entry::Occupied(entry) => Some(Cursor::<'_, T, V>::new(
+                entry,
+                &self.keys,
+                &self.items,
+                &self.pruned,
+            )),
             Entry::Vacant(entry) => {
                 Self::create(&self.keys, &self.items, entry, v);
                 None

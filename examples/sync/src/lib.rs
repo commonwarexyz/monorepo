@@ -1,19 +1,21 @@
 //! Synchronize state between a server and client.
 //!
 //! This library how to use [commonware_storage::adb::any::sync] to synchronize a client's
-//! [commonware_storage::adb::any::Any] database to a server's database.
+//! [Any] database to a server's database.
 //!
 //! It includes network protocols, database configuration, and utilities for creating test data.
 //!
 //! The sync example showcases how to:
-//! - Create and configure a [commonware_storage::adb::any::Any] database
+//! - Create and configure an [Any] database
 //! - Implement a network-based [commonware_storage::adb::any::sync::resolver::Resolver] for fetching operations
 //! - Use [commonware_storage::adb::any::sync] to synchronize the client's database state with the server's state
 
 use commonware_cryptography::Hasher as CryptoHasher;
-use commonware_storage::adb::any::Config;
+use commonware_runtime::buffer::PoolRef;
+use commonware_storage::adb::any::fixed::{Any, Config};
 
 pub mod error;
+use commonware_utils::NZUsize;
 pub use error::Error;
 pub mod protocol;
 pub use protocol::*;
@@ -30,7 +32,7 @@ pub type Key = commonware_cryptography::sha256::Digest;
 pub type Value = commonware_cryptography::sha256::Digest;
 
 /// Database type alias.
-pub type Database<E> = commonware_storage::adb::any::Any<E, Key, Value, Hasher, Translator>;
+pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
 pub type Operation = commonware_storage::store::operation::Fixed<Key, Value>;
@@ -49,13 +51,13 @@ pub fn create_adb_config() -> Config<Translator> {
         mmr_journal_partition: "mmr_journal".into(),
         mmr_metadata_partition: "mmr_metadata".into(),
         mmr_items_per_blob: 4096,
-        mmr_write_buffer: 1024,
+        mmr_write_buffer: NZUsize!(1024),
         log_journal_partition: "log_journal".into(),
         log_items_per_blob: 4096,
-        log_write_buffer: 1024,
+        log_write_buffer: NZUsize!(1024),
         translator: Translator::default(),
         thread_pool: None,
-        buffer_pool: commonware_runtime::buffer::PoolRef::new(1024, 10),
+        buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
         pruning_delay: 10,
     }
 }

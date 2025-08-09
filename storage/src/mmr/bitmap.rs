@@ -311,7 +311,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
     /// - Assumes self.next_bit is currently byte aligned, and panics otherwise.
     pub fn append_byte_unchecked(&mut self, byte: u8) {
         assert!(
-            self.next_bit % 8 == 0,
+            self.next_bit.is_multiple_of(8),
             "cannot add byte when not byte aligned"
         );
 

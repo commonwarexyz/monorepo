@@ -32,6 +32,7 @@
 //!         immutable::{Archive, Config},
 //!     },
 //! };
+//! use commonware_utils::NZUsize;
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -47,8 +48,8 @@
 //!         freezer_journal_compression: Some(3),
 //!         ordinal_partition: "ordinal".into(),
 //!         items_per_section: 1024,
-//!         write_buffer: 1024,
-//!         replay_buffer: 1024,
+//!         write_buffer: NZUsize!(1024),
+//!         replay_buffer: NZUsize!(1024),
 //!         codec_config: (),
 //!     };
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
@@ -61,6 +62,7 @@
 //! });
 
 mod storage;
+use std::num::NonZeroUsize;
 pub use storage::Archive;
 
 /// Configuration for [Archive] storage.
@@ -98,10 +100,10 @@ pub struct Config<C> {
 
     /// The amount of bytes that can be buffered in a section before being written to a
     /// [commonware_runtime::Blob].
-    pub write_buffer: usize,
+    pub write_buffer: NonZeroUsize,
 
     /// The buffer size to use when replaying a [commonware_runtime::Blob].
-    pub replay_buffer: usize,
+    pub replay_buffer: NonZeroUsize,
 
     /// The [commonware_codec::Codec] configuration to use for the value stored in the archive.
     pub codec_config: C,
@@ -113,6 +115,7 @@ mod tests {
     use crate::archive::Archive as ArchiveTrait;
     use commonware_cryptography::{hash, sha256::Digest};
     use commonware_runtime::{deterministic, Runner};
+    use commonware_utils::NZUsize;
 
     #[test]
     fn test_unclean_shutdown() {
@@ -129,8 +132,8 @@ mod tests {
                 freezer_journal_compression: Some(3),
                 ordinal_partition: "test_ordinal2".into(),
                 items_per_section: 512,
-                write_buffer: 1024,
-                replay_buffer: 1024,
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 codec_config: (),
             };
 

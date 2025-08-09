@@ -101,6 +101,7 @@ mod tests {
     use commonware_p2p::simulated::{self, Link, Network, Oracle};
     use commonware_resolver::p2p as resolver;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_utils::NZUsize;
     use governor::Quota;
     use rand::{seq::SliceRandom, Rng};
     use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
@@ -311,8 +312,8 @@ mod tests {
             codec_config: (),
             partition_prefix: format!("validator-{}", secret.public_key()),
             prunable_items_per_section: 10u64,
-            replay_buffer: 1024,
-            write_buffer: 1024,
+            replay_buffer: NZUsize!(1024),
+            write_buffer: NZUsize!(1024),
             freezer_table_initial_size: 64,
             freezer_table_resize_frequency: 10,
             freezer_table_resize_chunk_size: 10,

@@ -6,7 +6,9 @@ use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
-use std::{cmp::Ordering, collections::BTreeSet, marker::PhantomData, ops::Deref};
+use std::{
+    cmp::Ordering, collections::BTreeSet, marker::PhantomData, num::NonZeroUsize, ops::Deref,
+};
 use tracing::debug;
 
 /// The percentage of table entries that must reach `table_resize_frequency`
@@ -392,7 +394,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
         table_size: u32,
         table_resize_frequency: u8,
         max_valid_epoch: Option<u64>,
-        table_replay_buffer: usize,
+        table_replay_buffer: NonZeroUsize,
     ) -> Result<(bool, u64, u64, u32), Error> {
         // Create a buffered reader for efficient scanning
         let blob_size = Self::table_offset(table_size);

@@ -20,13 +20,13 @@ pub mod immutable;
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("mmr error: {0}")]
-    MmrError(#[from] crate::mmr::Error),
+    Mmr(#[from] crate::mmr::Error),
 
     #[error("metadata error: {0}")]
-    MetadataError(#[from] crate::metadata::Error),
+    Metadata(#[from] crate::metadata::Error),
 
     #[error("journal error: {0}")]
-    JournalError(#[from] crate::journal::Error),
+    Journal(#[from] crate::journal::Error),
 
     #[error("operation pruned: {0}")]
     OperationPruned(u64),
