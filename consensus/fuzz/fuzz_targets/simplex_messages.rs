@@ -22,7 +22,7 @@ use commonware_runtime::{
     deterministic::{self},
     Clock, Metrics, Runner,
 };
-use commonware_utils::NZU32;
+use commonware_utils::{NZUsize, NZU32};
 use governor::Quota;
 use libfuzzer_sys::fuzz_target;
 use mocks::{FuzzInput, Fuzzer};
@@ -145,8 +145,8 @@ fn fuzzer(input: FuzzInput) {
                 max_participants: n as usize,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 1,
-                replay_buffer: 1024 * 1024,
-                write_buffer: 1024 * 1024,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
             };
             let (voter, resolver) = registrations
                 .remove(&validator)
