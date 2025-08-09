@@ -33,7 +33,7 @@ enum OrdinalOperation {
         indices: Vec<u64>,
     },
     PutLargeBatch {
-        start: u64,
+        start: u32,
         count: u8,
     },
     ReopenAfterOperations,
@@ -69,7 +69,6 @@ fn fuzz(input: FuzzInput) {
                 Err(_) => panic!("Unable to init ordinal"),
             };
 
-        // Track expected state for verification
         let mut expected_data: HashMap<u64, FixedBytes<32>> = HashMap::new();
         let mut synced_data: HashMap<u64, FixedBytes<32>> = HashMap::new();
 
@@ -94,7 +93,6 @@ fn fuzz(input: FuzzInput) {
                     if let Some(ordinal) = store.as_ref() {
                         match ordinal.get(*index).await {
                             Ok(Some(value)) => {
-                                // Verify the value matches our expected state
                                 if let Some(expected) = expected_data.get(index) {
                                     assert_eq!(
                                         &value, expected,
@@ -107,7 +105,6 @@ fn fuzz(input: FuzzInput) {
                                 }
                             }
                             Ok(None) => {
-                                // Verify we don't expect this value
                                 assert!(
                                     !expected_data.contains_key(index),
                                     "Get returned None for index {index} that should exist",
@@ -135,7 +132,6 @@ fn fuzz(input: FuzzInput) {
                     if let Some(ordinal) = store.as_ref() {
                         let (current_end, next_start) = ordinal.next_gap(*index);
 
-                        // Basic validation of gap results
                         if let Some(end) = current_end {
                             assert!(ordinal.has(end), "current_end {end} should exist");
                             if end < u64::MAX {
@@ -200,9 +196,8 @@ fn fuzz(input: FuzzInput) {
                             value[0] = i as u8;
                             let value = FixedBytes::new(value);
 
-                            let constrained_index = index % 10000; // Limit index range
-                            if ordinal.put(constrained_index, value.clone()).await.is_ok() {
-                                expected_data.insert(constrained_index, value);
+                            if ordinal.put(index, value.clone()).await.is_ok() {
+                                expected_data.insert(index, value);
                             }
                         }
 
@@ -216,13 +211,13 @@ fn fuzz(input: FuzzInput) {
                 OrdinalOperation::PutLargeBatch { start, count } => {
                     if let Some(ordinal) = store.as_mut() {
                         // Put many consecutive values to test blob handling
-                        let count = (*count % 50) as u64; // Limit to reasonable batch size
-                        let start = *start % 5000; // Limit start range
+                        let count = (*count) as u32;
+                        let start = *start;
 
                         for i in 0..count {
-                            let index = start + i;
+                            let index = start as u64 + i as u64;
                             let mut value = [0u8; 32];
-                            value[0] = (i % 256) as u8;
+                            value[0] = i as u8;
                             let value = FixedBytes::new(value);
 
                             if ordinal.put(index, value.clone()).await.is_ok() {
@@ -296,7 +291,7 @@ fn fuzz(input: FuzzInput) {
 
                         // Then try to put in pruned range and verify it works correctly
                         for (i, &index) in put_indices.iter().take(5).enumerate() {
-                            let constrained_index = index % 10000;
+                            let constrained_index = index;
                             let mut value = [0u8; 32];
                             value[0] = i as u8;
                             value[1] = 0xFF; // Mark as post-prune value
@@ -308,7 +303,6 @@ fn fuzz(input: FuzzInput) {
                             }
                         }
 
-                        // Sync to ensure post-prune data is persisted
                         if ordinal.sync().await.is_ok() {
                             synced_data = expected_data.clone();
                         }
@@ -317,7 +311,6 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        // Clean up if ordinal still exists
         if let Some(o) = store.take() {
             o.destroy().await.expect("failed to destroy store");
         }
