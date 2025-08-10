@@ -3,7 +3,13 @@ use crate::{
     Blob, Error, RwLock,
 };
 use commonware_utils::{NZUsize, StableBuf};
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{
+    num::NonZeroUsize,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 /// A [Blob] wrapper that supports appending new data that is both read and write cached, and
 /// provides buffer-pool managed read caching of older data.
@@ -11,6 +17,9 @@ use std::{num::NonZeroUsize, sync::Arc};
 pub struct Append<B: Blob> {
     /// The underlying blob being wrapped.
     blob: B,
+
+    /// The actual size of the underlying blob on disk.
+    blob_size: Arc<AtomicU64>,
 
     /// Unique id assigned by the buffer pool.
     id: u64,
@@ -62,6 +71,7 @@ impl<B: Blob> Append<B> {
             id: pool_ref.next_id().await,
             pool_ref,
             buffer: Arc::new(RwLock::new(buffer)),
+            blob_size: Arc::new(AtomicU64::new(size)),
         })
     }
 
@@ -100,7 +110,7 @@ impl<B: Blob> Append<B> {
     /// the buffer pool.
     async fn flush(&self, buffer: &mut Buffer) -> Result<(), Error> {
         // Take the buffered data, if any.
-        let Some((buf, offset)) = buffer.take() else {
+        let Some((mut buf, offset)) = buffer.take() else {
             return Ok(());
         };
 
@@ -117,11 +127,22 @@ impl<B: Blob> Append<B> {
             buffer.data.extend_from_slice(&buf[buf.len() - remaining..])
         }
 
-        // Write the data buffer to the underlying blob.
-        // TODO(https://github.com/commonwarexyz/monorepo/issues/1218): The implementation will
-        // unnecessarily rewrite the last (blob_size % page_size) "trailing bytes" of the underlying
-        // blob since the write's starting offset is always page aligned.
-        self.blob.write_at(buf, offset).await?;
+        // Calculate where new data starts in the buffer to skip already-written trailing bytes.
+        let blob_size = self.blob_size.load(Ordering::Acquire);
+        let new_data_start = blob_size.saturating_sub(offset) as usize;
+
+        // Only write if there's actually new data to write.
+        if new_data_start < buf.len() {
+            let new_data = if new_data_start > 0 {
+                buf.split_off(new_data_start)
+            } else {
+                buf
+            };
+            let new_data_len = new_data.len() as u64;
+            self.blob.write_at(new_data, blob_size).await?;
+            self.blob_size
+                .store(blob_size + new_data_len, Ordering::Release);
+        }
 
         Ok(())
     }
@@ -200,6 +221,9 @@ impl<B: Blob> Blob for Append<B> {
 
         // Resize the underlying blob.
         self.blob.resize(size).await?;
+
+        // Update the physical blob size.
+        self.blob_size.store(size, Ordering::Release);
 
         // Reset the append buffer to the new size, ensuring its page alignment.
         let leftover_size = size % self.pool_ref.page_size as u64;
