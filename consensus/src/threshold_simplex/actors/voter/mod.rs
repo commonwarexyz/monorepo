@@ -155,6 +155,7 @@ mod tests {
                 activity_timeout: 10,
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
@@ -463,6 +464,7 @@ mod tests {
                 activity_timeout,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
             };
             let (actor, _mailbox) = Actor::new(context.clone(), voter_config);
 

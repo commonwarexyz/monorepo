@@ -100,7 +100,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{self, Link, Network, Oracle};
     use commonware_resolver::p2p as resolver;
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
     use commonware_utils::NZUsize;
     use governor::Quota;
     use rand::{seq::SliceRandom, Rng};
@@ -319,6 +319,7 @@ mod tests {
             freezer_table_resize_chunk_size: 10,
             freezer_journal_target_size: 1024,
             freezer_journal_compression: None,
+            freezer_journal_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
             immutable_items_per_section: 10u64,
         };
 

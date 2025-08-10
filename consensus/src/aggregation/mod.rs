@@ -77,10 +77,11 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
+        buffer::PoolRef,
         deterministic::{self, Context},
         Clock, Metrics, Runner, Spawner,
     };
-    use commonware_utils::NonZeroDuration;
+    use commonware_utils::{NZUsize, NonZeroDuration};
     use futures::{channel::oneshot, future::join_all};
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
@@ -229,6 +230,7 @@ mod tests {
                     journal_replay_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
                     journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                     journal_compression: Some(3),
+                    journal_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
                 },
             );
 
@@ -438,6 +440,7 @@ mod tests {
                                 journal_replay_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
                                 journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                                 journal_compression: Some(3),
+                                journal_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
                             },
                         );
 

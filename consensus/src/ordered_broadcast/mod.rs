@@ -71,6 +71,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
+        buffer::PoolRef,
         deterministic::{self, Context},
         Clock, Metrics, Runner, Spawner,
     };
@@ -236,6 +237,7 @@ mod tests {
                     journal_write_buffer: NZUsize!(4096),
                     journal_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
                     journal_compression: Some(3),
+                    journal_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
                 },
             );
 
@@ -866,6 +868,7 @@ mod tests {
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
                         journal_compression: Some(3),
+                        journal_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
                     },
                 );
 
@@ -919,6 +922,7 @@ mod tests {
                             sequencer.public_key()
                         ),
                         journal_compression: Some(3),
+                        journal_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
                     },
                 );
 

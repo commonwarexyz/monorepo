@@ -138,6 +138,7 @@ mod tests {
                 skip_timeout: 10,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
@@ -334,6 +335,7 @@ mod tests {
                 skip_timeout: 10,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
             };
             let (actor, _mailbox) = Actor::new(context.clone(), cfg);
 
