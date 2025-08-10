@@ -245,6 +245,7 @@ mod tests {
     use crate::{deterministic, Runner, Storage as _};
     use commonware_macros::test_traced;
     use commonware_utils::NZUsize;
+    use std::sync::atomic::Ordering;
 
     const PAGE_SIZE: usize = 1024;
     const BUFFER_SIZE: usize = PAGE_SIZE * 2;
@@ -398,6 +399,71 @@ mod tests {
             }
 
             blob.sync().await.expect("Failed to sync blob");
+        });
+    }
+
+    #[test_traced]
+    fn test_append_blob_tracks_physical_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, size) = context
+                .open("test", "blob".as_bytes())
+                .await
+                .expect("Failed to open blob");
+
+            let pool_ref = PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(10));
+            let blob = Append::new(blob, size, NZUsize!(BUFFER_SIZE), pool_ref.clone())
+                .await
+                .unwrap();
+
+            // Initially blob_size should be 0.
+            assert_eq!(blob.blob_size.load(Ordering::Acquire), 0);
+
+            // Write 100 bytes and sync.
+            blob.append(vec![1u8; 100]).await.unwrap();
+            blob.sync().await.unwrap();
+            assert_eq!(blob.blob_size.load(Ordering::Acquire), 100);
+
+            // Append more data but don't sync yet, blob_size shouldn't change.
+            blob.append(vec![2u8; 200]).await.unwrap();
+            assert_eq!(blob.blob_size.load(Ordering::Acquire), 100);
+
+            // Force a flush by exceeding buffer.
+            blob.append(vec![3u8; BUFFER_SIZE]).await.unwrap();
+            assert_eq!(
+                blob.blob_size.load(Ordering::Acquire),
+                100 + 200 + BUFFER_SIZE as u64
+            );
+
+            // Test resize down and up.
+            blob.resize(50).await.unwrap();
+            assert_eq!(blob.blob_size.load(Ordering::Acquire), 50);
+
+            blob.resize(150).await.unwrap();
+            assert_eq!(blob.blob_size.load(Ordering::Acquire), 150);
+
+            // Append after resize and sync.
+            blob.append(vec![4u8; 100]).await.unwrap();
+            blob.sync().await.unwrap();
+            assert_eq!(blob.blob_size.load(Ordering::Acquire), 250);
+
+            // Close and reopen.
+            let (blob, size) = context
+                .open("test", "blob".as_bytes())
+                .await
+                .expect("Failed to reopen blob");
+
+            let blob = Append::new(blob, size, NZUsize!(BUFFER_SIZE), pool_ref.clone())
+                .await
+                .unwrap();
+            assert_eq!(blob.blob_size.load(Ordering::Acquire), 250);
+
+            // Verify data integrity after all operations.
+            let mut buf = vec![0u8; 250];
+            buf = blob.read_at(buf, 0).await.unwrap().into();
+            assert_eq!(&buf[0..50], &vec![1u8; 50][..]);
+            assert_eq!(&buf[50..150], &vec![0u8; 100][..]); // Zeros from resize up to 150
+            assert_eq!(&buf[150..250], &vec![4u8; 100][..]);
         });
     }
 }
