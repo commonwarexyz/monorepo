@@ -1,6 +1,6 @@
 //! Helpers shared by the Archive benchmarks.
 
-use commonware_runtime::tokio::Context;
+use commonware_runtime::{buffer::PoolRef, tokio::Context};
 use commonware_storage::{
     archive::{immutable, prunable, Archive as ArchiveTrait, Identifier},
     translator::TwoCap,
@@ -17,6 +17,12 @@ const ITEMS_PER_SECTION: u64 = 1_024;
 
 /// Number of bytes to buffer when replaying a [commonware_runtime::Blob].
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
+
+/// Use a "prod sized" page size to test the performance of the journal.
+const PAGE_SIZE: usize = 16384;
+
+/// The number of pages to cache in the buffer pool.
+const PAGE_CACHE_SIZE: usize = 10_000;
 
 /// Fixed-length key and value types.
 pub type Key = FixedBytes<64>;
@@ -59,6 +65,10 @@ impl Archive {
                     freezer_journal_partition: "archive_bench_journal".into(),
                     freezer_journal_target_size: 1024 * 1024 * 10, // 10MB
                     freezer_journal_compression: compression,
+                    freezer_journal_buffer_pool: PoolRef::new(
+                        NZUsize!(PAGE_SIZE),
+                        NZUsize!(PAGE_CACHE_SIZE),
+                    ),
                     ordinal_partition: "archive_bench_ordinal".into(),
                     items_per_section: ITEMS_PER_SECTION,
                     write_buffer: NZUsize!(WRITE_BUFFER),
@@ -76,6 +86,7 @@ impl Archive {
                     items_per_section: ITEMS_PER_SECTION,
                     write_buffer: NZUsize!(WRITE_BUFFER),
                     replay_buffer: NZUsize!(REPLAY_BUFFER),
+                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 };
                 Archive::Prunable(prunable::Archive::init(ctx, cfg).await.unwrap())
             }

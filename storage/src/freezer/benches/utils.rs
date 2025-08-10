@@ -1,6 +1,6 @@
 //! Helpers shared by the Freezer benchmarks.
 
-use commonware_runtime::tokio::Context;
+use commonware_runtime::{buffer::PoolRef, tokio::Context};
 use commonware_storage::freezer::{Config, Freezer};
 use commonware_utils::{sequence::FixedBytes, NZUsize};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -29,6 +29,12 @@ pub const JOURNAL_PARTITION: &str = "freezer_bench_journal";
 /// Partition for [Freezer] table benchmarks.
 pub const TABLE_PARTITION: &str = "freezer_bench_table";
 
+/// Use a "prod sized" page size to test the performance of the journal.
+const PAGE_SIZE: usize = 16384;
+
+/// The number of pages to cache in the buffer pool.
+const PAGE_CACHE_SIZE: usize = 10_000;
+
 /// Fixed-length key and value types.
 pub type Key = FixedBytes<64>;
 pub type Val = FixedBytes<128>;
@@ -43,6 +49,7 @@ pub async fn init(ctx: Context) -> FreezerType {
         journal_compression: None,
         journal_write_buffer: NZUsize!(JOURNAL_WRITE_BUFFER),
         journal_target_size: JOURNAL_TARGET_SIZE,
+        journal_buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         table_partition: TABLE_PARTITION.into(),
         table_initial_size: TABLE_INITIAL_SIZE,
         table_resize_frequency: TABLE_RESIZE_FREQUENCY,
