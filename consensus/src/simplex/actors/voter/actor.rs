@@ -17,7 +17,7 @@ use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
     Receiver, Recipients, Sender,
 };
-use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{buffer::PoolRef, Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
 use commonware_utils::quorum;
 use futures::{
@@ -329,6 +329,7 @@ pub struct Actor<
     compression: Option<u8>,
     replay_buffer: NonZeroUsize,
     write_buffer: NonZeroUsize,
+    buffer_pool: PoolRef,
     journal: Option<Journal<E, Voter<C::Signature, D>>>,
 
     genesis: Option<D>,
@@ -421,6 +422,7 @@ impl<
                 compression: cfg.compression,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
+                buffer_pool: cfg.buffer_pool,
                 journal: None,
 
                 genesis: None,
@@ -1702,6 +1704,7 @@ impl<
                 partition: self.partition.clone(),
                 compression: self.compression,
                 codec_config: usize::MAX, // anything we read from journal is already verified
+                buffer_pool: self.buffer_pool.clone(),
                 write_buffer: self.write_buffer,
             },
         )

@@ -7,6 +7,7 @@ use crate::{
 };
 pub use actor::Actor;
 use commonware_cryptography::{Digest, Signer};
+use commonware_runtime::buffer::PoolRef;
 pub use ingress::{Mailbox, Message};
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -36,6 +37,7 @@ pub struct Config<
     pub skip_timeout: View,
     pub replay_buffer: NonZeroUsize,
     pub write_buffer: NonZeroUsize,
+    pub buffer_pool: PoolRef,
 }
 
 #[cfg(test)]

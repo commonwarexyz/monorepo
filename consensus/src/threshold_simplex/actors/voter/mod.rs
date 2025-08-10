@@ -11,6 +11,7 @@ use commonware_cryptography::{
     Digest, Signer,
 };
 use commonware_p2p::Blocker;
+use commonware_runtime::buffer::PoolRef;
 pub use ingress::{Mailbox, Message};
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -41,6 +42,7 @@ pub struct Config<
     pub activity_timeout: View,
     pub replay_buffer: NonZeroUsize,
     pub write_buffer: NonZeroUsize,
+    pub buffer_pool: PoolRef,
 }
 
 #[cfg(test)]

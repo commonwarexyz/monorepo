@@ -1,11 +1,11 @@
 use crate::Block;
 use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
 use commonware_resolver::p2p::Coordinator;
+use commonware_runtime::buffer::PoolRef;
 use governor::Quota;
 use std::num::NonZeroUsize;
 
 /// Marshal configuration.
-#[derive(Debug)]
 pub struct Config<V: Variant, P: PublicKey, Z: Coordinator<PublicKey = P>, B: Block> {
     /// The public key of the validator.
     pub public_key: P,
@@ -54,6 +54,9 @@ pub struct Config<V: Variant, P: PublicKey, Z: Coordinator<PublicKey = P>, B: Bl
 
     /// The compression level to use for the freezer journal.
     pub freezer_journal_compression: Option<u8>,
+
+    /// The buffer pool to use for the freezer journal.
+    pub freezer_journal_buffer_pool: PoolRef,
 
     /// The size of the replay buffer for storage archives.
     pub replay_buffer: NonZeroUsize,

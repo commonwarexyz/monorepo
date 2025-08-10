@@ -198,6 +198,7 @@ impl<
                 ),
                 freezer_journal_target_size: config.freezer_journal_target_size,
                 freezer_journal_compression: config.freezer_journal_compression,
+                freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
                 ordinal_partition: format!(
                     "{}-finalizations-by-height-ordinal",
                     config.partition_prefix
@@ -234,6 +235,7 @@ impl<
                 ),
                 freezer_journal_target_size: config.freezer_journal_target_size,
                 freezer_journal_compression: config.freezer_journal_compression,
+                freezer_journal_buffer_pool: config.freezer_journal_buffer_pool,
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: config.immutable_items_per_section,
                 codec_config: config.codec_config.clone(),
@@ -675,6 +677,7 @@ impl<
             items_per_section: config.prunable_items_per_section,
             compression: None,
             codec_config,
+            buffer_pool: config.freezer_journal_buffer_pool.clone(),
             replay_buffer: config.replay_buffer,
             write_buffer: config.write_buffer,
         };
