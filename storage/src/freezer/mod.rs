@@ -138,7 +138,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic};
+//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
 //! use commonware_storage::freezer::{Freezer, Config, Identifier};
 //! use commonware_utils::{sequence::FixedBytes, NZUsize};
 //!
@@ -150,6 +150,7 @@
 //!         journal_compression: Some(3),
 //!         journal_write_buffer: NZUsize!(1024 * 1024), // 1MB
 //!         journal_target_size: 100 * 1024 * 1024, // 100MB
+//!         journal_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
 //!         table_partition: "freezer_table".into(),
 //!         table_initial_size: 65_536, // ~3MB initial table size
 //!         table_resize_frequency: 4, // Force resize once 4 writes to the same entry occur
@@ -176,6 +177,7 @@
 //! ```
 
 mod storage;
+use commonware_runtime::buffer::PoolRef;
 use commonware_utils::Array;
 use std::num::NonZeroUsize;
 pub use storage::{Checkpoint, Cursor, Freezer};
@@ -212,6 +214,9 @@ pub struct Config<C> {
 
     /// The target size of each journal before creating a new one.
     pub journal_target_size: u64,
+
+    /// The buffer pool to use for the journal.
+    pub journal_buffer_pool: PoolRef,
 
     /// The [commonware_runtime::Storage] partition to use for storing the table.
     pub table_partition: String,

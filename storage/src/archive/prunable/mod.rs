@@ -102,7 +102,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic};
+//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
 //! use commonware_cryptography::hash;
 //! use commonware_storage::{
 //!     translator::FourCap,
@@ -124,6 +124,7 @@
 //!         items_per_section: 1024,
 //!         write_buffer: NZUsize!(1024 * 1024),
 //!         replay_buffer: NZUsize!(4096),
+//!         buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
 //!     };
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
 //!
@@ -136,6 +137,7 @@
 //! ```
 
 use crate::translator::Translator;
+use commonware_runtime::buffer::PoolRef;
 use std::num::NonZeroUsize;
 
 mod storage;
@@ -168,6 +170,9 @@ pub struct Config<T: Translator, C> {
 
     /// The buffer size to use when replaying a [commonware_runtime::Blob].
     pub replay_buffer: NonZeroUsize,
+
+    /// The buffer pool to use for the archive's [crate::journal] storage.
+    pub buffer_pool: PoolRef,
 }
 
 #[cfg(test)]
