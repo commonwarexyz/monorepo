@@ -119,8 +119,11 @@ mod tests {
     use super::*;
     use crate::archive::Archive as ArchiveTrait;
     use commonware_cryptography::{hash, sha256::Digest};
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
     use commonware_utils::NZUsize;
+
+    const PAGE_SIZE: usize = 1024;
+    const PAGE_CACHE_SIZE: usize = 10;
 
     #[test]
     fn test_unclean_shutdown() {
@@ -135,6 +138,10 @@ mod tests {
                 freezer_journal_partition: "test_journal2".into(),
                 freezer_journal_target_size: 1024 * 1024,
                 freezer_journal_compression: Some(3),
+                freezer_journal_buffer_pool: PoolRef::new(
+                    NZUsize!(PAGE_SIZE),
+                    NZUsize!(PAGE_CACHE_SIZE),
+                ),
                 ordinal_partition: "test_ordinal2".into(),
                 items_per_section: 512,
                 write_buffer: NZUsize!(1024),

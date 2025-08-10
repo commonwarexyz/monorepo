@@ -253,6 +253,8 @@ mod tests {
     const DEFAULT_TABLE_RESIZE_FREQUENCY: u8 = 4;
     const DEFAULT_TABLE_RESIZE_CHUNK_SIZE: u32 = 128; // force multiple chunks
     const DEFAULT_TABLE_REPLAY_BUFFER: usize = 64 * 1024; // 64KB
+    const PAGE_SIZE: usize = 1024;
+    const PAGE_CACHE_SIZE: usize = 10;
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -272,6 +274,7 @@ mod tests {
                 journal_compression: compression,
                 journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -339,6 +342,7 @@ mod tests {
                 journal_compression: None,
                 journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -389,6 +393,7 @@ mod tests {
                 journal_compression: None,
                 journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 table_partition: "test_table".into(),
                 table_initial_size: 4, // Very small to force collisions
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -449,6 +454,7 @@ mod tests {
                 journal_compression: None,
                 journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -518,6 +524,7 @@ mod tests {
                 journal_compression: None,
                 journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -616,6 +623,7 @@ mod tests {
                 journal_compression: None,
                 journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -674,6 +682,7 @@ mod tests {
                 journal_compression: None,
                 journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -731,6 +740,7 @@ mod tests {
                 journal_compression: None,
                 journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -794,6 +804,7 @@ mod tests {
                 journal_compression: None,
                 journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -868,6 +879,7 @@ mod tests {
                 journal_compression: None,
                 journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 table_partition: "test_table".into(),
                 table_initial_size: 2, // Very small initial size to force multiple resizes
                 table_resize_frequency: 2, // Resize after 2 items per entry
@@ -936,6 +948,7 @@ mod tests {
                 journal_compression: None,
                 journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 table_partition: "test_table".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
@@ -1003,6 +1016,7 @@ mod tests {
                 journal_compression: None,
                 journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
+                journal_buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 table_partition: "test_table".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
@@ -1064,6 +1078,7 @@ mod tests {
                 journal_compression: None,
                 journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
                 journal_target_size: 128, // Force multiple journal sections
+                journal_buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 table_partition: "test_table".into(),
                 table_initial_size: 8,     // Small table to force collisions
                 table_resize_frequency: 2, // Force resize frequently
