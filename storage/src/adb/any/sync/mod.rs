@@ -194,8 +194,13 @@ where
 mod tests {
     use crate::{
         adb::{
-            any::fixed::test::{
-                apply_ops, create_test_config, create_test_db, create_test_ops, AnyTest,
+            self,
+            any::fixed::{
+                test::{
+                    any_db_config, apply_ops, create_test_config, create_test_db, create_test_ops,
+                    AnyTest, PAGE_CACHE_SIZE, PAGE_SIZE,
+                },
+                Any,
             },
             sync::{
                 self,
@@ -204,14 +209,27 @@ mod tests {
                 Engine, Target,
             },
         },
-        mmr::{hasher::Standard, iterator::leaf_num_to_pos},
+        journal::{
+            self,
+            fixed::{Config as JConfig, Journal},
+        },
+        mmr::{hasher::Standard, iterator::leaf_num_to_pos, verification::Proof},
         store::operation::Fixed,
+        translator::TwoCap,
     };
-    use commonware_cryptography::{sha256, Digest, Sha256};
+    use commonware_cryptography::{
+        hash,
+        sha256::{self, Digest},
+        Digest as _, Sha256,
+    };
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _, RwLock};
-    use commonware_utils::NZU64;
-    use futures::{channel::mpsc, SinkExt as _};
+    use commonware_runtime::{
+        buffer::PoolRef,
+        deterministic::{self, Context},
+        Metrics as _, Runner as _, RwLock,
+    };
+    use commonware_utils::{NZUsize, NZU64};
+    use futures::{channel::mpsc, future::join_all, SinkExt as _};
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
     use std::{
         collections::{HashMap, HashSet},
@@ -1350,6 +1368,413 @@ mod tests {
             // Attempt to sync - should fail due to resolver error
             let result: Result<AnyTest, _> = sync::sync(engine_config).await;
             assert!(result.is_err());
+        });
+    }
+
+    /// Test `from_sync_result` with an empty source database (nothing persisted) syncing to
+    /// an empty target database.
+    #[test_traced("WARN")]
+    pub fn test_from_sync_result_empty_to_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let log = journal::fixed::Journal::<Context, Fixed<Digest, Digest>>::init(
+                context.clone(),
+                journal::fixed::Config {
+                    partition: "sync_basic_log".into(),
+                    items_per_blob: 1000,
+                    write_buffer: NZUsize!(1024),
+                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                },
+            )
+            .await
+            .unwrap();
+
+            let mut synced_db: AnyTest = <AnyTest as adb::sync::Database>::from_sync_result(
+                context.clone(),
+                any_db_config("sync_basic"),
+                log,
+                None,
+                0,
+                0,
+                1024,
+            )
+            .await
+            .unwrap();
+
+            // Verify database state
+            assert_eq!(synced_db.op_count(), 0);
+            assert_eq!(synced_db.inactivity_floor_loc, 0);
+            assert_eq!(synced_db.log.size().await.unwrap(), 0);
+            assert_eq!(synced_db.mmr.size(), 0);
+
+            // Test that we can perform operations on the synced database
+            let key1 = hash(&1u64.to_be_bytes());
+            let value1 = hash(&10u64.to_be_bytes());
+            let key2 = hash(&2u64.to_be_bytes());
+            let value2 = hash(&20u64.to_be_bytes());
+
+            synced_db.update(key1, value1).await.unwrap();
+            synced_db.update(key2, value2).await.unwrap();
+            synced_db.commit().await.unwrap();
+
+            // Verify the operations worked
+            assert_eq!(synced_db.get(&key1).await.unwrap(), Some(value1));
+            assert_eq!(synced_db.get(&key2).await.unwrap(), Some(value2));
+            assert!(synced_db.op_count() > 0);
+
+            synced_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `from_sync_result` with an empty source database (nothing persisted) syncing to
+    /// a non-empty target database.
+    #[test]
+    fn test_from_sync_result_empty_to_nonempty() {
+        const NUM_OPS: usize = 100;
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate a source database
+            let mut source_db = create_test_db(context.clone()).await;
+            let ops = create_test_ops(NUM_OPS);
+            apply_ops(&mut source_db, ops.clone()).await;
+            source_db.commit().await.unwrap();
+
+            let lower_bound_ops = source_db.inactivity_floor_loc;
+            let upper_bound_ops = source_db.op_count() - 1;
+
+            // Get pinned nodes and target hash before moving source_db
+            let pinned_nodes_pos = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(lower_bound_ops));
+            let pinned_nodes =
+                join_all(pinned_nodes_pos.map(|pos| source_db.mmr.get_node(pos))).await;
+            let pinned_nodes = pinned_nodes
+                .iter()
+                .map(|node| node.as_ref().unwrap().unwrap())
+                .collect::<Vec<_>>();
+            let mut hasher = Standard::<Sha256>::new();
+            let target_hash = source_db.root(&mut hasher);
+
+            // Create log with operations
+            let mut log = Journal::<_, Fixed<Digest, Digest>>::init_sync(
+                context.clone().with_label("ops_log"),
+                JConfig {
+                    partition: format!("ops_log_{}", context.next_u64()),
+                    items_per_blob: 1024,
+                    write_buffer: NZUsize!(64),
+                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                },
+                lower_bound_ops,
+                upper_bound_ops,
+            )
+            .await
+            .unwrap();
+
+            // Populate log with operations from source db
+            for i in lower_bound_ops..=upper_bound_ops {
+                let op = source_db.log.read(i).await.unwrap();
+                log.append(op).await.unwrap();
+            }
+
+            let db =
+                <Any<_, Digest, Digest, Sha256, TwoCap> as adb::sync::Database>::from_sync_result(
+                    context.clone(),
+                    any_db_config("sync_basic"),
+                    log,
+                    Some(pinned_nodes),
+                    lower_bound_ops,
+                    upper_bound_ops,
+                    1024,
+                )
+                .await
+                .unwrap();
+
+            // Verify database state
+            assert_eq!(db.op_count(), upper_bound_ops + 1);
+            assert_eq!(db.inactivity_floor_loc, lower_bound_ops);
+            assert_eq!(db.oldest_retained_loc(), Some(lower_bound_ops));
+            assert_eq!(db.mmr.size(), source_db.mmr.size());
+            assert_eq!(db.mmr.pruned_to_pos(), leaf_num_to_pos(lower_bound_ops));
+            assert_eq!(
+                db.log.size().await.unwrap(),
+                source_db.log.size().await.unwrap()
+            );
+
+            // Verify the root digest matches the target
+            assert_eq!(db.root(&mut hasher), target_hash);
+
+            // Verify state matches the source operations
+            let mut expected_kvs = HashMap::new();
+            let mut deleted_keys = HashSet::new();
+            for op in &ops {
+                if let Fixed::Update(key, value) = op {
+                    expected_kvs.insert(*key, *value);
+                    deleted_keys.remove(key);
+                } else if let Fixed::Delete(key) = op {
+                    expected_kvs.remove(key);
+                    deleted_keys.insert(*key);
+                }
+            }
+            for (key, value) in expected_kvs {
+                let synced_value = db.get(&key).await.unwrap().unwrap();
+                assert_eq!(synced_value, value);
+            }
+            // Verify that deleted keys are absent
+            for key in deleted_keys {
+                assert!(db.get(&key).await.unwrap().is_none(),);
+            }
+
+            db.destroy().await.unwrap();
+            source_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `from_sync_result` with an empty source database syncing to a non-empty target database
+    /// with different pruning boundaries.
+    #[test]
+    fn test_from_sync_result_empty_to_nonempty_different_pruning_boundaries() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate a source database
+            let mut source_db = create_test_db(context.clone()).await;
+            let ops = create_test_ops(200);
+            apply_ops(&mut source_db, ops.clone()).await;
+            source_db.commit().await.unwrap();
+
+            let total_ops = source_db.op_count();
+
+            // Test different pruning boundaries
+            for lower_bound in [0, 50, 100, 150] {
+                let upper_bound = std::cmp::min(lower_bound + 49, total_ops - 1);
+
+                // Create log with operations
+                let mut log = Journal::<_, Fixed<Digest, Digest>>::init_sync(
+                    context.clone().with_label("boundary_log"),
+                    JConfig {
+                        partition: format!("boundary_log_{}_{}", lower_bound, context.next_u64()),
+                        items_per_blob: 1024,
+                        write_buffer: NZUsize!(64),
+                        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                    },
+                    lower_bound,
+                    upper_bound,
+                )
+                .await
+                .unwrap();
+                log.sync().await.unwrap();
+
+                for i in lower_bound..=upper_bound {
+                    let op = source_db.log.read(i).await.unwrap();
+                    log.append(op).await.unwrap();
+                }
+                log.sync().await.unwrap();
+
+                let pinned_nodes = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(lower_bound))
+                    .map(|pos| source_db.mmr.get_node(pos));
+                let pinned_nodes = join_all(pinned_nodes).await;
+                let pinned_nodes = pinned_nodes
+                    .iter()
+                    .map(|node| node.as_ref().unwrap().unwrap())
+                    .collect::<Vec<_>>();
+
+                let db: AnyTest = <Any<_, Digest, Digest, Sha256, TwoCap> as adb::sync::Database>::from_sync_result(
+                    context.clone(),
+                    create_test_config(context.next_u64()),
+                    log,
+                    Some(pinned_nodes),
+                    lower_bound,
+                    upper_bound,
+                    1024,
+                )
+                .await
+                .unwrap();
+
+                // Verify database state
+                let expected_op_count = upper_bound + 1;
+                assert_eq!(db.log.size().await.unwrap(), expected_op_count);
+                assert_eq!(db.mmr.size(), leaf_num_to_pos(expected_op_count));
+                assert_eq!(db.op_count(), expected_op_count);
+                assert_eq!(db.inactivity_floor_loc, lower_bound);
+                assert_eq!(db.oldest_retained_loc(), Some(lower_bound));
+                assert_eq!(db.mmr.pruned_to_pos(), leaf_num_to_pos(lower_bound));
+
+                // Verify state matches the source operations
+                let mut expected_kvs = HashMap::new();
+                let mut deleted_keys = HashSet::new();
+                for op in &ops[lower_bound as usize..=upper_bound as usize] {
+                    if let Fixed::Update(key, value) = op {
+                        expected_kvs.insert(*key, *value);
+                        deleted_keys.remove(key);
+                    } else if let Fixed::Delete(key) = op {
+                        expected_kvs.remove(key);
+                        deleted_keys.insert(*key);
+                    }
+                }
+                for (key, value) in expected_kvs {
+                    assert_eq!(db.get(&key).await.unwrap().unwrap(), value,);
+                }
+                // Verify that deleted keys are absent
+                for key in deleted_keys {
+                    assert!(db.get(&key).await.unwrap().is_none());
+                }
+
+                db.destroy().await.unwrap();
+            }
+            source_db.destroy().await.unwrap();
+        });
+    }
+
+    // Test `from_sync_result` where the database has some but not all of the operations in the target
+    // database.
+    #[test]
+    fn test_from_sync_result_nonempty_to_nonempty_partial_match() {
+        const NUM_OPS: usize = 100;
+        const NUM_ADDITIONAL_OPS: usize = 5;
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate two databases.
+            let mut target_db = create_test_db(context.clone()).await;
+            let sync_db_config = create_test_config(context.next_u64());
+            let mut sync_db: AnyTest = Any::init(context.clone(), sync_db_config.clone())
+                .await
+                .unwrap();
+            let original_ops = create_test_ops(NUM_OPS);
+            apply_ops(&mut target_db, original_ops.clone()).await;
+            target_db.commit().await.unwrap();
+            apply_ops(&mut sync_db, original_ops.clone()).await;
+            sync_db.commit().await.unwrap();
+            let sync_db_original_size = sync_db.op_count();
+
+            // Get pinned nodes before closing the database
+            let pinned_nodes_map = sync_db.mmr.get_pinned_nodes();
+            let pinned_nodes =
+                Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(sync_db_original_size))
+                    .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
+                    .collect::<Vec<_>>();
+
+            // Close the sync db
+            sync_db.close().await.unwrap();
+
+            // Add one more operation to the target db
+            let more_ops = create_test_ops(NUM_ADDITIONAL_OPS);
+            apply_ops(&mut target_db, more_ops.clone()).await;
+            target_db.commit().await.unwrap();
+
+            // Capture target db state for comparison
+            let target_db_op_count = target_db.op_count();
+            let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc;
+            let target_db_log_size = target_db.log.size().await.unwrap();
+            let target_db_mmr_size = target_db.mmr.size();
+
+            let sync_lower_bound = target_db.inactivity_floor_loc;
+            let sync_upper_bound = target_db.op_count() - 1;
+
+            let mut hasher = Standard::<Sha256>::new();
+            let target_hash = target_db.root(&mut hasher);
+
+            let AnyTest { mmr, log, .. } = target_db;
+
+            // Re-open `sync_db`
+            let sync_db =
+                <Any<_, Digest, Digest, Sha256, TwoCap> as adb::sync::Database>::from_sync_result(
+                    context.clone(),
+                    sync_db_config,
+                    log,
+                    Some(pinned_nodes),
+                    sync_lower_bound,
+                    sync_upper_bound,
+                    1024,
+                )
+                .await
+                .unwrap();
+
+            // Verify database state
+            assert_eq!(sync_db.op_count(), target_db_op_count);
+            assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
+            assert_eq!(sync_db.oldest_retained_loc(), Some(sync_lower_bound));
+            assert_eq!(sync_db.log.size().await.unwrap(), target_db_log_size);
+            assert_eq!(sync_db.mmr.size(), target_db_mmr_size);
+            assert_eq!(
+                sync_db.mmr.pruned_to_pos(),
+                leaf_num_to_pos(sync_lower_bound)
+            );
+
+            // Verify the root digest matches the target
+            assert_eq!(sync_db.root(&mut hasher), target_hash);
+
+            // Verify state matches the source operations
+            let mut expected_kvs = HashMap::new();
+            let mut deleted_keys = HashSet::new();
+            for op in &original_ops {
+                if let Fixed::Update(key, value) = op {
+                    expected_kvs.insert(*key, *value);
+                    deleted_keys.remove(key);
+                } else if let Fixed::Delete(key) = op {
+                    expected_kvs.remove(key);
+                    deleted_keys.insert(*key);
+                }
+            }
+            for (key, value) in expected_kvs {
+                let synced_value = sync_db.get(&key).await.unwrap().unwrap();
+                assert_eq!(synced_value, value);
+            }
+            // Verify that deleted keys are absent
+            for key in deleted_keys {
+                assert!(sync_db.get(&key).await.unwrap().is_none(),);
+            }
+
+            sync_db.destroy().await.unwrap();
+            mmr.destroy().await.unwrap();
+        });
+    }
+
+    // Test `from_sync_result` where the database has all of the operations in the target range.
+    #[test]
+    fn test_from_sync_result_nonempty_to_nonempty_exact_match() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let db_config = create_test_config(context.next_u64());
+            let mut db = Any::init(context.clone(), db_config.clone()).await.unwrap();
+            let ops = create_test_ops(100);
+            apply_ops(&mut db, ops.clone()).await;
+            db.commit().await.unwrap();
+
+            let sync_lower_bound = db.inactivity_floor_loc;
+            let sync_upper_bound = db.op_count() - 1;
+            let target_db_op_count = db.op_count();
+            let target_db_inactivity_floor_loc = db.inactivity_floor_loc;
+            let target_db_log_size = db.log.size().await.unwrap();
+            let target_db_mmr_size = db.mmr.size();
+
+            let AnyTest { mmr, log, .. } = db;
+
+            // When we re-open the database, the MMR is closed and the log is opened.
+            let mut hasher = Standard::<Sha256>::new();
+            mmr.close(&mut hasher).await.unwrap();
+
+            let sync_db: AnyTest =
+                <Any<_, Digest, Digest, Sha256, TwoCap> as adb::sync::Database>::from_sync_result(
+                    context.clone(),
+                    db_config,
+                    log,
+                    None,
+                    sync_lower_bound,
+                    sync_upper_bound,
+                    1024,
+                )
+                .await
+                .unwrap();
+
+            // Verify database state
+            assert_eq!(sync_db.op_count(), target_db_op_count);
+            assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
+            assert_eq!(sync_db.oldest_retained_loc(), Some(sync_lower_bound));
+            assert_eq!(sync_db.log.size().await.unwrap(), target_db_log_size);
+            assert_eq!(sync_db.mmr.size(), target_db_mmr_size);
+            assert_eq!(
+                sync_db.mmr.pruned_to_pos(),
+                leaf_num_to_pos(sync_lower_bound)
+            );
+
+            sync_db.destroy().await.unwrap();
         });
     }
 }
