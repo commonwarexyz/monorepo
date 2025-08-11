@@ -4,7 +4,9 @@
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_macros::select;
-use commonware_runtime::{tokio as tokio_runtime, Listener, Metrics as _, Runner, RwLock};
+use commonware_runtime::{
+    tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, Spawner, Storage,
+};
 use commonware_storage::{adb::sync::Target, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
@@ -100,10 +102,7 @@ async fn maybe_add_operations<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable,
-    E: commonware_runtime::Storage
-        + commonware_runtime::Clock
-        + commonware_runtime::Metrics
-        + RngCore,
+    E: Storage + Clock + Metrics + RngCore,
 {
     let mut last_time = state.last_operation_time.write().await;
     let now = context.current();
@@ -292,11 +291,7 @@ async fn handle_client<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable + Send + Sync + 'static,
-    E: commonware_runtime::Storage
-        + commonware_runtime::Clock
-        + commonware_runtime::Metrics
-        + commonware_runtime::Network
-        + commonware_runtime::Spawner,
+    E: Storage + Clock + Metrics + Network + Spawner,
 {
     info!(client_addr = %client_addr, "client connected");
 
@@ -407,13 +402,7 @@ async fn run_helper<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable + Send + Sync + 'static,
-    E: commonware_runtime::Storage
-        + commonware_runtime::Clock
-        + commonware_runtime::Metrics
-        + commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + rand::RngCore
-        + Clone,
+    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     info!("starting {} database server", DB::database_name());
 

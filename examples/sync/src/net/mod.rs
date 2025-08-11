@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt};
+use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use std::mem::size_of;
 
 /// Maximum message size in bytes (10MB).
@@ -27,7 +27,7 @@ pub enum ErrorCode {
     InternalError,
 }
 
-impl commonware_codec::Write for ErrorCode {
+impl Write for ErrorCode {
     fn write(&self, buf: &mut impl BufMut) {
         let discriminant = match self {
             ErrorCode::InvalidRequest => 0u8,
@@ -49,7 +49,7 @@ impl EncodeSize for ErrorCode {
 impl Read for ErrorCode {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let discriminant = u8::read(buf)?;
         match discriminant {
             0 => Ok(ErrorCode::InvalidRequest),
@@ -57,7 +57,7 @@ impl Read for ErrorCode {
             2 => Ok(ErrorCode::NetworkError),
             3 => Ok(ErrorCode::Timeout),
             4 => Ok(ErrorCode::InternalError),
-            _ => Err(CodecError::InvalidEnum(discriminant)),
+            _ => Err(Error::InvalidEnum(discriminant)),
         }
     }
 }
@@ -73,7 +73,7 @@ pub struct ErrorResponse {
     pub message: String,
 }
 
-impl commonware_codec::Write for ErrorResponse {
+impl Write for ErrorResponse {
     fn write(&self, buf: &mut impl BufMut) {
         self.request_id.write(buf);
         self.error_code.write(buf);
@@ -92,13 +92,13 @@ impl EncodeSize for ErrorResponse {
 impl Read for ErrorResponse {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let request_id = RequestId::read_cfg(buf, &())?;
         let error_code = ErrorCode::read(buf)?;
         // Read string as Vec<u8> and convert to String
         let message_bytes = Vec::<u8>::read_range(buf, 0..=MAX_MESSAGE_SIZE)?;
         let message = String::from_utf8(message_bytes)
-            .map_err(|_| CodecError::Invalid("ErrorResponse", "invalid UTF-8 in message"))?;
+            .map_err(|_| Error::Invalid("ErrorResponse", "invalid UTF-8 in message"))?;
         Ok(Self {
             request_id,
             error_code,
@@ -110,7 +110,7 @@ impl Read for ErrorResponse {
 /// A message that can be sent over the wire.
 pub trait WireMessage: Encode + Sized + Send + Sync + 'static {
     fn request_id(&self) -> RequestId;
-    fn decode_from(bytes: &[u8]) -> Result<Self, commonware_codec::Error>;
+    fn decode_from(bytes: &[u8]) -> Result<Self, Error>;
 }
 
 #[cfg(test)]

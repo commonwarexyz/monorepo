@@ -3,7 +3,7 @@ use crate::{
     Error,
 };
 use commonware_macros::select;
-use commonware_runtime::{Sink, Stream};
+use commonware_runtime::{Handle, Sink, Spawner, Stream};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::{
     channel::{mpsc, oneshot},
@@ -22,7 +22,7 @@ pub struct Request<M: WireMessage> {
 /// Run the I/O loop which:
 /// - Receives requests from the request channel and sends them to the sink.
 /// - Receives responses from the stream and forwards them to their callback channel.
-async fn run<Si, St, M>(
+async fn run_loop<Si, St, M>(
     mut sink: Si,
     mut stream: St,
     mut request_rx: mpsc::Receiver<Request<M>>,
@@ -78,18 +78,18 @@ async fn run<Si, St, M>(
 /// Starts the I/O task and returns a sender for requests and a handle to the task.
 /// The I/O task is responsible for sending and receiving messages over the network.
 /// The I/O task uses a oneshot channel to send responses back to the caller.
-pub fn start_io<E, Si, St, M>(
+pub fn run<E, Si, St, M>(
     context: E,
     sink: Si,
     stream: St,
-) -> Result<(mpsc::Sender<Request<M>>, commonware_runtime::Handle<()>), commonware_runtime::Error>
+) -> Result<(mpsc::Sender<Request<M>>, Handle<()>), commonware_runtime::Error>
 where
-    E: commonware_runtime::Spawner,
+    E: Spawner,
     Si: Sink,
     St: Stream,
     M: WireMessage,
 {
     let (request_tx, request_rx) = mpsc::channel(REQUEST_BUFFER_SIZE);
-    let handle = context.spawn(move |_| run(sink, stream, request_rx, HashMap::new()));
+    let handle = context.spawn(move |_| run_loop(sink, stream, request_rx, HashMap::new()));
     Ok((request_tx, handle))
 }

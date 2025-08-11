@@ -1,13 +1,12 @@
 //! Database-specific modules for the sync example.
 
-use std::future::Future;
-
+use crate::Key;
+use commonware_codec::{Encode, Read};
 use commonware_storage::{
     adb,
     mmr::{hasher::Standard, verification::Proof},
 };
-
-use crate::Key;
+use std::future::Future;
 
 pub mod any;
 pub mod immutable;
@@ -27,8 +26,7 @@ impl std::str::FromStr for DatabaseType {
             "any" => Ok(DatabaseType::Any),
             "immutable" => Ok(DatabaseType::Immutable),
             _ => Err(format!(
-                "Invalid database type: '{}'. Must be 'any' or 'immutable'",
-                s
+                "Invalid database type: '{s}'. Must be 'any' or 'immutable'",
             )),
         }
     }
@@ -45,12 +43,7 @@ impl DatabaseType {
 
 /// Helper trait for databases that can be synced.
 pub trait Syncable {
-    type Operation: Clone
-        + commonware_codec::Read<Cfg = ()>
-        + commonware_codec::Encode
-        + Send
-        + Sync
-        + 'static;
+    type Operation: Clone + Read<Cfg = ()> + Encode + Send + Sync + 'static;
 
     /// Create test operations with the given count and seed.
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation>;
@@ -59,10 +52,10 @@ pub trait Syncable {
     fn add_operations(
         database: &mut Self,
         operations: Vec<Self::Operation>,
-    ) -> impl Future<Output = Result<(), commonware_storage::adb::Error>>;
+    ) -> impl Future<Output = Result<(), adb::Error>>;
 
     /// Commit pending operations to the database.
-    fn commit(&mut self) -> impl Future<Output = Result<(), commonware_storage::adb::Error>>;
+    fn commit(&mut self) -> impl Future<Output = Result<(), adb::Error>>;
 
     /// Get the root hash of the database.
     fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key;

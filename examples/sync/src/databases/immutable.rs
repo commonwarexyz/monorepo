@@ -2,12 +2,17 @@
 
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
+use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
-    adb::immutable::{self, Config},
-    mmr::hasher::Standard,
+    adb::{
+        self,
+        immutable::{self, Config},
+    },
+    mmr::{hasher::Standard, verification::Proof},
     store::operation,
 };
 use commonware_utils::NZUsize;
+use std::future::Future;
 
 /// Database type alias.
 pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
@@ -68,7 +73,7 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
 
 impl<E> super::Syncable for Database<E>
 where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    E: Storage + Clock + Metrics,
 {
     type Operation = Operation;
 
@@ -115,19 +120,11 @@ where
         size: u64,
         start_loc: u64,
         max_ops: u64,
-    ) -> impl std::future::Future<
-        Output = Result<
-            (
-                commonware_storage::mmr::verification::Proof<Key>,
-                Vec<Self::Operation>,
-            ),
-            commonware_storage::adb::Error,
-        >,
-    > + Send {
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
         self.historical_proof(size, start_loc, max_ops)
     }
 
     fn database_name() -> &'static str {
-        "Immutable"
+        "immutable"
     }
 }

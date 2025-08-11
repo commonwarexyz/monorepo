@@ -4,7 +4,10 @@
 //! with both empty and already-initialized databases.
 
 use clap::{Arg, Command};
-use commonware_runtime::{tokio as tokio_runtime, Metrics as _, Runner};
+use commonware_codec::{Encode, Read};
+use commonware_runtime::{
+    tokio as tokio_runtime, Clock, Metrics, Network, Runner, Spawner, Storage,
+};
 use commonware_storage::adb::sync::{self, engine::EngineConfig, Target};
 use commonware_sync::{
     any::{create_config, Database as AnyDb, Operation as AnyOp},
@@ -64,8 +67,8 @@ async fn target_update_task<E, Op, D>(
     initial_target: Target<D>,
 ) -> Result<(), Error>
 where
-    E: commonware_runtime::Clock,
-    Op: commonware_codec::Read<Cfg = ()> + commonware_codec::Encode + Send + Sync,
+    E: Clock,
+    Op: Read<Cfg = ()> + Encode + Send + Sync,
     D: commonware_cryptography::Digest,
 {
     let mut current_target = initial_target;
@@ -106,11 +109,7 @@ where
 /// Repeatedly sync an Any database to the server's state.
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: commonware_runtime::Storage
-        + commonware_runtime::Clock
-        + commonware_runtime::Metrics
-        + commonware_runtime::Network
-        + commonware_runtime::Spawner,
+    E: Storage + Clock + Metrics + Network + Spawner,
 {
     info!("starting Any database sync process");
     let mut iteration = 0u32;
@@ -169,11 +168,7 @@ where
 /// Repeatedly sync an Immutable database to the server's state.
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: commonware_runtime::Storage
-        + commonware_runtime::Clock
-        + commonware_runtime::Metrics
-        + commonware_runtime::Network
-        + commonware_runtime::Spawner,
+    E: Storage + Clock + Metrics + Network + Spawner,
 {
     info!("starting Immutable database sync process");
     let mut iteration = 1u32;
