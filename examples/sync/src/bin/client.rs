@@ -65,11 +65,7 @@ async fn target_update_task<E, Op, D>(
 ) -> Result<(), Error>
 where
     E: commonware_runtime::Clock,
-    Op: commonware_codec::Read<Cfg = ()>
-        + commonware_codec::Write
-        + commonware_codec::EncodeSize
-        + Send
-        + Sync,
+    Op: commonware_codec::Read<Cfg = ()> + commonware_codec::Encode + Send + Sync,
     D: commonware_cryptography::Digest,
 {
     let mut current_target = initial_target;

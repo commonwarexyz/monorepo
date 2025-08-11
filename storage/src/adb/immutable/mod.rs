@@ -264,16 +264,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        // Build snapshot from the log using the existing method
-        // This will handle applying any missing operations to MMR and locations
+        // Build snapshot from the log
         let mut snapshot = Index::init(
             context.with_label("snapshot"),
             cfg.db_config.translator.clone(),
         );
-
-        let mut hasher = Standard::<H>::new();
         let (log_size, oldest_retained_loc) = Self::build_snapshot_from_log(
-            &mut hasher,
+            &mut Standard::<H>::new(),
             cfg.db_config.log_items_per_section,
             &mut mmr,
             &mut cfg.log,

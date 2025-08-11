@@ -6,6 +6,7 @@
 //! - Callers must prepare the variable journal (e.g., `init_sync`) and compute the initial
 //!   `size` from a replay that considers only `[lower_bound, upper_bound]`.
 //! - No pruning/bound checks are done here; the sync engine handles range validation.
+
 use crate::{adb::sync, journal::variable, store::operation::Variable};
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
