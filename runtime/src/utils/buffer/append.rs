@@ -1,5 +1,5 @@
 use crate::{
-    buffer::{tip::Buffer, PoolRef},
+    buffer::{tip::Buffer, Immutable, PoolRef},
     Blob, Error, RwLock,
 };
 use commonware_utils::{NZUsize, StableBuf};
@@ -39,6 +39,20 @@ impl<B: Blob> Append<B> {
         buffer_size: NonZeroUsize,
         pool_ref: PoolRef,
     ) -> Result<Self, Error> {
+        let pool_id = pool_ref.next_id().await;
+        Self::new_in_pool(blob, size, buffer_size, pool_id, pool_ref).await
+    }
+
+    /// Create a new [Append] with a specific pool ID.
+    ///
+    /// This is used internally when converting from [Immutable] to reuse the same pool ID.
+    pub(crate) async fn new_in_pool(
+        blob: B,
+        size: u64,
+        buffer_size: NonZeroUsize,
+        id: u64,
+        pool_ref: PoolRef,
+    ) -> Result<Self, Error> {
         // Set a floor on the write buffer size to make sure we always write at least 1 page of new
         // data with each flush. We multiply page_size by two here since we could be storing up to
         // page_size-1 bytes of already written data in the append buffer to maintain page
@@ -59,7 +73,7 @@ impl<B: Blob> Append<B> {
 
         Ok(Self {
             blob,
-            id: pool_ref.next_id().await,
+            id,
             pool_ref,
             buffer: Arc::new(RwLock::new((buffer, size))),
         })
@@ -132,6 +146,19 @@ impl<B: Blob> Append<B> {
         *blob_size += new_data_len;
 
         Ok(())
+    }
+
+    /// Convert this [Append] wrapper to an [Immutable] wrapper.
+    ///
+    /// The caller *must* sync the [Append] before calling this conversion,
+    /// otherwise any unflushed data in the write buffer will be lost.
+    pub async fn into_immutable(self) -> Immutable<B> {
+        Immutable::new_in_pool(
+            self.blob,
+            self.buffer.read().await.1,
+            self.id,
+            self.pool_ref,
+        )
     }
 
     /// Clones and returns the underlying blob.
