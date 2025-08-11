@@ -5,15 +5,16 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_macros::select;
 use commonware_runtime::{tokio as tokio_runtime, Listener, Metrics as _, Runner, RwLock};
-use commonware_storage::{adb::sync::Target, mmr::hasher::Standard};
+use commonware_storage::{
+    adb::{self, sync::Target},
+    mmr::{hasher::Standard, verification::Proof},
+};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    any::{create_config, create_test_operations, Database, Operation},
+    any::{self},
     crate_version,
-    immutable::{
-        create_config as create_imm_config, create_test_operations as create_imm_test_operations,
-        Database as ImmDatabase, Operation as ImmOperation,
-    },
+    databases::DatabaseType,
+    immutable::{self},
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
 };
@@ -22,6 +23,7 @@ use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
+    future::Future,
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
     time::{Duration, SystemTime},
@@ -36,7 +38,14 @@ const RESPONSE_BUFFER_SIZE: usize = 64;
 
 /// Helper trait for databases that can be synced.
 trait Syncable {
-    type Operation: Clone;
+    type Operation: Clone
+        + commonware_codec::Read<Cfg = ()>
+        + commonware_codec::Write
+        + commonware_codec::EncodeSize
+        + commonware_codec::Encode
+        + Send
+        + Sync
+        + 'static;
 
     /// Create test operations with the given count and seed.
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation>;
@@ -60,28 +69,25 @@ trait Syncable {
     fn lower_bound_ops(&self) -> u64;
 
     /// Get historical proof and operations.
-    async fn historical_proof(
+    fn historical_proof(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: u64,
-    ) -> Result<
-        (
-            commonware_storage::mmr::verification::Proof<Key>,
-            Vec<Self::Operation>,
-        ),
-        commonware_storage::adb::Error,
-    >;
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send;
+
+    /// Get the database type name for logging.
+    fn database_name() -> &'static str;
 }
 
-impl<E> Syncable for Database<E>
+impl<E> Syncable for any::Database<E>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
-    type Operation = Operation;
+    type Operation = any::Operation;
 
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
-        create_test_operations(count, seed)
+        any::create_test_operations(count, seed)
     }
 
     async fn add_operations(
@@ -90,13 +96,13 @@ where
     ) -> Result<(), commonware_storage::adb::Error> {
         for operation in operations {
             match operation {
-                Operation::Update(key, value) => {
+                any::Operation::Update(key, value) => {
                     database.update(key, value).await?;
                 }
-                Operation::Delete(key) => {
+                any::Operation::Delete(key) => {
                     database.delete(key).await?;
                 }
-                Operation::CommitFloor(_) => {
+                any::Operation::CommitFloor(_) => {
                     database.commit().await?;
                 }
             }
@@ -120,30 +126,36 @@ where
         self.inactivity_floor_loc()
     }
 
-    async fn historical_proof(
+    fn historical_proof(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: u64,
-    ) -> Result<
-        (
-            commonware_storage::mmr::verification::Proof<Key>,
-            Vec<Self::Operation>,
-        ),
-        commonware_storage::adb::Error,
-    > {
-        self.historical_proof(size, start_loc, max_ops).await
+    ) -> impl std::future::Future<
+        Output = Result<
+            (
+                commonware_storage::mmr::verification::Proof<Key>,
+                Vec<Self::Operation>,
+            ),
+            commonware_storage::adb::Error,
+        >,
+    > + Send {
+        self.historical_proof(size, start_loc, max_ops)
+    }
+
+    fn database_name() -> &'static str {
+        "Any"
     }
 }
 
-impl<E> Syncable for ImmDatabase<E>
+impl<E> Syncable for immutable::Database<E>
 where
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
 {
-    type Operation = ImmOperation;
+    type Operation = immutable::Operation;
 
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
-        create_imm_test_operations(count, seed)
+        immutable::create_test_operations(count, seed)
     }
 
     async fn add_operations(
@@ -152,10 +164,10 @@ where
     ) -> Result<(), commonware_storage::adb::Error> {
         for operation in operations {
             match operation {
-                ImmOperation::Set(key, value) => {
+                immutable::Operation::Set(key, value) => {
                     database.set(key, value).await?;
                 }
-                ImmOperation::Commit() => {
+                immutable::Operation::Commit() => {
                     database.commit().await?;
                 }
                 _ => {}
@@ -180,50 +192,25 @@ where
         self.oldest_retained_loc().unwrap_or(0)
     }
 
-    async fn historical_proof(
+    fn historical_proof(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: u64,
-    ) -> Result<
-        (
-            commonware_storage::mmr::verification::Proof<Key>,
-            Vec<Self::Operation>,
-        ),
-        commonware_storage::adb::Error,
-    > {
-        self.historical_proof(size, start_loc, max_ops).await
+    ) -> impl std::future::Future<
+        Output = Result<
+            (
+                commonware_storage::mmr::verification::Proof<Key>,
+                Vec<Self::Operation>,
+            ),
+            commonware_storage::adb::Error,
+        >,
+    > + Send {
+        self.historical_proof(size, start_loc, max_ops)
     }
-}
 
-/// Database type selection.
-#[derive(Debug, Clone, Copy)]
-enum DatabaseType {
-    Any,
-    Immutable,
-}
-
-impl std::str::FromStr for DatabaseType {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "any" => Ok(DatabaseType::Any),
-            "immutable" => Ok(DatabaseType::Immutable),
-            _ => Err(format!(
-                "Invalid database type: '{}'. Must be 'any' or 'immutable'",
-                s
-            )),
-        }
-    }
-}
-
-impl DatabaseType {
-    fn as_str(&self) -> &'static str {
-        match self {
-            DatabaseType::Any => "any",
-            DatabaseType::Immutable => "immutable",
-        }
+    fn database_name() -> &'static str {
+        "Immutable"
     }
 }
 
@@ -477,15 +464,16 @@ where
     }
 }
 
-/// Handle a client connection with concurrent request processing for Any database.
-async fn handle_client<E>(
+/// Handle a client connection with concurrent request processing.
+async fn handle_client<DB, E>(
     context: E,
-    state: Arc<State<Database<E>>>,
+    state: Arc<State<DB>>,
     mut sink: commonware_runtime::SinkOf<E>,
     mut stream: commonware_runtime::StreamOf<E>,
     client_addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
+    DB: Syncable + Send + Sync + 'static,
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
         + commonware_runtime::Metrics
@@ -496,14 +484,14 @@ where
 
     // Wait until we receive a message from the client or we have a response to send.
     let (response_sender, mut response_receiver) =
-        mpsc::channel::<wire::Message<Operation, Key>>(RESPONSE_BUFFER_SIZE);
+        mpsc::channel::<wire::Message<DB::Operation, Key>>(RESPONSE_BUFFER_SIZE);
     loop {
         select! {
             incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
                 match incoming {
                     Ok(message_data) => {
                         // Parse the message.
-                        let message: wire::Message<Operation, Key> = match wire::Message::decode(&message_data[..]) {
+                        let message: wire::Message<DB::Operation, Key> = match wire::Message::decode(&message_data[..]) {
                             Ok(msg) => msg,
                             Err(e) => {
                                 warn!(client_addr = %client_addr, error = %e, "failed to parse message");
@@ -518,81 +506,7 @@ where
                             let state = state.clone();
                             let mut response_sender = response_sender.clone();
                             move |_| async move {
-                                let response = handle_message::<Database<E>>(&state, message).await;
-                                if let Err(e) = response_sender.send(response).await {
-                                    warn!(client_addr = %client_addr, error = %e, "failed to send response to main loop");
-                                }
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        info!(client_addr = %client_addr, error = %e, "recv failed (client likely disconnected)");
-                        state.error_counter.inc();
-                        break Ok(());
-                    }
-                }
-            },
-
-            outgoing = response_receiver.next() => {
-                if let Some(response) = outgoing {
-                    // We have a response to send to the client.
-                    let response_data = response.encode().to_vec();
-                    if let Err(e) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
-                        info!(client_addr = %client_addr, error = %e, "send failed (client likely disconnected)");
-                        state.error_counter.inc();
-                        break Ok(());
-                    }
-                } else {
-                    // Channel closed
-                    break Ok(());
-                }
-            }
-        }
-    }
-}
-
-/// Handle a client connection with concurrent request processing for Immutable database.
-async fn handle_imm_client<E>(
-    context: E,
-    state: Arc<State<ImmDatabase<E>>>,
-    mut sink: commonware_runtime::SinkOf<E>,
-    mut stream: commonware_runtime::StreamOf<E>,
-    client_addr: SocketAddr,
-) -> Result<(), Box<dyn std::error::Error>>
-where
-    E: commonware_runtime::Storage
-        + commonware_runtime::Clock
-        + commonware_runtime::Metrics
-        + commonware_runtime::Network
-        + commonware_runtime::Spawner,
-{
-    info!(client_addr = %client_addr, "Immutable client connected");
-
-    // Wait until we receive a message from the client or we have a response to send.
-    let (response_sender, mut response_receiver) =
-        mpsc::channel::<wire::Message<ImmOperation, Key>>(RESPONSE_BUFFER_SIZE);
-    loop {
-        select! {
-            incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
-                match incoming {
-                    Ok(message_data) => {
-                        // Parse the message.
-                        let message: wire::Message<ImmOperation, Key> = match wire::Message::decode(&message_data[..]) {
-                            Ok(msg) => msg,
-                            Err(e) => {
-                                warn!(client_addr = %client_addr, error = %e, "failed to parse message");
-                                state.error_counter.inc();
-                                continue;
-                            }
-                        };
-
-                        // Start a new task to handle the message.
-                        // The response will be sent on `response_sender`.
-                        context.with_label("request-handler").spawn({
-                            let state = state.clone();
-                            let mut response_sender = response_sender.clone();
-                            move |_| async move {
-                                let response = handle_message::<ImmDatabase<E>>(&state, message).await;
+                                let response = handle_message::<DB>(&state, message).await;
                                 if let Err(e) = response_sender.send(response).await {
                                     warn!(client_addr = %client_addr, error = %e, "failed to send response to main loop");
                                 }
@@ -667,23 +581,25 @@ where
     Ok(())
 }
 
-/// Run the Any database server.
-async fn run_any<E>(mut context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+/// Run a generic server with the given database.
+async fn run_server<DB, E>(
+    mut context: E,
+    config: Config,
+    mut database: DB,
+) -> Result<(), Box<dyn std::error::Error>>
 where
+    DB: Syncable + Send + Sync + 'static,
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
         + commonware_runtime::Metrics
         + commonware_runtime::Network
         + commonware_runtime::Spawner
-        + rand::RngCore,
+        + rand::RngCore
+        + Clone,
 {
-    info!("starting Any database server");
+    info!("starting {} database server", DB::database_name());
 
-    // Create and initialize database
-    let db_config = create_config();
-    let mut database = Database::init(context.with_label("database"), db_config).await?;
-
-    initialize_database(&mut database, &config, &mut context, "Any").await?;
+    initialize_database(&mut database, &config, &mut context, DB::database_name()).await?;
 
     // Create listener to accept connections
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
@@ -692,7 +608,8 @@ where
         addr = %addr,
         op_interval = ?config.op_interval,
         ops_per_interval = config.ops_per_interval,
-        "Any server listening and continuously adding operations"
+        "{} server listening and continuously adding operations",
+        DB::database_name()
     );
 
     let state = Arc::new(State::new(context.with_label("server"), database));
@@ -713,7 +630,7 @@ where
                         let context = context.clone();
                         context.with_label("client").spawn(move|context|async move {
                             if let Err(e) =
-                                handle_client(context,state.clone(), sink, stream, client_addr).await
+                                handle_client::<DB, _>(context, state.clone(), sink, stream, client_addr).await
                             {
                                 error!(client_addr = %client_addr, error = %e, "❌ error handling client");
                             }
@@ -728,65 +645,40 @@ where
     }
 }
 
-/// Run the Immutable database server.
-async fn run_immutable<E>(mut context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+/// Run the Any database server.
+async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
         + commonware_runtime::Metrics
         + commonware_runtime::Network
         + commonware_runtime::Spawner
-        + rand::RngCore,
+        + rand::RngCore
+        + Clone,
 {
-    info!("starting Immutable database server");
-
     // Create and initialize database
-    let db_config = create_imm_config();
-    let mut database = ImmDatabase::init(context.with_label("database"), db_config).await?;
+    let db_config = any::create_config();
+    let database = any::Database::init(context.with_label("database"), db_config).await?;
 
-    initialize_database(&mut database, &config, &mut context, "Immutable").await?;
+    run_server(context, config, database).await
+}
 
-    // Create listener to accept connections
-    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
-    let mut listener = context.with_label("listener").bind(addr).await?;
-    info!(
-        addr = %addr,
-        op_interval = ?config.op_interval,
-        ops_per_interval = config.ops_per_interval,
-        "Immutable server listening and continuously adding operations"
-    );
+/// Run the Immutable database server.
+async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: commonware_runtime::Storage
+        + commonware_runtime::Clock
+        + commonware_runtime::Metrics
+        + commonware_runtime::Network
+        + commonware_runtime::Spawner
+        + rand::RngCore
+        + Clone,
+{
+    // Create and initialize database
+    let db_config = immutable::create_config();
+    let database = immutable::Database::init(context.with_label("database"), db_config).await?;
 
-    let state = Arc::new(State::new(context.with_label("server"), database));
-    let mut next_op_time = context.current() + config.op_interval;
-    loop {
-        select! {
-            _ = context.sleep_until(next_op_time) => {
-                // Add operations to the database
-                if let Err(e) = maybe_add_operations(&state, &mut context, &config).await {
-                    warn!(error = %e, "failed to add additional operations");
-                }
-                next_op_time = context.current() + config.op_interval;
-            },
-            client_result = listener.accept() => {
-                match client_result {
-                    Ok((client_addr, sink, stream)) => {
-                        let state = state.clone();
-                        let context = context.clone();
-                        context.with_label("client").spawn(move|context|async move {
-                            if let Err(e) =
-                                handle_imm_client(context,state.clone(), sink, stream, client_addr).await
-                            {
-                                error!(client_addr = %client_addr, error = %e, "❌ error handling client");
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        error!(error = %e, "❌ failed to accept client");
-                    }
-                }
-            }
-        }
-    }
+    run_server(context, config, database).await
 }
 
 /// Parse command line arguments and return configuration.

@@ -9,6 +9,7 @@ use commonware_storage::adb::sync::{self, engine::EngineConfig, Target};
 use commonware_sync::{
     any::{create_config, Database as AnyDb, Operation as AnyOp},
     crate_version,
+    databases::DatabaseType,
     immutable::{create_config as create_imm_config, Database as ImmDb, Operation as ImmOp},
     net::Resolver,
     Digest, Error, Key,
@@ -35,6 +36,8 @@ const UPDATE_CHANNEL_SIZE: usize = 16;
 /// Client configuration.
 #[derive(Debug)]
 struct Config {
+    /// Database type to use.
+    database_type: DatabaseType,
     /// Server address to connect to.
     server: SocketAddr,
     /// Batch size for fetching operations.
@@ -51,11 +54,12 @@ struct Config {
     max_outstanding_requests: usize,
 }
 
-/// Periodically request target updates from server and send them to sync client on `update_sender`.
+/// Every `interval_duration`, use `resolver` to request an updated sync target and send it on
+/// `update_tx`.
 async fn target_update_task<E, Op, D>(
     context: E,
     resolver: Resolver<Op, D>,
-    update_sender: mpsc::Sender<Target<D>>,
+    update_tx: mpsc::Sender<Target<D>>,
     interval_duration: Duration,
     initial_target: Target<D>,
 ) -> Result<(), Error>
@@ -76,7 +80,7 @@ where
         match resolver.get_sync_target().await {
             Ok(new_target) => {
                 if new_target.root != current_target.root {
-                    match update_sender.clone().try_send(new_target.clone()) {
+                    match update_tx.clone().try_send(new_target.clone()) {
                         Ok(()) => {
                             info!(old_target = ?current_target, new_target = ?new_target, "target updated");
                             current_target = new_target;
@@ -239,7 +243,7 @@ where
     }
 }
 
-fn main() {
+fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
     // Parse command line arguments
     let matches = Command::new("Sync Client")
         .version(crate_version())
@@ -309,66 +313,76 @@ fn main() {
         )
         .get_matches();
 
-    let config = Config {
-        server: matches
-            .get_one::<String>("server")
+    let database_type = matches
+        .get_one::<String>("db")
+        .unwrap()
+        .parse::<DatabaseType>()
+        .map_err(|e| format!("Invalid database type: {e}"))?;
+
+    let server = matches
+        .get_one::<String>("server")
+        .unwrap()
+        .parse()
+        .map_err(|e| format!("Invalid server address: {e}"))?;
+
+    let batch_size = matches
+        .get_one::<String>("batch-size")
+        .unwrap()
+        .parse()
+        .map_err(|e| format!("Invalid batch size: {e}"))?;
+
+    let storage_dir = {
+        let storage_dir = matches
+            .get_one::<String>("storage-dir")
             .unwrap()
-            .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid server address: {e}");
-                std::process::exit(1);
-            }),
-        batch_size: matches
-            .get_one::<String>("batch-size")
-            .unwrap()
-            .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid batch size: {e}");
-                std::process::exit(1);
-            }),
-        storage_dir: {
-            let storage_dir = matches
-                .get_one::<String>("storage-dir")
-                .unwrap()
-                .to_string();
-            // Only add suffix if using the default value
-            if storage_dir == DEFAULT_CLIENT_DIR_PREFIX {
-                let suffix: u64 = rand::thread_rng().gen();
-                format!("{storage_dir}-{suffix}")
-            } else {
-                storage_dir
-            }
-        },
-        metrics_port: matches
-            .get_one::<String>("metrics-port")
-            .unwrap()
-            .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid metrics port: {e}");
-                std::process::exit(1);
-            }),
-        target_update_interval: parse_duration(
-            matches.get_one::<String>("target-update-interval").unwrap(),
-        )
-        .unwrap_or_else(|e| {
-            eprintln!("❌ Invalid target update interval: {e}");
-            std::process::exit(1);
-        }),
-        sync_interval: parse_duration(matches.get_one::<String>("sync-interval").unwrap())
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid sync interval: {e}");
-                std::process::exit(1);
-            }),
-        max_outstanding_requests: matches
-            .get_one::<String>("max-outstanding-requests")
-            .unwrap()
-            .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid max outstanding requests: {e}");
-                std::process::exit(1);
-            }),
+            .to_string();
+        // Only add suffix if using the default value
+        if storage_dir == DEFAULT_CLIENT_DIR_PREFIX {
+            let suffix: u64 = rand::thread_rng().gen();
+            format!("{storage_dir}-{suffix}")
+        } else {
+            storage_dir
+        }
     };
+
+    let metrics_port = matches
+        .get_one::<String>("metrics-port")
+        .unwrap()
+        .parse()
+        .map_err(|e| format!("Invalid metrics port: {e}"))?;
+
+    let target_update_interval =
+        parse_duration(matches.get_one::<String>("target-update-interval").unwrap())
+            .map_err(|e| format!("Invalid target update interval: {e}"))?;
+
+    let sync_interval = parse_duration(matches.get_one::<String>("sync-interval").unwrap())
+        .map_err(|e| format!("Invalid sync interval: {e}"))?;
+
+    let max_outstanding_requests = matches
+        .get_one::<String>("max-outstanding-requests")
+        .unwrap()
+        .parse()
+        .map_err(|e| format!("Invalid max outstanding requests: {e}"))?;
+
+    Ok(Config {
+        database_type,
+        server,
+        batch_size,
+        storage_dir,
+        metrics_port,
+        target_update_interval,
+        sync_interval,
+        max_outstanding_requests,
+    })
+}
+
+fn main() {
+    let config = parse_config().unwrap_or_else(|e| {
+        eprintln!("❌ Configuration error: {e}");
+        std::process::exit(1);
+    });
     info!(
+        database_type = %config.database_type.as_str(),
         server = %config.server,
         batch_size = config.batch_size,
         storage_dir = %config.storage_dir,
@@ -393,12 +407,10 @@ fn main() {
             None,
         );
 
-        // Dispatch based on db flag
-        let db_choice = matches.get_one::<String>("db").unwrap().as_str();
-        let result = match db_choice {
-            "any" => run_any(context.with_label("sync"), config).await,
-            "immutable" => run_immutable(context.with_label("sync"), config).await,
-            other => Err(format!("unsupported --db value: {other}")),
+        // Dispatch based on database type
+        let result = match config.database_type {
+            DatabaseType::Any => run_any(context.with_label("sync"), config).await,
+            DatabaseType::Immutable => run_immutable(context.with_label("sync"), config).await,
         };
 
         if let Err(e) = result {

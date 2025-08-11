@@ -19,7 +19,9 @@ pub struct Request<M: WireMessage> {
     pub response_tx: oneshot::Sender<Result<M, Error>>,
 }
 
-/// Run the I/O loop for a wire message enum `M`.
+/// Run the I/O loop which:
+/// - Receives requests from the request channel and sends them to the sink.
+/// - Receives responses from the stream and forwards them to their callback channel.
 async fn run<Si, St, M>(
     mut sink: Si,
     mut stream: St,
