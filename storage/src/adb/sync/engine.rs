@@ -459,7 +459,8 @@ where
                 self.config,
                 self.journal,
                 self.pinned_nodes,
-                self.target.clone(),
+                self.target.lower_bound_ops,
+                self.target.upper_bound_ops,
                 self.apply_batch_size,
             )
             .await

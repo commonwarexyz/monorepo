@@ -119,20 +119,36 @@ where
         Standard::<H>::new()
     }
 
+    /// Returns a [super::Immutable] initialized data collected in the sync process.
+    ///
+    /// # Behavior
+    ///
+    /// This method handles different initialization scenarios based on existing data:
+    /// - If the MMR journal is empty or the last item is before `lower_bound`, it creates a
+    ///   fresh MMR from the provided `pinned_nodes`
+    /// - If the MMR journal has data but is incomplete (< `upper_bound`), missing operations
+    ///   from the log are applied to bring it up to the target state
+    /// - If the MMR journal has data beyond the `upper_bound`, it is rewound to match the sync target
+    ///
+    /// # Returns
+    ///
+    /// A [super::Immutable] db populated with the state from `lower_bound` to `upper_bound`, inclusive.
+    /// The pruning boundary is set to `lower_bound`.
     async fn from_sync_result(
         context: Self::Context,
         db_config: Self::Config,
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        target: sync::Target<Self::Digest>,
+        lower_bound: u64,
+        upper_bound: u64,
         apply_batch_size: usize,
     ) -> Result<Self, Self::Error> {
         let journal = journal.into_inner();
         let sync_config = Config {
             db_config,
             log: journal,
-            lower_bound: target.lower_bound_ops,
-            upper_bound: target.upper_bound_ops,
+            lower_bound,
+            upper_bound,
             pinned_nodes,
             apply_batch_size,
         };

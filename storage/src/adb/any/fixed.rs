@@ -8,7 +8,7 @@
 //! and cannot be updated after.
 
 use crate::{
-    adb::{any::sync, Error},
+    adb::Error,
     index::Index,
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
@@ -158,89 +158,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator
             pruning_delay,
         };
 
-        Ok(db)
-    }
-
-    /// Returns an [Any] initialized from sync data in `cfg` for use in state sync.
-    ///
-    /// # Behavior
-    ///
-    /// This method handles different initialization scenarios based on existing data:
-    /// - If the MMR journal is empty or the last item is before `lower_bound`, it creates a
-    ///   fresh MMR from the provided `pinned_nodes`
-    /// - If the MMR journal has data but is incomplete (< `upper_bound`), missing operations
-    ///   from the log are applied to bring it up to the target state
-    /// - If the MMR journal has data beyond the `upper_bound`, it is rewound to match the sync target
-    ///
-    /// # Returns
-    ///
-    /// An [Any] db populated with the state from `cfg.lower_bound` to `cfg.upper_bound`, inclusive.
-    /// The pruning boundary is set to `cfg.lower_bound`.
-    pub(super) async fn init_synced(
-        context: E,
-        cfg: sync::SyncConfig<E, K, V, T, H::Digest>,
-    ) -> Result<Self, Error> {
-        let mut mmr = Mmr::init_sync(
-            context.with_label("mmr"),
-            crate::mmr::journaled::SyncConfig {
-                config: crate::mmr::journaled::Config {
-                    journal_partition: cfg.db_config.mmr_journal_partition,
-                    metadata_partition: cfg.db_config.mmr_metadata_partition,
-                    items_per_blob: cfg.db_config.mmr_items_per_blob,
-                    write_buffer: cfg.db_config.mmr_write_buffer,
-                    thread_pool: cfg.db_config.thread_pool.clone(),
-                    buffer_pool: cfg.db_config.buffer_pool.clone(),
-                },
-                lower_bound: leaf_num_to_pos(cfg.lower_bound),
-                // The last node of an MMR with `cfg.upper_bound` + 1 operations is at the position
-                // right before where the next leaf goes.
-                upper_bound: leaf_num_to_pos(cfg.upper_bound + 1) - 1,
-                pinned_nodes: cfg.pinned_nodes,
-            },
-        )
-        .await
-        .map_err(Error::Mmr)?;
-
-        // Convert MMR size to number of operations.
-        let Some(mmr_ops) = leaf_pos_to_num(mmr.size()) else {
-            return Err(Error::Mmr(crate::mmr::Error::InvalidSize(mmr.size())));
-        };
-
-        // Apply the missing operations from the log to the MMR.
-        let mut hasher = Standard::<H>::new();
-        let log_size = cfg.log.size().await?;
-        for i in mmr_ops..log_size {
-            let op = cfg.log.read(i).await?;
-            mmr.add_batched(&mut hasher, &op.encode()).await?;
-            if i % cfg.apply_batch_size as u64 == 0 {
-                // Periodically sync the MMR to avoid memory bloat.
-                // Since the first value i takes may not be a multiple of `cfg.apply_batch_size`,
-                // the first sync may occur before `apply_batch_size` operations are applied.
-                // This is fine.
-                mmr.sync(&mut hasher).await?;
-            }
-        }
-
-        // Build the snapshot from the log.
-        let mut snapshot = Index::init(
-            context.with_label("snapshot"),
-            cfg.db_config.translator.clone(),
-        );
-        let inactivity_floor_loc = Any::<E, K, V, H, T>::build_snapshot_from_log::<
-            0, /* UNUSED_N */
-        >(cfg.lower_bound, &cfg.log, &mut snapshot, None)
-        .await?;
-
-        let mut db = Any {
-            mmr,
-            log: cfg.log,
-            snapshot,
-            inactivity_floor_loc,
-            uncommitted_ops: 0,
-            hasher: Standard::<H>::new(),
-            pruning_delay: cfg.db_config.pruning_delay,
-        };
-        db.sync().await?;
         Ok(db)
     }
 
@@ -802,7 +719,7 @@ where
 pub(super) mod test {
     use super::*;
     use crate::{
-        adb::any::sync::SyncConfig,
+        adb::{self},
         mmr::{hasher::Standard, mem::Mmr as MemMmr},
         translator::TwoCap,
     };
@@ -1449,18 +1366,19 @@ pub(super) mod test {
             )
             .await
             .unwrap();
-            let sync_config: SyncConfig<Context, Digest, Digest, TwoCap, Digest> = SyncConfig {
-                db_config: any_db_config("sync_basic"),
-                lower_bound: 0,
-                upper_bound: 0,
-                pinned_nodes: None,
-                log,
-                apply_batch_size: 1024,
-            };
+
             let mut synced_db: Any<_, Digest, Digest, Sha256, TwoCap> =
-                Any::init_synced(context.clone(), sync_config)
-                    .await
-                    .unwrap();
+                <Any<_, Digest, Digest, Sha256, TwoCap> as adb::sync::Database>::from_sync_result(
+                    context.clone(),
+                    any_db_config("sync_basic"),
+                    log,
+                    None,
+                    0,
+                    0,
+                    1024,
+                )
+                .await
+                .unwrap();
 
             // Verify database state
             assert_eq!(synced_db.op_count(), 0);
@@ -1535,19 +1453,18 @@ pub(super) mod test {
                 log.append(op).await.unwrap();
             }
 
-            let db = Any::init_synced(
-                context.clone(),
-                SyncConfig {
-                    db_config: create_test_config(context.next_u64()),
+            let db =
+                <Any<_, Digest, Digest, Sha256, TwoCap> as adb::sync::Database>::from_sync_result(
+                    context.clone(),
+                    any_db_config("sync_basic"),
                     log,
-                    lower_bound: lower_bound_ops,
-                    upper_bound: upper_bound_ops,
-                    pinned_nodes: Some(pinned_nodes),
-                    apply_batch_size: 1024,
-                },
-            )
-            .await
-            .unwrap();
+                    Some(pinned_nodes),
+                    lower_bound_ops,
+                    upper_bound_ops,
+                    1024,
+                )
+                .await
+                .unwrap();
 
             // Verify database state
             assert_eq!(db.op_count(), upper_bound_ops + 1);
@@ -1637,16 +1554,14 @@ pub(super) mod test {
                     .map(|node| node.as_ref().unwrap().unwrap())
                     .collect::<Vec<_>>();
 
-                let db: AnyTest = Any::init_synced(
+                let db: AnyTest = <Any<_, Digest, Digest, Sha256, TwoCap> as adb::sync::Database>::from_sync_result(
                     context.clone(),
-                    SyncConfig {
-                        db_config: create_test_config(context.next_u64()),
-                        log,
-                        lower_bound,
-                        upper_bound,
-                        pinned_nodes: Some(pinned_nodes),
-                        apply_batch_size: 1024,
-                    },
+                    create_test_config(context.next_u64()),
+                    log,
+                    Some(pinned_nodes),
+                    lower_bound,
+                    upper_bound,
+                    1024,
                 )
                 .await
                 .unwrap();
@@ -1737,19 +1652,18 @@ pub(super) mod test {
             let AnyTest { mmr, log, .. } = target_db;
 
             // Re-open `sync_db`
-            let sync_db = Any::init_synced(
-                context.clone(),
-                SyncConfig {
-                    db_config: sync_db_config,
+            let sync_db =
+                <Any<_, Digest, Digest, Sha256, TwoCap> as adb::sync::Database>::from_sync_result(
+                    context.clone(),
+                    sync_db_config,
                     log,
-                    lower_bound: sync_lower_bound,
-                    upper_bound: sync_upper_bound,
-                    pinned_nodes: Some(pinned_nodes),
-                    apply_batch_size: 1024,
-                },
-            )
-            .await
-            .unwrap();
+                    Some(pinned_nodes),
+                    sync_lower_bound,
+                    sync_upper_bound,
+                    1024,
+                )
+                .await
+                .unwrap();
 
             // Verify database state
             assert_eq!(sync_db.op_count(), target_db_op_count);
@@ -1815,19 +1729,18 @@ pub(super) mod test {
             let mut hasher = Standard::<Sha256>::new();
             mmr.close(&mut hasher).await.unwrap();
 
-            let sync_db: AnyTest = Any::init_synced(
-                context.clone(),
-                SyncConfig {
+            let sync_db: AnyTest =
+                <Any<_, Digest, Digest, Sha256, TwoCap> as adb::sync::Database>::from_sync_result(
+                    context.clone(),
                     db_config,
                     log,
-                    lower_bound: sync_lower_bound,
-                    upper_bound: sync_upper_bound,
-                    pinned_nodes: None,
-                    apply_batch_size: 1024,
-                },
-            )
-            .await
-            .unwrap();
+                    None,
+                    sync_lower_bound,
+                    sync_upper_bound,
+                    1024,
+                )
+                .await
+                .unwrap();
 
             // Verify database state
             assert_eq!(sync_db.op_count(), target_db_op_count);

@@ -1,4 +1,4 @@
-use crate::adb::sync::{Journal, Target};
+use crate::adb::sync::Journal;
 use commonware_cryptography::Digest;
 use std::future::Future;
 
@@ -38,7 +38,8 @@ pub trait Database: Sized {
         config: Self::Config,
         journal: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        target: Target<Self::Digest>,
+        lower_bound: u64,
+        upper_bound: u64,
         apply_batch_size: usize,
     ) -> impl Future<Output = Result<Self, Self::Error>>;
 

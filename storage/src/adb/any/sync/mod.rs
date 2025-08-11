@@ -4,11 +4,16 @@ use crate::{
         any::fixed::{Any, Config},
         sync,
     },
+    index::Index,
     journal::fixed::{self, Journal},
-    mmr::hasher::Standard,
+    mmr::{
+        hasher::Standard,
+        iterator::{leaf_num_to_pos, leaf_pos_to_num},
+    },
     store::operation::Fixed,
     translator::Translator,
 };
+use commonware_codec::Encode as _;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -87,23 +92,72 @@ where
     async fn from_sync_result(
         context: Self::Context,
         db_config: Self::Config,
-        journal: Self::Journal,
+        log: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        target: sync::Target<Self::Digest>,
+        lower_bound: u64,
+        upper_bound: u64,
         apply_batch_size: usize,
     ) -> Result<Self, Self::Error> {
-        Any::init_synced(
-            context,
-            SyncConfig {
-                db_config,
-                log: journal,
-                lower_bound: target.lower_bound_ops,
-                upper_bound: target.upper_bound_ops,
+        let mut mmr = crate::mmr::journaled::Mmr::init_sync(
+            context.with_label("mmr"),
+            crate::mmr::journaled::SyncConfig {
+                config: crate::mmr::journaled::Config {
+                    journal_partition: db_config.mmr_journal_partition,
+                    metadata_partition: db_config.mmr_metadata_partition,
+                    items_per_blob: db_config.mmr_items_per_blob,
+                    write_buffer: db_config.mmr_write_buffer,
+                    thread_pool: db_config.thread_pool.clone(),
+                    buffer_pool: db_config.buffer_pool.clone(),
+                },
+                lower_bound: leaf_num_to_pos(lower_bound),
+                // The last node of an MMR with `upper_bound` + 1 operations is at the position
+                // right before where the next leaf goes.
+                upper_bound: leaf_num_to_pos(upper_bound + 1) - 1,
                 pinned_nodes,
-                apply_batch_size,
             },
         )
         .await
+        .map_err(Error::Mmr)?;
+
+        // Convert MMR size to number of operations.
+        let Some(mmr_ops) = leaf_pos_to_num(mmr.size()) else {
+            return Err(Error::Mmr(crate::mmr::Error::InvalidSize(mmr.size())));
+        };
+
+        // Apply the missing operations from the log to the MMR.
+        let mut hasher = Standard::<H>::new();
+        let log_size = log.size().await?;
+        for i in mmr_ops..log_size {
+            let op = log.read(i).await?;
+            mmr.add_batched(&mut hasher, &op.encode()).await?;
+            if i % apply_batch_size as u64 == 0 {
+                // Periodically sync the MMR to avoid memory bloat.
+                // Since the first value i takes may not be a multiple of `apply_batch_size`,
+                // the first sync may occur before `apply_batch_size` operations are applied.
+                // This is fine.
+                mmr.sync(&mut hasher).await?;
+            }
+        }
+
+        // Build the snapshot from the log.
+        let mut snapshot =
+            Index::init(context.with_label("snapshot"), db_config.translator.clone());
+        let inactivity_floor_loc = Any::<E, K, V, H, T>::build_snapshot_from_log::<
+            0, /* UNUSED_N */
+        >(lower_bound, &log, &mut snapshot, None)
+        .await?;
+
+        let mut db = Any {
+            mmr,
+            log,
+            snapshot,
+            inactivity_floor_loc,
+            uncommitted_ops: 0,
+            hasher: Standard::<H>::new(),
+            pruning_delay: db_config.pruning_delay,
+        };
+        db.sync().await?;
+        Ok(db)
     }
 
     fn root(&self) -> Self::Digest {
