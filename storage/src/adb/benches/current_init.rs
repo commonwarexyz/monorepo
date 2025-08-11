@@ -28,15 +28,15 @@ const PAGE_SIZE: usize = 16384;
 /// The number of pages to cache in the buffer pool.
 const PAGE_CACHE_SIZE: usize = 10_000;
 
-/// current_init is multithreaded, and will have different performance for different number of threads. 
-/// So we benchmark with 1 and 8 threads to compare singlethreaded and multithreaded performance.
+/// current_init is multithreaded, and will have different performance for different number of threads.
+/// So we benchmark with no thread pool and 8 threads to compare singlethreaded and multithreaded performance.
 const SINGLE_THREADED: usize = 1;
 const MULTI_THREADED: usize = 8;
 
 /// Chunk size for the current ADB bitmap - must be a power of 2 (as assumed in current::grafting_height()) and a multiple of digest size.
 const CHUNK_SIZE: usize = 32;
 
-fn current_cfg(pool: ThreadPool) -> CConfig<EightCap> {
+fn current_cfg(pool: Option<ThreadPool>) -> CConfig<EightCap> {
     CConfig::<EightCap> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
@@ -47,7 +47,7 @@ fn current_cfg(pool: ThreadPool) -> CConfig<EightCap> {
         log_write_buffer: 1024,
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
-        thread_pool: Some(pool),
+        thread_pool: pool,
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         pruning_delay: 10,
     }
@@ -62,7 +62,11 @@ fn gen_random_current(cfg: Config, num_elements: u64, num_operations: u64, threa
     let runner = Runner::new(cfg.clone());
     runner.start(|ctx| async move {
         info!("starting DB generation...");
-        let pool = create_pool(ctx.clone(), threads).unwrap();
+        let pool = if threads == 1 {
+            None
+        } else {
+            Some(create_pool(ctx.clone(), threads).unwrap())
+        };
         let current_cfg = current_cfg(pool);
         let mut db = Current::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
             .await
@@ -132,8 +136,11 @@ fn bench_current_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let pool =
-                                commonware_runtime::create_pool(ctx.clone(), threads).unwrap();
+                            let pool = if threads == 1 {
+                                None
+                            } else {
+                                Some(commonware_runtime::create_pool(ctx.clone(), threads).unwrap())
+                            };
                             let current_cfg = current_cfg(pool);
                             let start = Instant::now();
                             for _ in 0..iters {
@@ -152,7 +159,11 @@ fn bench_current_init(c: &mut Criterion) {
                 let runner = Runner::new(cfg.clone());
                 runner.start(|ctx| async move {
                     info!("cleaning up db...");
-                    let pool = commonware_runtime::create_pool(ctx.clone(), threads).unwrap();
+                    let pool = if threads == 1 {
+                        None
+                    } else {
+                        Some(commonware_runtime::create_pool(ctx.clone(), threads).unwrap())
+                    };
                     let current_cfg = current_cfg(pool);
                     // Clean up the database after the benchmark.
                     let db = CurrentDb::init(ctx.clone(), current_cfg.clone())
