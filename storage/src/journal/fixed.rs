@@ -59,7 +59,7 @@ use super::Error;
 use bytes::BufMut;
 use commonware_codec::{Codec, DecodeExt, FixedSize};
 use commonware_runtime::{
-    buffer::{Append, PoolRef, Read},
+    buffer::{Append, Immutable, PoolRef, Read},
     Blob, Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;
@@ -107,7 +107,7 @@ pub struct Journal<E: Storage + Metrics, A> {
     /// - Indices are consecutive and without gaps.
     /// - Contains only full blobs.
     /// - Never contains the most recent blob.
-    blobs: BTreeMap<u64, Append<E::Blob>>,
+    blobs: BTreeMap<u64, Immutable<E::Blob>>,
 
     /// The most recent blob.
     ///
@@ -219,14 +219,12 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             tracked.inc();
         }
 
-        // Wrap all blobs with Append wrappers.
-        // TODO(https://github.com/commonwarexyz/monorepo/issues/1219): Consider creating an
-        // Immutable wrapper which doesn't allocate a write buffer for these.
+        // Wrap historical blobs with Immutable wrappers.
         let blobs = try_join_all(blobs.into_iter().map(|(index, (blob, size))| {
             let pool = cfg.buffer_pool.clone();
             async move {
-                let blob = Append::new(blob, size, cfg.write_buffer, pool).await?;
-                Ok::<_, Error>((index, (blob, size)))
+                let blob = Immutable::new(blob, size, pool).await;
+                Ok::<_, Error>((index, blob))
             }
         }))
         .await?;
@@ -235,10 +233,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         Ok(Self {
             context,
             cfg,
-            blobs: blobs
-                .into_iter()
-                .map(|(index, (blob, _))| (index, blob))
-                .collect(),
+            blobs: blobs.into_iter().collect(),
             tail,
             tail_index,
             tracked,
@@ -490,7 +485,10 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
             // Move the old tail blob to the historical blobs map and set the new blob as the tail.
             let old_tail = std::mem::replace(&mut self.tail, next_blob);
-            assert!(self.blobs.insert(self.tail_index, old_tail).is_none());
+            assert!(self
+                .blobs
+                .insert(self.tail_index, old_tail.into_immutable().await)
+                .is_none());
             self.tail_index = next_blob_index;
         }
 
@@ -514,13 +512,19 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         }
         let rewind_to_offset = (size % self.cfg.items_per_blob) * Self::CHUNK_SIZE_U64;
 
-        // Remove blobs until we reach the rewind point.  Blobs must be removed in reverse order to
+        // Remove blobs until we reach the rewind point. Blobs must be removed in reverse order to
         // preserve consistency in the event of failures.
         while rewind_to_blob_index < self.tail_index {
-            let (blob_index, mut new_tail) = self.blobs.pop_last().unwrap();
+            let (blob_index, immutable_blob) = self.blobs.pop_last().unwrap();
             assert_eq!(blob_index, self.tail_index - 1);
-            std::mem::swap(&mut self.tail, &mut new_tail);
-            self.remove_blob(self.tail_index, new_tail).await?;
+
+            // Convert the immutable blob back to Append for use as the new tail.
+            let new_tail = immutable_blob.into_append(self.cfg.write_buffer).await?;
+
+            // Swap the old tail with the new tail and remove the old tail blob
+            // from storage.
+            let old_tail = std::mem::replace(&mut self.tail, new_tail);
+            self.remove_blob(self.tail_index, old_tail).await?;
             self.tail_index -= 1;
         }
 
@@ -550,16 +554,19 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
             return Err(Error::InvalidItem(item_pos));
         }
 
-        let blob = if blob_index == self.tail_index {
-            &self.tail
+        let offset = (item_pos % self.cfg.items_per_blob.get()) * Self::CHUNK_SIZE_U64;
+        let read = if blob_index == self.tail_index {
+            self.tail
+                .read_at(vec![0u8; Self::CHUNK_SIZE], offset)
+                .await?
         } else {
-            self.blobs
+            let blob = self
+                .blobs
                 .get(&blob_index)
-                .ok_or(Error::ItemPruned(item_pos))?
+                .ok_or(Error::ItemPruned(item_pos))?;
+            blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?
         };
 
-        let offset = (item_pos % self.cfg.items_per_blob.get()) * Self::CHUNK_SIZE_U64;
-        let read = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
         Self::verify_integrity(read.as_ref())
     }
 
@@ -686,7 +693,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     }
 
     /// Safely removes any previously tracked blob from underlying storage.
-    async fn remove_blob(&mut self, index: u64, blob: Append<E::Blob>) -> Result<(), Error> {
+    async fn remove_blob<B: Blob>(&mut self, index: u64, blob: B) -> Result<(), Error> {
         drop(blob);
         self.context
             .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
@@ -699,10 +706,6 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
 
     /// Syncs and closes all open sections.
     pub async fn close(self) -> Result<(), Error> {
-        for (i, blob) in self.blobs.into_iter() {
-            blob.sync().await?;
-            debug!(blob = i, "synced blob");
-        }
         self.tail.sync().await?;
         debug!(blob = self.tail_index, "synced tail");
 
