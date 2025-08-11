@@ -13,7 +13,7 @@ use commonware_sync::{
     any::{create_config, Database as AnyDb, Operation as AnyOp},
     crate_version,
     databases::DatabaseType,
-    immutable::{create_config as create_imm_config, Database as ImmDb, Operation as ImmOp},
+    immutable,
     net::Resolver,
     Digest, Error, Key,
 };
@@ -173,11 +173,12 @@ where
     info!("starting Immutable database sync process");
     let mut iteration = 1u32;
     loop {
-        let resolver = Resolver::<ImmOp, Key>::connect(context.clone(), config.server).await?;
+        let resolver =
+            Resolver::<immutable::Operation, Key>::connect(context.clone(), config.server).await?;
 
         let initial_target = resolver.get_sync_target().await?;
 
-        let db_config = create_imm_config();
+        let db_config = immutable::create_config();
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {
@@ -195,18 +196,19 @@ where
             })
         };
 
-        let sync_config = EngineConfig::<ImmDb<_>, Resolver<ImmOp, Key>> {
-            context: context.clone(),
-            db_config,
-            fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
-            target: initial_target,
-            resolver,
-            apply_batch_size: 1024,
-            max_outstanding_requests: config.max_outstanding_requests,
-            update_receiver: Some(update_receiver),
-        };
+        let sync_config =
+            EngineConfig::<immutable::Database<_>, Resolver<immutable::Operation, Key>> {
+                context: context.clone(),
+                db_config,
+                fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
+                target: initial_target,
+                resolver,
+                apply_batch_size: 1024,
+                max_outstanding_requests: config.max_outstanding_requests,
+                update_receiver: Some(update_receiver),
+            };
 
-        let database: ImmDb<_> = sync::sync(sync_config).await?;
+        let database: immutable::Database<_> = sync::sync(sync_config).await?;
         let got_root = {
             let mut hasher = commonware_storage::mmr::hasher::Standard::new();
             database.root(&mut hasher)

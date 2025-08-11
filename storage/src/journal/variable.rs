@@ -318,36 +318,95 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             }
         }
 
-        // Prune operations beyond upper_bound in the upper_section
-        if journal.blobs.contains_key(&upper_section) {
-            let upper_section_max_operation = (upper_section + 1) * items_per_section - 1;
+        // Remove any operations beyond upper_bound
+        Self::truncate_upper_section(&mut journal, upper_bound, items_per_section).await?;
 
-            if upper_bound < upper_section_max_operation {
-                debug!(
-                    upper_section,
-                    upper_bound,
-                    upper_section_max_operation,
-                    "pruning operations beyond upper_bound in upper_section"
-                );
+        Ok(journal)
+    }
 
-                // Calculate the offset within the section that corresponds to upper_bound
-                let upper_bound_offset_in_section = (upper_bound % items_per_section) as u32;
+    /// Remove operations beyond the `upper_bound` location (inclusive).
+    /// Assumes each section contains `items_per_section` operations.
+    async fn truncate_upper_section(
+        journal: &mut Journal<E, V>,
+        upper_bound: u64,
+        items_per_section: u64,
+    ) -> Result<(), Error> {
+        // Find which section contains the upper_bound operation
+        let upper_section = upper_bound / items_per_section;
+        let Some(blob) = journal.blobs.get(&upper_section) else {
+            return Ok(()); // Section doesn't exist, nothing to truncate
+        };
 
-                // We want to keep operations from offset 0 up to upper_bound_offset_in_section (inclusive)
-                // So we need (upper_bound_offset_in_section + 1) operations
-                let operations_to_keep = upper_bound_offset_in_section + 1;
+        // Calculate the logical operation range for this section
+        let section_start = upper_section * items_per_section;
+        let section_end = section_start + items_per_section - 1;
 
-                // Convert operations count to byte size using the same logic as rewind_to_offset
-                let target_byte_size = operations_to_keep as u64 * ITEM_ALIGNMENT;
+        // If upper_bound is at the very end of the section, no truncation needed
+        if upper_bound >= section_end {
+            return Ok(());
+        }
 
-                // Rewind the upper section to keep only the required operations
-                journal
-                    .rewind_section(upper_section, target_byte_size)
-                    .await?;
+        // Calculate how many operations to keep (upper_bound is inclusive)
+        let operations_to_keep = (upper_bound - section_start + 1) as u32;
+        debug!(
+            upper_section,
+            upper_bound,
+            section_start,
+            section_end,
+            operations_to_keep,
+            "truncating section to remove operations beyond upper_bound"
+        );
+
+        // Find where to rewind to (after the last operation we want to keep)
+        let target_byte_size = Self::compute_offset(
+            blob,
+            &journal.cfg.codec_config,
+            journal.cfg.compression.is_some(),
+            operations_to_keep,
+        )
+        .await?;
+
+        // Cut the section at that precise boundary
+        journal
+            .rewind_section(upper_section, target_byte_size)
+            .await?;
+
+        debug!(
+            upper_section,
+            operations_to_keep, target_byte_size, "section truncated to exact byte boundary"
+        );
+
+        Ok(())
+    }
+
+    /// Return the byte offset of the next element after `operations_count` elements of `blob`.
+    async fn compute_offset(
+        blob: &Write<E::Blob>,
+        codec_config: &V::Cfg,
+        compressed: bool,
+        operations_count: u32,
+    ) -> Result<u64, Error> {
+        if operations_count == 0 {
+            return Ok(0);
+        }
+
+        let mut current_offset = 0u32;
+
+        // Read through operations one by one to find where each one ends
+        for _ in 0..operations_count {
+            match Self::read(compressed, codec_config, blob, current_offset).await {
+                Ok((next_slot, _item_len, _operation)) => {
+                    current_offset = next_slot;
+                }
+                Err(Error::Runtime(commonware_runtime::Error::BlobInsufficientLength)) => {
+                    // This sections has fewer than `operations_count` operations.
+                    break;
+                }
+                Err(e) => return Err(e),
             }
         }
 
-        Ok(journal)
+        Ok((current_offset as u64) * ITEM_ALIGNMENT)
     }
 
     /// Ensures that a pruned section is not accessed.
@@ -915,7 +974,7 @@ mod tests {
     use commonware_cryptography::hash;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Error as RError, Runner, Storage};
-    use commonware_utils::{NZUsize, StableBuf};
+    use commonware_utils::{NZUsize, StableBuf, NZU64};
     use futures::{pin_mut, StreamExt};
     use prometheus_client::registry::Metric;
 
@@ -2701,6 +2760,235 @@ mod tests {
             assert_eq!(journal.get(2, offset).await.unwrap(), Some(999));
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `compute_offset` correctly calculates byte boundaries for variable-sized operations.
+    #[test_traced]
+    fn test_compute_offset() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_compute_offset".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Create a journal and populate a section with 5 operations
+            let mut journal =
+                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to create journal");
+
+            let section = 0;
+            for i in 0..5 {
+                journal.append(section, i as u64).await.unwrap();
+            }
+            journal.sync(section).await.unwrap();
+
+            let blob = journal.blobs.get(&section).unwrap();
+
+            // Helper function to compute byte size for N operations
+            let compute_offset = |operations_count: u32| async move {
+                Journal::<deterministic::Context, u64>::compute_offset(
+                    blob,
+                    &journal.cfg.codec_config,
+                    journal.cfg.compression.is_some(),
+                    operations_count,
+                )
+                .await
+                .unwrap()
+            };
+
+            // Test various operation counts (each u64 operation takes 16 bytes when aligned)
+            assert_eq!(compute_offset(0).await, 0); // 0 operations = 0 bytes
+            assert_eq!(compute_offset(1).await, 16); // 1 operation = 16 bytes
+            assert_eq!(compute_offset(3).await, 48); // 3 operations = 48 bytes
+            assert_eq!(compute_offset(5).await, 80); // 5 operations = 80 bytes
+
+            // Test requesting more operations than available (should return size of all available)
+            assert_eq!(compute_offset(10).await, 80); // Still 80 bytes (capped at available)
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `truncate_upper_section` correctly removes operations beyond sync boundaries.
+    #[test_traced]
+    fn test_truncate_section_to_upper_bound() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_truncate_section".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+            };
+            let items_per_section = 5;
+
+            // Helper to create a fresh journal with test data
+            let create_journal = || async {
+                let mut journal =
+                    Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                        .await
+                        .expect("Failed to create journal");
+
+                // Add operations to sections 0, 1, 2
+                for section in 0..3 {
+                    for i in 0..items_per_section {
+                        journal.append(section, section * 100 + i).await.unwrap();
+                    }
+                    journal.sync(section).await.unwrap();
+                }
+                journal
+            };
+
+            // Test 1: No truncation needed (upper_bound at section end)
+            {
+                let mut journal = create_journal().await;
+                let upper_bound = 9; // End of section 1 (section 1: ops 5-9)
+                Journal::<deterministic::Context, u64>::truncate_upper_section(
+                    &mut journal,
+                    upper_bound,
+                    items_per_section,
+                )
+                .await
+                .unwrap();
+
+                // Section 1 should remain unchanged (5 operations = 80 bytes)
+                let section_1_size = journal.size(1).await.unwrap();
+                assert_eq!(section_1_size, 80);
+                journal.destroy().await.unwrap();
+            }
+
+            // Test 2: Truncation needed (upper_bound mid-section)
+            {
+                let mut journal = create_journal().await;
+                let upper_bound = 7; // Middle of section 1 (keep ops 5, 6, 7)
+                Journal::<deterministic::Context, u64>::truncate_upper_section(
+                    &mut journal,
+                    upper_bound,
+                    items_per_section,
+                )
+                .await
+                .unwrap();
+
+                // Section 1 should now have only 3 operations (48 bytes)
+                let section_1_size = journal.size(1).await.unwrap();
+                assert_eq!(section_1_size, 48);
+
+                // Verify the remaining operations are accessible
+                assert_eq!(journal.get(1, 0).await.unwrap(), Some(100)); // section 1, offset 0 = 1*100+0
+                assert_eq!(journal.get(1, 1).await.unwrap(), Some(101)); // section 1, offset 1 = 1*100+1
+                assert_eq!(journal.get(1, 2).await.unwrap(), Some(102)); // section 1, offset 2 = 1*100+2
+
+                // Verify truncated operations are not accessible
+                let result = journal.get(1, 3).await;
+                assert!(result.is_err()); // op at logical loc 8 should be gone
+                journal.destroy().await.unwrap();
+            }
+
+            // Test 3: Non-existent section (should not error)
+            {
+                let mut journal = create_journal().await;
+                Journal::<deterministic::Context, u64>::truncate_upper_section(
+                    &mut journal,
+                    99, // upper_bound that would be in a non-existent section
+                    items_per_section,
+                )
+                .await
+                .unwrap(); // Should not error
+                journal.destroy().await.unwrap();
+            }
+
+            // Test 4: Upper bound beyond section (no truncation)
+            {
+                let mut journal = create_journal().await;
+                let upper_bound = 15; // Beyond section 2
+                let original_section_2_size = journal.size(2).await.unwrap();
+                Journal::<deterministic::Context, u64>::truncate_upper_section(
+                    &mut journal,
+                    upper_bound,
+                    items_per_section,
+                )
+                .await
+                .unwrap();
+
+                // Section 2 should remain unchanged
+                let section_2_size = journal.size(2).await.unwrap();
+                assert_eq!(section_2_size, original_section_2_size);
+                journal.destroy().await.unwrap();
+            }
+        });
+    }
+
+    /// Test intra-section truncation integration with real sync scenarios.
+    #[test_traced]
+    fn test_intra_section_truncation_integration() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_truncation_integration".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+            };
+            let items_per_section = 3; // Small sections for easier testing
+
+            // Create journal with data across multiple sections
+            let mut journal =
+                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to create journal");
+
+            // Section 0: ops 0, 1, 2
+            // Section 1: ops 3, 4, 5
+            // Section 2: ops 6, 7, 8
+            for section in 0..3 {
+                for i in 0..3 {
+                    let op_value = section * items_per_section + i;
+                    journal.append(section, op_value).await.unwrap();
+                }
+            }
+            journal.close().await.unwrap();
+
+            // Test sync with upper_bound in middle of section 1 (upper_bound = 4)
+            // Should keep: ops 2, 3, 4 (sections 0 partially removed, 1 truncated, 2 removed)
+            let lower_bound = 2;
+            let upper_bound = 4;
+            let synced_journal = Journal::<deterministic::Context, u64>::init_sync(
+                context.clone(),
+                cfg.clone(),
+                lower_bound,
+                upper_bound,
+                NZU64!(items_per_section),
+            )
+            .await
+            .expect("Failed to initialize synced journal");
+
+            // Verify section 0 is partially present (only op 2)
+            assert!(synced_journal.blobs.contains_key(&0));
+            assert_eq!(synced_journal.get(0, 2).await.unwrap(), Some(2));
+
+            // Verify section 1 is truncated (ops 3, 4 only)
+            assert!(synced_journal.blobs.contains_key(&1));
+            assert_eq!(synced_journal.get(1, 0).await.unwrap(), Some(3));
+            assert_eq!(synced_journal.get(1, 1).await.unwrap(), Some(4));
+
+            // Operation 5 should be inaccessible (truncated)
+            let result = synced_journal.get(1, 2).await;
+            assert!(result.is_err());
+
+            // Verify section 2 is completely removed
+            assert!(!synced_journal.blobs.contains_key(&2));
+
+            // Test that new appends work correctly after truncation
+            let mut synced_journal = synced_journal;
+            let (offset, _) = synced_journal.append(1, 999).await.unwrap();
+            assert_eq!(synced_journal.get(1, offset).await.unwrap(), Some(999));
+
+            synced_journal.destroy().await.unwrap();
         });
     }
 }
