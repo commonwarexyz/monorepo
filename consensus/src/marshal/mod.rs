@@ -101,7 +101,7 @@ mod tests {
     use commonware_p2p::simulated::{self, Link, Network, Oracle};
     use commonware_resolver::p2p as resolver;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, NZU64};
     use governor::Quota;
     use rand::{seq::SliceRandom, Rng};
     use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
@@ -311,7 +311,7 @@ mod tests {
             max_repair: 10,
             codec_config: (),
             partition_prefix: format!("validator-{}", secret.public_key()),
-            prunable_items_per_section: 10u64,
+            prunable_items_per_section: NZU64!(10),
             replay_buffer: NZUsize!(1024),
             write_buffer: NZUsize!(1024),
             freezer_table_initial_size: 64,
@@ -319,7 +319,7 @@ mod tests {
             freezer_table_resize_chunk_size: 10,
             freezer_journal_target_size: 1024,
             freezer_journal_compression: None,
-            immutable_items_per_section: 10u64,
+            immutable_items_per_section: NZU64!(10),
         };
 
         let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;

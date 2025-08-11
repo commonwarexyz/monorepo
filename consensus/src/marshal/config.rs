@@ -2,7 +2,7 @@ use crate::Block;
 use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
 use commonware_resolver::p2p::Coordinator;
 use governor::Quota;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.
 #[derive(Debug)]
@@ -34,10 +34,10 @@ pub struct Config<V: Variant, P: PublicKey, Z: Coordinator<PublicKey = P>, B: Bl
     pub namespace: Vec<u8>,
 
     /// Prunable archive partition prefix.
-    pub prunable_items_per_section: u64,
+    pub prunable_items_per_section: NonZeroU64,
 
     /// The number of items to store per section in immutable archives.
-    pub immutable_items_per_section: u64,
+    pub immutable_items_per_section: NonZeroU64,
 
     /// The initial size of the freezer table.
     pub freezer_table_initial_size: u32,
