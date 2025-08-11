@@ -119,17 +119,19 @@ impl<B: Blob> Append<B> {
         // Calculate where new data starts in the buffer to skip already-written trailing bytes.
         let new_data_start = blob_size.saturating_sub(offset) as usize;
 
-        // Only write if there's actually new data to write.
-        if new_data_start < buf.len() {
-            let new_data = if new_data_start > 0 {
-                buf.split_off(new_data_start)
-            } else {
-                buf
-            };
-            let new_data_len = new_data.len() as u64;
-            self.blob.write_at(new_data, *blob_size).await?;
-            *blob_size += new_data_len;
+        // Early exit if there's no new data to write.
+        if new_data_start >= buf.len() {
+            return Ok(());
         }
+
+        let new_data = if new_data_start > 0 {
+            buf.split_off(new_data_start)
+        } else {
+            buf
+        };
+        let new_data_len = new_data.len() as u64;
+        self.blob.write_at(new_data, *blob_size).await?;
+        *blob_size += new_data_len;
 
         Ok(())
     }
