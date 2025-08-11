@@ -31,7 +31,7 @@ pub struct SyncConfig<E: Storage + Metrics, K: Array, V: Array, T: Translator, D
     pub upper_bound: u64,
 
     /// The pinned nodes the MMR needs at the pruning boundary given by
-    /// `lower_bound`, in the order specified by [Proof::nodes_to_pin].
+    /// `lower_bound`, in the order specified by Proof's `nodes_to_pin` method.
     /// If `None`, the pinned nodes will be computed from the MMR's journal and metadata,
     /// which are expected to have the necessary pinned nodes.
     pub pinned_nodes: Option<Vec<D>>,

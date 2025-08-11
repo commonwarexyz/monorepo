@@ -43,7 +43,7 @@ const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator> {
-    /// The name of the [RStorage] partition used for the MMR's backing journal.
+    /// The name of the [Storage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
     /// The items per blob configuration value used by the MMR journal.
@@ -52,10 +52,10 @@ pub struct Config<T: Translator> {
     /// The size of the write buffer to use for each blob in the MMR journal.
     pub mmr_write_buffer: NonZeroUsize,
 
-    /// The name of the [RStorage] partition used for the MMR's metadata.
+    /// The name of the [Storage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
 
-    /// The name of the [RStorage] partition used to persist the (pruned) log of operations.
+    /// The name of the [Storage] partition used to persist the (pruned) log of operations.
     pub log_journal_partition: String,
 
     /// The items per blob configuration value used by the log journal.
