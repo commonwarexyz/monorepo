@@ -225,7 +225,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::{quorum, NZU32};
+    use commonware_utils::{quorum, NZUsize, NZU32};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
@@ -424,8 +424,8 @@ mod tests {
                     max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -690,8 +690,8 @@ mod tests {
                         max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_buffer: 1024 * 1024,
-                        write_buffer: 1024 * 1024,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -884,8 +884,8 @@ mod tests {
                     max_fetch_count: 1, // force many fetches
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1007,8 +1007,8 @@ mod tests {
                 max_fetch_count: 1,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 1,
-                replay_buffer: 1024 * 1024,
-                write_buffer: 1024 * 1024,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1152,8 +1152,8 @@ mod tests {
                     max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1417,8 +1417,8 @@ mod tests {
                     max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1591,8 +1591,8 @@ mod tests {
                     max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1801,8 +1801,8 @@ mod tests {
                     max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2007,8 +2007,8 @@ mod tests {
                     max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2201,8 +2201,8 @@ mod tests {
                         max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_buffer: 1024 * 1024,
-                        write_buffer: 1024 * 1024,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -2391,8 +2391,8 @@ mod tests {
                         max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_buffer: 1024 * 1024,
-                        write_buffer: 1024 * 1024,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -2572,8 +2572,8 @@ mod tests {
                         max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_buffer: 1024 * 1024,
-                        write_buffer: 1024 * 1024,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -2745,8 +2745,8 @@ mod tests {
                         max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_buffer: 1024 * 1024,
-                        write_buffer: 1024 * 1024,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -2932,8 +2932,8 @@ mod tests {
                         max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_buffer: 1024 * 1024,
-                        write_buffer: 1024 * 1024,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3083,8 +3083,8 @@ mod tests {
                     max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -3243,8 +3243,8 @@ mod tests {
                     max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(10)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 

@@ -1,10 +1,10 @@
 use crate::{
     adb::any::{
+        fixed::Any,
         sync::{
             client::{Client, Config},
             resolver::Resolver,
         },
-        Any,
     },
     mmr,
     translator::Translator,

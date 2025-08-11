@@ -4,6 +4,7 @@ use futures::{future::Shared, FutureExt};
 use std::{
     collections::{hash_map::Entry, HashMap},
     future::Future,
+    num::NonZeroUsize,
     pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -83,10 +84,10 @@ pub struct PoolRef {
 
 impl PoolRef {
     /// Returns a new [PoolRef] with the given `page_size` and `capacity`.
-    pub fn new(page_size: usize, capacity: usize) -> Self {
+    pub fn new(page_size: NonZeroUsize, capacity: NonZeroUsize) -> Self {
         Self {
-            page_size,
-            pool: Arc::new(RwLock::new(Pool::new(capacity))),
+            page_size: page_size.get(),
+            pool: Arc::new(RwLock::new(Pool::new(capacity.get()))),
         }
     }
 
@@ -371,6 +372,7 @@ mod tests {
     use super::*;
     use crate::{deterministic, Runner as _, Storage as _};
     use commonware_macros::test_traced;
+    use commonware_utils::NZUsize;
 
     const PAGE_SIZE: usize = 1024;
 
@@ -435,7 +437,7 @@ mod tests {
             }
 
             // Fill the buffer pool with the blob's data.
-            let pool_ref = PoolRef::new(PAGE_SIZE, 10);
+            let pool_ref = PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(10));
             for i in 0..11 {
                 let mut buf = vec![0; PAGE_SIZE];
                 pool_ref
@@ -457,7 +459,7 @@ mod tests {
             }
 
             // Cleanup.
-            blob.close().await.expect("Failed to destroy blob");
+            blob.sync().await.unwrap();
         });
     }
 }

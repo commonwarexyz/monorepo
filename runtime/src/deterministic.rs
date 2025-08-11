@@ -32,9 +32,10 @@ use crate::{
         metered::Storage as MeteredStorage,
     },
     telemetry::metrics::task::Label,
-    utils::Signaler,
-    Clock, Error, Handle, ListenerOf, Signal, METRICS_PREFIX,
+    utils::signal::{Signal, Stopper},
+    Clock, Error, Handle, ListenerOf, METRICS_PREFIX,
 };
+use commonware_macros::select;
 use commonware_utils::{hex, SystemTimeExt};
 use futures::{
     task::{waker_ref, ArcWake},
@@ -226,8 +227,7 @@ pub struct Executor {
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
     partitions: Mutex<HashMap<String, Partition>>,
-    signaler: Mutex<Signaler>,
-    signal: Signal,
+    shutdown: Mutex<Stopper>,
     finished: Mutex<bool>,
     recovered: Mutex<bool>,
 }
@@ -411,10 +411,10 @@ impl crate::Runner for Runner {
                         }
                     }
                 }
-                if skip.is_some() {
+                if let Some(skip_time) = skip {
                     {
                         let mut time = executor.time.lock().unwrap();
-                        *time = skip.unwrap();
+                        *time = skip_time;
                         current = *time;
                     }
                     trace!(now = current.epoch_millis(), "time skipped");
@@ -597,7 +597,6 @@ impl Context {
         let deadline = cfg
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
-        let (signaler, signal) = Signaler::new();
         let auditor = Arc::new(Auditor::default());
         let storage = MeteredStorage::new(
             AuditedStorage::new(MemStorage::default(), auditor.clone()),
@@ -617,8 +616,7 @@ impl Context {
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             partitions: Mutex::new(HashMap::new()),
-            signaler: Mutex::new(signaler),
-            signal,
+            shutdown: Mutex::new(Stopper::default()),
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
         });
@@ -665,7 +663,6 @@ impl Context {
 
         // Copy state
         let auditor = self.executor.auditor.clone();
-        let (signaler, signal) = Signaler::new();
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
@@ -683,8 +680,7 @@ impl Context {
             metrics: metrics.clone(),
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
-            signaler: Mutex::new(signaler),
-            signal,
+            shutdown: Mutex::new(Stopper::default()),
             finished: Mutex::new(false),
             recovered: Mutex::new(false),
         });
@@ -805,16 +801,34 @@ impl crate::Spawner for Context {
         }
     }
 
-    fn stop(&self, value: i32) {
+    async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
         self.executor.auditor.event(b"stop", |hasher| {
             hasher.update(value.to_be_bytes());
         });
-        self.executor.signaler.lock().unwrap().signal(value);
+        let stop_resolved = {
+            let mut shutdown = self.executor.shutdown.lock().unwrap();
+            shutdown.stop(value)
+        };
+
+        // Wait for all tasks to complete or the timeout to fire
+        let timeout_future = match timeout {
+            Some(duration) => futures::future::Either::Left(self.sleep(duration)),
+            None => futures::future::Either::Right(futures::future::pending()),
+        };
+        select! {
+            result = stop_resolved => {
+                result.map_err(|_| Error::Closed)?;
+                Ok(())
+            },
+            _ = timeout_future => {
+                Err(Error::Timeout)
+            }
+        }
     }
 
     fn stopped(&self) -> Signal {
         self.executor.auditor.event(b"stopped", |_| {});
-        self.executor.signal.clone()
+        self.executor.shutdown.lock().unwrap().stopped()
     }
 }
 

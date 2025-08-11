@@ -2,7 +2,7 @@
 
 use commonware_runtime::tokio::Context;
 use commonware_storage::freezer::{Config, Freezer};
-use commonware_utils::sequence::FixedBytes;
+use commonware_utils::{sequence::FixedBytes, NZUsize};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 /// Number of bytes that can be buffered before being written to disk.
@@ -41,13 +41,13 @@ pub async fn init(ctx: Context) -> FreezerType {
     let cfg = Config {
         journal_partition: JOURNAL_PARTITION.into(),
         journal_compression: None,
-        journal_write_buffer: JOURNAL_WRITE_BUFFER,
+        journal_write_buffer: NZUsize!(JOURNAL_WRITE_BUFFER),
         journal_target_size: JOURNAL_TARGET_SIZE,
         table_partition: TABLE_PARTITION.into(),
         table_initial_size: TABLE_INITIAL_SIZE,
         table_resize_frequency: TABLE_RESIZE_FREQUENCY,
         table_resize_chunk_size: TABLE_RESIZE_CHUNK_SIZE,
-        table_replay_buffer: TABLE_REPLAY_BUFFER,
+        table_replay_buffer: NZUsize!(TABLE_REPLAY_BUFFER),
         codec_config: (),
     };
     Freezer::init(ctx, cfg).await.unwrap()

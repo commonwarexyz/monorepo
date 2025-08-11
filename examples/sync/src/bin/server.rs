@@ -1,5 +1,5 @@
 //! Server that serves operations and proofs to clients attempting to sync a
-//! [commonware_storage::adb::any::Any] database.
+//! [commonware_storage::adb::any::fixed::Any] database.
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
@@ -115,11 +115,9 @@ where
                 let mut database = self.database.write().await;
                 for operation in new_operations.iter() {
                     let result = match operation {
-                        Operation::Update(key, value) => {
-                            database.update(*key, *value).await.map(|_| ())
-                        }
-                        Operation::Deleted(key) => database.delete(*key).await.map(|_| ()),
-                        Operation::Commit(_) => database.commit().await.map(|_| ()),
+                        Operation::Update(key, value) => database.update(*key, *value).await,
+                        Operation::Delete(key) => database.delete(*key).await.map(|_| ()),
+                        Operation::CommitFloor(_) => database.commit().await,
                     };
 
                     if let Err(e) = result {
@@ -154,10 +152,10 @@ where
             Operation::Update(key, value) => {
                 database.update(key, value).await?;
             }
-            Operation::Deleted(key) => {
+            Operation::Delete(key) => {
                 database.delete(key).await?;
             }
-            Operation::Commit(_) => {
+            Operation::CommitFloor(_) => {
                 database.commit().await?;
             }
         }
@@ -225,7 +223,7 @@ where
     let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
 
     debug!(
-        request_id = request.request_id.value(),
+        request_id = request.request_id,
         max_ops,
         start_loc = request.start_loc,
         db_size,
@@ -245,7 +243,7 @@ where
     })?;
 
     debug!(
-        request_id = request.request_id.value(),
+        request_id = request.request_id,
         operations_len = operations.len(),
         proof_len = proof.digests.len(),
         "sending operations and proof"

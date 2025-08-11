@@ -84,8 +84,6 @@ pub enum Error {
     BlobResizeFailed(String, String, IoError),
     #[error("blob sync failed: {0}/{1} error: {2}")]
     BlobSyncFailed(String, String, IoError),
-    #[error("blob close failed: {0}/{1} error: {2}")]
-    BlobCloseFailed(String, String, IoError),
     #[error("blob insufficient length")]
     BlobInsufficientLength,
     #[error("offset overflow")]
@@ -178,19 +176,38 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static;
 
-    /// Signals the runtime to stop execution and that all outstanding tasks
-    /// should perform any required cleanup and exit. This method is idempotent and
-    /// can be called multiple times.
+    /// Signals the runtime to stop execution and waits for all outstanding tasks
+    /// to perform any required cleanup and exit.
     ///
     /// This method does not actually kill any tasks but rather signals to them, using
-    /// the `Signal` returned by `stopped`, that they should exit.
-    fn stop(&self, value: i32);
+    /// the [signal::Signal] returned by [Spawner::stopped], that they should exit.
+    /// It then waits for all [signal::Signal] references to be dropped before returning.
+    ///
+    /// ## Multiple Stop Calls
+    ///
+    /// This method is idempotent and safe to call multiple times concurrently (on
+    /// different instances of the same context since it consumes `self`). The first
+    /// call initiates shutdown with the provided `value`, and all subsequent calls
+    /// will wait for the same completion regardless of their `value` parameter, i.e.
+    /// the original `value` from the first call is preserved.
+    ///
+    /// ## Timeout
+    ///
+    /// If a timeout is provided, the method will return an error if all [signal::Signal]
+    /// references have not been dropped within the specified duration.
+    fn stop(
+        self,
+        value: i32,
+        timeout: Option<Duration>,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// Returns an instance of a `Signal` that resolves when `stop` is called by
+    /// Returns an instance of a [signal::Signal] that resolves when [Spawner::stop] is called by
     /// any task.
     ///
-    /// If `stop` has already been called, the returned `Signal` will resolve immediately.
-    fn stopped(&self) -> Signal;
+    /// If [Spawner::stop] has already been called, the [signal::Signal] returned will resolve
+    /// immediately. The [signal::Signal] returned will always resolve to the value of the
+    /// first [Spawner::stop] call.
+    fn stopped(&self) -> signal::Signal;
 }
 
 /// Interface to register and encode metrics.
@@ -363,6 +380,10 @@ pub trait Storage: Clone + Send + Sync + 'static {
 /// opening a new file descriptor. If multiple blobs are opened with the same
 /// name, they are not expected to coordinate access to underlying storage
 /// and writing to both is undefined behavior.
+///
+/// When a blob is dropped, any unsynced changes may be discarded. Implementations
+/// may attempt to sync during drop but errors will go unhandled. Call `sync`
+/// before dropping to ensure all changes are durably persisted.
 #[allow(clippy::len_without_is_empty)]
 pub trait Blob: Clone + Send + Sync + 'static {
     /// Read from the blob at the given offset.
@@ -390,9 +411,6 @@ pub trait Blob: Clone + Send + Sync + 'static {
 
     /// Ensure all pending data is durably persisted.
     fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
-
-    /// Close the blob.
-    fn close(self) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 #[cfg(test)]
@@ -402,15 +420,18 @@ mod tests {
     use commonware_macros::select;
     use futures::{
         channel::{mpsc, oneshot},
-        future::ready,
-        join, SinkExt, StreamExt,
+        future::{pending, ready},
+        join, pin_mut, FutureExt, SinkExt, StreamExt,
     };
     use prometheus_client::metrics::counter::Counter;
     use std::{
         collections::HashMap,
         panic::{catch_unwind, AssertUnwindSafe},
         str::FromStr,
-        sync::Mutex,
+        sync::{
+            atomic::{AtomicU32, Ordering},
+            Arc, Mutex,
+        },
     };
     use tracing::{error, Level};
     use utils::reschedule;
@@ -611,8 +632,8 @@ mod tests {
                 .expect("Failed to read from blob");
             assert_eq!(read.as_ref(), data);
 
-            // Close the blob
-            blob.close().await.expect("Failed to close blob");
+            // Sync the blob
+            blob.sync().await.expect("Failed to sync blob");
 
             // Scan blobs in the partition
             let blobs = context
@@ -635,8 +656,8 @@ mod tests {
                 .expect("Failed to read data");
             assert_eq!(read.as_ref(), b"Storage");
 
-            // Close the blob
-            blob.close().await.expect("Failed to close blob");
+            // Sync the blob
+            blob.sync().await.expect("Failed to sync blob");
 
             // Remove the blob
             context
@@ -738,9 +759,6 @@ mod tests {
                 .await
                 .expect("Failed to write");
             blob.sync().await.expect("Failed to sync after write");
-            blob.close()
-                .await
-                .expect("Failed to close blob after writing");
 
             // Re-open and check length
             let (blob, len) = context.open(partition, name).await.unwrap();
@@ -752,9 +770,6 @@ mod tests {
                 .await
                 .expect("Failed to resize to extend");
             blob.sync().await.expect("Failed to sync after resize");
-            blob.close()
-                .await
-                .expect("Failed to close blob after resizing");
 
             // Re-open and check length again
             let (blob, len) = context.open(partition, name).await.unwrap();
@@ -774,7 +789,6 @@ mod tests {
             // Truncate the blob
             blob.resize(data.len() as u64).await.unwrap();
             blob.sync().await.unwrap();
-            blob.close().await.unwrap();
 
             // Reopen to check truncation
             let (blob, size) = context.open(partition, name).await.unwrap();
@@ -783,7 +797,7 @@ mod tests {
             // Read truncated data
             let read_buf = blob.read_at(vec![0; data.len()], 0).await.unwrap();
             assert_eq!(read_buf.as_ref(), data);
-            blob.close().await.unwrap();
+            blob.sync().await.unwrap();
         });
     }
 
@@ -812,8 +826,8 @@ mod tests {
                     .await
                     .expect("Failed to write data2");
 
-                // Close the blob
-                blob.close().await.expect("Failed to close blob");
+                // Sync the blob
+                blob.sync().await.expect("Failed to sync blob");
             }
 
             for (additional, partition) in partitions.iter().enumerate() {
@@ -831,9 +845,6 @@ mod tests {
                     .expect("Failed to read data");
                 assert_eq!(&read.as_ref()[..5], b"Hello");
                 assert_eq!(&read.as_ref()[5 + additional..], b"World");
-
-                // Close the blob
-                blob.close().await.expect("Failed to close blob");
             }
         });
     }
@@ -925,8 +936,8 @@ mod tests {
                 .expect("Failed to read from blob");
             assert_eq!(read.as_ref(), data);
 
-            // Close the blob
-            blob.close().await.expect("Failed to close blob");
+            // Drop the blob
+            drop(blob);
 
             // Ensure no blobs still open
             let buffer = context.encode();
@@ -944,40 +955,169 @@ mod tests {
             let before = context
                 .with_label("before")
                 .spawn(move |context| async move {
-                    let sig = context.stopped().await;
-                    assert_eq!(sig.unwrap(), kill);
+                    let mut signal = context.stopped();
+                    let value = (&mut signal).await.unwrap();
+                    assert_eq!(value, kill);
+                    drop(signal);
                 });
+
+            // Signal the tasks and wait for them to stop
+            let result = context.clone().stop(kill, None).await;
+            assert!(result.is_ok());
 
             // Spawn a task after stop is called
             let after = context
                 .with_label("after")
                 .spawn(move |context| async move {
-                    // Wait for stop signal
-                    let mut signal = context.stopped();
-                    loop {
-                        select! {
-                            sig = &mut signal => {
-                                // Stopper resolved
-                                assert_eq!(sig.unwrap(), kill);
-                                break;
-                            },
-                            _ = context.sleep(Duration::from_millis(10)) => {
-                                // Continue waiting
-                            },
-                        }
-                    }
+                    // A call to `stopped()` after `stop()` resolves immediately
+                    let value = context.stopped().await.unwrap();
+                    assert_eq!(value, kill);
                 });
-
-            // Sleep for a bit before stopping
-            context.sleep(Duration::from_millis(50)).await;
-
-            // Signal the task
-            context.stop(kill);
 
             // Ensure both tasks complete
             let result = join!(before, after);
             assert!(result.0.is_ok());
             assert!(result.1.is_ok());
+        });
+    }
+
+    fn test_shutdown_multiple_signals<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Metrics + Clock,
+    {
+        let kill = 42;
+        runner.start(|context| async move {
+            let (started_tx, mut started_rx) = mpsc::channel(3);
+            let counter = Arc::new(AtomicU32::new(0));
+
+            // Spawn 3 tasks that do cleanup work after receiving stop signal
+            // and increment a shared counter
+            let task = |cleanup_duration: Duration| {
+                let context = context.clone();
+                let counter = counter.clone();
+                let mut started_tx = started_tx.clone();
+                context.spawn(move |context| async move {
+                    // Wait for signal to be acquired
+                    let mut signal = context.stopped();
+                    started_tx.send(()).await.unwrap();
+
+                    // Increment once killed
+                    let value = (&mut signal).await.unwrap();
+                    assert_eq!(value, kill);
+                    context.sleep(cleanup_duration).await;
+                    counter.fetch_add(1, Ordering::SeqCst);
+
+                    // Wait to drop signal until work has been done
+                    drop(signal);
+                })
+            };
+
+            let task1 = task(Duration::from_millis(10));
+            let task2 = task(Duration::from_millis(20));
+            let task3 = task(Duration::from_millis(30));
+
+            // Give tasks time to start
+            for _ in 0..3 {
+                started_rx.next().await.unwrap();
+            }
+
+            // Stop and verify all cleanup completed
+            context.stop(kill, None).await.unwrap();
+            assert_eq!(counter.load(Ordering::SeqCst), 3);
+
+            // Ensure all tasks completed
+            let result = join!(task1, task2, task3);
+            assert!(result.0.is_ok());
+            assert!(result.1.is_ok());
+            assert!(result.2.is_ok());
+        });
+    }
+
+    fn test_shutdown_timeout<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Metrics + Clock,
+    {
+        let kill = 42;
+        runner.start(|context| async move {
+            // Setup startup coordinator
+            let (started_tx, started_rx) = oneshot::channel();
+
+            // Spawn a task that never completes its cleanup
+            context.clone().spawn(move |context| async move {
+                let signal = context.stopped();
+                started_tx.send(()).unwrap();
+                pending::<()>().await;
+                signal.await.unwrap();
+            });
+
+            // Try to stop with a timeout
+            started_rx.await.unwrap();
+            let result = context.stop(kill, Some(Duration::from_millis(100))).await;
+
+            // Assert that we got a timeout error
+            assert!(matches!(result, Err(Error::Timeout)));
+        });
+    }
+
+    fn test_shutdown_multiple_stop_calls<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Metrics + Clock,
+    {
+        let kill1 = 42;
+        let kill2 = 43;
+
+        runner.start(|context| async move {
+            let (started_tx, started_rx) = oneshot::channel();
+            let counter = Arc::new(AtomicU32::new(0));
+
+            // Spawn a task that delays completion to test timing
+            let task = context.with_label("blocking_task").spawn({
+                let counter = counter.clone();
+                move |context| async move {
+                    // Wait for signal to be acquired
+                    let mut signal = context.stopped();
+                    started_tx.send(()).unwrap();
+
+                    // Wait for signal to be resolved
+                    let value = (&mut signal).await.unwrap();
+                    assert_eq!(value, kill1);
+                    context.sleep(Duration::from_millis(50)).await;
+
+                    // Increment counter
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    drop(signal);
+                }
+            });
+
+            // Give task time to start
+            started_rx.await.unwrap();
+
+            // Issue two separate stop calls
+            // The second stop call uses a different stop value that should be ignored
+            let stop_task1 = context.clone().stop(kill1, None);
+            pin_mut!(stop_task1);
+            let stop_task2 = context.clone().stop(kill2, None);
+            pin_mut!(stop_task2);
+
+            // Both of them should be awaiting completion
+            assert!(stop_task1.as_mut().now_or_never().is_none());
+            assert!(stop_task2.as_mut().now_or_never().is_none());
+
+            // Wait for both stop calls to complete
+            assert!(stop_task1.await.is_ok());
+            assert!(stop_task2.await.is_ok());
+
+            // Verify first stop value wins
+            let sig = context.stopped().await;
+            assert_eq!(sig.unwrap(), kill1);
+
+            // Wait for blocking task to complete
+            let result = task.await;
+            assert!(result.is_ok());
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+            // Post-completion stop should return immediately
+            assert!(context.stop(kill2, None).now_or_never().unwrap().is_ok());
         });
     }
 
@@ -1240,6 +1380,24 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_shutdown_multiple_signals() {
+        let executor = deterministic::Runner::default();
+        test_shutdown_multiple_signals(executor);
+    }
+
+    #[test]
+    fn test_deterministic_shutdown_timeout() {
+        let executor = deterministic::Runner::default();
+        test_shutdown_timeout(executor);
+    }
+
+    #[test]
+    fn test_deterministic_shutdown_multiple_stop_calls() {
+        let executor = deterministic::Runner::default();
+        test_shutdown_multiple_stop_calls(executor);
+    }
+
+    #[test]
     fn test_deterministic_spawn_ref() {
         let executor = deterministic::Runner::default();
         test_spawn_ref(executor);
@@ -1414,6 +1572,24 @@ mod tests {
     fn test_tokio_shutdown() {
         let executor = tokio::Runner::default();
         test_shutdown(executor);
+    }
+
+    #[test]
+    fn test_tokio_shutdown_multiple_signals() {
+        let executor = tokio::Runner::default();
+        test_shutdown_multiple_signals(executor);
+    }
+
+    #[test]
+    fn test_tokio_shutdown_timeout() {
+        let executor = tokio::Runner::default();
+        test_shutdown_timeout(executor);
+    }
+
+    #[test]
+    fn test_tokio_shutdown_multiple_stop_calls() {
+        let executor = tokio::Runner::default();
+        test_shutdown_multiple_stop_calls(executor);
     }
 
     #[test]

@@ -30,7 +30,7 @@ impl<Key: Span> Read for Message<Key> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let id = buf.get_u64();
+        let id = u64::read(buf)?;
         let payload = Payload::read(buf)?;
         Ok(Message { id, payload })
     }
@@ -83,7 +83,7 @@ impl<Key: Span> Read for Payload<Key> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let payload_type = buf.get_u8();
+        let payload_type = u8::read(buf)?;
         match payload_type {
             0 => {
                 let key = Key::read(buf)?;

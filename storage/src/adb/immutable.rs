@@ -2,7 +2,7 @@
 //! deletions), where values can have varying sizes.
 
 use crate::{
-    adb::{operation::Variable, Error},
+    adb::Error,
     index::Index,
     journal::{
         fixed::{Config as FConfig, Journal as FJournal},
@@ -14,13 +14,15 @@ use crate::{
         journaled::{Config as MmrConfig, Mmr},
         verification::Proof,
     },
+    store::operation::Variable,
     translator::Translator,
 };
 use commonware_codec::{Codec, Encode as _, Read};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
-use commonware_utils::{sequence::U32, Array};
+use commonware_utils::{sequence::U32, Array, NZUsize};
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
+use std::num::NonZeroUsize;
 use tracing::warn;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
@@ -38,7 +40,7 @@ pub struct Config<T: Translator, C> {
     pub mmr_items_per_blob: u64,
 
     /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer: usize,
+    pub mmr_write_buffer: NonZeroUsize,
 
     /// The name of the [RStorage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
@@ -47,7 +49,7 @@ pub struct Config<T: Translator, C> {
     pub log_journal_partition: String,
 
     /// The size of the write buffer to use for each blob in the log journal.
-    pub log_write_buffer: usize,
+    pub log_write_buffer: NonZeroUsize,
 
     /// Optional compression level (using `zstd`) to apply to log data before storing.
     pub log_compression: Option<u8>,
@@ -239,12 +241,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // operations that must be rolled back, and any log operations that need to be re-added to
         // the MMR & locations.
         {
-            let stream = log.replay(SNAPSHOT_READ_BUFFER_SIZE).await?;
+            let stream = log.replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE)).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
                     Err(e) => {
-                        return Err(Error::JournalError(e));
+                        return Err(Error::Journal(e));
                     }
                     Ok((section, offset, _, op)) => {
                         if oldest_retained_loc.is_none() {
@@ -282,6 +284,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                 end_loc = log_size;
                                 end_offset = offset;
                             }
+                            _ => {
+                                unreachable!(
+                                    "unsupported operation at offset {offset} in section {section}"
+                                );
+                            }
                         }
                     }
                 }
@@ -315,7 +322,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Returns the section of the log where we are currently writing new items.
-    pub fn current_section(&self) -> u64 {
+    fn current_section(&self) -> u64 {
         self.log_size / self.log_items_per_section
     }
 
@@ -347,7 +354,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.mmr
             .prune_to_pos(&mut self.hasher, leaf_num_to_pos(self.oldest_retained_loc))
             .await
-            .map_err(Error::MmrError)
+            .map_err(Error::Mmr)
     }
 
     /// Set the index of `key` in the snapshot. Assumes the key has not already been previously set
@@ -391,9 +398,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         match self.locations.read(loc).await {
             Ok(offset) => {
-                return self.get_from_offset(key, loc, offset.to_u32()).await;
+                return self.get_from_offset(key, loc, offset.into()).await;
             }
-            Err(e) => Err(Error::JournalError(e)),
+            Err(e) => Err(Error::Journal(e)),
         }
     }
 
@@ -483,28 +490,28 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn historical_proof(
         &self,
         size: u64,
-        start_index: u64,
+        start_loc: u64,
         max_ops: u64,
     ) -> Result<(Proof<H::Digest>, Vec<Variable<K, V>>), Error> {
-        if start_index < self.oldest_retained_loc {
-            return Err(Error::OperationPruned(start_index));
+        if start_loc < self.oldest_retained_loc {
+            return Err(Error::OperationPruned(start_loc));
         }
 
-        let start_pos = leaf_num_to_pos(start_index);
-        let end_index = std::cmp::min(size - 1, start_index + max_ops - 1);
-        let end_pos = leaf_num_to_pos(end_index);
+        let start_pos = leaf_num_to_pos(start_loc);
+        let end_loc = std::cmp::min(size - 1, start_loc + max_ops - 1);
+        let end_pos = leaf_num_to_pos(end_loc);
         let mmr_size = leaf_num_to_pos(size);
 
         let proof = self
             .mmr
             .historical_range_proof(mmr_size, start_pos, end_pos)
             .await?;
-        let mut ops = Vec::with_capacity((end_index - start_index + 1) as usize);
-        for index in start_index..=end_index {
-            let section = index / self.log_items_per_section;
-            let offset = self.locations.read(index).await?.to_u32();
+        let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
+        for loc in start_loc..=end_loc {
+            let section = loc / self.log_items_per_section;
+            let offset = self.locations.read(loc).await?.into();
             let Some(op) = self.log.get(section, offset).await? else {
-                panic!("no log item at index {index}");
+                panic!("no log item at location {loc}");
             };
             ops.push(op);
         }
@@ -540,9 +547,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
         let section = self.current_section();
         try_join!(
-            self.mmr.sync(&mut self.hasher).map_err(Error::MmrError),
-            self.log.sync(section).map_err(Error::JournalError),
-            self.locations.sync().map_err(Error::JournalError),
+            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
+            self.log.sync(section).map_err(Error::Journal),
+            self.locations.sync().map_err(Error::Journal),
         )?;
 
         Ok(())
@@ -551,9 +558,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Close the db. Operations that have not been committed will be lost.
     pub async fn close(mut self) -> Result<(), Error> {
         try_join!(
-            self.log.close().map_err(Error::JournalError),
-            self.mmr.close(&mut self.hasher).map_err(Error::MmrError),
-            self.locations.close().map_err(Error::JournalError),
+            self.log.close().map_err(Error::Journal),
+            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+            self.locations.close().map_err(Error::Journal),
         )?;
 
         Ok(())
@@ -562,9 +569,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         try_join!(
-            self.log.destroy().map_err(Error::JournalError),
-            self.mmr.destroy().map_err(Error::MmrError),
-            self.locations.destroy().map_err(Error::JournalError),
+            self.log.destroy().map_err(Error::Journal),
+            self.mmr.destroy().map_err(Error::Mmr),
+            self.locations.destroy().map_err(Error::Journal),
         )?;
 
         Ok(())
@@ -634,6 +641,7 @@ pub(super) mod test {
         deterministic::{self},
         Runner as _,
     };
+    use commonware_utils::NZUsize;
 
     const PAGE_SIZE: usize = 77;
     const PAGE_CACHE_SIZE: usize = 9;
@@ -644,17 +652,17 @@ pub(super) mod test {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
             mmr_items_per_blob: 11,
-            mmr_write_buffer: 1024,
+            mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: format!("log_journal_{suffix}"),
             log_items_per_section: ITEMS_PER_SECTION,
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
-            log_write_buffer: 1024,
+            log_write_buffer: NZUsize!(1024),
             locations_journal_partition: format!("locations_journal_{suffix}"),
             locations_items_per_blob: 7,
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         }
     }
 

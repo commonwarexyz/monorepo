@@ -6,8 +6,7 @@
 
 use crate::{
     adb::{
-        any::{Any, Config as AConfig, UpdateResult},
-        operation::Fixed,
+        any::fixed::{Any, Config as AConfig},
         Error,
     },
     index::Index,
@@ -18,6 +17,7 @@ use crate::{
         storage::Grafting as GStorage,
         verification::Proof,
     },
+    store::operation::Fixed,
     translator::Translator,
 };
 use commonware_codec::{Encode as _, FixedSize};
@@ -25,6 +25,7 @@ use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::future::try_join_all;
+use std::num::NonZeroUsize;
 use tracing::{debug, warn};
 
 /// Configuration for a [Current] authenticated db.
@@ -37,7 +38,7 @@ pub struct Config<T: Translator> {
     pub mmr_items_per_blob: u64,
 
     /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer: usize,
+    pub mmr_write_buffer: NonZeroUsize,
 
     /// The name of the [RStorage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
@@ -49,7 +50,7 @@ pub struct Config<T: Translator> {
     pub log_items_per_blob: u64,
 
     /// The size of the write buffer to use for each blob in the log journal.
-    pub log_write_buffer: usize,
+    pub log_write_buffer: NonZeroUsize,
 
     /// The name of the [RStorage] partition used for the bitmap metadata.
     pub bitmap_metadata_partition: String,
@@ -122,7 +123,7 @@ impl<
     // A compile-time assertion that the chunk size is some multiple of digest size. A multiple of 1 is optimal with
     // respect to proof size, but a higher multiple allows for a smaller (RAM resident) merkle tree over the structure.
     const _CHUNK_SIZE_ASSERT: () = assert!(
-        N % H::Digest::SIZE == 0,
+        N.is_multiple_of(H::Digest::SIZE),
         "chunk size must be some multiple of the digest size",
     );
 
@@ -228,7 +229,7 @@ impl<
         }
 
         let any = Any {
-            ops: mmr,
+            mmr,
             log,
             snapshot,
             inactivity_floor_loc,
@@ -272,18 +273,14 @@ impl<
     /// Updates `key` to have value `value`. If the key already has this same value, then this is a
     /// no-op. The operation is reflected in the snapshot, but will be subject to rollback until the
     /// next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V) -> Result<UpdateResult, Error> {
-        let update_result = self.any.update(key, value).await?;
-        match update_result {
-            UpdateResult::NoOp => return Ok(update_result),
-            UpdateResult::Inserted(_) => (),
-            UpdateResult::Updated(old_loc, _) => {
-                self.status.set_bit(old_loc, false);
-            }
+    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        let update_result = self.any.update_return_loc(key, value).await?;
+        if let Some(old_loc) = update_result {
+            self.status.set_bit(old_loc, false);
         }
         self.status.append(true);
 
-        Ok(update_result)
+        Ok(())
     }
 
     /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
@@ -336,7 +333,7 @@ impl<
         }
 
         self.any
-            .apply_op(Fixed::Commit(self.any.inactivity_floor_loc))
+            .apply_op(Fixed::CommitFloor(self.any.inactivity_floor_loc))
             .await?;
         self.status.append(false);
 
@@ -356,7 +353,7 @@ impl<
 
         let mut grafter = Grafting::new(&mut self.any.hasher, Self::grafting_height());
         grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.ops)
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;
         self.status.sync(&mut grafter).await?;
 
@@ -389,7 +386,7 @@ impl<
             !self.status.is_dirty(),
             "must process updates before computing root"
         );
-        let ops = &self.any.ops;
+        let ops = &self.any.mmr;
         let height = Self::grafting_height();
         let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, ops, height);
         let mmr_root = grafted_mmr.root(hasher).await?;
@@ -435,7 +432,7 @@ impl<
             !self.status.is_dirty(),
             "must process updates before computing proofs"
         );
-        let mmr = &self.any.ops;
+        let mmr = &self.any.mmr;
         let start_pos = leaf_num_to_pos(start_loc);
         let end_pos_last = mmr.last_leaf_pos().unwrap();
         let end_pos_max = leaf_num_to_pos(start_loc + max_ops - 1);
@@ -569,7 +566,7 @@ impl<
         };
         let pos = leaf_num_to_pos(loc);
         let height = Self::grafting_height();
-        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.ops, height);
+        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
         let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, pos, pos).await?;
         let chunk = *self.status.get_chunk(loc);
@@ -686,7 +683,7 @@ impl<
 
         let pos = leaf_num_to_pos(loc);
         let height = Self::grafting_height();
-        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.ops, height);
+        let grafted_mmr = GStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
 
         let mut proof = Proof::<H::Digest>::range_proof(&grafted_mmr, pos, pos).await?;
         let chunk = *self.status.get_chunk(loc);
@@ -724,7 +721,7 @@ impl<
 
         let mut grafter = Grafting::new(&mut self.any.hasher, Self::grafting_height());
         grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.ops)
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
             .await?;
         self.status.sync(&mut grafter).await?;
         let target_prune_loc = self
@@ -750,6 +747,7 @@ pub mod test {
     use commonware_cryptography::{hash, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
+    use commonware_utils::NZUsize;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
 
     const PAGE_SIZE: usize = 88;
@@ -760,14 +758,14 @@ pub mod test {
             mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
             mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
             mmr_items_per_blob: 11,
-            mmr_write_buffer: 1024,
+            mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: format!("{partition_prefix}_partition_prefix"),
             log_items_per_blob: 7,
-            log_write_buffer: 1024,
+            log_write_buffer: NZUsize!(1024),
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             pruning_delay: 10,
         }
     }
@@ -809,14 +807,6 @@ pub mod test {
             assert!(root1 != root0);
             db.close().await.unwrap();
             db = open_db(context.clone(), partition).await;
-            assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 2 moves.
-            assert_eq!(db.root(&mut hasher).await.unwrap(), root1);
-
-            // Repeated update should be no-op.
-            assert!(matches!(
-                db.update(k1, v1).await.unwrap(),
-                UpdateResult::NoOp
-            ));
             assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 2 moves.
             assert_eq!(db.root(&mut hasher).await.unwrap(), root1);
 
@@ -1018,7 +1008,7 @@ pub mod test {
             // retained op to tip.
             let max_ops = 4;
             let end_loc = db.op_count();
-            let start_pos = db.any.ops.pruned_to_pos();
+            let start_pos = db.any.mmr.pruned_to_pos();
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
 
             for i in start_loc..end_loc {

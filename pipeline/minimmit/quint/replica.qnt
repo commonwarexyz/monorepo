@@ -3,8 +3,10 @@ module replica {
     import defs.* from "./defs"
     import option.* from "./option"
 
-    // Weights of all replicas.
-    const WEIGHTS: ReplicaId -> Weight
+    // Total number of replicas.
+    const N: int
+    // Maximum number of faulty replicas.
+    const F: int
     // Identities of the correct replicas.
     const CORRECT: Set[ReplicaId]
     // Identities of the faulty replicas.
@@ -15,16 +17,10 @@ module replica {
     const VALID_BLOCKS: Set[BlockHash]
     // All replicas.
     pure val Replicas = CORRECT.union(FAULTY)
-
-    // The sum of all validator weights.
-    pure val TotalWeight: Weight = WEIGHTS.keys().fold(0, (s, id) => s + WEIGHTS.get(id));
-    // The maximum weight of faulty replicas.
-    // We want 5*FAULTY_WEIGHT + 1 = TOTAL_WEIGHT
-    pure val FaultyWeight: Weight = (TotalWeight - 1) / 5;
-    // The weight threshold needed to form a quorum certificate.
-    pure val QuorumWeight: Weight = TotalWeight - FaultyWeight;
-    // The weight threshold needed to trigger a reproposal.
-    pure val SubquorumWeight: Weight = TotalWeight - 3 * FaultyWeight;
+    
+    // Quorums:
+    pure val Q = N - F;
+    pure val L = 2*F + 1;
 
     // Produce replica's signature
     pure def sig_of(id: str): str = id
@@ -85,7 +81,7 @@ module replica {
         select_votes(view, NotarizeKind, votes)
             .filter(v => v.block_hash == block_hash)
             .map(v => v.sig)
-            .size() >= QuorumWeight
+            .size() >= Q
     }
 
     // Does a set of certificates contain nullification certificates for this view?
@@ -115,7 +111,7 @@ module replica {
         })
         val votes_count = similar_votes.size()
 
-        if (votes_count < SubquorumWeight) {
+        if (votes_count < L) {
             None
         } else {
             Some({
@@ -137,7 +133,7 @@ module replica {
         })
 
         val votes_count = similar_votes.size()
-        if (votes_count < SubquorumWeight) {
+        if (votes_count < L) {
             None
         } else {
             Some({
@@ -154,7 +150,7 @@ module replica {
     def is_block_in_view_cannot_be_notarized(b: BlockHash, view: ViewNumber, votes: Set[Vote]): bool = {
         val vs1 = votes.filter(v => v.kind == NotarizeKind and v.view == view and v.block_hash != b).map(v => v.sig)
         val vs2 = votes.filter(v => v.kind == NullifyKind and v.view == view).map(v => v.sig)
-        vs1.union(vs2).size() >= SubquorumWeight
+        vs1.union(vs2).size() >= L
     }
 
     // Is there a contradiction for the notarized block in the set of votes?
@@ -546,7 +542,7 @@ module replica {
             // verify view
             cert.view >= self.view, // not in spec
             // verify certificate: Certificate of ≥ L notarize(c, v) or nullify(v) messages
-            cert.signatures.size() >= SubquorumWeight,
+            cert.signatures.size() >= L,
             // Store the certificate if we do not have already had it.
             //not(cert.in(store_certificate.get(id))),
             _process_certificate(id, certificates, cert),
@@ -589,7 +585,7 @@ module replica {
     }
 
     // -------------------------------------------------
-    // ── Backup timer: If timer expires, broadcast nullify(v) if not yet broadcast notarize(c, v).
+    // Backup timer: If timer expires, broadcast nullify(v) if not yet broadcast notarize(c, v).
     // -------------------------------------------------
 
     action on_timer_expired(id: ReplicaId): bool = all {
@@ -622,13 +618,13 @@ module replica {
     }
 
     // -------------------------------------------------
-    // ── Byzantine behavior (completely adversarial)
+    // Byzantine behavior (completely adversarial)
     // -------------------------------------------------
 
     action faulty_step: bool = all {
         FAULTY != Set(),
 
-        // adversary may inject arbitrary well-typed vote messages
+        // Adversary may inject arbitrary well-typed vote messages.
         all {
             nondet senders = FAULTY.powerset().oneOf()
             nondet view = VIEWS.oneOf()
@@ -643,7 +639,7 @@ module replica {
             })
             sent_vote' = sent_vote.union(votes),
         },
-        // adversary may inject arbitrary certificates
+        // Adversary may inject arbitrary certificates.
         all {
             nondet sender = FAULTY.oneOf()
             nondet senders = FAULTY.powerset().oneOf()
@@ -666,7 +662,7 @@ module replica {
             }
             sent_certificate' = sent_certificate.union(Set(cert))
         },
-        // adversary may inject arbitrary proposal
+        // Adversary may inject arbitrary proposal.
         all {
             nondet view_parent = VIEWS.oneOf()
             nondet view = VIEWS.oneOf()
@@ -684,7 +680,7 @@ module replica {
         }
     }
 
-    // part of the state that is not touched by the Byzantine validators
+    // Part of the state that is not touched by the Byzantine validators.
     action _unchanged_replica_state = all {
         ghost_committed_blocks' = ghost_committed_blocks,
         replica_state' = replica_state,
@@ -698,7 +694,15 @@ module replica {
     // Invariants
     // -------------------------------------------------
 
-    // no two correct replicas disagree on the committed blocks
+    // Assumptions and thresholds.
+    val assumptions_valid = all {
+        CORRECT.size() + FAULTY.size() == N,
+        N >= 5*F+1,
+        2*L <= Q + 1, // Liveness guard, prevents equivocation stall.
+        L + Q > N + F, // Every L-quorum and every Q-quorum share at least one honest replica.
+    } 
+
+    // No two correct replicas disagree on the committed blocks.
     val agreement = tuples(CORRECT, CORRECT).forall(((p1, p2)) => {
         val blocks1 = ghost_committed_blocks.get(p1)
         val blocks2 = ghost_committed_blocks.get(p2)
@@ -713,7 +717,7 @@ module replica {
         length(votes) <= 1
     }
 
-    // A correct replica should not send two votes in the same view
+    // A correct replica should not send two votes in the same view.
     // Honest replicas may not broadcast a notarize(c, v) after first broadcasting a nullify(v).
     val no_vote_equivocation_inv = CORRECT.forall(id => {
         val self = replica_state.get(id)
@@ -734,7 +738,7 @@ module replica {
         views_with_nullification.intersect(views_with_finalization) == Set()
     })
 
-    // No equivocation
+    // No equivocation.
     val no_proposal_equivocation = tuples(sent_proposal, sent_proposal).forall(((m1, m2)) => or {
         not(m1.view == m2.view and m1.sig == m2.sig),
         FAULTY.contains(m1.sig),
@@ -747,12 +751,12 @@ module replica {
     })
 
 
-    // Make sure that no invalid certificates are stored
+    // Make sure that no invalid certificates are stored.
     val certificates_are_valid_inv = CORRECT.forall(id => {
         val certs = store_certificate.get(id)
         certs.forall(cert => and {
             cert.view >= 0,
-            cert.signatures.size() >= SubquorumWeight,
+            cert.signatures.size() >= L,
             cert.kind == NotarizationKind or cert.kind == NullificationKind,
             (cert.block_hash == DUMMY_BLOCK_HASH) iff (cert.kind == NullificationKind),
             VALID_BLOCKS.contains(cert.block_hash) or (cert.block_hash == DUMMY_BLOCK_HASH)
@@ -767,10 +771,10 @@ module replica {
     // Suppose that a block B for some slot v is finalized, then no other block B' for slot v can be finalized.
     val validity = tuples(CORRECT, CORRECT, VIEWS).forall(((id1, id2, v)) => {
         val certs1 = store_certificate.get(id1).filter(c => and {
-            c.signatures.size() >= QuorumWeight, c.kind == NotarizationKind, c.view == v
+            c.signatures.size() >= Q, c.kind == NotarizationKind, c.view == v
         })
         val certs2 = store_certificate.get(id2).filter(c => and {
-            c.signatures.size() >= QuorumWeight, c.kind == NotarizationKind, c.view == v
+            c.signatures.size() >= Q, c.kind == NotarizationKind, c.view == v
         })
 
         or {
@@ -788,7 +792,7 @@ module replica {
             AllBlocks.forall(b => not(is_view_finalized(v, votes, b))),
             select_votes(v, NullifyKind, votes)
                 .map(vote => vote.sig)
-                .size() < SubquorumWeight
+                .size() < L
         }
     })
 
@@ -801,7 +805,7 @@ module replica {
             select_votes(v, NotarizeKind, votes)
                 .filter(vote => vote.block_hash != b)
                 .map(vote => vote.sig)
-                .size() < SubquorumWeight
+                .size() < L
         })
     })
 
@@ -824,14 +828,14 @@ module replica {
 
     val safe = all_invariants
 
-    // Test invariants:
+    // Test invariants.
 
     val correct_nodes_sent_certificates_valid = sent_certificate.filter(cert => cert.ghost_sender.in(CORRECT)).forall(cert => {
-        cert.signatures.size() >= SubquorumWeight
+        cert.signatures.size() >= L
     })
     val store_certificates_are_valid = CORRECT.forall(id => {
         val certs = store_certificate.get(id)
-        certs.forall(cert => cert.signatures.size() >= SubquorumWeight)
+        certs.forall(cert => cert.signatures.size() >= L)
     })
 
     val certificates_are_valid = and {
@@ -839,7 +843,7 @@ module replica {
         store_certificates_are_valid
     }
 
-    // Examples:
+    // Examples.
 
     // Check this invariant to see an example of having a finalized block.
     val block_example = not(CORRECT.exists(id => {
@@ -865,12 +869,12 @@ module replica {
 
     // Check this invariant to see an example of having a subquorum of votes.
     val votes_subquorum_example = CORRECT.forall(id => {
-        store_vote.get(id).size() <= SubquorumWeight
+        store_vote.get(id).size() <= L
     })
 
     // Check this invariant to see an example of having a quorum of votes.
     val votes_quorum_example = CORRECT.forall(id => {
-        store_vote.get(id).size() <= QuorumWeight
+        store_vote.get(id).size() <= Q
     })
 
     // Check this invariant to see an example of having a certificate.

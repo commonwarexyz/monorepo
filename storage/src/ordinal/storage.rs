@@ -317,7 +317,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         // Remove the collected sections
         for section in sections_to_remove {
             if let Some(blob) = self.blobs.remove(&section) {
-                blob.close().await?;
+                drop(blob);
                 self.context
                     .remove(&self.config.partition, Some(&section.to_be_bytes()))
                     .await?;
@@ -356,14 +356,11 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
         Ok(())
     }
 
-    /// Sync all pending entries and close all [Blob]s.
+    /// Sync all pending entries and [Blob]s.
     pub async fn close(mut self) -> Result<(), Error> {
-        // Sync any pending entries
         self.sync().await?;
-
-        // Close all blobs
         for (_, blob) in take(&mut self.blobs) {
-            blob.close().await?;
+            blob.sync().await?;
         }
         Ok(())
     }
@@ -371,7 +368,7 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
     /// Destroy [Ordinal] and remove all data.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
-            blob.close().await?;
+            drop(blob);
             self.context
                 .remove(&self.config.partition, Some(&i.to_be_bytes()))
                 .await?;

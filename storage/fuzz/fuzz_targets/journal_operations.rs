@@ -10,6 +10,7 @@ use commonware_storage::journal::{
     },
     Error,
 };
+use commonware_utils::NZUsize;
 use futures::{pin_mut, StreamExt};
 use libfuzzer_sys::fuzz_target;
 
@@ -74,14 +75,14 @@ fn fuzz(input: FuzzInput) {
             JournalType::Fixed => FixedConfig {
                 partition: "fixed_journal_operations_fuzz_test".to_string(),
                 items_per_blob: 3,
-                write_buffer: MAX_WRITE_BUF,
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(MAX_WRITE_BUF),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             },
             JournalType::Variable => VariableConfig {
                 partition: "variable_journal_operations_fuzz_test".to_string(),
                 items_per_blob: 3,
-                write_buffer: MAX_WRITE_BUF,
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(MAX_WRITE_BUF),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             },
         };
 
@@ -136,7 +137,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Replay { buffer, start_pos } => {
-                    match journal.replay(*buffer, *start_pos).await {
+                    match journal.replay(NZUsize!(*buffer), *start_pos).await {
                         Ok(stream) => {
                             pin_mut!(stream);
                             // Consume first few items to test stream - panic on stream errors
