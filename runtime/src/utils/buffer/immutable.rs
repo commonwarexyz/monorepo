@@ -100,14 +100,14 @@ impl<B: Blob> Blob for Immutable<B> {
 
         // If we need to read trailing bytes, read them directly from the blob.
         if pool_read_len < buf.len() {
-            let trailing_buf = self
+            let mut trailing_part = buf.split_off(pool_read_len);
+
+            trailing_part = self
                 .blob
-                .read_at(
-                    vec![0; buf.len() - pool_read_len],
-                    offset + pool_read_len as u64,
-                )
+                .read_at(trailing_part, offset + pool_read_len as u64)
                 .await?;
-            buf.as_mut()[pool_read_len..].copy_from_slice(trailing_buf.as_ref());
+
+            buf.unsplit(trailing_part);
         }
 
         Ok(buf)
