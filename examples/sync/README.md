@@ -95,7 +95,6 @@ Client options:
 
    The client will continue syncing indefinitely, with each iteration showing a new sync_iteration value.
 
-
 ## Metrics
 
 Both the server and client expose Prometheus metrics:
