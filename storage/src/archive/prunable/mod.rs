@@ -111,7 +111,7 @@
 //!         prunable::{Archive, Config},
 //!     },
 //! };
-//! use commonware_utils::NZUsize;
+//! use commonware_utils::{NZUsize, NZU64};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -121,7 +121,7 @@
 //!         partition: "demo".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
-//!         items_per_section: 1024,
+//!         items_per_section: NZU64!(1024),
 //!         write_buffer: NZUsize!(1024 * 1024),
 //!         replay_buffer: NZUsize!(4096),
 //!         buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
@@ -138,7 +138,7 @@
 
 use crate::translator::Translator;
 use commonware_runtime::buffer::PoolRef;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 mod storage;
 pub use storage::Archive;
@@ -162,7 +162,7 @@ pub struct Config<T: Translator, C> {
     pub codec_config: C,
 
     /// The number of items per section (the granularity of pruning).
-    pub items_per_section: u64,
+    pub items_per_section: NonZeroU64,
 
     /// The amount of bytes that can be buffered in a section before being written to a
     /// [commonware_runtime::Blob].
@@ -186,7 +186,7 @@ mod tests {
     use commonware_codec::{varint::UInt, DecodeExt, EncodeSize, Error as CodecError};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{sequence::FixedBytes, NZUsize};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
     use rand::Rng;
     use std::collections::BTreeMap;
 
@@ -217,7 +217,7 @@ mod tests {
                 compression: Some(3),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: DEFAULT_ITEMS_PER_SECTION,
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -244,7 +244,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: DEFAULT_ITEMS_PER_SECTION,
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let result = Archive::<_, _, FixedBytes<64>, i32>::init(context, cfg.clone()).await;
@@ -268,7 +268,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: DEFAULT_ITEMS_PER_SECTION,
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -308,7 +308,7 @@ mod tests {
                     compression: None,
                     write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                     replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                    items_per_section: DEFAULT_ITEMS_PER_SECTION,
+                    items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
@@ -336,7 +336,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: DEFAULT_ITEMS_PER_SECTION,
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -399,7 +399,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: DEFAULT_ITEMS_PER_SECTION,
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -456,7 +456,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section: 1, // no mask - each item is its own section
+                items_per_section: NZU64!(1), // no mask - each item is its own section
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -542,7 +542,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section,
+                items_per_section: NZU64!(items_per_section),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -600,7 +600,7 @@ mod tests {
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
-                items_per_section,
+                items_per_section: NZU64!(items_per_section),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive =

@@ -5,7 +5,7 @@ use commonware_storage::{
     archive::{immutable, prunable, Archive as ArchiveTrait, Identifier},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::num::NonZeroUsize;
 
@@ -68,7 +68,7 @@ impl Archive {
                     freezer_journal_compression: compression,
                     freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     ordinal_partition: "archive_bench_ordinal".into(),
-                    items_per_section: ITEMS_PER_SECTION,
+                    items_per_section: NZU64!(ITEMS_PER_SECTION),
                     write_buffer: NZUsize!(WRITE_BUFFER),
                     replay_buffer: NZUsize!(REPLAY_BUFFER),
                     codec_config: (),
@@ -81,7 +81,7 @@ impl Archive {
                     translator: TwoCap,
                     compression,
                     codec_config: (),
-                    items_per_section: ITEMS_PER_SECTION,
+                    items_per_section: NZU64!(ITEMS_PER_SECTION),
                     write_buffer: NZUsize!(WRITE_BUFFER),
                     replay_buffer: NZUsize!(REPLAY_BUFFER),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),

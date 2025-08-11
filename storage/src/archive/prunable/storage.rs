@@ -160,7 +160,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
         // Return populated archive
         Ok(Self {
-            items_per_section: cfg.items_per_section,
+            items_per_section: cfg.items_per_section.get(),
             journal,
             pending: BTreeSet::new(),
             oldest_allowed: None,

@@ -109,7 +109,7 @@ mod tests {
         deterministic::{self, Context},
         Runner,
     };
-    use commonware_utils::{sequence::FixedBytes, NZUsize};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
     use rand::Rng;
     use std::{collections::BTreeMap, num::NonZeroUsize};
 
@@ -133,7 +133,7 @@ mod tests {
             translator: TwoCap,
             compression,
             codec_config: (),
-            items_per_section: 1024,
+            items_per_section: NZU64!(1024),
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -156,7 +156,7 @@ mod tests {
             freezer_journal_compression: compression,
             freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             ordinal_partition: "test_ordinal".into(),
-            items_per_section: 1024,
+            items_per_section: NZU64!(1024),
             write_buffer: NZUsize!(1024 * 1024),
             replay_buffer: NZUsize!(1024 * 1024),
             codec_config: (),
