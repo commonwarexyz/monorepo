@@ -15,65 +15,13 @@ use commonware_cryptography::{
     Digest, Signer as _,
 };
 use commonware_macros::select;
-use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_p2p::{simulated::helpers::PartitionStrategy, Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use futures_timer::Delay;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::time::Duration;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
-
-#[derive(Debug, Clone, Arbitrary)]
-pub enum PartitionStrategy {
-    /// All validators can communicate with all others (full mesh)
-    Connected,
-
-    /// Validator 0 acts as byzantine, can talk to itself and both halves
-    /// Other validators are split into two partitions that cannot communicate
-    TwoPartitionsWithByzantine,
-
-    /// The byzantine validator can send messages to all other validators.
-    /// Other validators cannot communicate with each other.
-    ManyPartitionsWithByzantine,
-
-    /// No validator can communicate with any other (complete isolation)
-    Isolated,
-
-    /// Validator i can send messages to itself or the next validator
-    Linear,
-}
-
-fn two_partitions_with_byzantine(n: usize, i: usize, j: usize) -> bool {
-    if i == 0 || j == 0 {
-        return true;
-    }
-
-    let mid = n / 2;
-    let i_partition = if i <= mid { 1 } else { 2 };
-    let j_partition = if j <= mid { 1 } else { 2 };
-
-    i_partition == j_partition
-}
-
-fn many_partitions_with_byzantine(_: usize, i: usize, j: usize) -> bool {
-    i == 0 || j == 0
-}
-
-fn linear(n: usize, i: usize, j: usize) -> bool {
-    i + 1 % n == j % n || i == j
-}
-
-impl PartitionStrategy {
-    pub fn create(&self) -> Option<fn(usize, usize, usize) -> bool> {
-        match self {
-            PartitionStrategy::Connected => None,
-            PartitionStrategy::Isolated => Some(|_n, i, j| i == j),
-            PartitionStrategy::TwoPartitionsWithByzantine => Some(two_partitions_with_byzantine),
-            PartitionStrategy::ManyPartitionsWithByzantine => Some(many_partitions_with_byzantine),
-            PartitionStrategy::Linear => Some(linear),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Arbitrary)]
 pub enum Mutation {
