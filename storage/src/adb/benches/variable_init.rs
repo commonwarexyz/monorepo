@@ -10,17 +10,20 @@ use commonware_storage::{
     adb::any::variable::{Any, Config as AConfig},
     translator::EightCap,
 };
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, NZU64};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::{num::NonZeroUsize, time::Instant};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    time::Instant,
+};
 use tracing::info;
 
 const NUM_ELEMENTS: u64 = 100_000;
 const NUM_OPERATIONS: u64 = 1_000_000;
 const COMMIT_FREQUENCY: u32 = 10_000;
 const DELETE_FREQUENCY: u32 = 10; // 1/10th of the updates will be deletes.
-const ITEMS_PER_BLOB: u64 = 500_000;
+const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(500_000);
 const PARTITION_SUFFIX: &str = "any_bench_partition";
 
 /// Use a "prod sized" page size to test the performance of the journal.
@@ -106,7 +109,7 @@ fn bench_variable_init(c: &mut Criterion) {
     let runner = tokio::Runner::new(cfg.clone());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
-            info!(elements, operations, "benchmarking any init",);
+            info!(elements, operations, "benchmarking variable::Any init",);
             gen_random_any(cfg.clone(), elements, operations);
 
             c.bench_function(

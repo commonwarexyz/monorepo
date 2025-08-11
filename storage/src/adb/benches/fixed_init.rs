@@ -105,7 +105,7 @@ fn bench_fixed_init(c: &mut Criterion) {
     let runner = tokio::Runner::new(cfg.clone());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
-            info!(elements, operations, "benchmarking any init",);
+            info!(elements, operations, "benchmarking fixed::Any init",);
             gen_random_any(cfg.clone(), elements, operations);
 
             c.bench_function(
