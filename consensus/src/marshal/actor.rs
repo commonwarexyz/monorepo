@@ -40,10 +40,10 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
-/// A waiter entry that can be canceled.
-struct WaiterEntry<B: Block> {
-    // The responders to the request
-    responders: Vec<oneshot::Sender<B>>,
+/// An entry for multiple listeners for a block.
+struct ListenerEntry<B: Block> {
+    // The listeners that are waiting for the block
+    listeners: Vec<oneshot::Sender<B>>,
     // Hook that aborts the waiter future when dropped
     _hook: AbortHook,
 }
@@ -100,8 +100,8 @@ pub struct Actor<
     // Last view processed
     last_processed_view: u64,
 
-    // Outstanding waiters for blocks
-    waiters: BTreeMap<B::Commitment, WaiterEntry<B>>,
+    // Outstanding listeners for blocks
+    listeners: BTreeMap<B::Commitment, ListenerEntry<B>>,
 
     // ---------- Prunable Storage ----------
     // Verified blocks stored by view
@@ -265,7 +265,7 @@ impl<
                 partition_prefix: config.partition_prefix,
 
                 last_processed_view: 0,
-                waiters: BTreeMap::new(),
+                listeners: BTreeMap::new(),
 
                 verified_blocks,
                 notarized_blocks,
@@ -320,26 +320,24 @@ impl<
             .spawn(|_| finalizer.run());
 
         // Create a local pool for waiter futures
-        let mut waiter_futures = AbortablePool::<(B::Commitment, B)>::default();
+        let mut waiters = AbortablePool::<(B::Commitment, B)>::default();
 
         // Handle messages
         loop {
-            // Remove any dropped waiters
-            self.waiters.retain(|_, waiter| {
-                // Remove any canceled responders. If all responders are canceled, remove and drop
-                // the waiter, which also aborts the waiter future.
-                waiter.responders.retain(|tx| !tx.is_canceled());
-                !waiter.responders.is_empty()
+            // Remove any dropped listeners. If all listeners are dropped, abort the waiter.
+            self.listeners.retain(|_, listener| {
+                listener.listeners.retain(|tx| !tx.is_canceled());
+                !listener.listeners.is_empty()
             });
 
             // Select messages
             select! {
                 // Handle waiter completions first
-                waiter_result = waiter_futures.next_completed() => {
-                    let Ok((commitment, block)) = waiter_result else {
+                result = waiters.next_completed() => {
+                    let Ok((commitment, block)) = result else {
                         continue; // Aborted future
                     };
-                    self.resolve_waiter(commitment, &block).await;
+                    self.resolve_listeners(commitment, &block).await;
                 },
                 // Handle consensus before finalizer or backfiller
                 mailbox_message = self.mailbox.next() => {
@@ -419,21 +417,21 @@ impl<
                                 resolver.fetch(Request::<B>::Notarized { view }).await;
                             }
 
-                            // Register waiter
-                            debug!(view, ?commitment, "registering waiter");
-                            match self.waiters.entry(commitment) {
+                            // Register listener
+                            debug!(view, ?commitment, "registering listener");
+                            match self.listeners.entry(commitment) {
                                 Entry::Occupied(mut entry) => {
-                                    entry.get_mut().responders.push(response);
+                                    entry.get_mut().listeners.push(response);
                                 }
                                 Entry::Vacant(entry) => {
                                     let (tx, rx) = oneshot::channel();
                                     buffer.subscribe_prepared(None, commitment, None, tx).await;
-                                    entry.insert(WaiterEntry {
-                                        responders: vec![response],
-                                        _hook: waiter_futures.push(async move {
-                                            let block = rx.await.unwrap();
-                                            (commitment, block)
-                                        }),
+                                    let hook = waiters.push(async move {
+                                        (commitment, rx.await.unwrap())
+                                    });
+                                    entry.insert(ListenerEntry {
+                                        listeners: vec![response],
+                                        _hook: hook,
                                     });
                                 }
                             }
@@ -708,11 +706,11 @@ impl<
 
     // -------------------- Waiters --------------------
 
-    /// Resolve any waiters for the given commitment with the provided block.
-    async fn resolve_waiter(&mut self, commitment: B::Commitment, block: &B) {
-        if let Some(mut waiter) = self.waiters.remove(&commitment) {
-            for responder in waiter.responders.drain(..) {
-                let _ = responder.send(block.clone());
+    /// Resolve any listeners for the given commitment with the provided block.
+    async fn resolve_listeners(&mut self, commitment: B::Commitment, block: &B) {
+        if let Some(mut listener) = self.listeners.remove(&commitment) {
+            for listener in listener.listeners.drain(..) {
+                let _ = listener.send(block.clone());
             }
         }
     }
@@ -721,7 +719,7 @@ impl<
 
     /// Add a verified block to the archive.
     async fn put_verified_block(&mut self, view: u64, commitment: B::Commitment, block: B) {
-        self.resolve_waiter(commitment, &block).await;
+        self.resolve_listeners(commitment, &block).await;
 
         match self.verified_blocks.put_sync(view, commitment, block).await {
             Ok(_) => {
@@ -786,7 +784,7 @@ impl<
 
     /// Add a notarized block to the archive.
     async fn put_notarized_block(&mut self, view: u64, commitment: B::Commitment, block: B) {
-        self.resolve_waiter(commitment, &block).await;
+        self.resolve_listeners(commitment, &block).await;
 
         match self
             .notarized_blocks
@@ -816,7 +814,7 @@ impl<
         block: B,
         notifier: &mut mpsc::Sender<()>,
     ) {
-        self.resolve_waiter(commitment, &block).await;
+        self.resolve_listeners(commitment, &block).await;
 
         if let Err(e) = self
             .finalized_blocks
@@ -837,7 +835,7 @@ impl<
         block: B,
         notifier: &mut mpsc::Sender<()>,
     ) {
-        self.resolve_waiter(commitment, &block).await;
+        self.resolve_listeners(commitment, &block).await;
 
         if let Err(e) = try_join!(
             self.finalizations_by_height
