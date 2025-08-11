@@ -10,7 +10,6 @@ cargo-fuzz = true
 [dependencies]
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
-commonware-consensus = { workspace = true, features = ["fuzz"] }
 commonware-macros = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-p2p = { workspace = true }
@@ -21,6 +20,10 @@ rand = { workspace = true }
 governor = { workspace = true }
 futures-timer = "3.0.3"
 futures = { workspace = true }
+
+[dependencies.commonware-consensus]
+path = ".."
+features = ["fuzz"]
 
 [[bin]]
 name = "simplex_messages"
