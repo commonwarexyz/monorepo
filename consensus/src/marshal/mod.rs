@@ -97,7 +97,6 @@ mod tests {
         sha256::{self, Digest as Sha256Digest},
         Digestible, PrivateKeyExt as _, Signer as _,
     };
-    use commonware_macros::test_traced;
     use commonware_p2p::simulated::{self, Link, Network, Oracle};
     use commonware_resolver::p2p as resolver;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
@@ -116,142 +115,6 @@ mod tests {
     const NUM_VALIDATORS: u32 = 4;
     const QUORUM: u32 = 3;
     const NUM_BLOCKS: u64 = 100;
-
-    #[test_traced("WARN")]
-    fn test_finalize_good_links() {
-        let link = Link {
-            latency: 100.0,
-            jitter: 1.0,
-            success_rate: 1.0,
-        };
-        for seed in 0..5 {
-            let result1 = finalize(seed, link.clone());
-            let result2 = finalize(seed, link.clone());
-
-            // Ensure determinism
-            assert_eq!(result1, result2);
-        }
-    }
-
-    #[test_traced("WARN")]
-    fn test_finalize_bad_links() {
-        let link = Link {
-            latency: 200.0,
-            jitter: 50.0,
-            success_rate: 0.7,
-        };
-        for seed in 0..5 {
-            let result1 = finalize(seed, link.clone());
-            let result2 = finalize(seed, link.clone());
-
-            // Ensure determinism
-            assert_eq!(result1, result2);
-        }
-    }
-
-    fn finalize(seed: u64, link: Link) -> String {
-        let runner = deterministic::Runner::new(
-            deterministic::Config::new()
-                .with_seed(seed)
-                .with_timeout(Some(Duration::from_secs(300))),
-        );
-        runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
-            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
-
-            // Initialize applications and actors
-            let mut applications = BTreeMap::new();
-            let mut actors = Vec::new();
-            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
-
-            for (i, secret) in schemes.iter().enumerate() {
-                let (application, actor) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
-                    &mut oracle,
-                    coordinator.clone(),
-                    secret.clone(),
-                    identity,
-                )
-                .await;
-                applications.insert(peers[i].clone(), application);
-                actors.push(actor);
-            }
-
-            // Add links between all peers
-            setup_network_links(&mut oracle, &peers, link.clone()).await;
-
-            // Generate blocks, skipping the genesis block.
-            let mut blocks = Vec::<B>::new();
-            let mut parent = sha256::hash(b"");
-            for i in 1..=NUM_BLOCKS {
-                let block = B::new::<sha256::Sha256>(parent, i, i);
-                parent = block.digest();
-                blocks.push(block);
-            }
-
-            // Broadcast and finalize blocks in random order
-            blocks.shuffle(&mut context);
-            for block in blocks.iter() {
-                // Skip genesis block
-                let height = block.height();
-                assert!(height > 0, "genesis block should not have been generated");
-
-                // Broadcast block by one validator
-                let actor_index: usize = (height % (NUM_VALIDATORS as u64)) as usize;
-                let mut actor = actors[actor_index].clone();
-                actor.broadcast(block.clone()).await;
-                actor.verified(height, block.clone()).await;
-
-                // Wait for the block to be broadcast, but due to jitter, we may or may not receive
-                // the block before continuing.
-                context
-                    .sleep(Duration::from_millis(link.latency as u64))
-                    .await;
-
-                // Notarize block by the validator that broadcasted it
-                let proposal = Proposal {
-                    view: height,
-                    parent: height.checked_sub(1).unwrap(),
-                    payload: block.digest(),
-                };
-                let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
-                actor
-                    .report(Activity::Notarization(notarization.clone()))
-                    .await;
-
-                // Finalize block by all validators
-                let fin = make_finalization(proposal, &shares, QUORUM);
-                for actor in actors.iter_mut() {
-                    // Always finalize the last block. Otherwise, finalize randomly.
-                    if height == NUM_BLOCKS || context.gen_bool(0.2) {
-                        actor.report(Activity::Finalization(fin.clone())).await;
-                    }
-                }
-            }
-
-            // Check that all applications received all blocks.
-            let mut finished = false;
-            while !finished {
-                // Avoid a busy loop
-                context.sleep(Duration::from_secs(1)).await;
-
-                // If not all validators have finished, try again
-                if applications.len() != NUM_VALIDATORS as usize {
-                    continue;
-                }
-                finished = true;
-                for app in applications.values() {
-                    if app.blocks().len() != NUM_BLOCKS as usize {
-                        finished = false;
-                        break;
-                    }
-                }
-            }
-
-            // Return state
-            context.auditor().state()
-        })
-    }
 
     async fn setup_validator(
         context: deterministic::Context,
@@ -407,7 +270,143 @@ mod tests {
         }
     }
 
-    #[test_traced("WARN")]
+    #[test]
+    fn test_finalize_good_links() {
+        let link = Link {
+            latency: 100.0,
+            jitter: 1.0,
+            success_rate: 1.0,
+        };
+        for seed in 0..5 {
+            let result1 = finalize(seed, link.clone());
+            let result2 = finalize(seed, link.clone());
+
+            // Ensure determinism
+            assert_eq!(result1, result2);
+        }
+    }
+
+    #[test]
+    fn test_finalize_bad_links() {
+        let link = Link {
+            latency: 200.0,
+            jitter: 50.0,
+            success_rate: 0.7,
+        };
+        for seed in 0..5 {
+            let result1 = finalize(seed, link.clone());
+            let result2 = finalize(seed, link.clone());
+
+            // Ensure determinism
+            assert_eq!(result1, result2);
+        }
+    }
+
+    fn finalize(seed: u64, link: Link) -> String {
+        let runner = deterministic::Runner::new(
+            deterministic::Config::new()
+                .with_seed(seed)
+                .with_timeout(Some(Duration::from_secs(300))),
+        );
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone());
+            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
+
+            // Initialize applications and actors
+            let mut applications = BTreeMap::new();
+            let mut actors = Vec::new();
+            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
+
+            for (i, secret) in schemes.iter().enumerate() {
+                let (application, actor) = setup_validator(
+                    context.with_label(&format!("validator-{i}")),
+                    &mut oracle,
+                    coordinator.clone(),
+                    secret.clone(),
+                    identity,
+                )
+                .await;
+                applications.insert(peers[i].clone(), application);
+                actors.push(actor);
+            }
+
+            // Add links between all peers
+            setup_network_links(&mut oracle, &peers, link.clone()).await;
+
+            // Generate blocks, skipping the genesis block.
+            let mut blocks = Vec::<B>::new();
+            let mut parent = sha256::hash(b"");
+            for i in 1..=NUM_BLOCKS {
+                let block = B::new::<sha256::Sha256>(parent, i, i);
+                parent = block.digest();
+                blocks.push(block);
+            }
+
+            // Broadcast and finalize blocks in random order
+            blocks.shuffle(&mut context);
+            for block in blocks.iter() {
+                // Skip genesis block
+                let height = block.height();
+                assert!(height > 0, "genesis block should not have been generated");
+
+                // Broadcast block by one validator
+                let actor_index: usize = (height % (NUM_VALIDATORS as u64)) as usize;
+                let mut actor = actors[actor_index].clone();
+                actor.broadcast(block.clone()).await;
+                actor.verified(height, block.clone()).await;
+
+                // Wait for the block to be broadcast, but due to jitter, we may or may not receive
+                // the block before continuing.
+                context
+                    .sleep(Duration::from_millis(link.latency as u64))
+                    .await;
+
+                // Notarize block by the validator that broadcasted it
+                let proposal = Proposal {
+                    view: height,
+                    parent: height.checked_sub(1).unwrap(),
+                    payload: block.digest(),
+                };
+                let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
+                actor
+                    .report(Activity::Notarization(notarization.clone()))
+                    .await;
+
+                // Finalize block by all validators
+                let fin = make_finalization(proposal, &shares, QUORUM);
+                for actor in actors.iter_mut() {
+                    // Always finalize the last block. Otherwise, finalize randomly.
+                    if height == NUM_BLOCKS || context.gen_bool(0.2) {
+                        actor.report(Activity::Finalization(fin.clone())).await;
+                    }
+                }
+            }
+
+            // Check that all applications received all blocks.
+            let mut finished = false;
+            while !finished {
+                // Avoid a busy loop
+                context.sleep(Duration::from_secs(1)).await;
+
+                // If not all validators have finished, try again
+                if applications.len() != NUM_VALIDATORS as usize {
+                    continue;
+                }
+                finished = true;
+                for app in applications.values() {
+                    if app.blocks().len() != NUM_BLOCKS as usize {
+                        finished = false;
+                        break;
+                    }
+                }
+            }
+
+            // Return state
+            context.auditor().state()
+        })
+    }
+
+    #[test]
     fn test_subscribe_basic_block_delivery() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
@@ -461,7 +460,7 @@ mod tests {
         })
     }
 
-    #[test_traced("WARN")]
+    #[test]
     fn test_subscribe_multiple_subscriptions() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
@@ -529,7 +528,7 @@ mod tests {
         })
     }
 
-    #[test_traced("WARN")]
+    #[test]
     fn test_subscribe_canceled_subscriptions() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
@@ -591,7 +590,7 @@ mod tests {
         })
     }
 
-    #[test_traced("WARN")]
+    #[test]
     fn test_subscribe_blocks_from_different_sources() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {

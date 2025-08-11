@@ -291,7 +291,7 @@ mod tests {
             pin_mut!(timeout_future);
             let result = select(stream_future, timeout_future).await;
             match result {
-                Either::Left((_, _)) => panic!("Stream resolved after abort"),
+                Either::Left((_, _)) => panic!("Stream resolved after cancellation"),
                 Either::Right((_, _)) => {
                     // Wait for the timeout to trigger.
                 }
