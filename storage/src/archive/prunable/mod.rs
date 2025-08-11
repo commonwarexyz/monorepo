@@ -193,8 +193,8 @@ mod tests {
     const DEFAULT_ITEMS_PER_SECTION: u64 = 65536;
     const DEFAULT_WRITE_BUFFER: usize = 1024;
     const DEFAULT_REPLAY_BUFFER: usize = 4096;
-    const PAGE_SIZE: usize = 1024;
-    const PAGE_CACHE_SIZE: usize = 10;
+    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -218,7 +218,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: DEFAULT_ITEMS_PER_SECTION,
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -245,7 +245,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: DEFAULT_ITEMS_PER_SECTION,
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let result = Archive::<_, _, FixedBytes<64>, i32>::init(context, cfg.clone()).await;
             assert!(matches!(
@@ -269,7 +269,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: DEFAULT_ITEMS_PER_SECTION,
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -309,7 +309,7 @@ mod tests {
                     write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                     replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                     items_per_section: DEFAULT_ITEMS_PER_SECTION,
-                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
             .await.expect("Failed to initialize archive");
@@ -337,7 +337,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: DEFAULT_ITEMS_PER_SECTION,
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -400,7 +400,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: DEFAULT_ITEMS_PER_SECTION,
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -457,7 +457,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: 1, // no mask - each item is its own section
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -543,7 +543,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section,
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
                 .await
@@ -601,7 +601,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section,
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut archive =
                 Archive::<_, _, _, FixedBytes<1024>>::init(context.clone(), cfg.clone())

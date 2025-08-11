@@ -111,10 +111,10 @@ mod tests {
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize};
     use rand::Rng;
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, num::NonZeroUsize};
 
-    const PAGE_SIZE: usize = 1024;
-    const PAGE_CACHE_SIZE: usize = 10;
+    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -136,7 +136,7 @@ mod tests {
             items_per_section: 1024,
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
         prunable::Archive::init(context, cfg).await.unwrap()
     }
@@ -154,10 +154,7 @@ mod tests {
             freezer_journal_partition: "test_journal".into(),
             freezer_journal_target_size: 1024 * 1024,
             freezer_journal_compression: compression,
-            freezer_journal_buffer_pool: PoolRef::new(
-                NZUsize!(PAGE_SIZE),
-                NZUsize!(PAGE_CACHE_SIZE),
-            ),
+            freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             ordinal_partition: "test_ordinal".into(),
             items_per_section: 1024,
             write_buffer: NZUsize!(1024 * 1024),

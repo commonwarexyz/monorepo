@@ -149,14 +149,15 @@ mod tests {
     use rand::Rng as _;
     use std::{
         collections::{BTreeMap, HashMap},
+        num::NonZeroUsize,
         sync::{Arc, Mutex},
         time::Duration,
     };
     use tracing::debug;
     use types::Activity;
 
-    const PAGE_SIZE: usize = 1024;
-    const PAGE_CACHE_SIZE: usize = 10;
+    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     /// Registers all validators using the oracle.
     async fn register_validators<P: CPublicKey>(
@@ -331,7 +332,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
                 let (voter, resolver) = registrations
@@ -576,7 +577,7 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     let (voter_network, resolver_network) = registrations
@@ -746,7 +747,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -865,7 +866,7 @@ mod tests {
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, resolver) = registrations
                 .remove(&validator)
@@ -988,7 +989,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1215,7 +1216,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1374,7 +1375,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1558,7 +1559,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1738,7 +1739,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1906,7 +1907,7 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let (voter, resolver) = registrations
                         .remove(&validator)
@@ -2075,7 +2076,7 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let (voter, resolver) = registrations
                         .remove(&validator)
@@ -2240,7 +2241,7 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let (voter, resolver) = registrations
                         .remove(&validator)
@@ -2377,7 +2378,7 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)

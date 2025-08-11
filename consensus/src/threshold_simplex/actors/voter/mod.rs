@@ -74,6 +74,9 @@ mod tests {
     use futures::{channel::mpsc, StreamExt};
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
     /// Trigger processing of an uninteresting view from the resolver after
     /// jumping ahead to a new finalize view:
     ///
@@ -155,7 +158,7 @@ mod tests {
                 activity_timeout: 10,
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
@@ -464,7 +467,7 @@ mod tests {
                 activity_timeout,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (actor, _mailbox) = Actor::new(context.clone(), voter_config);
 
