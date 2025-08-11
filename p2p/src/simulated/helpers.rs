@@ -1,8 +1,7 @@
+use super::{Link, Oracle, Receiver, Sender};
 use commonware_cryptography::PublicKey as CPublicKey;
-use commonware_p2p::simulated::{Link, Oracle, Receiver, Sender};
 use std::collections::HashMap;
 
-#[allow(dead_code)]
 #[derive(Clone)]
 pub enum Action {
     Link(Link),
@@ -10,8 +9,7 @@ pub enum Action {
     Unlink,
 }
 
-#[warn(unused_imports)]
-pub async fn register_validators<P: CPublicKey>(
+pub async fn register_peers<P: CPublicKey>(
     oracle: &mut Oracle<P>,
     validators: &[P],
 ) -> HashMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))> {
@@ -31,8 +29,7 @@ pub async fn register_validators<P: CPublicKey>(
     registrations
 }
 
-#[warn(unused_imports)]
-pub async fn link_validators<P: CPublicKey>(
+pub async fn link_peers<P: CPublicKey>(
     oracle: &mut Oracle<P>,
     validators: &[P],
     action: Action,

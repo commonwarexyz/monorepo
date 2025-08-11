@@ -1,8 +1,5 @@
 #![no_main]
 
-mod common;
-use common::{link_validators, register_validators, Action};
-
 mod mocks;
 use commonware_consensus::simplex::{
     config::Config,
@@ -17,7 +14,7 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
     PrivateKeyExt as _, Sha256, Signer as _,
 };
-use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
+use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network, helpers::{Action, link_peers, register_peers}};
 use commonware_runtime::{deterministic::{self}, Metrics, Runner};
 use commonware_utils::{NZUsize, NZU32};
 use governor::Quota;
@@ -56,7 +53,7 @@ fn fuzzer(input: FuzzInput) {
         validators.sort();
         schemes.sort_by_key(|s| s.public_key());
         let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
-        let mut registrations = register_validators(&mut oracle, &validators).await;
+        let mut registrations = register_peers(&mut oracle, &validators).await;
 
         // Link all validators
         // The first validator is byzantine.
@@ -65,7 +62,7 @@ fn fuzzer(input: FuzzInput) {
             jitter: 0.0,
             success_rate: 1.0,
         };
-        link_validators(
+        link_peers(
             &mut oracle,
             &validators,
             Action::Link(link),
