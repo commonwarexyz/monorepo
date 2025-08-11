@@ -14,8 +14,14 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
     PrivateKeyExt as _, Sha256, Signer as _,
 };
-use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network, helpers::{Action, link_peers, register_peers}};
-use commonware_runtime::{deterministic::{self}, Metrics, Runner};
+use commonware_p2p::simulated::{
+    helpers::{link_peers, register_peers, Action},
+    Config as NetworkConfig, Link, Network,
+};
+use commonware_runtime::{
+    deterministic::{self},
+    Metrics, Runner,
+};
 use commonware_utils::{NZUsize, NZU32};
 use governor::Quota;
 use libfuzzer_sys::fuzz_target;
@@ -26,8 +32,7 @@ fn fuzzer(input: FuzzInput) {
     // Create context
     let n = 4;
     let namespace = b"consensus_fuzz".to_vec();
-    let cfg = deterministic::Config::new()
-        .with_seed(input.seed); // Reduced timeout for faster cleanup
+    let cfg = deterministic::Config::new().with_seed(input.seed); // Reduced timeout for faster cleanup
     let executor = deterministic::Runner::new(cfg);
     executor.start(|context| async move {
         // Create simulated network

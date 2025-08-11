@@ -165,9 +165,9 @@ impl<E: Clock + Spawner> Fuzzer<E> {
                 Ok(msg) => msg,
                 Err(_) => return, // Skip malformed messages
             };
+
         // Store view.
         self.view = msg.view();
-
         // Process message based on type
         match msg {
             Voter::Notarize(notarize) => {
@@ -338,7 +338,6 @@ impl<E: Clock + Spawner> Fuzzer<E> {
                     .into();
                     let _ = sender.send(Recipients::All, encoded_msg, true).await;
                 }
-
                 Message::Random => {
                     let malformed_bytes = self.random_bytes();
                     let _ = sender
