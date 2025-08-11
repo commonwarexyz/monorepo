@@ -1,7 +1,7 @@
 //! Utilities for working with futures.
 
 use futures::{
-    future,
+    future::{self, AbortHandle, Abortable, Aborted},
     stream::{FuturesUnordered, SelectNextSome},
     StreamExt,
 };
@@ -67,6 +67,82 @@ impl<T: Send> Pool<T> {
     /// Creates a dummy future that never resolves.
     fn create_dummy_future() -> PooledFuture<T> {
         Box::pin(async { future::pending::<T>().await })
+    }
+}
+
+/// A hook that can be used to abort a specific future in an [AbortablePool].
+///
+/// When the hook is dropped, the associated future is aborted.
+pub struct AbortHook {
+    handle: AbortHandle,
+}
+
+impl Drop for AbortHook {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+/// A future type that can be used in [AbortablePool].
+type AbortablePooledFuture<T> = Pin<Box<dyn Future<Output = Result<T, Aborted>> + Send>>;
+
+/// An unordered pool of futures that can be individually aborted.
+///
+/// Each future added to the pool returns an [AbortHook]. When the hook is dropped,
+/// the associated future is aborted.
+///
+/// **Note:** This pool is not thread-safe and should not be used across threads without external
+/// synchronization.
+pub struct AbortablePool<T> {
+    pool: FuturesUnordered<AbortablePooledFuture<T>>,
+}
+
+impl<T: Send> Default for AbortablePool<T> {
+    fn default() -> Self {
+        // Insert a dummy future (that never resolves) to prevent the stream from being empty.
+        // Else, the `select_next_some()` function returns `None` instantly.
+        let pool = FuturesUnordered::new();
+        pool.push(Self::create_dummy_future());
+        Self { pool }
+    }
+}
+
+impl<T: Send> AbortablePool<T> {
+    /// Returns the number of futures in the pool.
+    pub fn len(&self) -> usize {
+        // Subtract the dummy future.
+        self.pool.len().checked_sub(1).unwrap()
+    }
+
+    /// Returns `true` if the pool is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Adds a future to the pool and returns an [AbortHook] that can be used to abort it.
+    ///
+    /// The future must be `'static` and `Send` to ensure it can be safely stored and executed.
+    /// When the returned [AbortHook] is dropped, the future will be aborted.
+    pub fn push(&mut self, future: impl Future<Output = T> + Send + 'static) -> AbortHook {
+        let (handle, registration) = AbortHandle::new_pair();
+        let abortable_future = Abortable::new(future, registration);
+        self.pool.push(Box::pin(abortable_future));
+        AbortHook { handle }
+    }
+
+    /// Returns a future that resolves to the next future in the pool that resolves.
+    ///
+    /// If the pool is empty, the future will never resolve.
+    /// Returns `Ok(T)` for successful completion or `Err(Aborted)` for aborted futures.
+    pub fn next_completed(
+        &mut self,
+    ) -> SelectNextSome<'_, FuturesUnordered<AbortablePooledFuture<T>>> {
+        self.pool.select_next_some()
+    }
+
+    /// Creates a dummy future that never resolves.
+    fn create_dummy_future() -> AbortablePooledFuture<T> {
+        Box::pin(async { Ok(future::pending::<T>().await) })
     }
 }
 
@@ -215,7 +291,7 @@ mod tests {
             pin_mut!(timeout_future);
             let result = select(stream_future, timeout_future).await;
             match result {
-                Either::Left((_, _)) => panic!("Stream resolved after cancellation"),
+                Either::Left((_, _)) => panic!("Stream resolved after abort"),
                 Either::Right((_, _)) => {
                     // Wait for the timeout to trigger.
                 }
@@ -255,6 +331,95 @@ mod tests {
                 pool.is_empty(),
                 "Pool should be empty after all futures resolve"
             );
+        });
+    }
+
+    #[test]
+    fn test_abortable_pool_initialization() {
+        let pool = AbortablePool::<i32>::default();
+        assert_eq!(pool.len(), 0);
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn test_abortable_pool_adding_futures() {
+        let mut pool = AbortablePool::<i32>::default();
+        assert_eq!(pool.len(), 0);
+        assert!(pool.is_empty());
+
+        let _hook1 = pool.push(async { 42 });
+        assert_eq!(pool.len(), 1);
+        assert!(!pool.is_empty());
+
+        let _hook2 = pool.push(async { 43 });
+        assert_eq!(pool.len(), 2);
+    }
+
+    #[test]
+    fn test_abortable_pool_successful_completion() {
+        block_on(async move {
+            let mut pool = AbortablePool::<i32>::default();
+            let _hook = pool.push(future::ready(42));
+            let result = pool.next_completed().await;
+            assert_eq!(result, Ok(42));
+            assert!(pool.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_abortable_pool_drop_abort() {
+        block_on(async move {
+            let mut pool = AbortablePool::<i32>::default();
+
+            let (sender, receiver) = oneshot::channel();
+            let hook = pool.push(async move {
+                receiver.await.unwrap();
+                42
+            });
+
+            drop(hook);
+
+            let result = pool.next_completed().await;
+            assert!(result.is_err());
+            assert!(pool.is_empty());
+
+            let _ = sender.send(());
+        });
+    }
+
+    #[test]
+    fn test_abortable_pool_partial_abort() {
+        block_on(async move {
+            let mut pool = AbortablePool::<i32>::default();
+
+            let _hook1 = pool.push(future::ready(1));
+            let (sender, receiver) = oneshot::channel();
+            let hook2 = pool.push(async move {
+                receiver.await.unwrap();
+                2
+            });
+            let _hook3 = pool.push(future::ready(3));
+
+            assert_eq!(pool.len(), 3);
+
+            drop(hook2);
+
+            let mut results = Vec::new();
+            for _ in 0..3 {
+                let result = pool.next_completed().await;
+                results.push(result);
+            }
+
+            let successful: Vec<_> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
+            let aborted: Vec<_> = results.iter().filter(|r| r.is_err()).collect();
+
+            assert_eq!(successful.len(), 2);
+            assert_eq!(aborted.len(), 1);
+            assert!(successful.contains(&&1));
+            assert!(successful.contains(&&3));
+            assert!(pool.is_empty());
+
+            let _ = sender.send(());
         });
     }
 }
