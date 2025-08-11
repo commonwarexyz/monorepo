@@ -1,19 +1,46 @@
 use crate::{
     adb::{
         self,
-        any::{self, fixed::Any},
+        any::fixed::{Any, Config},
         sync,
     },
-    journal::fixed,
+    journal::fixed::{self, Journal},
     mmr::hasher::Standard,
     store::operation::Fixed,
     translator::Translator,
 };
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
 pub type Error = adb::Error;
+
+/// Configuration for syncing an [Any] to a pruned target state.
+pub struct SyncConfig<E: Storage + Metrics, K: Array, V: Array, T: Translator, D: Digest> {
+    /// Database configuration.
+    pub db_config: Config<T>,
+
+    /// The [Any]'s log of operations. It has elements from `lower_bound` to `upper_bound`, inclusive.
+    /// Reports `lower_bound` as its pruning boundary (oldest retained operation index).
+    pub log: Journal<E, Fixed<K, V>>,
+
+    /// Sync lower boundary (inclusive) - operations below this index are pruned.
+    pub lower_bound: u64,
+
+    /// Sync upper boundary (inclusive) - operations above this index are not synced.
+    pub upper_bound: u64,
+
+    /// The pinned nodes the MMR needs at the pruning boundary given by
+    /// `lower_bound`, in the order specified by [Proof::nodes_to_pin].
+    /// If `None`, the pinned nodes will be computed from the MMR's journal and metadata,
+    /// which are expected to have the necessary pinned nodes.
+    pub pinned_nodes: Option<Vec<D>>,
+
+    /// The maximum number of operations to keep in memory
+    /// before committing the database while applying operations.
+    /// Higher value will cause more memory usage during sync.
+    pub apply_batch_size: usize,
+}
 
 impl<E, K, V, H, T> adb::sync::Database for Any<E, K, V, H, T>
 where
@@ -67,7 +94,7 @@ where
     ) -> Result<Self, Self::Error> {
         Any::init_synced(
             context,
-            any::fixed::SyncConfig {
+            SyncConfig {
                 db_config,
                 log: journal,
                 lower_bound: target.lower_bound_ops,

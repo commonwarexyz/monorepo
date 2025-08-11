@@ -8,7 +8,7 @@
 //! and cannot be updated after.
 
 use crate::{
-    adb::Error,
+    adb::{any::sync, Error},
     index::Index,
     journal::fixed::{Config as JConfig, Journal},
     mmr::{
@@ -22,7 +22,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_codec::Encode as _;
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use commonware_utils::{Array, NZUsize};
 use futures::{
@@ -78,33 +78,6 @@ pub struct Config<T: Translator> {
     /// which is useful for serving state sync clients, who may request operations
     /// below the inactivity floor.
     pub pruning_delay: u64,
-}
-
-/// Configuration for syncing an [Any] to a pruned target state.
-pub struct SyncConfig<E: Storage + Metrics, K: Array, V: Array, T: Translator, D: Digest> {
-    /// Database configuration.
-    pub db_config: Config<T>,
-
-    /// The [Any]'s log of operations. It has elements from `lower_bound` to `upper_bound`, inclusive.
-    /// Reports `lower_bound` as its pruning boundary (oldest retained operation index).
-    pub log: Journal<E, Operation<K, V>>,
-
-    /// Sync lower boundary (inclusive) - operations below this index are pruned.
-    pub lower_bound: u64,
-
-    /// Sync upper boundary (inclusive) - operations above this index are not synced.
-    pub upper_bound: u64,
-
-    /// The pinned nodes the MMR needs at the pruning boundary given by
-    /// `lower_bound`, in the order specified by [Proof::nodes_to_pin].
-    /// If `None`, the pinned nodes will be computed from the MMR's journal and metadata,
-    /// which are expected to have the necessary pinned nodes.
-    pub pinned_nodes: Option<Vec<D>>,
-
-    /// The maximum number of operations to keep in memory
-    /// before committing the database while applying operations.
-    /// Higher value will cause more memory usage during sync.
-    pub apply_batch_size: usize,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
@@ -205,7 +178,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator
     /// The pruning boundary is set to `cfg.lower_bound`.
     pub(super) async fn init_synced(
         context: E,
-        cfg: SyncConfig<E, K, V, T, H::Digest>,
+        cfg: sync::SyncConfig<E, K, V, T, H::Digest>,
     ) -> Result<Self, Error> {
         let mut mmr = Mmr::init_sync(
             context.with_label("mmr"),
@@ -829,6 +802,7 @@ where
 pub(super) mod test {
     use super::*;
     use crate::{
+        adb::any::sync::SyncConfig,
         mmr::{hasher::Standard, mem::Mmr as MemMmr},
         translator::TwoCap,
     };
