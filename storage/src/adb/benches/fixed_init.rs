@@ -99,13 +99,13 @@ fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
 type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
 
 /// Benchmark the initialization of a large randomly generated any db.
-fn bench_any_init(c: &mut Criterion) {
+fn bench_fixed_init(c: &mut Criterion) {
     tracing_subscriber::fmt().try_init().ok();
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg.clone());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 2] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 2] {
-            info!(elements, operations, "benchmarking any init",);
+            info!(elements, operations, "benchmarking fixed::Any init",);
             gen_random_any(cfg.clone(), elements, operations);
 
             c.bench_function(
@@ -148,5 +148,5 @@ fn bench_any_init(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_any_init
+    targets = bench_fixed_init
 }
