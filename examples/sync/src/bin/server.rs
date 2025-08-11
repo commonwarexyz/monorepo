@@ -357,13 +357,12 @@ async fn initialize_database<DB, E>(
     database: &mut DB,
     config: &Config,
     context: &mut E,
-    database_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable,
     E: rand::RngCore,
 {
-    info!("starting {} database", database_name);
+    info!("starting {} database", DB::name());
 
     // Create and initialize database
     let initial_ops = DB::create_test_operations(config.initial_ops, context.next_u64());
@@ -388,7 +387,7 @@ where
         op_count = database.op_count(),
         root = %root_hex,
         "{} database ready",
-        database_name
+        DB::name()
     );
 
     Ok(())
@@ -404,9 +403,9 @@ where
     DB: Syncable + Send + Sync + 'static,
     E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
-    info!("starting {} database server", DB::database_name());
+    info!("starting {} database server", DB::name());
 
-    initialize_database(&mut database, &config, &mut context, DB::database_name()).await?;
+    initialize_database(&mut database, &config, &mut context).await?;
 
     // Create listener to accept connections
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
@@ -416,7 +415,7 @@ where
         op_interval = ?config.op_interval,
         ops_per_interval = config.ops_per_interval,
         "{} server listening and continuously adding operations",
-        DB::database_name()
+        DB::name()
     );
 
     let state = Arc::new(State::new(context.with_label("server"), database));

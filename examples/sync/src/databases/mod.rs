@@ -75,5 +75,5 @@ pub trait Syncable {
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send;
 
     /// Get the database type name for logging.
-    fn database_name() -> &'static str;
+    fn name() -> &'static str;
 }

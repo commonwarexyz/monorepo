@@ -124,7 +124,7 @@ where
         self.historical_proof(size, start_loc, max_ops)
     }
 
-    fn database_name() -> &'static str {
+    fn name() -> &'static str {
         "immutable"
     }
 }
