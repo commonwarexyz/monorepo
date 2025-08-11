@@ -749,19 +749,19 @@ mod tests {
     use commonware_utils::{NZUsize, NZU64};
     use futures::{pin_mut, StreamExt};
 
-    const PAGE_SIZE: usize = 44;
-    const PAGE_CACHE_SIZE: usize = 3;
+    const PAGE_SIZE: NonZeroUsize = NZUsize!(44);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
 
     /// Generate a SHA-256 digest for the given value.
     fn test_digest(value: u64) -> Digest {
         hash(&value.to_be_bytes())
     }
 
-    fn test_cfg(items_per_blob: u64) -> Config {
+    fn test_cfg(items_per_blob: NonZeroU64) -> Config {
         Config {
             partition: "test_partition".into(),
-            items_per_blob: NZU64!(items_per_blob),
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            items_per_blob,
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
         }
     }
@@ -774,7 +774,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
-            let cfg = test_cfg(2);
+            let cfg = test_cfg(NZU64!(2));
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -793,7 +793,7 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Re-initialize the journal to simulate a restart
-            let cfg = test_cfg(2);
+            let cfg = test_cfg(NZU64!(2));
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
@@ -922,14 +922,14 @@ mod tests {
     fn test_fixed_journal_append_a_lot_of_data() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
-        const ITEMS_PER_BLOB: u64 = 10000;
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10000);
         executor.start(|context| async move {
             let cfg = test_cfg(ITEMS_PER_BLOB);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             // Append 2 blobs worth of items.
-            for i in 0u64..ITEMS_PER_BLOB * 2 - 1 {
+            for i in 0u64..ITEMS_PER_BLOB.get() * 2 - 1 {
                 journal
                     .append(test_digest(i))
                     .await
@@ -950,7 +950,7 @@ mod tests {
 
     #[test_traced]
     fn test_fixed_journal_replay() {
-        const ITEMS_PER_BLOB: u64 = 7;
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
 
@@ -963,7 +963,7 @@ mod tests {
                 .expect("failed to initialize journal");
 
             // Append many items, filling 100 blobs and part of the 101st
-            for i in 0u64..(ITEMS_PER_BLOB * 100 + ITEMS_PER_BLOB / 2) {
+            for i in 0u64..(ITEMS_PER_BLOB.get() * 100 + ITEMS_PER_BLOB.get() / 2) {
                 let pos = journal
                     .append(test_digest(i))
                     .await
@@ -975,7 +975,7 @@ mod tests {
             assert!(buffer.contains("tracked 101"));
 
             // Read them back the usual way.
-            for i in 0u64..(ITEMS_PER_BLOB * 100 + ITEMS_PER_BLOB / 2) {
+            for i in 0u64..(ITEMS_PER_BLOB.get() * 100 + ITEMS_PER_BLOB.get() / 2) {
                 let item: Digest = journal.read(i).await.expect("failed to read data");
                 assert_eq!(item, test_digest(i), "i={i}");
             }
@@ -1001,7 +1001,7 @@ mod tests {
                 // Make sure all items were replayed
                 assert_eq!(
                     items.len(),
-                    ITEMS_PER_BLOB as usize * 100 + ITEMS_PER_BLOB as usize / 2
+                    ITEMS_PER_BLOB.get() as usize * 100 + ITEMS_PER_BLOB.get() as usize / 2
                 );
                 items.sort();
                 for (i, pos) in items.iter().enumerate() {
@@ -1011,8 +1011,8 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Corrupt one of the checksums and make sure it's detected.
-            let checksum_offset =
-                Digest::SIZE as u64 + (ITEMS_PER_BLOB / 2) * (Digest::SIZE + u32::SIZE) as u64;
+            let checksum_offset = Digest::SIZE as u64
+                + (ITEMS_PER_BLOB.get() / 2) * (Digest::SIZE + u32::SIZE) as u64;
             let (blob, _) = context
                 .open(&cfg.partition, &40u64.to_be_bytes())
                 .await
@@ -1022,7 +1022,7 @@ mod tests {
             blob.write_at(bad_checksum.to_be_bytes().to_vec(), checksum_offset)
                 .await
                 .expect("Failed to write incorrect checksum");
-            let corrupted_item_pos = 40 * ITEMS_PER_BLOB + ITEMS_PER_BLOB / 2;
+            let corrupted_item_pos = 40 * ITEMS_PER_BLOB.get() + ITEMS_PER_BLOB.get() / 2;
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
@@ -1059,7 +1059,7 @@ mod tests {
                 // Result will be missing only the one corrupted value.
                 assert_eq!(
                     items.len(),
-                    ITEMS_PER_BLOB as usize * 100 + ITEMS_PER_BLOB as usize / 2 - 1
+                    ITEMS_PER_BLOB.get() as usize * 100 + ITEMS_PER_BLOB.get() as usize / 2 - 1
                 );
             }
             journal.close().await.expect("Failed to close journal");
@@ -1071,7 +1071,7 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         // Start the test within the executor
-        const ITEMS_PER_BLOB: u64 = 7;
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(ITEMS_PER_BLOB);
@@ -1080,7 +1080,7 @@ mod tests {
                 .expect("failed to initialize journal");
 
             // Append many items, filling 100 blobs and part of the 101st
-            for i in 0u64..(ITEMS_PER_BLOB * 100 + ITEMS_PER_BLOB / 2) {
+            for i in 0u64..(ITEMS_PER_BLOB.get() * 100 + ITEMS_PER_BLOB.get() / 2) {
                 let pos = journal
                     .append(test_digest(i))
                     .await
@@ -1120,7 +1120,7 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         // Start the test within the executor
-        const ITEMS_PER_BLOB: u64 = 7;
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(ITEMS_PER_BLOB);
@@ -1129,7 +1129,7 @@ mod tests {
                 .expect("failed to initialize journal");
 
             // Fill one blob and put 3 items in the second.
-            let item_count = ITEMS_PER_BLOB + 3;
+            let item_count = ITEMS_PER_BLOB.get() + 3;
             for i in 0u64..item_count {
                 journal
                     .append(test_digest(i))
@@ -1186,7 +1186,7 @@ mod tests {
 
     #[test_traced]
     fn test_fixed_journal_partial_replay() {
-        const ITEMS_PER_BLOB: u64 = 7;
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
         // 53 % 7 = 4, which will trigger a non-trivial seek in the starting blob to reach the
         // starting position.
         const START_POS: u64 = 53;
@@ -1202,7 +1202,7 @@ mod tests {
                 .expect("failed to initialize journal");
 
             // Append many items, filling 100 blobs and part of the 101st
-            for i in 0u64..(ITEMS_PER_BLOB * 100 + ITEMS_PER_BLOB / 2) {
+            for i in 0u64..(ITEMS_PER_BLOB.get() * 100 + ITEMS_PER_BLOB.get() / 2) {
                 let pos = journal
                     .append(test_digest(i))
                     .await
@@ -1239,7 +1239,7 @@ mod tests {
                 // Make sure all items were replayed
                 assert_eq!(
                     items.len(),
-                    ITEMS_PER_BLOB as usize * 100 + ITEMS_PER_BLOB as usize / 2
+                    ITEMS_PER_BLOB.get() as usize * 100 + ITEMS_PER_BLOB.get() as usize / 2
                         - START_POS as usize
                 );
                 items.sort();
@@ -1260,7 +1260,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 3 items per blob.
-            let cfg = test_cfg(3);
+            let cfg = test_cfg(NZU64!(3));
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1320,7 +1320,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
-            let cfg = test_cfg(10);
+            let cfg = test_cfg(NZU64!(10));
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1366,7 +1366,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
-            let cfg = test_cfg(10);
+            let cfg = test_cfg(NZU64!(10));
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1424,7 +1424,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
-            let cfg = test_cfg(2);
+            let cfg = test_cfg(NZU64!(2));
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1487,7 +1487,7 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Repeat with a different blob size (3 items per blob)
-            let mut cfg = test_cfg(3);
+            let mut cfg = test_cfg(NZU64!(3));
             cfg.partition = "test_partition_2".into();
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -1541,7 +1541,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Create a journal configuration
-            let cfg = test_cfg(60);
+            let cfg = test_cfg(NZU64!(60));
 
             // Initialize the journal
             let mut journal = Journal::init(context.clone(), cfg.clone())
@@ -1607,7 +1607,7 @@ mod tests {
                 partition: "test_fresh_start".into(),
                 items_per_blob: NZU64!(5),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Initialize journal with sync boundaries when no existing data exists
@@ -1662,7 +1662,7 @@ mod tests {
                 partition: "test_overlap".into(),
                 items_per_blob: NZU64!(4),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Create initial journal with 20 operations
@@ -1736,7 +1736,7 @@ mod tests {
                 partition: "test_exact_match".into(),
                 items_per_blob: NZU64!(3),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Create initial journal with 20 operations (0-19)
@@ -1810,7 +1810,7 @@ mod tests {
                 partition: "test_rewind".into(),
                 items_per_blob: NZU64!(4),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Create initial journal with 30 operations (0-29)
@@ -1890,7 +1890,7 @@ mod tests {
                 partition: "test_invalid_range".into(),
                 items_per_blob: NZU64!(4),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             let lower_bound = 6;
@@ -1923,7 +1923,7 @@ mod tests {
                 partition: "test_init_at_size".into(),
                 items_per_blob: NZU64!(5),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Test 1: Initialize at size 0 (empty journal)
