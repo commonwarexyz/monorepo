@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::ordinal::{Config, Ordinal};
-use commonware_utils::{sequence::FixedBytes, NZUsize};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -34,7 +34,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
         // Initialize the ordinal
-    let items_per_blob = input.items_per_blob.clamp(1, u16::MAX) as u64;
+        let items_per_blob = NZU64!(input.items_per_blob.clamp(1, u16::MAX) as u64);
         let cfg = Config {
             partition: "ordinal_operations_fuzz_test".to_string(),
             items_per_blob,
