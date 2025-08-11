@@ -30,27 +30,22 @@ struct FuzzInput {
 }
 
 fn fuzz(input: FuzzInput) {
+    // Initialize the runtime
     let runner = deterministic::Runner::default();
-
     runner.start(|context| async move {
-        let items_per_blob = input.items_per_blob.clamp(1, u16::MAX) as u64;
-
+        // Initialize the ordinal
+    let items_per_blob = input.items_per_blob.clamp(1, u16::MAX) as u64;
         let cfg = Config {
             partition: "ordinal_operations_fuzz_test".to_string(),
             items_per_blob,
             write_buffer: NZUsize!(4096),
             replay_buffer: NZUsize!(64 * 1024),
         };
+        let mut store = Some(Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone()).await.expect("failed to init ordinal"));
 
-        let mut store =
-            match Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone()).await {
-                Ok(o) => Some(o),
-                Err(_) => panic!("Unable to init ordinal"),
-            };
-
+        // Run operations
         let mut expected_data: HashMap<u64, FixedBytes<32>> = HashMap::new();
         let mut synced_data: HashMap<u64, FixedBytes<32>> = HashMap::new();
-
         for op in input.operations.iter() {
             match op {
                 OrdinalOperation::Put { index, value } => {
