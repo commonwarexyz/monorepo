@@ -108,7 +108,7 @@ where
 }
 
 /// Repeatedly sync an Any database to the server's state.
-async fn run_any<E>(context: E, config: Config) -> Result<(), String>
+async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
@@ -119,14 +119,9 @@ where
     info!("starting Any database sync process");
     let mut iteration = 0u32;
     loop {
-        let resolver = Resolver::<AnyOp, Digest>::connect(context.clone(), config.server)
-            .await
-            .map_err(|e| e.to_string())?;
+        let resolver = Resolver::<AnyOp, Digest>::connect(context.clone(), config.server).await?;
 
-        let initial_target = resolver
-            .get_sync_target()
-            .await
-            .map_err(|e| e.to_string())?;
+        let initial_target = resolver.get_sync_target().await?;
 
         let db_config = create_config();
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
@@ -157,7 +152,7 @@ where
             update_receiver: Some(update_receiver),
         };
 
-        let database: AnyDb<_> = sync::sync(sync_config).await.map_err(|e| format!("{e}"))?;
+        let database: AnyDb<_> = sync::sync(sync_config).await?;
         let got_root = {
             let mut hasher = commonware_storage::mmr::hasher::Standard::new();
             database.root(&mut hasher)
@@ -168,7 +163,7 @@ where
             sync_interval = ?config.sync_interval,
             "✅ Any sync completed successfully"
         );
-        database.close().await.map_err(|e| format!("{e}"))?;
+        database.close().await?;
         target_update_handle.abort();
         context.sleep(config.sync_interval).await;
         iteration += 1;
@@ -176,7 +171,7 @@ where
 }
 
 /// Repeatedly sync an Immutable database to the server's state.
-async fn run_immutable<E>(context: E, config: Config) -> Result<(), String>
+async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
@@ -187,14 +182,9 @@ where
     info!("starting Immutable database sync process");
     let mut iteration = 1u32;
     loop {
-        let resolver = Resolver::<ImmOp, Key>::connect(context.clone(), config.server)
-            .await
-            .map_err(|e| e.to_string())?;
+        let resolver = Resolver::<ImmOp, Key>::connect(context.clone(), config.server).await?;
 
-        let initial_target = resolver
-            .get_sync_target()
-            .await
-            .map_err(|e| e.to_string())?;
+        let initial_target = resolver.get_sync_target().await?;
 
         let db_config = create_imm_config();
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
@@ -225,7 +215,7 @@ where
             update_receiver: Some(update_receiver),
         };
 
-        let database: ImmDb<_> = sync::sync(sync_config).await.map_err(|e| format!("{e}"))?;
+        let database: ImmDb<_> = sync::sync(sync_config).await?;
         let got_root = {
             let mut hasher = commonware_storage::mmr::hasher::Standard::new();
             database.root(&mut hasher)
@@ -236,7 +226,7 @@ where
             sync_interval = ?config.sync_interval,
             "✅ Immutable sync completed successfully"
         );
-        database.close().await.map_err(|e| format!("{e}"))?;
+        database.close().await?;
         target_update_handle.abort();
         context.sleep(config.sync_interval).await;
         iteration += 1;

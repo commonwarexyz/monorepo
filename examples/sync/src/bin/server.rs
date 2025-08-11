@@ -582,7 +582,7 @@ where
 }
 
 /// Run a generic server with the given database.
-async fn run_server<DB, E>(
+async fn run_helper<DB, E>(
     mut context: E,
     config: Config,
     mut database: DB,
@@ -660,7 +660,7 @@ where
     let db_config = any::create_config();
     let database = any::Database::init(context.with_label("database"), db_config).await?;
 
-    run_server(context, config, database).await
+    run_helper(context, config, database).await
 }
 
 /// Run the Immutable database server.
@@ -678,7 +678,7 @@ where
     let db_config = immutable::create_config();
     let database = immutable::Database::init(context.with_label("database"), db_config).await?;
 
-    run_server(context, config, database).await
+    run_helper(context, config, database).await
 }
 
 /// Parse command line arguments and return configuration.
