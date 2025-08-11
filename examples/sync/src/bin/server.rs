@@ -5,7 +5,7 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_macros::select;
 use commonware_runtime::{tokio as tokio_runtime, Listener, Metrics as _, Runner, RwLock};
-use commonware_storage::{adb::sync::Target, mmr::hasher::Standard, store::operation::Variable};
+use commonware_storage::{adb::sync::Target, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any::{create_config, create_test_operations, Database, Operation},
@@ -34,9 +34,204 @@ const MAX_BATCH_SIZE: u64 = 100;
 /// Size of the channel for responses.
 const RESPONSE_BUFFER_SIZE: usize = 64;
 
+/// Helper trait for databases that can be synced.
+trait Syncable {
+    type Operation: Clone;
+
+    /// Create test operations with the given count and seed.
+    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation>;
+
+    /// Add operations to the database.
+    async fn add_operations(
+        database: &mut Self,
+        operations: Vec<Self::Operation>,
+    ) -> Result<(), commonware_storage::adb::Error>;
+
+    /// Commit pending operations to the database.
+    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error>;
+
+    /// Get the root hash of the database.
+    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key;
+
+    /// Get the operation count of the database.
+    fn op_count(&self) -> u64;
+
+    /// Get the lower bound for operations (inactivity floor or oldest retained location).
+    fn lower_bound_ops(&self) -> u64;
+
+    /// Get historical proof and operations.
+    async fn historical_proof(
+        &self,
+        size: u64,
+        start_loc: u64,
+        max_ops: u64,
+    ) -> Result<
+        (
+            commonware_storage::mmr::verification::Proof<Key>,
+            Vec<Self::Operation>,
+        ),
+        commonware_storage::adb::Error,
+    >;
+}
+
+impl<E> Syncable for Database<E>
+where
+    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+{
+    type Operation = Operation;
+
+    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
+        create_test_operations(count, seed)
+    }
+
+    async fn add_operations(
+        database: &mut Self,
+        operations: Vec<Self::Operation>,
+    ) -> Result<(), commonware_storage::adb::Error> {
+        for operation in operations {
+            match operation {
+                Operation::Update(key, value) => {
+                    database.update(key, value).await?;
+                }
+                Operation::Delete(key) => {
+                    database.delete(key).await?;
+                }
+                Operation::CommitFloor(_) => {
+                    database.commit().await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
+        self.commit().await
+    }
+
+    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
+        self.root(hasher)
+    }
+
+    fn op_count(&self) -> u64 {
+        self.op_count()
+    }
+
+    fn lower_bound_ops(&self) -> u64 {
+        self.inactivity_floor_loc()
+    }
+
+    async fn historical_proof(
+        &self,
+        size: u64,
+        start_loc: u64,
+        max_ops: u64,
+    ) -> Result<
+        (
+            commonware_storage::mmr::verification::Proof<Key>,
+            Vec<Self::Operation>,
+        ),
+        commonware_storage::adb::Error,
+    > {
+        self.historical_proof(size, start_loc, max_ops).await
+    }
+}
+
+impl<E> Syncable for ImmDatabase<E>
+where
+    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+{
+    type Operation = ImmOperation;
+
+    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
+        create_imm_test_operations(count, seed)
+    }
+
+    async fn add_operations(
+        database: &mut Self,
+        operations: Vec<Self::Operation>,
+    ) -> Result<(), commonware_storage::adb::Error> {
+        for operation in operations {
+            match operation {
+                ImmOperation::Set(key, value) => {
+                    database.set(key, value).await?;
+                }
+                ImmOperation::Commit() => {
+                    database.commit().await?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
+        self.commit().await
+    }
+
+    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
+        self.root(hasher)
+    }
+
+    fn op_count(&self) -> u64 {
+        self.op_count()
+    }
+
+    fn lower_bound_ops(&self) -> u64 {
+        self.oldest_retained_loc().unwrap_or(0)
+    }
+
+    async fn historical_proof(
+        &self,
+        size: u64,
+        start_loc: u64,
+        max_ops: u64,
+    ) -> Result<
+        (
+            commonware_storage::mmr::verification::Proof<Key>,
+            Vec<Self::Operation>,
+        ),
+        commonware_storage::adb::Error,
+    > {
+        self.historical_proof(size, start_loc, max_ops).await
+    }
+}
+
+/// Database type selection.
+#[derive(Debug, Clone, Copy)]
+enum DatabaseType {
+    Any,
+    Immutable,
+}
+
+impl std::str::FromStr for DatabaseType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "any" => Ok(DatabaseType::Any),
+            "immutable" => Ok(DatabaseType::Immutable),
+            _ => Err(format!(
+                "Invalid database type: '{}'. Must be 'any' or 'immutable'",
+                s
+            )),
+        }
+    }
+}
+
+impl DatabaseType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            DatabaseType::Any => "any",
+            DatabaseType::Immutable => "immutable",
+        }
+    }
+}
+
 /// Server configuration.
 #[derive(Debug)]
 struct Config {
+    /// Database type to use.
+    database_type: DatabaseType,
     /// Port to listen on.
     port: u16,
     /// Number of initial operations to create.
@@ -54,7 +249,7 @@ struct Config {
 /// Server state containing the database and metrics.
 struct State<DB> {
     /// The database wrapped in async mutex.
-    database: Arc<RwLock<DB>>,
+    database: RwLock<DB>,
     /// Request counter for metrics.
     request_counter: Counter,
     /// Error counter for metrics.
@@ -62,7 +257,7 @@ struct State<DB> {
     /// Counter for operations added.
     ops_counter: Counter,
     /// Last time we added operations.
-    last_operation_time: Arc<RwLock<SystemTime>>,
+    last_operation_time: RwLock<SystemTime>,
 }
 
 impl<DB> State<DB> {
@@ -71,11 +266,11 @@ impl<DB> State<DB> {
         E: commonware_runtime::Metrics,
     {
         let state = Self {
-            database: Arc::new(RwLock::new(database)),
+            database: RwLock::new(database),
             request_counter: Counter::default(),
             error_counter: Counter::default(),
             ops_counter: Counter::default(),
-            last_operation_time: Arc::new(RwLock::new(SystemTime::now())),
+            last_operation_time: RwLock::new(SystemTime::now()),
         };
         context.register(
             "requests",
@@ -92,62 +287,14 @@ impl<DB> State<DB> {
     }
 }
 
-/// Add operations to the Any database if the configured interval has passed.
-async fn maybe_add_any_operations<E>(
-    state: &State<Database<E>>,
+/// Add operations to the database if the configured interval has passed.
+async fn maybe_add_operations<DB, E>(
+    state: &State<DB>,
     context: &mut E,
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: commonware_runtime::Storage
-        + commonware_runtime::Clock
-        + commonware_runtime::Metrics
-        + RngCore,
-{
-    let mut last_time = state.last_operation_time.write().await;
-    let now = context.current();
-
-    if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.op_interval {
-        *last_time = now;
-
-        // Generate new operations
-        let new_operations = create_test_operations(config.ops_per_interval, context.next_u64());
-
-        // Add operations to database and get the new root
-        let root = {
-            let mut database = state.database.write().await;
-            for operation in new_operations.iter() {
-                let result = match operation {
-                    Operation::Update(key, value) => database.update(*key, *value).await,
-                    Operation::Delete(key) => database.delete(*key).await.map(|_| ()),
-                    Operation::CommitFloor(_) => database.commit().await,
-                };
-
-                if let Err(e) = result {
-                    error!(error = %e, "failed to add operations to database");
-                }
-            }
-            database.root(&mut Standard::new())
-        };
-
-        state.ops_counter.inc_by(new_operations.len() as u64);
-        info!(
-            operations_added = new_operations.len(),
-            root = %root,
-            "added operations"
-        );
-    }
-
-    Ok(())
-}
-
-/// Add operations to the Immutable database if the configured interval has passed.
-async fn maybe_add_immutable_operations<E>(
-    state: &State<ImmDatabase<E>>,
-    context: &mut E,
-    config: &Config,
-) -> Result<(), Box<dyn std::error::Error>>
-where
+    DB: Syncable,
     E: commonware_runtime::Storage
         + commonware_runtime::Clock
         + commonware_runtime::Metrics
@@ -161,29 +308,26 @@ where
 
         // Generate new operations
         let new_operations =
-            create_imm_test_operations(config.ops_per_interval, context.next_u64());
+            DB::create_test_operations(config.ops_per_interval, context.next_u64());
 
         // Add operations to database and get the new root
         let root = {
             let mut database = state.database.write().await;
-            for operation in new_operations.iter() {
-                let result = match operation {
-                    Variable::Set(key, value) => database.set(*key, *value).await.map(|_| ()),
-                    Variable::Commit() => database.commit().await.map(|_| ()),
-                    _ => Ok(()),
-                };
-
-                if let Err(e) = result {
-                    error!(error = %e, "failed to add operations to database");
-                }
+            if let Err(e) = DB::add_operations(&mut *database, new_operations.clone()).await {
+                error!(error = %e, "failed to add operations to database");
             }
-            database.root(&mut Standard::new())
+            DB::root(&*database, &mut Standard::new())
         };
 
         state.ops_counter.inc_by(new_operations.len() as u64);
+        let root_hex = root
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
         info!(
             operations_added = new_operations.len(),
-            root = %root,
+            root = %root_hex,
             "added operations"
         );
     }
@@ -191,59 +335,13 @@ where
     Ok(())
 }
 
-/// Add the given `operations` to the `database`.
-async fn add_operations<E>(
-    database: &mut Database<E>,
-    operations: Vec<Operation>,
-) -> Result<(), commonware_storage::adb::Error>
-where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-{
-    for operation in operations {
-        match operation {
-            Operation::Update(key, value) => {
-                database.update(key, value).await?;
-            }
-            Operation::Delete(key) => {
-                database.delete(key).await?;
-            }
-            Operation::CommitFloor(_) => {
-                database.commit().await?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Add the given immutable `operations` to the `database`.
-async fn add_imm_operations<E>(
-    database: &mut ImmDatabase<E>,
-    operations: Vec<ImmOperation>,
-) -> Result<(), commonware_storage::adb::Error>
-where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-{
-    for operation in operations {
-        match operation {
-            ImmOperation::Set(key, value) => {
-                database.set(key, value).await?;
-            }
-            ImmOperation::Commit() => {
-                database.commit().await?;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-/// Handle a request for sync target for Any database.
-async fn handle_get_sync_target<E>(
-    state: &State<Database<E>>,
+/// Handle a request for sync target.
+async fn handle_get_sync_target<DB>(
+    state: &State<DB>,
     request: wire::GetSyncTargetRequest,
 ) -> Result<wire::GetSyncTargetResponse<Key>, Error>
 where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    DB: Syncable,
 {
     state.request_counter.inc();
 
@@ -253,7 +351,7 @@ where
         let database = state.database.read().await;
         (
             database.root(&mut hasher),
-            database.inactivity_floor_loc(),
+            database.lower_bound_ops(),
             database.op_count().saturating_sub(1),
         )
     };
@@ -270,46 +368,13 @@ where
     Ok(response)
 }
 
-/// Handle a request for sync target for Immutable database.
-async fn handle_get_imm_sync_target<E>(
-    state: &State<ImmDatabase<E>>,
-    request: wire::GetSyncTargetRequest,
-) -> Result<wire::GetSyncTargetResponse<Key>, Error>
-where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-{
-    state.request_counter.inc();
-
-    // Get the current database state
-    let (root, lower_bound_ops, upper_bound_ops) = {
-        let mut hasher = Standard::new();
-        let database = state.database.read().await;
-        (
-            database.root(&mut hasher),
-            database.oldest_retained_loc().unwrap_or(0),
-            database.op_count().saturating_sub(1),
-        )
-    };
-    let response = wire::GetSyncTargetResponse::<Key> {
-        request_id: request.request_id,
-        target: Target {
-            root,
-            lower_bound_ops,
-            upper_bound_ops,
-        },
-    };
-
-    debug!(?response, "serving immutable target update");
-    Ok(response)
-}
-
-/// Handle a GetOperationsRequest and return operations with proof for Any database.
-async fn handle_get_operations<E>(
-    state: &State<Database<E>>,
+/// Handle a GetOperationsRequest and return operations with proof.
+async fn handle_get_operations<DB>(
+    state: &State<DB>,
     request: wire::GetOperationsRequest,
-) -> Result<wire::GetOperationsResponse<Operation, Key>, Error>
+) -> Result<wire::GetOperationsResponse<DB::Operation, Key>, Error>
 where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    DB: Syncable,
 {
     state.request_counter.inc();
     request.validate()?;
@@ -356,85 +421,25 @@ where
         "sending operations and proof"
     );
 
-    Ok(wire::GetOperationsResponse::<Operation, Key> {
+    Ok(wire::GetOperationsResponse::<DB::Operation, Key> {
         request_id: request.request_id,
         proof,
         operations,
     })
 }
 
-/// Handle a GetOperationsRequest and return operations with proof for Immutable database.
-async fn handle_get_imm_operations<E>(
-    state: &State<ImmDatabase<E>>,
-    request: wire::GetOperationsRequest,
-) -> Result<wire::GetOperationsResponse<ImmOperation, Key>, Error>
+/// Handle a message from a client and return the appropriate response.
+async fn handle_message<DB>(
+    state: &State<DB>,
+    message: wire::Message<DB::Operation, Key>,
+) -> wire::Message<DB::Operation, Key>
 where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-{
-    state.request_counter.inc();
-    request.validate()?;
-
-    let database = state.database.read().await;
-
-    // Check if we have enough operations
-    let db_size = database.op_count();
-    if request.start_loc >= db_size {
-        return Err(Error::InvalidRequest(format!(
-            "start_loc >= database size ({}) >= ({})",
-            request.start_loc, db_size
-        )));
-    }
-
-    // Calculate how many operations to return
-    let max_ops = std::cmp::min(request.max_ops.get(), db_size - request.start_loc);
-    let max_ops = std::cmp::min(max_ops, MAX_BATCH_SIZE);
-
-    debug!(
-        request_id = request.request_id,
-        max_ops,
-        start_loc = request.start_loc,
-        db_size,
-        "immutable operations request"
-    );
-
-    // Get the historical proof and operations
-    let result = database
-        .historical_proof(request.size, request.start_loc, max_ops)
-        .await;
-
-    drop(database);
-
-    let (proof, operations) = result.map_err(|e| {
-        warn!(error = %e, "failed to generate historical proof");
-        Error::Database(e)
-    })?;
-
-    debug!(
-        request_id = request.request_id,
-        operations_len = operations.len(),
-        proof_len = proof.digests.len(),
-        "sending immutable operations and proof"
-    );
-
-    Ok(wire::GetOperationsResponse::<ImmOperation, Key> {
-        request_id: request.request_id,
-        proof,
-        operations,
-    })
-}
-
-/// Handle a message from a client and return the appropriate response for Any database.
-async fn handle_message<E>(
-    state: Arc<State<Database<E>>>,
-    message: wire::Message<Operation, Key>,
-) -> wire::Message<Operation, Key>
-where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    DB: Syncable,
 {
     let request_id = message.request_id();
     match message {
         wire::Message::GetOperationsRequest(request) => {
-            match handle_get_operations(&state, request).await {
+            match handle_get_operations::<DB>(state, request).await {
                 Ok(response) => wire::Message::GetOperationsResponse(response),
                 Err(e) => {
                     state.error_counter.inc();
@@ -448,56 +453,7 @@ where
         }
 
         wire::Message::GetSyncTargetRequest(request) => {
-            match handle_get_sync_target(&state, request).await {
-                Ok(response) => wire::Message::GetSyncTargetResponse(response),
-                Err(e) => {
-                    state.error_counter.inc();
-                    wire::Message::Error(ErrorResponse {
-                        request_id,
-                        error_code: e.to_error_code(),
-                        message: e.to_string(),
-                    })
-                }
-            }
-        }
-
-        _ => {
-            state.error_counter.inc();
-            wire::Message::Error(ErrorResponse {
-                request_id,
-                error_code: ErrorCode::InvalidRequest,
-                message: "unexpected message type".to_string(),
-            })
-        }
-    }
-}
-
-/// Handle a message from a client and return the appropriate response for Immutable database.
-async fn handle_imm_message<E>(
-    state: Arc<State<ImmDatabase<E>>>,
-    message: wire::Message<ImmOperation, Key>,
-) -> wire::Message<ImmOperation, Key>
-where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-{
-    let request_id = message.request_id();
-    match message {
-        wire::Message::GetOperationsRequest(request) => {
-            match handle_get_imm_operations(&state, request).await {
-                Ok(response) => wire::Message::GetOperationsResponse(response),
-                Err(e) => {
-                    state.error_counter.inc();
-                    wire::Message::Error(ErrorResponse {
-                        request_id,
-                        error_code: e.to_error_code(),
-                        message: e.to_string(),
-                    })
-                }
-            }
-        }
-
-        wire::Message::GetSyncTargetRequest(request) => {
-            match handle_get_imm_sync_target(&state, request).await {
+            match handle_get_sync_target::<DB>(state, request).await {
                 Ok(response) => wire::Message::GetSyncTargetResponse(response),
                 Err(e) => {
                     state.error_counter.inc();
@@ -562,7 +518,7 @@ where
                             let state = state.clone();
                             let mut response_sender = response_sender.clone();
                             move |_| async move {
-                                let response = handle_message(state, message).await;
+                                let response = handle_message::<Database<E>>(&state, message).await;
                                 if let Err(e) = response_sender.send(response).await {
                                     warn!(client_addr = %client_addr, error = %e, "failed to send response to main loop");
                                 }
@@ -636,7 +592,7 @@ where
                             let state = state.clone();
                             let mut response_sender = response_sender.clone();
                             move |_| async move {
-                                let response = handle_imm_message(state, message).await;
+                                let response = handle_message::<ImmDatabase<E>>(&state, message).await;
                                 if let Err(e) = response_sender.send(response).await {
                                     warn!(client_addr = %client_addr, error = %e, "failed to send response to main loop");
                                 }
@@ -669,6 +625,48 @@ where
     }
 }
 
+/// Initialize and display database state with initial operations.
+async fn initialize_database<DB, E>(
+    database: &mut DB,
+    config: &Config,
+    context: &mut E,
+    database_name: &str,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    DB: Syncable,
+    E: rand::RngCore,
+{
+    info!("starting {} database", database_name);
+
+    // Create and initialize database
+    let initial_ops = DB::create_test_operations(config.initial_ops, context.next_u64());
+    info!(
+        operations_len = initial_ops.len(),
+        "creating initial operations"
+    );
+    DB::add_operations(database, initial_ops).await?;
+
+    // Commit the database to ensure operations are persisted
+    database.commit().await?;
+
+    // Display database state
+    let mut hasher = Standard::new();
+    let root = database.root(&mut hasher);
+    let root_hex = root
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    info!(
+        op_count = database.op_count(),
+        root = %root_hex,
+        "{} database ready",
+        database_name
+    );
+
+    Ok(())
+}
+
 /// Run the Any database server.
 async fn run_any<E>(mut context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
@@ -685,30 +683,7 @@ where
     let db_config = create_config();
     let mut database = Database::init(context.with_label("database"), db_config).await?;
 
-    // Create and add initial operations
-    let initial_ops = create_test_operations(config.initial_ops, context.next_u64());
-    info!(
-        operations_len = initial_ops.len(),
-        "creating initial operations"
-    );
-    add_operations(&mut database, initial_ops).await?;
-
-    // Commit the database to ensure operations are persisted
-    database.commit().await?;
-
-    // Display database state
-    let mut hasher = Standard::new();
-    let root = database.root(&mut hasher);
-    let root_hex = root
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
-    info!(
-        op_count = database.op_count(),
-        root = %root_hex,
-        "Any database ready"
-    );
+    initialize_database(&mut database, &config, &mut context, "Any").await?;
 
     // Create listener to accept connections
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
@@ -726,7 +701,7 @@ where
         select! {
             _ = context.sleep_until(next_op_time) => {
                 // Add operations to the database
-                if let Err(e) = maybe_add_any_operations(&state, &mut context, &config).await {
+                if let Err(e) = maybe_add_operations(&state, &mut context, &config).await {
                     warn!(error = %e, "failed to add additional operations");
                 }
                 next_op_time = context.current() + config.op_interval;
@@ -769,30 +744,7 @@ where
     let db_config = create_imm_config();
     let mut database = ImmDatabase::init(context.with_label("database"), db_config).await?;
 
-    // Create and add initial operations
-    let initial_ops = create_imm_test_operations(config.initial_ops, context.next_u64());
-    info!(
-        operations_len = initial_ops.len(),
-        "creating initial operations"
-    );
-    add_imm_operations(&mut database, initial_ops).await?;
-
-    // Commit the database to ensure operations are persisted
-    database.commit().await?;
-
-    // Display database state
-    let mut hasher = Standard::new();
-    let root = database.root(&mut hasher);
-    let root_hex = root
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
-    info!(
-        op_count = database.op_count(),
-        root = %root_hex,
-        "Immutable database ready"
-    );
+    initialize_database(&mut database, &config, &mut context, "Immutable").await?;
 
     // Create listener to accept connections
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
@@ -810,7 +762,7 @@ where
         select! {
             _ = context.sleep_until(next_op_time) => {
                 // Add operations to the database
-                if let Err(e) = maybe_add_immutable_operations(&state, &mut context, &config).await {
+                if let Err(e) = maybe_add_operations(&state, &mut context, &config).await {
                     warn!(error = %e, "failed to add additional operations");
                 }
                 next_op_time = context.current() + config.op_interval;
@@ -837,7 +789,8 @@ where
     }
 }
 
-fn main() {
+/// Parse command line arguments and return configuration.
+fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
     // Parse command line arguments
     let matches = Command::new("Sync Server")
         .version(crate_version())
@@ -899,23 +852,23 @@ fn main() {
         )
         .get_matches();
 
-    let config = Config {
+    let database_type = matches
+        .get_one::<String>("db")
+        .unwrap()
+        .parse::<DatabaseType>()?;
+
+    Ok(Config {
+        database_type,
         port: matches
             .get_one::<String>("port")
             .unwrap()
             .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid port: {e}");
-                std::process::exit(1);
-            }),
+            .map_err(|e| format!("Invalid port: {e}"))?,
         initial_ops: matches
             .get_one::<String>("initial-ops")
             .unwrap()
             .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid initial operations count: {e}");
-                std::process::exit(1);
-            }),
+            .map_err(|e| format!("Invalid initial operations count: {e}"))?,
         storage_dir: {
             let storage_dir = matches
                 .get_one::<String>("storage-dir")
@@ -933,25 +886,24 @@ fn main() {
             .get_one::<String>("metrics-port")
             .unwrap()
             .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid metrics port: {e}");
-                std::process::exit(1);
-            }),
+            .map_err(|e| format!("Invalid metrics port: {e}"))?,
         op_interval: parse_duration(matches.get_one::<String>("op-interval").unwrap())
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid operation interval: {e}");
-                std::process::exit(1);
-            }),
+            .map_err(|e| format!("Invalid operation interval: {e}"))?,
         ops_per_interval: matches
             .get_one::<String>("ops-per-interval")
             .unwrap()
             .parse()
-            .unwrap_or_else(|e| {
-                eprintln!("❌ Invalid ops per interval: {e}");
-                std::process::exit(1);
-            }),
-    };
+            .map_err(|e| format!("Invalid ops per interval: {e}"))?,
+    })
+}
+
+fn main() {
+    let config = parse_config().unwrap_or_else(|e| {
+        eprintln!("❌ {e}");
+        std::process::exit(1);
+    });
     info!(
+        database_type = %config.database_type.as_str(),
         port = config.port,
         initial_ops = config.initial_ops,
         storage_dir = %config.storage_dir,
@@ -976,14 +928,9 @@ fn main() {
         );
 
         // Run the appropriate server based on database type
-        let db_choice = matches.get_one::<String>("db").unwrap().as_str();
-        let result = match db_choice {
-            "any" => run_any(context, config).await,
-            "immutable" => run_immutable(context, config).await,
-            other => {
-                error!("unsupported --db value: {other}");
-                return;
-            }
+        let result = match config.database_type {
+            DatabaseType::Any => run_any(context, config).await,
+            DatabaseType::Immutable => run_immutable(context, config).await,
         };
 
         if let Err(e) = result {
