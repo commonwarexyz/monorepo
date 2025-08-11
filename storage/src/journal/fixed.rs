@@ -69,7 +69,11 @@ use futures::{
     StreamExt,
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::{collections::BTreeMap, marker::PhantomData, num::NonZeroUsize};
+use std::{
+    collections::BTreeMap,
+    marker::PhantomData,
+    num::{NonZeroU64, NonZeroUsize},
+};
 use tracing::{debug, trace, warn};
 
 /// Configuration for `Journal` storage.
@@ -82,7 +86,7 @@ pub struct Config {
     ///
     /// Any unpruned historical blobs will contain exactly this number of items.
     /// Only the newest blob may contain fewer items.
-    pub items_per_blob: u64,
+    pub items_per_blob: NonZeroU64,
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
@@ -159,7 +163,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         }
 
         // Check that there are no gaps in the historical blobs and that they are all full.
-        let full_size = cfg.items_per_blob * Self::CHUNK_SIZE_U64;
+        let full_size = cfg.items_per_blob.get() * Self::CHUNK_SIZE_U64;
         if !blobs.is_empty() {
             let mut it = blobs.keys().rev();
             let mut prev_index = *it.next().unwrap();
@@ -437,7 +441,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         let size = self.tail.size().await;
         assert_eq!(size % Self::CHUNK_SIZE_U64, 0);
         let items_in_blob = size / Self::CHUNK_SIZE_U64;
-        Ok(items_in_blob + self.cfg.items_per_blob * self.tail_index)
+        Ok(items_in_blob + self.cfg.items_per_blob.get() * self.tail_index)
     }
 
     /// Append a new item to the journal. Return the item's position in the journal, or error if the
@@ -445,7 +449,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
     pub async fn append(&mut self, item: A) -> Result<u64, Error> {
         // There should always be room to append an item in the newest blob
         let mut size = self.tail.size().await;
-        assert!(size < self.cfg.items_per_blob * Self::CHUNK_SIZE_U64);
+        assert!(size < self.cfg.items_per_blob.get() * Self::CHUNK_SIZE_U64);
         assert_eq!(size % Self::CHUNK_SIZE_U64, 0);
         let mut buf: Vec<u8> = Vec::with_capacity(Self::CHUNK_SIZE);
         let item = item.encode();
@@ -454,14 +458,15 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         buf.put_u32(checksum);
 
         // Write the item to the blob
-        let item_pos = (size / Self::CHUNK_SIZE_U64) + self.cfg.items_per_blob * self.tail_index;
+        let item_pos =
+            (size / Self::CHUNK_SIZE_U64) + self.cfg.items_per_blob.get() * self.tail_index;
         self.tail.append(buf).await?;
         trace!(blob = self.tail_index, pos = item_pos, "appended item");
         size += Self::CHUNK_SIZE_U64;
 
         // If the tail blob is now full we need to create a new empty one to fulfill the invariant
         // that the tail blob always has room for a new element.
-        if size == self.cfg.items_per_blob * Self::CHUNK_SIZE_U64 {
+        if size == self.cfg.items_per_blob.get() * Self::CHUNK_SIZE_U64 {
             // Sync the tail blob before creating a new one so if we crash we don't end up with a
             // non-full historical blob.
             self.tail.sync().await?;
@@ -535,12 +540,12 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         }
 
         // The oldest retained item is the first item in the oldest blob.
-        Ok(Some(oldest_blob_index * self.cfg.items_per_blob))
+        Ok(Some(oldest_blob_index * self.cfg.items_per_blob.get()))
     }
 
     /// Read the item at the given position in the journal.
     pub async fn read(&self, item_pos: u64) -> Result<A, Error> {
-        let blob_index = item_pos / self.cfg.items_per_blob;
+        let blob_index = item_pos / self.cfg.items_per_blob.get();
         if blob_index > self.tail_index {
             return Err(Error::InvalidItem(item_pos));
         }
@@ -553,7 +558,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
                 .ok_or(Error::ItemPruned(item_pos))?
         };
 
-        let offset = (item_pos % self.cfg.items_per_blob) * Self::CHUNK_SIZE_U64;
+        let offset = (item_pos % self.cfg.items_per_blob.get()) * Self::CHUNK_SIZE_U64;
         let read = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
         Self::verify_integrity(read.as_ref())
     }
@@ -592,10 +597,11 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         }
 
         // Collect all blobs to replay paired with their index.
-        let start_blob = start_pos / self.cfg.items_per_blob;
+        let items_per_blob = self.cfg.items_per_blob.get();
+        let start_blob = start_pos / items_per_blob;
         assert!(start_blob <= self.tail_index);
         let blobs = self.blobs.range(start_blob..).collect::<Vec<_>>();
-        let full_size = self.cfg.items_per_blob * Self::CHUNK_SIZE_U64;
+        let full_size = items_per_blob * Self::CHUNK_SIZE_U64;
         let mut blob_plus = blobs
             .into_iter()
             .map(|(blob_index, blob)| (*blob_index, blob.clone_blob(), full_size))
@@ -605,7 +611,6 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         self.tail.sync().await?; // make sure no data is buffered
         let tail_size = self.tail.size().await;
         blob_plus.push((self.tail_index, self.tail.clone_blob(), tail_size));
-        let items_per_blob = self.cfg.items_per_blob;
         let start_offset = (start_pos % items_per_blob) * Self::CHUNK_SIZE_U64;
 
         // Replay all blobs in order and stream items as they are read (to avoid occupying too much
@@ -741,22 +746,22 @@ mod tests {
         deterministic::{self, Context},
         Blob, Runner, Storage,
     };
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, NZU64};
     use futures::{pin_mut, StreamExt};
 
-    const PAGE_SIZE: usize = 44;
-    const PAGE_CACHE_SIZE: usize = 3;
+    const PAGE_SIZE: NonZeroUsize = NZUsize!(44);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
 
     /// Generate a SHA-256 digest for the given value.
     fn test_digest(value: u64) -> Digest {
         hash(&value.to_be_bytes())
     }
 
-    fn test_cfg(items_per_blob: u64) -> Config {
+    fn test_cfg(items_per_blob: NonZeroU64) -> Config {
         Config {
             partition: "test_partition".into(),
             items_per_blob,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
         }
     }
@@ -769,7 +774,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
-            let cfg = test_cfg(2);
+            let cfg = test_cfg(NZU64!(2));
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -788,7 +793,7 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Re-initialize the journal to simulate a restart
-            let cfg = test_cfg(2);
+            let cfg = test_cfg(NZU64!(2));
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
@@ -863,7 +868,7 @@ mod tests {
 
             // Prune first 3 blobs (6 items)
             journal
-                .prune(3 * cfg.items_per_blob)
+                .prune(3 * cfg.items_per_blob.get())
                 .await
                 .expect("failed to prune journal 2");
             assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(6));
@@ -917,14 +922,14 @@ mod tests {
     fn test_fixed_journal_append_a_lot_of_data() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
-        const ITEMS_PER_BLOB: u64 = 10000;
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10000);
         executor.start(|context| async move {
             let cfg = test_cfg(ITEMS_PER_BLOB);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             // Append 2 blobs worth of items.
-            for i in 0u64..ITEMS_PER_BLOB * 2 - 1 {
+            for i in 0u64..ITEMS_PER_BLOB.get() * 2 - 1 {
                 journal
                     .append(test_digest(i))
                     .await
@@ -945,7 +950,7 @@ mod tests {
 
     #[test_traced]
     fn test_fixed_journal_replay() {
-        const ITEMS_PER_BLOB: u64 = 7;
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
 
@@ -958,7 +963,7 @@ mod tests {
                 .expect("failed to initialize journal");
 
             // Append many items, filling 100 blobs and part of the 101st
-            for i in 0u64..(ITEMS_PER_BLOB * 100 + ITEMS_PER_BLOB / 2) {
+            for i in 0u64..(ITEMS_PER_BLOB.get() * 100 + ITEMS_PER_BLOB.get() / 2) {
                 let pos = journal
                     .append(test_digest(i))
                     .await
@@ -970,7 +975,7 @@ mod tests {
             assert!(buffer.contains("tracked 101"));
 
             // Read them back the usual way.
-            for i in 0u64..(ITEMS_PER_BLOB * 100 + ITEMS_PER_BLOB / 2) {
+            for i in 0u64..(ITEMS_PER_BLOB.get() * 100 + ITEMS_PER_BLOB.get() / 2) {
                 let item: Digest = journal.read(i).await.expect("failed to read data");
                 assert_eq!(item, test_digest(i), "i={i}");
             }
@@ -996,7 +1001,7 @@ mod tests {
                 // Make sure all items were replayed
                 assert_eq!(
                     items.len(),
-                    ITEMS_PER_BLOB as usize * 100 + ITEMS_PER_BLOB as usize / 2
+                    ITEMS_PER_BLOB.get() as usize * 100 + ITEMS_PER_BLOB.get() as usize / 2
                 );
                 items.sort();
                 for (i, pos) in items.iter().enumerate() {
@@ -1006,8 +1011,8 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Corrupt one of the checksums and make sure it's detected.
-            let checksum_offset =
-                Digest::SIZE as u64 + (ITEMS_PER_BLOB / 2) * (Digest::SIZE + u32::SIZE) as u64;
+            let checksum_offset = Digest::SIZE as u64
+                + (ITEMS_PER_BLOB.get() / 2) * (Digest::SIZE + u32::SIZE) as u64;
             let (blob, _) = context
                 .open(&cfg.partition, &40u64.to_be_bytes())
                 .await
@@ -1017,7 +1022,7 @@ mod tests {
             blob.write_at(bad_checksum.to_be_bytes().to_vec(), checksum_offset)
                 .await
                 .expect("Failed to write incorrect checksum");
-            let corrupted_item_pos = 40 * ITEMS_PER_BLOB + ITEMS_PER_BLOB / 2;
+            let corrupted_item_pos = 40 * ITEMS_PER_BLOB.get() + ITEMS_PER_BLOB.get() / 2;
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
@@ -1054,7 +1059,7 @@ mod tests {
                 // Result will be missing only the one corrupted value.
                 assert_eq!(
                     items.len(),
-                    ITEMS_PER_BLOB as usize * 100 + ITEMS_PER_BLOB as usize / 2 - 1
+                    ITEMS_PER_BLOB.get() as usize * 100 + ITEMS_PER_BLOB.get() as usize / 2 - 1
                 );
             }
             journal.close().await.expect("Failed to close journal");
@@ -1066,7 +1071,7 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         // Start the test within the executor
-        const ITEMS_PER_BLOB: u64 = 7;
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(ITEMS_PER_BLOB);
@@ -1075,7 +1080,7 @@ mod tests {
                 .expect("failed to initialize journal");
 
             // Append many items, filling 100 blobs and part of the 101st
-            for i in 0u64..(ITEMS_PER_BLOB * 100 + ITEMS_PER_BLOB / 2) {
+            for i in 0u64..(ITEMS_PER_BLOB.get() * 100 + ITEMS_PER_BLOB.get() / 2) {
                 let pos = journal
                     .append(test_digest(i))
                     .await
@@ -1115,7 +1120,7 @@ mod tests {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         // Start the test within the executor
-        const ITEMS_PER_BLOB: u64 = 7;
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(ITEMS_PER_BLOB);
@@ -1124,7 +1129,7 @@ mod tests {
                 .expect("failed to initialize journal");
 
             // Fill one blob and put 3 items in the second.
-            let item_count = ITEMS_PER_BLOB + 3;
+            let item_count = ITEMS_PER_BLOB.get() + 3;
             for i in 0u64..item_count {
                 journal
                     .append(test_digest(i))
@@ -1181,7 +1186,7 @@ mod tests {
 
     #[test_traced]
     fn test_fixed_journal_partial_replay() {
-        const ITEMS_PER_BLOB: u64 = 7;
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
         // 53 % 7 = 4, which will trigger a non-trivial seek in the starting blob to reach the
         // starting position.
         const START_POS: u64 = 53;
@@ -1197,7 +1202,7 @@ mod tests {
                 .expect("failed to initialize journal");
 
             // Append many items, filling 100 blobs and part of the 101st
-            for i in 0u64..(ITEMS_PER_BLOB * 100 + ITEMS_PER_BLOB / 2) {
+            for i in 0u64..(ITEMS_PER_BLOB.get() * 100 + ITEMS_PER_BLOB.get() / 2) {
                 let pos = journal
                     .append(test_digest(i))
                     .await
@@ -1234,7 +1239,7 @@ mod tests {
                 // Make sure all items were replayed
                 assert_eq!(
                     items.len(),
-                    ITEMS_PER_BLOB as usize * 100 + ITEMS_PER_BLOB as usize / 2
+                    ITEMS_PER_BLOB.get() as usize * 100 + ITEMS_PER_BLOB.get() as usize / 2
                         - START_POS as usize
                 );
                 items.sort();
@@ -1255,7 +1260,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 3 items per blob.
-            let cfg = test_cfg(3);
+            let cfg = test_cfg(NZU64!(3));
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1315,7 +1320,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
-            let cfg = test_cfg(10);
+            let cfg = test_cfg(NZU64!(10));
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1361,7 +1366,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
-            let cfg = test_cfg(10);
+            let cfg = test_cfg(NZU64!(10));
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1419,7 +1424,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
-            let cfg = test_cfg(2);
+            let cfg = test_cfg(NZU64!(2));
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1482,7 +1487,7 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Repeat with a different blob size (3 items per blob)
-            let mut cfg = test_cfg(3);
+            let mut cfg = test_cfg(NZU64!(3));
             cfg.partition = "test_partition_2".into();
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
@@ -1536,7 +1541,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Create a journal configuration
-            let cfg = test_cfg(60);
+            let cfg = test_cfg(NZU64!(60));
 
             // Initialize the journal
             let mut journal = Journal::init(context.clone(), cfg.clone())
@@ -1600,9 +1605,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_fresh_start".into(),
-                items_per_blob: 5,
+                items_per_blob: NZU64!(5),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Initialize journal with sync boundaries when no existing data exists
@@ -1655,9 +1660,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_overlap".into(),
-                items_per_blob: 4,
+                items_per_blob: NZU64!(4),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Create initial journal with 20 operations
@@ -1729,9 +1734,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_exact_match".into(),
-                items_per_blob: 3,
+                items_per_blob: NZU64!(3),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Create initial journal with 20 operations (0-19)
@@ -1803,9 +1808,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_rewind".into(),
-                items_per_blob: 4,
+                items_per_blob: NZU64!(4),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Create initial journal with 30 operations (0-29)
@@ -1883,9 +1888,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_invalid_range".into(),
-                items_per_blob: 4,
+                items_per_blob: NZU64!(4),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             let lower_bound = 6;
@@ -1916,9 +1921,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test_init_at_size".into(),
-                items_per_blob: 5,
+                items_per_blob: NZU64!(5),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Test 1: Initialize at size 0 (empty journal)

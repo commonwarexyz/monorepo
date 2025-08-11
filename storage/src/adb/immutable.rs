@@ -22,7 +22,7 @@ use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::{sequence::U32, Array, NZUsize};
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::warn;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
@@ -37,7 +37,7 @@ pub struct Config<T: Translator, C> {
     pub mmr_journal_partition: String,
 
     /// The items per blob configuration value used by the MMR journal.
-    pub mmr_items_per_blob: u64,
+    pub mmr_items_per_blob: NonZeroU64,
 
     /// The size of the write buffer to use for each blob in the MMR journal.
     pub mmr_write_buffer: NonZeroUsize,
@@ -58,13 +58,13 @@ pub struct Config<T: Translator, C> {
     pub log_codec_config: C,
 
     /// The number of items to put in each section of the journal.
-    pub log_items_per_section: u64,
+    pub log_items_per_section: NonZeroU64,
 
     /// The name of the [RStorage] partition used for the location map.
     pub locations_journal_partition: String,
 
     /// The number of items to put in each blob in the location map.
-    pub locations_items_per_blob: u64,
+    pub locations_items_per_blob: NonZeroU64,
 
     /// The translator used by the compressed index.
     pub translator: T,
@@ -168,7 +168,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
         let (log_size, oldest_retained_loc) = Self::build_snapshot_from_log(
             &mut hasher,
-            cfg.log_items_per_section,
+            cfg.log_items_per_section.get(),
             &mut mmr,
             &mut log,
             &mut locations,
@@ -182,7 +182,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             log_size,
             oldest_retained_loc,
             locations,
-            log_items_per_section: cfg.log_items_per_section,
+            log_items_per_section: cfg.log_items_per_section.get(),
             snapshot,
             hasher,
         };
@@ -641,7 +641,7 @@ pub(super) mod test {
         deterministic::{self},
         Runner as _,
     };
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, NZU64};
 
     const PAGE_SIZE: usize = 77;
     const PAGE_CACHE_SIZE: usize = 9;
@@ -651,15 +651,15 @@ pub(super) mod test {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
-            mmr_items_per_blob: 11,
+            mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: format!("log_journal_{suffix}"),
-            log_items_per_section: ITEMS_PER_SECTION,
+            log_items_per_section: NZU64!(ITEMS_PER_SECTION),
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             log_write_buffer: NZUsize!(1024),
             locations_journal_partition: format!("locations_journal_{suffix}"),
-            locations_items_per_blob: 7,
+            locations_items_per_blob: NZU64!(7),
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),

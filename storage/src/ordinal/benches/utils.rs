@@ -1,6 +1,6 @@
 use commonware_runtime::tokio::Context;
 use commonware_storage::ordinal;
-use commonware_utils::{sequence::FixedBytes, NZUsize};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 /// Number of bytes that can be buffered before being written to disk.
@@ -22,7 +22,7 @@ pub type Ordinal = ordinal::Ordinal<Context, FixedBytes<128>>;
 pub async fn init(ctx: Context) -> Ordinal {
     let cfg = ordinal::Config {
         partition: PARTITION.into(),
-        items_per_blob: ITEMS_PER_BLOB,
+        items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(WRITE_BUFFER),
         replay_buffer: NZUsize!(REPLAY_BUFFER),
     };

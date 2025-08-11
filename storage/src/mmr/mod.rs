@@ -58,7 +58,7 @@
 //!       Hash(5, Hash(3, element_2), Hash(4, element_4))
 //!     )
 //!     Hash(13,
-//!       Hash(9, Hash(7, element_0), Hash(8, element_8)),
+//!       Hash(9, Hash(7, element_7), Hash(8, element_8)),
 //!       Hash(12, Hash(10, element_10), Hash(11, element_11))
 //!     )
 //!   )
