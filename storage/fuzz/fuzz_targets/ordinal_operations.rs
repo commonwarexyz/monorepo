@@ -53,8 +53,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        // Use constrained items_per_blob to ensure reasonable blob sizes
-        let items_per_blob = ((input.items_per_blob % 1000) + 10) as u64;
+        let items_per_blob = input.items_per_blob.clamp(1, u16::MAX) as u64;
 
         let cfg = Config {
             partition: "ordinal_operations_fuzz_test".to_string(),
