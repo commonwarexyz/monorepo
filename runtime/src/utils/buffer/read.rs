@@ -1,5 +1,6 @@
 use crate::{Blob, Error};
 use commonware_utils::StableBuf;
+use std::num::NonZeroUsize;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
 /// of a full scan of contents.
@@ -7,6 +8,7 @@ use commonware_utils::StableBuf;
 /// # Example
 ///
 /// ```
+/// use commonware_utils::NZUsize;
 /// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Storage, deterministic};
 ///
 /// let executor = deterministic::Runner::default();
@@ -19,7 +21,7 @@ use commonware_utils::StableBuf;
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
-///     let mut reader = Read::new(blob, size, buffer);
+///     let mut reader = Read::new(blob, size, NZUsize!(buffer));
 ///
 ///     // Read data sequentially
 ///     let mut header = [0u8; 16];
@@ -53,16 +55,15 @@ impl<B: Blob> Read<B> {
     /// # Panics
     ///
     /// Panics if `buffer_size` is zero.
-    pub fn new(blob: B, blob_size: u64, buffer_size: usize) -> Self {
-        assert!(buffer_size > 0, "buffer size must be greater than zero");
+    pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize) -> Self {
         Self {
             blob,
-            buffer: vec![0; buffer_size].into(),
+            buffer: vec![0; buffer_size.get()].into(),
             blob_position: 0,
             blob_size,
             buffer_position: 0,
             buffer_valid_len: 0,
-            buffer_size,
+            buffer_size: buffer_size.get(),
         }
     }
 

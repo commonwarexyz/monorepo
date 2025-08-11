@@ -23,9 +23,9 @@ use crate::{
 use commonware_codec::{Codec, Encode as _, Read};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
-use commonware_utils::{sequence::U32, Array};
+use commonware_utils::{sequence::U32, Array, NZUsize};
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
-use std::collections::HashMap;
+use std::{collections::HashMap, num::NonZeroUsize};
 use tracing::{debug, warn};
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
@@ -42,7 +42,7 @@ pub struct Config<T: Translator, C> {
     pub mmr_items_per_blob: u64,
 
     /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer: usize,
+    pub mmr_write_buffer: NonZeroUsize,
 
     /// The name of the [RStorage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
@@ -51,7 +51,7 @@ pub struct Config<T: Translator, C> {
     pub log_journal_partition: String,
 
     /// The size of the write buffer to use for each blob in the log journal.
-    pub log_write_buffer: usize,
+    pub log_write_buffer: NonZeroUsize,
 
     /// Optional compression level (using `zstd`) to apply to log data before storing.
     pub log_compression: Option<u8>,
@@ -237,7 +237,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Replay the log from inception to build the snapshot, keeping track of any uncommitted
         // operations, and any log operations that need to be re-added to the MMR & locations.
         {
-            let stream = self.log.replay(SNAPSHOT_READ_BUFFER_SIZE).await?;
+            let stream = self.log.replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE)).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
@@ -794,17 +794,17 @@ pub(super) mod test {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
             mmr_items_per_blob: 11,
-            mmr_write_buffer: 1024,
+            mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: format!("log_journal_{suffix}"),
             log_items_per_section: 7,
-            log_write_buffer: 1024,
+            log_write_buffer: NZUsize!(1024),
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             locations_journal_partition: format!("locations_journal_{suffix}"),
             locations_items_per_blob: 7,
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         }
     }
 

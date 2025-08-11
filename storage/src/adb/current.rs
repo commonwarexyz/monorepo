@@ -25,6 +25,7 @@ use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::future::try_join_all;
+use std::num::NonZeroUsize;
 use tracing::{debug, warn};
 
 /// Configuration for a [Current] authenticated db.
@@ -37,7 +38,7 @@ pub struct Config<T: Translator> {
     pub mmr_items_per_blob: u64,
 
     /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer: usize,
+    pub mmr_write_buffer: NonZeroUsize,
 
     /// The name of the [RStorage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
@@ -49,7 +50,7 @@ pub struct Config<T: Translator> {
     pub log_items_per_blob: u64,
 
     /// The size of the write buffer to use for each blob in the log journal.
-    pub log_write_buffer: usize,
+    pub log_write_buffer: NonZeroUsize,
 
     /// The name of the [RStorage] partition used for the bitmap metadata.
     pub bitmap_metadata_partition: String,
@@ -742,6 +743,7 @@ pub mod test {
     use commonware_cryptography::{hash, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
+    use commonware_utils::NZUsize;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
 
     const PAGE_SIZE: usize = 88;
@@ -752,14 +754,14 @@ pub mod test {
             mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
             mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
             mmr_items_per_blob: 11,
-            mmr_write_buffer: 1024,
+            mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: format!("{partition_prefix}_partition_prefix"),
             log_items_per_blob: 7,
-            log_write_buffer: 1024,
+            log_write_buffer: NZUsize!(1024),
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             pruning_delay: 10,
         }
     }

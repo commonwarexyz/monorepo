@@ -2,6 +2,7 @@ use crate::Block;
 use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
 use commonware_resolver::p2p::Coordinator;
 use governor::Quota;
+use std::num::NonZeroUsize;
 
 /// Marshal configuration.
 #[derive(Debug)]
@@ -55,10 +56,10 @@ pub struct Config<V: Variant, P: PublicKey, Z: Coordinator<PublicKey = P>, B: Bl
     pub freezer_journal_compression: Option<u8>,
 
     /// The size of the replay buffer for storage archives.
-    pub replay_buffer: usize,
+    pub replay_buffer: NonZeroUsize,
 
     /// The size of the write buffer for storage archives.
-    pub write_buffer: usize,
+    pub write_buffer: NonZeroUsize,
 
     /// Codec configuration for block type.
     pub codec_config: B::Cfg,

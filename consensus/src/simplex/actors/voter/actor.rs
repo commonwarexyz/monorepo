@@ -32,6 +32,7 @@ use rand::Rng;
 use std::{
     cmp::max,
     collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap},
+    num::NonZeroUsize,
     sync::atomic::AtomicI64,
     time::{Duration, SystemTime},
 };
@@ -194,7 +195,7 @@ impl<
         false
     }
 
-    fn notarizable(&mut self, threshold: u32, force: bool) -> Notarizable<C::Signature, D> {
+    fn notarizable(&mut self, threshold: u32, force: bool) -> Notarizable<'_, C::Signature, D> {
         if !force && (self.broadcast_notarization || self.broadcast_nullification) {
             // We want to broadcast a notarization, even if we haven't yet verified a proposal.
             return None;
@@ -218,7 +219,7 @@ impl<
         None
     }
 
-    fn nullifiable(&mut self, threshold: u32, force: bool) -> Nullifiable<C::Signature> {
+    fn nullifiable(&mut self, threshold: u32, force: bool) -> Nullifiable<'_, C::Signature> {
         if !force && (self.broadcast_nullification || self.broadcast_notarization) {
             return None;
         }
@@ -270,7 +271,7 @@ impl<
         true
     }
 
-    fn finalizable(&mut self, threshold: u32, force: bool) -> Finalizable<C::Signature, D> {
+    fn finalizable(&mut self, threshold: u32, force: bool) -> Finalizable<'_, C::Signature, D> {
         if !force && self.broadcast_finalization {
             // We want to broadcast a finalization, even if we haven't yet verified a proposal.
             return None;
@@ -326,8 +327,8 @@ pub struct Actor<
 
     partition: String,
     compression: Option<u8>,
-    replay_buffer: usize,
-    write_buffer: usize,
+    replay_buffer: NonZeroUsize,
+    write_buffer: NonZeroUsize,
     journal: Option<Journal<E, Voter<C::Signature, D>>>,
 
     genesis: Option<D>,

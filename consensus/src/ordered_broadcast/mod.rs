@@ -74,7 +74,7 @@ mod tests {
         deterministic::{self, Context},
         Clock, Metrics, Runner, Spawner,
     };
-    use commonware_utils::quorum;
+    use commonware_utils::{quorum, NZUsize};
     use futures::{channel::oneshot, future::join_all};
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::{
@@ -232,8 +232,8 @@ mod tests {
                     priority_acks: false,
                     priority_proposals: false,
                     journal_heights_per_section: 10,
-                    journal_replay_buffer: 4096,
-                    journal_write_buffer: 4096,
+                    journal_replay_buffer: NZUsize!(4096),
+                    journal_write_buffer: NZUsize!(4096),
                     journal_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
                     journal_compression: Some(3),
                 },
@@ -862,8 +862,8 @@ mod tests {
                         priority_acks: false,
                         priority_proposals: false,
                         journal_heights_per_section: 10,
-                        journal_replay_buffer: 4096,
-                        journal_write_buffer: 4096,
+                        journal_replay_buffer: NZUsize!(4096),
+                        journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
                         journal_compression: Some(3),
                     },
@@ -912,8 +912,8 @@ mod tests {
                         priority_acks: false,
                         priority_proposals: false,
                         journal_heights_per_section: 10,
-                        journal_replay_buffer: 4096,
-                        journal_write_buffer: 4096,
+                        journal_replay_buffer: NZUsize!(4096),
+                        journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!(
                             "ordered-broadcast-seq/{}/",
                             sequencer.public_key()

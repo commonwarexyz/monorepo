@@ -8,7 +8,7 @@ use commonware_storage::{
     mmr::hasher::{Hasher, Standard},
     translator::TwoCap,
 };
-use commonware_utils::sequence::FixedBytes;
+use commonware_utils::{sequence::FixedBytes, NZUsize};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -47,13 +47,13 @@ fn fuzz(data: FuzzInput) {
             mmr_journal_partition: "fuzz_current_mmr_journal".into(),
             mmr_metadata_partition: "fuzz_current_mmr_metadata".into(),
             mmr_items_per_blob: 11,
-            mmr_write_buffer: 1024,
+            mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: "fuzz_current_log_journal".into(),
             log_items_per_blob: 7,
-            log_write_buffer: 1024,
+            log_write_buffer: NZUsize!(1024),
             bitmap_metadata_partition: "fuzz_current_bitmap_metadata".into(),
             translator: TwoCap,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             thread_pool: None,
             pruning_delay: 10,
         };
