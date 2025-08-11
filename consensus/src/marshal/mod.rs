@@ -156,37 +156,13 @@ mod tests {
                 .with_timeout(Some(Duration::from_secs(300))),
         );
         runner.start(|mut context| async move {
-            // Initialize network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                simulated::Config {
-                    max_size: 1024 * 1024,
-                },
-            );
-            network.start();
-
-            // Generate private keys and sort them by public key.
-            let mut schemes = (0..NUM_VALIDATORS)
-                .map(|i| PrivateKey::from_seed(i as u64))
-                .collect::<Vec<_>>();
-            schemes.sort_by_key(|s| s.public_key());
-            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
-
-            // Generate shares
-            let (identity, shares) =
-                generate_shares::<_, V>(&mut context, None, NUM_VALIDATORS, QUORUM);
-            let identity = *poly::public::<V>(&identity);
-
-            // Initialize validators
-            let mut pks = Vec::new();
-            for scheme in schemes.iter() {
-                pks.push(scheme.public_key());
-            }
+            let mut oracle = setup_network(context.clone());
+            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
 
             // Initialize applications and actors
             let mut applications = BTreeMap::new();
             let mut actors = Vec::new();
-            let coordinator = resolver::mocks::Coordinator::new(pks.clone());
+            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
 
             for (i, secret) in schemes.iter().enumerate() {
                 let (application, actor) = setup_validator(
@@ -197,22 +173,12 @@ mod tests {
                     identity,
                 )
                 .await;
-                applications.insert(pks[i].clone(), application);
+                applications.insert(peers[i].clone(), application);
                 actors.push(actor);
             }
 
             // Add links between all peers
-            for p1 in peers.iter() {
-                for p2 in peers.iter() {
-                    if p2 == p1 {
-                        continue;
-                    }
-                    oracle
-                        .add_link(p1.clone(), p2.clone(), link.clone())
-                        .await
-                        .unwrap();
-                }
-            }
+            setup_network_links(&mut oracle, &peers, link.clone()).await;
 
             // Generate blocks, skipping the genesis block.
             let mut blocks = Vec::<B>::new();
@@ -401,34 +367,53 @@ mod tests {
         }
     }
 
+    fn setup_network(context: deterministic::Context) -> Oracle<P> {
+        let (network, oracle) = Network::new(
+            context.with_label("network"),
+            simulated::Config {
+                max_size: 1024 * 1024,
+            },
+        );
+        network.start();
+        oracle
+    }
+
+    fn setup_validators_and_shares(
+        context: &mut deterministic::Context,
+    ) -> (Vec<E>, Vec<P>, <V as Variant>::Public, Vec<Sh>) {
+        let mut schemes = (0..NUM_VALIDATORS)
+            .map(|i| PrivateKey::from_seed(i as u64))
+            .collect::<Vec<_>>();
+        schemes.sort_by_key(|s| s.public_key());
+        let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+
+        let (identity, shares) = generate_shares::<_, V>(context, None, NUM_VALIDATORS, QUORUM);
+        let identity = *poly::public::<V>(&identity);
+
+        (schemes, peers, identity, shares)
+    }
+
+    async fn setup_network_links(oracle: &mut Oracle<P>, peers: &[P], link: Link) {
+        for p1 in peers.iter() {
+            for p2 in peers.iter() {
+                if p2 == p1 {
+                    continue;
+                }
+                oracle
+                    .add_link(p1.clone(), p2.clone(), link.clone())
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
     #[test_traced("WARN")]
     fn test_subscribe_basic_block_delivery() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                simulated::Config {
-                    max_size: 1024 * 1024,
-                },
-            );
-            network.start();
-
-            let mut schemes = (0..NUM_VALIDATORS)
-                .map(|i| PrivateKey::from_seed(i as u64))
-                .collect::<Vec<_>>();
-            schemes.sort_by_key(|s| s.public_key());
-            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
-
-            let (identity, shares) =
-                generate_shares::<_, V>(&mut context, None, NUM_VALIDATORS, QUORUM);
-            let identity = *poly::public::<V>(&identity);
-
-            let mut pks = Vec::new();
-            for scheme in schemes.iter() {
-                pks.push(scheme.public_key());
-            }
-
-            let coordinator = resolver::mocks::Coordinator::new(pks.clone());
+            let mut oracle = setup_network(context.clone());
+            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
+            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -444,25 +429,12 @@ mod tests {
             }
             let mut actor = actors[0].clone();
 
-            for p1 in peers.iter() {
-                for p2 in peers.iter() {
-                    if p2 == p1 {
-                        continue;
-                    }
-                    oracle
-                        .add_link(
-                            p1.clone(),
-                            p2.clone(),
-                            Link {
-                                latency: 10.0,
-                                jitter: 1.0,
-                                success_rate: 1.0,
-                            },
-                        )
-                        .await
-                        .unwrap();
-                }
-            }
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            setup_network_links(&mut oracle, &peers, link).await;
 
             let parent = sha256::hash(b"");
             let block = B::new::<sha256::Sha256>(parent, 1, 1);
@@ -486,8 +458,6 @@ mod tests {
             let received_block = subscription_rx.await.unwrap();
             assert_eq!(received_block.digest(), block.digest());
             assert_eq!(received_block.height(), 1);
-
-            "subscription_delivered_block_successfully".to_string()
         })
     }
 
@@ -495,30 +465,9 @@ mod tests {
     fn test_subscribe_multiple_subscriptions() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                simulated::Config {
-                    max_size: 1024 * 1024,
-                },
-            );
-            network.start();
-
-            let mut schemes = (0..NUM_VALIDATORS)
-                .map(|i| PrivateKey::from_seed(i as u64))
-                .collect::<Vec<_>>();
-            schemes.sort_by_key(|s| s.public_key());
-            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
-
-            let (identity, shares) =
-                generate_shares::<_, V>(&mut context, None, NUM_VALIDATORS, QUORUM);
-            let identity = *poly::public::<V>(&identity);
-
-            let mut pks = Vec::new();
-            for scheme in schemes.iter() {
-                pks.push(scheme.public_key());
-            }
-
-            let coordinator = resolver::mocks::Coordinator::new(pks.clone());
+            let mut oracle = setup_network(context.clone());
+            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
+            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -534,25 +483,12 @@ mod tests {
             }
             let mut actor = actors[0].clone();
 
-            for p1 in peers.iter() {
-                for p2 in peers.iter() {
-                    if p2 == p1 {
-                        continue;
-                    }
-                    oracle
-                        .add_link(
-                            p1.clone(),
-                            p2.clone(),
-                            Link {
-                                latency: 10.0,
-                                jitter: 1.0,
-                                success_rate: 1.0,
-                            },
-                        )
-                        .await
-                        .unwrap();
-                }
-            }
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            setup_network_links(&mut oracle, &peers, link).await;
 
             let parent = sha256::hash(b"");
             let block1 = B::new::<sha256::Sha256>(parent, 1, 1);
@@ -590,8 +526,6 @@ mod tests {
             assert_eq!(received1_sub1.height(), 1);
             assert_eq!(received2.height(), 2);
             assert_eq!(received1_sub3.height(), 1);
-
-            "multiple_subscriptions_delivered_successfully".to_string()
         })
     }
 
@@ -599,30 +533,9 @@ mod tests {
     fn test_subscribe_canceled_subscriptions() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                simulated::Config {
-                    max_size: 1024 * 1024,
-                },
-            );
-            network.start();
-
-            let mut schemes = (0..NUM_VALIDATORS)
-                .map(|i| PrivateKey::from_seed(i as u64))
-                .collect::<Vec<_>>();
-            schemes.sort_by_key(|s| s.public_key());
-            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
-
-            let (identity, shares) =
-                generate_shares::<_, V>(&mut context, None, NUM_VALIDATORS, QUORUM);
-            let identity = *poly::public::<V>(&identity);
-
-            let mut pks = Vec::new();
-            for scheme in schemes.iter() {
-                pks.push(scheme.public_key());
-            }
-
-            let coordinator = resolver::mocks::Coordinator::new(pks.clone());
+            let mut oracle = setup_network(context.clone());
+            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
+            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -638,25 +551,12 @@ mod tests {
             }
             let mut actor = actors[0].clone();
 
-            for p1 in peers.iter() {
-                for p2 in peers.iter() {
-                    if p2 == p1 {
-                        continue;
-                    }
-                    oracle
-                        .add_link(
-                            p1.clone(),
-                            p2.clone(),
-                            Link {
-                                latency: 10.0,
-                                jitter: 1.0,
-                                success_rate: 1.0,
-                            },
-                        )
-                        .await
-                        .unwrap();
-                }
-            }
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            setup_network_links(&mut oracle, &peers, link).await;
 
             let parent = sha256::hash(b"");
             let block1 = B::new::<sha256::Sha256>(parent, 1, 1);
@@ -688,8 +588,6 @@ mod tests {
             let received2 = sub2_rx.await.unwrap();
             assert_eq!(received2.digest(), block2.digest());
             assert_eq!(received2.height(), 2);
-
-            "canceled_subscription_handled_correctly".to_string()
         })
     }
 
@@ -697,30 +595,9 @@ mod tests {
     fn test_subscribe_blocks_from_different_sources() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                simulated::Config {
-                    max_size: 1024 * 1024,
-                },
-            );
-            network.start();
-
-            let mut schemes = (0..NUM_VALIDATORS)
-                .map(|i| PrivateKey::from_seed(i as u64))
-                .collect::<Vec<_>>();
-            schemes.sort_by_key(|s| s.public_key());
-            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
-
-            let (identity, shares) =
-                generate_shares::<_, V>(&mut context, None, NUM_VALIDATORS, QUORUM);
-            let identity = *poly::public::<V>(&identity);
-
-            let mut pks = Vec::new();
-            for scheme in schemes.iter() {
-                pks.push(scheme.public_key());
-            }
-
-            let coordinator = resolver::mocks::Coordinator::new(pks.clone());
+            let mut oracle = setup_network(context.clone());
+            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
+            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
 
             let mut actors = Vec::new();
             for (i, secret) in schemes.iter().enumerate() {
@@ -736,25 +613,12 @@ mod tests {
             }
             let mut actor = actors[0].clone();
 
-            for p1 in peers.iter() {
-                for p2 in peers.iter() {
-                    if p2 == p1 {
-                        continue;
-                    }
-                    oracle
-                        .add_link(
-                            p1.clone(),
-                            p2.clone(),
-                            Link {
-                                latency: 10.0,
-                                jitter: 1.0,
-                                success_rate: 1.0,
-                            },
-                        )
-                        .await
-                        .unwrap();
-                }
-            }
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            setup_network_links(&mut oracle, &peers, link).await;
 
             let parent = sha256::hash(b"");
             let block1 = B::new::<sha256::Sha256>(parent, 1, 1);
