@@ -124,13 +124,11 @@ impl<B: Blob> Append<B> {
             return Ok(());
         }
 
-        let new_data = if new_data_start > 0 {
-            buf.split_off(new_data_start)
-        } else {
-            buf
-        };
-        let new_data_len = new_data.len() as u64;
-        self.blob.write_at(new_data, *blob_size).await?;
+        if new_data_start > 0 {
+            buf.drain(0..new_data_start);
+        }
+        let new_data_len = buf.len() as u64;
+        self.blob.write_at(buf, *blob_size).await?;
         *blob_size += new_data_len;
 
         Ok(())
