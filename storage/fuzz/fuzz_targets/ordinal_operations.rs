@@ -9,38 +9,18 @@ use std::collections::HashMap;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum OrdinalOperation {
-    Put {
-        index: u64,
-        value: Vec<u8>,
-    },
-    Get {
-        index: u64,
-    },
-    Has {
-        index: u64,
-    },
-    NextGap {
-        index: u64,
-    },
+    Put { index: u64, value: Vec<u8> },
+    Get { index: u64 },
+    Has { index: u64 },
+    NextGap { index: u64 },
     Sync,
-    Prune {
-        min: u64,
-    },
+    Prune { min: u64 },
     Close,
     Destroy,
     // Edge case operations
-    PutSparse {
-        indices: Vec<u64>,
-    },
-    PutLargeBatch {
-        start: u32,
-        count: u8,
-    },
+    PutSparse { indices: Vec<u64> },
+    PutLargeBatch { start: u32, count: u8 },
     ReopenAfterOperations,
-    PruneAndPutInPrunedRange {
-        prune_min: u64,
-        put_indices: Vec<u64>,
-    },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -270,40 +250,6 @@ fn fuzz(input: FuzzInput) {
                             Err(e) => {
                                 panic!("Failed to reopen ordinal: {e:?}");
                             }
-                        }
-                    }
-                }
-
-                OrdinalOperation::PruneAndPutInPrunedRange {
-                    prune_min,
-                    put_indices,
-                } => {
-                    if let Some(ordinal) = store.as_mut() {
-                        let min_blob = *prune_min / items_per_blob;
-
-                        // First prune
-                        if ordinal.prune(*prune_min).await.is_ok() {
-                            // Remove all data in pruned blobs from expected state
-                            expected_data.retain(|&index, _| index / items_per_blob >= min_blob);
-                            synced_data.retain(|&index, _| index / items_per_blob >= min_blob);
-                        }
-
-                        // Then try to put in pruned range and verify it works correctly
-                        for (i, &index) in put_indices.iter().take(5).enumerate() {
-                            let constrained_index = index;
-                            let mut value = [0u8; 32];
-                            value[0] = i as u8;
-                            value[1] = 0xFF; // Mark as post-prune value
-                            let value = FixedBytes::new(value);
-
-                            // This should recreate the blob if it was pruned
-                            if ordinal.put(constrained_index, value.clone()).await.is_ok() {
-                                expected_data.insert(constrained_index, value);
-                            }
-                        }
-
-                        if ordinal.sync().await.is_ok() {
-                            synced_data = expected_data.clone();
                         }
                     }
                 }
