@@ -179,10 +179,8 @@ mod tests {
 
             // Initialize validators
             let mut pks = Vec::new();
-            let mut secrets = Vec::new();
             for scheme in schemes.iter() {
                 pks.push(scheme.public_key());
-                secrets.push(scheme);
             }
 
             // Initialize applications and actors
@@ -190,12 +188,12 @@ mod tests {
             let mut actors = Vec::new();
             let coordinator = resolver::mocks::Coordinator::new(pks.clone());
 
-            for i in 0..NUM_VALIDATORS as usize {
+            for (i, secret) in schemes.iter().enumerate() {
                 let (application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
                     coordinator.clone(),
-                    secrets[i].clone(),
+                    secret.clone(),
                     identity,
                 )
                 .await;
@@ -401,5 +399,435 @@ mod tests {
             proposal_signature,
             seed_signature,
         }
+    }
+
+    #[test_traced("WARN")]
+    fn test_subscribe_basic_block_delivery() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+            network.start();
+
+            let mut schemes = (0..NUM_VALIDATORS)
+                .map(|i| PrivateKey::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            schemes.sort_by_key(|s| s.public_key());
+            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+
+            let (identity, shares) =
+                generate_shares::<_, V>(&mut context, None, NUM_VALIDATORS, QUORUM);
+            let identity = *poly::public::<V>(&identity);
+
+            let mut pks = Vec::new();
+            for scheme in schemes.iter() {
+                pks.push(scheme.public_key());
+            }
+
+            let coordinator = resolver::mocks::Coordinator::new(pks.clone());
+
+            let mut actors = Vec::new();
+            for (i, secret) in schemes.iter().enumerate() {
+                let (_application, actor) = setup_validator(
+                    context.with_label(&format!("validator-{i}")),
+                    &mut oracle,
+                    coordinator.clone(),
+                    secret.clone(),
+                    identity,
+                )
+                .await;
+                actors.push(actor);
+            }
+            let mut actor = actors[0].clone();
+
+            for p1 in peers.iter() {
+                for p2 in peers.iter() {
+                    if p2 == p1 {
+                        continue;
+                    }
+                    oracle
+                        .add_link(
+                            p1.clone(),
+                            p2.clone(),
+                            Link {
+                                latency: 10.0,
+                                jitter: 1.0,
+                                success_rate: 1.0,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+
+            let parent = sha256::hash(b"");
+            let block = B::new::<sha256::Sha256>(parent, 1, 1);
+            let commitment = block.digest();
+
+            let subscription_rx = actor.subscribe(Some(1), commitment).await;
+
+            actor.verified(1, block.clone()).await;
+
+            let proposal = Proposal {
+                view: 1,
+                parent: 0,
+                payload: commitment,
+            };
+            let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
+            actor.report(Activity::Notarization(notarization)).await;
+
+            let finalization = make_finalization(proposal, &shares, QUORUM);
+            actor.report(Activity::Finalization(finalization)).await;
+
+            let received_block = subscription_rx.await.unwrap();
+            assert_eq!(received_block.digest(), block.digest());
+            assert_eq!(received_block.height(), 1);
+
+            "subscription_delivered_block_successfully".to_string()
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_subscribe_multiple_subscriptions() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+            network.start();
+
+            let mut schemes = (0..NUM_VALIDATORS)
+                .map(|i| PrivateKey::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            schemes.sort_by_key(|s| s.public_key());
+            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+
+            let (identity, shares) =
+                generate_shares::<_, V>(&mut context, None, NUM_VALIDATORS, QUORUM);
+            let identity = *poly::public::<V>(&identity);
+
+            let mut pks = Vec::new();
+            for scheme in schemes.iter() {
+                pks.push(scheme.public_key());
+            }
+
+            let coordinator = resolver::mocks::Coordinator::new(pks.clone());
+
+            let mut actors = Vec::new();
+            for (i, secret) in schemes.iter().enumerate() {
+                let (_application, actor) = setup_validator(
+                    context.with_label(&format!("validator-{i}")),
+                    &mut oracle,
+                    coordinator.clone(),
+                    secret.clone(),
+                    identity,
+                )
+                .await;
+                actors.push(actor);
+            }
+            let mut actor = actors[0].clone();
+
+            for p1 in peers.iter() {
+                for p2 in peers.iter() {
+                    if p2 == p1 {
+                        continue;
+                    }
+                    oracle
+                        .add_link(
+                            p1.clone(),
+                            p2.clone(),
+                            Link {
+                                latency: 10.0,
+                                jitter: 1.0,
+                                success_rate: 1.0,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+
+            let parent = sha256::hash(b"");
+            let block1 = B::new::<sha256::Sha256>(parent, 1, 1);
+            let block2 = B::new::<sha256::Sha256>(block1.digest(), 2, 2);
+            let commitment1 = block1.digest();
+            let commitment2 = block2.digest();
+
+            let sub1_rx = actor.subscribe(Some(1), commitment1).await;
+            let sub2_rx = actor.subscribe(Some(2), commitment2).await;
+            let sub3_rx = actor.subscribe(Some(1), commitment1).await;
+
+            actor.verified(1, block1.clone()).await;
+            actor.verified(2, block2.clone()).await;
+
+            for (view, block) in [(1, block1.clone()), (2, block2.clone())] {
+                let proposal = Proposal {
+                    view,
+                    parent: view.checked_sub(1).unwrap(),
+                    payload: block.digest(),
+                };
+                let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
+                actor.report(Activity::Notarization(notarization)).await;
+
+                let finalization = make_finalization(proposal, &shares, QUORUM);
+                actor.report(Activity::Finalization(finalization)).await;
+            }
+
+            let received1_sub1 = sub1_rx.await.unwrap();
+            let received2 = sub2_rx.await.unwrap();
+            let received1_sub3 = sub3_rx.await.unwrap();
+
+            assert_eq!(received1_sub1.digest(), block1.digest());
+            assert_eq!(received2.digest(), block2.digest());
+            assert_eq!(received1_sub3.digest(), block1.digest());
+            assert_eq!(received1_sub1.height(), 1);
+            assert_eq!(received2.height(), 2);
+            assert_eq!(received1_sub3.height(), 1);
+
+            "multiple_subscriptions_delivered_successfully".to_string()
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_subscribe_canceled_subscriptions() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+            network.start();
+
+            let mut schemes = (0..NUM_VALIDATORS)
+                .map(|i| PrivateKey::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            schemes.sort_by_key(|s| s.public_key());
+            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+
+            let (identity, shares) =
+                generate_shares::<_, V>(&mut context, None, NUM_VALIDATORS, QUORUM);
+            let identity = *poly::public::<V>(&identity);
+
+            let mut pks = Vec::new();
+            for scheme in schemes.iter() {
+                pks.push(scheme.public_key());
+            }
+
+            let coordinator = resolver::mocks::Coordinator::new(pks.clone());
+
+            let mut actors = Vec::new();
+            for (i, secret) in schemes.iter().enumerate() {
+                let (_application, actor) = setup_validator(
+                    context.with_label(&format!("validator-{i}")),
+                    &mut oracle,
+                    coordinator.clone(),
+                    secret.clone(),
+                    identity,
+                )
+                .await;
+                actors.push(actor);
+            }
+            let mut actor = actors[0].clone();
+
+            for p1 in peers.iter() {
+                for p2 in peers.iter() {
+                    if p2 == p1 {
+                        continue;
+                    }
+                    oracle
+                        .add_link(
+                            p1.clone(),
+                            p2.clone(),
+                            Link {
+                                latency: 10.0,
+                                jitter: 1.0,
+                                success_rate: 1.0,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+
+            let parent = sha256::hash(b"");
+            let block1 = B::new::<sha256::Sha256>(parent, 1, 1);
+            let block2 = B::new::<sha256::Sha256>(block1.digest(), 2, 2);
+            let commitment1 = block1.digest();
+            let commitment2 = block2.digest();
+
+            let sub1_rx = actor.subscribe(Some(1), commitment1).await;
+            let sub2_rx = actor.subscribe(Some(2), commitment2).await;
+
+            drop(sub1_rx);
+
+            actor.verified(1, block1.clone()).await;
+            actor.verified(2, block2.clone()).await;
+
+            for (view, block) in [(1, block1.clone()), (2, block2.clone())] {
+                let proposal = Proposal {
+                    view,
+                    parent: view.checked_sub(1).unwrap(),
+                    payload: block.digest(),
+                };
+                let notarization = make_notarization(proposal.clone(), &shares, QUORUM);
+                actor.report(Activity::Notarization(notarization)).await;
+
+                let finalization = make_finalization(proposal, &shares, QUORUM);
+                actor.report(Activity::Finalization(finalization)).await;
+            }
+
+            let received2 = sub2_rx.await.unwrap();
+            assert_eq!(received2.digest(), block2.digest());
+            assert_eq!(received2.height(), 2);
+
+            "canceled_subscription_handled_correctly".to_string()
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_subscribe_blocks_from_different_sources() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+            network.start();
+
+            let mut schemes = (0..NUM_VALIDATORS)
+                .map(|i| PrivateKey::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            schemes.sort_by_key(|s| s.public_key());
+            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+
+            let (identity, shares) =
+                generate_shares::<_, V>(&mut context, None, NUM_VALIDATORS, QUORUM);
+            let identity = *poly::public::<V>(&identity);
+
+            let mut pks = Vec::new();
+            for scheme in schemes.iter() {
+                pks.push(scheme.public_key());
+            }
+
+            let coordinator = resolver::mocks::Coordinator::new(pks.clone());
+
+            let mut actors = Vec::new();
+            for (i, secret) in schemes.iter().enumerate() {
+                let (_application, actor) = setup_validator(
+                    context.with_label(&format!("validator-{i}")),
+                    &mut oracle,
+                    coordinator.clone(),
+                    secret.clone(),
+                    identity,
+                )
+                .await;
+                actors.push(actor);
+            }
+            let mut actor = actors[0].clone();
+
+            for p1 in peers.iter() {
+                for p2 in peers.iter() {
+                    if p2 == p1 {
+                        continue;
+                    }
+                    oracle
+                        .add_link(
+                            p1.clone(),
+                            p2.clone(),
+                            Link {
+                                latency: 10.0,
+                                jitter: 1.0,
+                                success_rate: 1.0,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+
+            let parent = sha256::hash(b"");
+            let block1 = B::new::<sha256::Sha256>(parent, 1, 1);
+            let block2 = B::new::<sha256::Sha256>(block1.digest(), 2, 2);
+            let block3 = B::new::<sha256::Sha256>(block2.digest(), 3, 3);
+            let block4 = B::new::<sha256::Sha256>(block3.digest(), 4, 4);
+            let block5 = B::new::<sha256::Sha256>(block4.digest(), 5, 5);
+
+            let sub1_rx = actor.subscribe(Some(1), block1.digest()).await;
+            let sub2_rx = actor.subscribe(Some(2), block2.digest()).await;
+            let sub3_rx = actor.subscribe(Some(3), block3.digest()).await;
+            let sub4_rx = actor.subscribe(Some(4), block4.digest()).await;
+            let sub5_rx = actor.subscribe(Some(5), block5.digest()).await;
+
+            // Block1: Broadcasted by the actor
+            actor.broadcast(block1.clone()).await;
+            context.sleep(Duration::from_millis(20)).await;
+
+            // Block1: delivered
+            let received1 = sub1_rx.await.unwrap();
+            assert_eq!(received1.digest(), block1.digest());
+            assert_eq!(received1.height(), 1);
+
+            // Block2: Verified by the actor
+            actor.verified(2, block2.clone()).await;
+
+            // Block2: delivered
+            let received2 = sub2_rx.await.unwrap();
+            assert_eq!(received2.digest(), block2.digest());
+            assert_eq!(received2.height(), 2);
+
+            // Block3: Notarized by the actor
+            let proposal3 = Proposal {
+                view: 3,
+                parent: 2,
+                payload: block3.digest(),
+            };
+            let notarization3 = make_notarization(proposal3.clone(), &shares, QUORUM);
+            actor.report(Activity::Notarization(notarization3)).await;
+            actor.verified(3, block3.clone()).await;
+
+            // Block3: delivered
+            let received3 = sub3_rx.await.unwrap();
+            assert_eq!(received3.digest(), block3.digest());
+            assert_eq!(received3.height(), 3);
+
+            // Block4: Finalized by the actor
+            let finalization4 = make_finalization(
+                Proposal {
+                    view: 4,
+                    parent: 3,
+                    payload: block4.digest(),
+                },
+                &shares,
+                QUORUM,
+            );
+            actor.report(Activity::Finalization(finalization4)).await;
+            actor.verified(4, block4.clone()).await;
+
+            // Block4: delivered
+            let received4 = sub4_rx.await.unwrap();
+            assert_eq!(received4.digest(), block4.digest());
+            assert_eq!(received4.height(), 4);
+
+            // Block5: Broadcasted by a remote node (different actor)
+            let remote_actor = &mut actors[1].clone();
+            remote_actor.broadcast(block5.clone()).await;
+            context.sleep(Duration::from_millis(20)).await;
+
+            // Block5: delivered
+            let received5 = sub5_rx.await.unwrap();
+            assert_eq!(received5.digest(), block5.digest());
+            assert_eq!(received5.height(), 5);
+        })
     }
 }
