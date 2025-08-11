@@ -60,13 +60,12 @@ async fn target_update_task<E, Op, D>(
     initial_target: Target<D>,
 ) -> Result<(), Error>
 where
-    E: commonware_runtime::Network + commonware_runtime::Clock + commonware_runtime::Spawner,
+    E: commonware_runtime::Clock,
     Op: commonware_codec::Read<Cfg = ()>
         + commonware_codec::Write
         + commonware_codec::EncodeSize
         + Send
-        + Sync
-        + 'static,
+        + Sync,
     D: commonware_cryptography::Digest,
 {
     let mut current_target = initial_target;
@@ -104,7 +103,7 @@ where
     }
 }
 
-/// Run sync for Any database.
+/// Repeatedly sync an Any database to the server's state.
 async fn run_any<E>(context: E, config: Config) -> Result<(), String>
 where
     E: commonware_runtime::Storage
@@ -114,7 +113,7 @@ where
         + commonware_runtime::Spawner,
 {
     info!("starting Any database sync process");
-    let mut iteration = 1u32;
+    let mut iteration = 0u32;
     loop {
         let resolver = Resolver::<AnyOp, Digest>::connect(context.clone(), config.server)
             .await
@@ -172,7 +171,7 @@ where
     }
 }
 
-/// Run sync for Immutable database.
+/// Repeatedly sync an Immutable database to the server's state.
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), String>
 where
     E: commonware_runtime::Storage
@@ -249,7 +248,7 @@ fn main() {
             Arg::new("db")
                 .long("db")
                 .value_name("any|immutable")
-                .help("Database type to use")
+                .help("Database type to use. Must be `any` or `immutable`.")
                 .default_value("any"),
         )
         .arg(

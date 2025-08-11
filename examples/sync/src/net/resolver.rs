@@ -22,7 +22,7 @@ where
 
 impl<Op, D> Resolver<Op, D>
 where
-    Op: Send + Sync + 'static + Read<Cfg = ()> + Encode,
+    Op: Send + Sync + Read<Cfg = ()> + Encode,
     D: Digest,
 {
     /// Returns a resolver connected to the server at the given address.
@@ -42,6 +42,7 @@ where
         })
     }
 
+    /// Returns the current sync target from the server.
     pub async fn get_sync_target(&self) -> Result<sync::Target<D>, crate::Error> {
         let request_id = self.request_id_generator.next();
         let request =
@@ -71,7 +72,7 @@ where
 
 impl<Op, D> sync::resolver::Resolver for Resolver<Op, D>
 where
-    Op: Clone + Send + Sync + 'static + Read<Cfg = ()> + Encode,
+    Op: Clone + Send + Sync + Read<Cfg = ()> + Encode,
     D: Digest,
 {
     type Digest = D;

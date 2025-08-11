@@ -22,7 +22,6 @@ use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
-    marker::PhantomData,
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
     time::{Duration, SystemTime},
@@ -53,10 +52,7 @@ struct Config {
 }
 
 /// Server state containing the database and metrics.
-struct State<E, DB>
-where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-{
+struct State<DB> {
     /// The database wrapped in async mutex.
     database: Arc<RwLock<DB>>,
     /// Request counter for metrics.
@@ -67,22 +63,19 @@ where
     ops_counter: Counter,
     /// Last time we added operations.
     last_operation_time: Arc<RwLock<SystemTime>>,
-    /// Phantom data to hold the E type parameter.
-    _phantom: PhantomData<E>,
 }
 
-impl<E, DB> State<E, DB>
-where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-{
-    fn new(context: E, database: DB) -> Self {
+impl<DB> State<DB> {
+    fn new<E>(context: E, database: DB) -> Self
+    where
+        E: commonware_runtime::Metrics,
+    {
         let state = Self {
             database: Arc::new(RwLock::new(database)),
             request_counter: Counter::default(),
             error_counter: Counter::default(),
             ops_counter: Counter::default(),
             last_operation_time: Arc::new(RwLock::new(SystemTime::now())),
-            _phantom: PhantomData,
         };
         context.register(
             "requests",
@@ -101,7 +94,7 @@ where
 
 /// Add operations to the Any database if the configured interval has passed.
 async fn maybe_add_any_operations<E>(
-    state: &State<E, Database<E>>,
+    state: &State<Database<E>>,
     context: &mut E,
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>>
@@ -150,7 +143,7 @@ where
 
 /// Add operations to the Immutable database if the configured interval has passed.
 async fn maybe_add_immutable_operations<E>(
-    state: &State<E, ImmDatabase<E>>,
+    state: &State<ImmDatabase<E>>,
     context: &mut E,
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>>
@@ -246,7 +239,7 @@ where
 
 /// Handle a request for sync target for Any database.
 async fn handle_get_sync_target<E>(
-    state: &State<E, Database<E>>,
+    state: &State<Database<E>>,
     request: wire::GetSyncTargetRequest,
 ) -> Result<wire::GetSyncTargetResponse<Key>, Error>
 where
@@ -279,7 +272,7 @@ where
 
 /// Handle a request for sync target for Immutable database.
 async fn handle_get_imm_sync_target<E>(
-    state: &State<E, ImmDatabase<E>>,
+    state: &State<ImmDatabase<E>>,
     request: wire::GetSyncTargetRequest,
 ) -> Result<wire::GetSyncTargetResponse<Key>, Error>
 where
@@ -312,7 +305,7 @@ where
 
 /// Handle a GetOperationsRequest and return operations with proof for Any database.
 async fn handle_get_operations<E>(
-    state: &State<E, Database<E>>,
+    state: &State<Database<E>>,
     request: wire::GetOperationsRequest,
 ) -> Result<wire::GetOperationsResponse<Operation, Key>, Error>
 where
@@ -372,7 +365,7 @@ where
 
 /// Handle a GetOperationsRequest and return operations with proof for Immutable database.
 async fn handle_get_imm_operations<E>(
-    state: &State<E, ImmDatabase<E>>,
+    state: &State<ImmDatabase<E>>,
     request: wire::GetOperationsRequest,
 ) -> Result<wire::GetOperationsResponse<ImmOperation, Key>, Error>
 where
@@ -432,7 +425,7 @@ where
 
 /// Handle a message from a client and return the appropriate response for Any database.
 async fn handle_message<E>(
-    state: Arc<State<E, Database<E>>>,
+    state: Arc<State<Database<E>>>,
     message: wire::Message<Operation, Key>,
 ) -> wire::Message<Operation, Key>
 where
@@ -481,7 +474,7 @@ where
 
 /// Handle a message from a client and return the appropriate response for Immutable database.
 async fn handle_imm_message<E>(
-    state: Arc<State<E, ImmDatabase<E>>>,
+    state: Arc<State<ImmDatabase<E>>>,
     message: wire::Message<ImmOperation, Key>,
 ) -> wire::Message<ImmOperation, Key>
 where
@@ -531,7 +524,7 @@ where
 /// Handle a client connection with concurrent request processing for Any database.
 async fn handle_client<E>(
     context: E,
-    state: Arc<State<E, Database<E>>>,
+    state: Arc<State<Database<E>>>,
     mut sink: commonware_runtime::SinkOf<E>,
     mut stream: commonware_runtime::StreamOf<E>,
     client_addr: SocketAddr,
@@ -605,7 +598,7 @@ where
 /// Handle a client connection with concurrent request processing for Immutable database.
 async fn handle_imm_client<E>(
     context: E,
-    state: Arc<State<E, ImmDatabase<E>>>,
+    state: Arc<State<ImmDatabase<E>>>,
     mut sink: commonware_runtime::SinkOf<E>,
     mut stream: commonware_runtime::StreamOf<E>,
     client_addr: SocketAddr,
@@ -853,7 +846,7 @@ fn main() {
             Arg::new("db")
                 .long("db")
                 .value_name("any|immutable")
-                .help("Database type to serve")
+                .help("Database type to use. Must be `any` or `immutable`.")
                 .default_value("any"),
         )
         .arg(
