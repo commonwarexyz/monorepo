@@ -3,13 +3,7 @@ use crate::{
     Blob, Error, RwLock,
 };
 use commonware_utils::{NZUsize, StableBuf};
-use std::{
-    num::NonZeroUsize,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-};
+use std::{num::NonZeroUsize, sync::Arc};
 
 /// A [Blob] wrapper that supports appending new data that is both read and write cached, and
 /// provides buffer-pool managed read caching of older data.
@@ -17,9 +11,6 @@ use std::{
 pub struct Append<B: Blob> {
     /// The underlying blob being wrapped.
     blob: B,
-
-    /// The actual size of the underlying blob on disk.
-    blob_size: Arc<AtomicU64>,
 
     /// Unique id assigned by the buffer pool.
     id: u64,
@@ -29,14 +20,14 @@ pub struct Append<B: Blob> {
 
     /// The buffer containing the data yet to be appended to the tip of the underlying blob, as well
     /// as up to the final page_size-1 bytes from the underlying blob (to ensure the buffer's offset
-    /// is always at a page boundary).
+    /// is always at a page boundary), paired with the actual size of the underlying blob on disk.
     ///
     /// # Invariants
     ///
     /// - The buffer's `offset` into the blob is always page aligned.
     /// - The range of bytes in this buffer never overlaps with any page buffered by `pool`. (See
     ///   the warning in [Self::resize] for one uncommon exception.)
-    buffer: Arc<RwLock<Buffer>>,
+    buffer: Arc<RwLock<(Buffer, u64)>>,
 }
 
 impl<B: Blob> Append<B> {
@@ -70,8 +61,7 @@ impl<B: Blob> Append<B> {
             blob,
             id: pool_ref.next_id().await,
             pool_ref,
-            buffer: Arc::new(RwLock::new(buffer)),
-            blob_size: Arc::new(AtomicU64::new(size)),
+            buffer: Arc::new(RwLock::new((buffer, size))),
         })
     }
 
@@ -80,8 +70,8 @@ impl<B: Blob> Append<B> {
         // Prepare `buf` to be written.
         let buf = buf.into();
 
-        // Acquire a write lock on the buffer.
-        let mut buffer = self.buffer.write().await;
+        // Acquire a write lock on the buffer and blob_size.
+        let (buffer, blob_size) = &mut *self.buffer.write().await;
 
         // Ensure the write doesn't overflow.
         buffer
@@ -91,7 +81,7 @@ impl<B: Blob> Append<B> {
 
         if buffer.append(buf.as_ref()) {
             // Buffer is over capacity, flush it to the underlying blob.
-            return self.flush(&mut buffer).await;
+            return self.flush(buffer, blob_size).await;
         }
 
         Ok(())
@@ -102,13 +92,12 @@ impl<B: Blob> Append<B> {
     /// This represents the total size of data that would be present after flushing.
     #[allow(clippy::len_without_is_empty)]
     pub async fn size(&self) -> u64 {
-        let buffer = self.buffer.read().await;
-        buffer.size()
+        self.buffer.read().await.0.size()
     }
 
     /// Flush the append buffer to the underlying blob, caching each page worth of written data in
     /// the buffer pool.
-    async fn flush(&self, buffer: &mut Buffer) -> Result<(), Error> {
+    async fn flush(&self, buffer: &mut Buffer, blob_size: &mut u64) -> Result<(), Error> {
         // Take the buffered data, if any.
         let Some((mut buf, offset)) = buffer.take() else {
             return Ok(());
@@ -128,7 +117,6 @@ impl<B: Blob> Append<B> {
         }
 
         // Calculate where new data starts in the buffer to skip already-written trailing bytes.
-        let blob_size = self.blob_size.load(Ordering::Acquire);
         let new_data_start = blob_size.saturating_sub(offset) as usize;
 
         // Only write if there's actually new data to write.
@@ -139,9 +127,8 @@ impl<B: Blob> Append<B> {
                 buf
             };
             let new_data_len = new_data.len() as u64;
-            self.blob.write_at(new_data, blob_size).await?;
-            self.blob_size
-                .store(blob_size + new_data_len, Ordering::Release);
+            self.blob.write_at(new_data, *blob_size).await?;
+            *blob_size += new_data_len;
         }
 
         Ok(())
@@ -168,7 +155,7 @@ impl<B: Blob> Blob for Append<B> {
             .ok_or(Error::OffsetOverflow)?;
 
         // Acquire a read lock on the buffer.
-        let buffer = self.buffer.read().await;
+        let (buffer, _) = &*self.buffer.read().await;
 
         // If the data required is beyond the size of the blob, return an error.
         if end_offset > buffer.size() {
@@ -198,8 +185,8 @@ impl<B: Blob> Blob for Append<B> {
 
     async fn sync(&self) -> Result<(), Error> {
         {
-            let mut buffer = self.buffer.write().await;
-            self.flush(&mut buffer).await?;
+            let (buffer, blob_size) = &mut *self.buffer.write().await;
+            self.flush(buffer, blob_size).await?;
         }
         self.blob.sync().await
     }
@@ -213,17 +200,17 @@ impl<B: Blob> Blob for Append<B> {
         // page, if any old data hasn't expired naturally by then.
 
         // Acquire a write lock on the buffer.
-        let mut buffer = self.buffer.write().await;
+        let (buffer, blob_size) = &mut *self.buffer.write().await;
 
         // Flush any buffered bytes to the underlying blob. (Note that a fancier implementation
         // might avoid flushing those bytes that are backed up over by the next step, if any.)
-        self.flush(&mut buffer).await?;
+        self.flush(buffer, blob_size).await?;
 
         // Resize the underlying blob.
         self.blob.resize(size).await?;
 
         // Update the physical blob size.
-        self.blob_size.store(size, Ordering::Release);
+        *blob_size = size;
 
         // Reset the append buffer to the new size, ensuring its page alignment.
         let leftover_size = size % self.pool_ref.page_size as u64;
@@ -245,7 +232,6 @@ mod tests {
     use crate::{deterministic, Runner, Storage as _};
     use commonware_macros::test_traced;
     use commonware_utils::NZUsize;
-    use std::sync::atomic::Ordering;
 
     const PAGE_SIZE: usize = 1024;
     const BUFFER_SIZE: usize = PAGE_SIZE * 2;
@@ -417,35 +403,32 @@ mod tests {
                 .unwrap();
 
             // Initially blob_size should be 0.
-            assert_eq!(blob.blob_size.load(Ordering::Acquire), 0);
+            assert_eq!(blob.buffer.read().await.1, 0);
 
             // Write 100 bytes and sync.
             blob.append(vec![1u8; 100]).await.unwrap();
             blob.sync().await.unwrap();
-            assert_eq!(blob.blob_size.load(Ordering::Acquire), 100);
+            assert_eq!(blob.buffer.read().await.1, 100);
 
             // Append more data but don't sync yet, blob_size shouldn't change.
             blob.append(vec![2u8; 200]).await.unwrap();
-            assert_eq!(blob.blob_size.load(Ordering::Acquire), 100);
+            assert_eq!(blob.buffer.read().await.1, 100);
 
             // Force a flush by exceeding buffer.
             blob.append(vec![3u8; BUFFER_SIZE]).await.unwrap();
-            assert_eq!(
-                blob.blob_size.load(Ordering::Acquire),
-                100 + 200 + BUFFER_SIZE as u64
-            );
+            assert_eq!(blob.buffer.read().await.1, 100 + 200 + BUFFER_SIZE as u64);
 
             // Test resize down and up.
             blob.resize(50).await.unwrap();
-            assert_eq!(blob.blob_size.load(Ordering::Acquire), 50);
+            assert_eq!(blob.buffer.read().await.1, 50);
 
             blob.resize(150).await.unwrap();
-            assert_eq!(blob.blob_size.load(Ordering::Acquire), 150);
+            assert_eq!(blob.buffer.read().await.1, 150);
 
             // Append after resize and sync.
             blob.append(vec![4u8; 100]).await.unwrap();
             blob.sync().await.unwrap();
-            assert_eq!(blob.blob_size.load(Ordering::Acquire), 250);
+            assert_eq!(blob.buffer.read().await.1, 250);
 
             // Close and reopen.
             let (blob, size) = context
@@ -456,7 +439,7 @@ mod tests {
             let blob = Append::new(blob, size, NZUsize!(BUFFER_SIZE), pool_ref.clone())
                 .await
                 .unwrap();
-            assert_eq!(blob.blob_size.load(Ordering::Acquire), 250);
+            assert_eq!(blob.buffer.read().await.1, 250);
 
             // Verify data integrity after all operations.
             let mut buf = vec![0u8; 250];
