@@ -8,7 +8,7 @@ use commonware_storage::{
     mmr::hasher::Standard,
     translator::EightCap,
 };
-use commonware_utils::sequence::FixedBytes;
+use commonware_utils::{sequence::FixedBytes, NZUsize};
 use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet};
 
@@ -45,14 +45,14 @@ fn fuzz(data: FuzzInput) {
         let cfg = Config::<EightCap> {
             mmr_journal_partition: "test_adb_mmr_journal".into(),
             mmr_items_per_blob: 500000,
-            mmr_write_buffer: 1024,
+            mmr_write_buffer: NZUsize!(1024),
             mmr_metadata_partition: "test_adb_mmr_metadata".into(),
             log_journal_partition: "test_adb_log_journal".into(),
             log_items_per_blob: 500000,
-            log_write_buffer: 1024,
+            log_write_buffer: NZUsize!(1024),
             translator: EightCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             pruning_delay: 10,
         };
 

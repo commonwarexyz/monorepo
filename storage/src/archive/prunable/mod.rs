@@ -111,6 +111,7 @@
 //!         prunable::{Archive, Config},
 //!     },
 //! };
+//! use commonware_utils::NZUsize;
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -121,8 +122,8 @@
 //!         compression: Some(3),
 //!         codec_config: (),
 //!         items_per_section: 1024,
-//!         write_buffer: 1024 * 1024,
-//!         replay_buffer: 4096,
+//!         write_buffer: NZUsize!(1024 * 1024),
+//!         replay_buffer: NZUsize!(4096),
 //!     };
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
 //!
@@ -135,6 +136,7 @@
 //! ```
 
 use crate::translator::Translator;
+use std::num::NonZeroUsize;
 
 mod storage;
 pub use storage::Archive;
@@ -162,10 +164,10 @@ pub struct Config<T: Translator, C> {
 
     /// The amount of bytes that can be buffered in a section before being written to a
     /// [commonware_runtime::Blob].
-    pub write_buffer: usize,
+    pub write_buffer: NonZeroUsize,
 
     /// The buffer size to use when replaying a [commonware_runtime::Blob].
-    pub replay_buffer: usize,
+    pub replay_buffer: NonZeroUsize,
 }
 
 #[cfg(test)]
@@ -179,7 +181,7 @@ mod tests {
     use commonware_codec::{varint::UInt, DecodeExt, EncodeSize, Error as CodecError};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::sequence::FixedBytes;
+    use commonware_utils::{sequence::FixedBytes, NZUsize};
     use rand::Rng;
     use std::collections::BTreeMap;
 
@@ -206,8 +208,8 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: Some(3),
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: DEFAULT_ITEMS_PER_SECTION,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -232,8 +234,8 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                write_buffer: 1024,
-                replay_buffer: 4096,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: DEFAULT_ITEMS_PER_SECTION,
             };
             let result = Archive::<_, _, FixedBytes<64>, i32>::init(context, cfg.clone()).await;
@@ -255,8 +257,8 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: DEFAULT_ITEMS_PER_SECTION,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -294,8 +296,8 @@ mod tests {
                     translator: FourCap,
                     codec_config: (),
                     compression: None,
-                    write_buffer: DEFAULT_WRITE_BUFFER,
-                    replay_buffer: DEFAULT_REPLAY_BUFFER,
+                    write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                    replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                     items_per_section: DEFAULT_ITEMS_PER_SECTION,
                 },
             )
@@ -321,8 +323,8 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: DEFAULT_ITEMS_PER_SECTION,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -383,8 +385,8 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: DEFAULT_ITEMS_PER_SECTION,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -439,8 +441,8 @@ mod tests {
                 translator: FourCap,
                 codec_config: (),
                 compression: None,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: 1, // no mask - each item is its own section
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -524,8 +526,8 @@ mod tests {
                 translator: TwoCap,
                 codec_config: (),
                 compression: None,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section,
             };
             let mut archive = Archive::init(context.clone(), cfg.clone())
@@ -581,8 +583,8 @@ mod tests {
                 translator: TwoCap,
                 codec_config: (),
                 compression: None,
-                write_buffer: DEFAULT_WRITE_BUFFER,
-                replay_buffer: DEFAULT_REPLAY_BUFFER,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section,
             };
             let mut archive =

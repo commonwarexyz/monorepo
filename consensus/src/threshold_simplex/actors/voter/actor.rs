@@ -43,6 +43,7 @@ use prometheus_client::metrics::{
 use rand::Rng;
 use std::{
     collections::BTreeMap,
+    num::NonZeroUsize,
     sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
 };
@@ -449,8 +450,8 @@ pub struct Actor<
 
     partition: String,
     compression: Option<u8>,
-    replay_buffer: usize,
-    write_buffer: usize,
+    replay_buffer: NonZeroUsize,
+    write_buffer: NonZeroUsize,
     journal: Option<Journal<E, Voter<V, D>>>,
 
     genesis: Option<D>,

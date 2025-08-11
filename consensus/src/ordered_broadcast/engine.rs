@@ -39,6 +39,7 @@ use futures::{
 use std::{
     collections::BTreeMap,
     marker::PhantomData,
+    num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, info, warn};
@@ -140,10 +141,10 @@ pub struct Engine<
     journal_heights_per_section: u64,
 
     // The number of bytes to buffer when replaying a journal.
-    journal_replay_buffer: usize,
+    journal_replay_buffer: NonZeroUsize,
 
     // The size of the write buffer to use for each blob in the journal.
-    journal_write_buffer: usize,
+    journal_write_buffer: NonZeroUsize,
 
     // A prefix for the journal names.
     // The rest of the name is the hex-encoded public keys of the relevant sequencer.

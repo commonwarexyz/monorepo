@@ -44,6 +44,7 @@
 //!     store::{Config, Store},
 //!     translator::TwoCap,
 //! };
+//! use commonware_utils::NZUsize;
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
 //! use commonware_runtime::{buffer::PoolRef, deterministic::Runner, Metrics, Runner as _};
 //!
@@ -54,14 +55,14 @@
 //! executor.start(|mut ctx| async move {
 //!     let config = Config {
 //!         log_journal_partition: "test_partition".to_string(),
-//!         log_write_buffer: 64 * 1024,
+//!         log_write_buffer: NZUsize!(64 * 1024),
 //!         log_compression: None,
 //!         log_codec_config: (),
 //!         log_items_per_section: 4,
 //!         locations_journal_partition: "locations_partition".to_string(),
 //!         locations_items_per_blob: 4,
 //!         translator: TwoCap,
-//!         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+//!         buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
 //!     };
 //!     let mut store =
 //!         Store::<_, Digest, Digest, TwoCap>::init(ctx.with_label("store"), config)
@@ -106,9 +107,9 @@ use crate::{
 };
 use commonware_codec::{Codec, Read};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
-use commonware_utils::{sequence::U32, Array};
+use commonware_utils::{sequence::U32, Array, NZUsize};
 use futures::{pin_mut, try_join, StreamExt};
-use std::collections::HashMap;
+use std::{collections::HashMap, num::NonZeroUsize};
 use tracing::{debug, warn};
 
 pub mod operation;
@@ -135,7 +136,7 @@ pub struct Config<T: Translator, C> {
     pub log_journal_partition: String,
 
     /// The size of the write buffer to use for each blob in the [`VJournal`].
-    pub log_write_buffer: usize,
+    pub log_write_buffer: NonZeroUsize,
 
     /// Optional compression level (using `zstd`) to apply to log data before storing.
     pub log_compression: Option<u8>,
@@ -393,7 +394,7 @@ where
         let mut uncommitted_ops = HashMap::new();
         let mut oldest_retained_loc_found = false;
         {
-            let stream = self.log.replay(SNAPSHOT_READ_BUFFER_SIZE).await?;
+            let stream = self.log.replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE)).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
@@ -701,14 +702,14 @@ mod test {
     async fn create_test_store(context: deterministic::Context) -> TestStore {
         let cfg = Config {
             log_journal_partition: "journal".to_string(),
-            log_write_buffer: 1024,
+            log_write_buffer: NZUsize!(64 * 1024),
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             log_items_per_section: 7,
             locations_journal_partition: "locations_journal".to_string(),
             locations_items_per_blob: 11,
             translator: TwoCap,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         };
         Store::init(context, cfg).await.unwrap()
     }

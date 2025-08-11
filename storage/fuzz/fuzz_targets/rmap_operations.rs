@@ -44,9 +44,7 @@ fn fuzz(data: FuzzInput) {
 
                 // Verify removal
                 for value in start..=end.min(start.saturating_add(1000)) {
-                    let range = rmap.get(&value);
-                    if range.is_some() {
-                        let (range_start, range_end) = range.unwrap();
+                    if let Some((range_start, range_end)) = rmap.get(&value) {
                         // The value should not be in a range that was fully contained in [start, end]
                         assert!(
                             !(range_start >= start && range_end <= end),

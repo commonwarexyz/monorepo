@@ -142,7 +142,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::{quorum, NZU32};
+    use commonware_utils::{quorum, NZUsize, NZU32};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
@@ -326,8 +326,8 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
                 let (voter, resolver) = registrations
@@ -570,8 +570,8 @@ mod tests {
                         max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_buffer: 1024 * 1024,
-                        write_buffer: 1024 * 1024,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     let (voter_network, resolver_network) = registrations
@@ -739,8 +739,8 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -857,8 +857,8 @@ mod tests {
                 max_participants: n as usize,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 1,
-                replay_buffer: 1024 * 1024,
-                write_buffer: 1024 * 1024,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
             };
             let (voter, resolver) = registrations
                 .remove(&validator)
@@ -979,8 +979,8 @@ mod tests {
                     max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1205,8 +1205,8 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1363,8 +1363,8 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1546,8 +1546,8 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1725,8 +1725,8 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)
@@ -1892,8 +1892,8 @@ mod tests {
                         max_participants: n as usize,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_buffer: 1024 * 1024,
-                        write_buffer: 1024 * 1024,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
                     };
                     let (voter, resolver) = registrations
                         .remove(&validator)
@@ -2060,8 +2060,8 @@ mod tests {
                         max_participants: n as usize,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_buffer: 1024 * 1024,
-                        write_buffer: 1024 * 1024,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
                     };
                     let (voter, resolver) = registrations
                         .remove(&validator)
@@ -2224,8 +2224,8 @@ mod tests {
                         max_participants: n as usize,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                         fetch_concurrent: 1,
-                        replay_buffer: 1024 * 1024,
-                        write_buffer: 1024 * 1024,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
                     };
                     let (voter, resolver) = registrations
                         .remove(&validator)
@@ -2360,8 +2360,8 @@ mod tests {
                     max_participants: n as usize,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                     fetch_concurrent: 1,
-                    replay_buffer: 1024 * 1024,
-                    write_buffer: 1024 * 1024,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
                 };
                 let (voter, resolver) = registrations
                     .remove(&validator)

@@ -79,6 +79,7 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_storage::journal::variable::{Journal, Config};
+//! use commonware_utils::NZUsize;
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -87,7 +88,7 @@
 //!         partition: "partition".to_string(),
 //!         compression: None,
 //!         codec_config: (),
-//!         write_buffer: 1024 * 1024,
+//!         write_buffer: NZUsize!(1024 * 1024),
 //!     }).await.unwrap();
 //!
 //!     // Append data to the journal
@@ -112,7 +113,7 @@ use std::{
     collections::{btree_map::Entry, BTreeMap},
     io::Cursor,
     marker::PhantomData,
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     ops::Bound,
 };
 use tracing::{debug, trace, warn};
@@ -132,7 +133,7 @@ pub struct Config<C> {
     pub codec_config: C,
 
     /// The size of the write buffer to use for each blob.
-    pub write_buffer: usize,
+    pub write_buffer: NonZeroUsize,
 }
 
 const ITEM_ALIGNMENT: u64 = 16;
@@ -494,7 +495,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// truncated to the last valid item).
     pub async fn replay(
         &self,
-        buffer: usize,
+        buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, u32, u32, V), Error>> + '_, Error> {
         // Collect all blobs to replay
         let codec_config = self.cfg.codec_config.clone();
@@ -886,7 +887,7 @@ mod tests {
     use commonware_cryptography::hash;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Error as RError, Runner, Storage};
-    use commonware_utils::StableBuf;
+    use commonware_utils::{NZUsize, StableBuf};
     use futures::{pin_mut, StreamExt};
     use prometheus_client::registry::Metric;
 
@@ -902,7 +903,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
             let index = 1u64;
             let data = 10;
@@ -928,7 +929,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
             let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
                 .await
@@ -936,7 +937,10 @@ mod tests {
 
             // Replay the journal and collect items
             let mut items = Vec::new();
-            let stream = journal.replay(1024).await.expect("unable to setup replay");
+            let stream = journal
+                .replay(NZUsize!(1024))
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
@@ -968,7 +972,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Initialize the journal
@@ -1002,7 +1006,10 @@ mod tests {
             // Replay the journal and collect items
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1038,7 +1045,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Initialize the journal
@@ -1086,7 +1093,10 @@ mod tests {
             // Replay the journal and collect items
             let mut items = Vec::<(u64, u64)>::new();
             {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1133,7 +1143,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Manually create a blob with an invalid name (not 8 bytes)
@@ -1164,7 +1174,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Manually create a blob with incomplete size data
@@ -1188,7 +1198,10 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay(1024).await.expect("unable to setup replay");
+            let stream = journal
+                .replay(NZUsize!(1024))
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = stream.next().await {
@@ -1213,7 +1226,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Manually create a blob with missing item data
@@ -1241,7 +1254,10 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay(1024).await.expect("unable to setup replay");
+            let stream = journal
+                .replay(NZUsize!(1024))
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = stream.next().await {
@@ -1266,7 +1282,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Manually create a blob with missing checksum
@@ -1304,7 +1320,10 @@ mod tests {
             // Attempt to replay the journal
             //
             // This will truncate the leftover bytes from our manual write.
-            let stream = journal.replay(1024).await.expect("unable to setup replay");
+            let stream = journal
+                .replay(NZUsize!(1024))
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::<(u64, u64)>::new();
             while let Some(result) = stream.next().await {
@@ -1329,7 +1348,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Manually create a blob with incorrect checksum
@@ -1372,7 +1391,10 @@ mod tests {
 
             // Attempt to replay the journal
             {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 let mut items = Vec::<(u64, u64)>::new();
                 while let Some(result) = stream.next().await {
@@ -1406,7 +1428,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Initialize the journal
@@ -1448,7 +1470,10 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1483,7 +1508,10 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1532,7 +1560,10 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u32)>::new();
             {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1567,7 +1598,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Initialize the journal
@@ -1609,7 +1640,10 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u64)>::new();
             {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1658,7 +1692,10 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, u64)>::new();
             {
-                let stream = journal.replay(1024).await.expect("unable to setup replay");
+                let stream = journal
+                    .replay(NZUsize!(1024))
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -1694,7 +1731,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Initialize the journal
@@ -1735,7 +1772,10 @@ mod tests {
 
             // Attempt to replay the journal
             let mut items = Vec::<(u64, i32)>::new();
-            let stream = journal.replay(1024).await.expect("unable to setup replay");
+            let stream = journal
+                .replay(NZUsize!(1024))
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
@@ -1828,7 +1868,7 @@ mod tests {
                 partition: "partition".to_string(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
             let context = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT, // can store up to u32::Max at the last offset
@@ -1855,7 +1895,7 @@ mod tests {
                 partition: "partition".to_string(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
             let context = MockStorage {
                 len: u32::MAX as u64 * INDEX_ALIGNMENT + 1,
@@ -1879,7 +1919,7 @@ mod tests {
                 partition: "test_partition".to_string(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context, cfg).await.unwrap();
 
@@ -1933,7 +1973,7 @@ mod tests {
                 partition: "test_partition".to_string(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context, cfg).await.unwrap();
 
@@ -1990,7 +2030,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Initialize the journal
@@ -2034,7 +2074,7 @@ mod tests {
                 partition: "test_fresh_start".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Initialize journal with sync boundaries when no existing data exists
@@ -2087,7 +2127,7 @@ mod tests {
                 partition: "test_overlap".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Create initial journal with data in multiple sections
@@ -2154,7 +2194,7 @@ mod tests {
                 partition: "test_exact_match".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Create initial journal with data exactly matching sync range
@@ -2214,7 +2254,7 @@ mod tests {
                 partition: "test_rewind".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Create initial journal with data beyond sync range
@@ -2286,7 +2326,7 @@ mod tests {
                 partition: "test_stale".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Create initial journal with stale data
@@ -2338,7 +2378,7 @@ mod tests {
                 partition: "test_invalid".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Test invalid bounds: lower > upper
@@ -2363,7 +2403,7 @@ mod tests {
                 partition: "test_boundaries".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Create journal with data at section boundaries
@@ -2417,7 +2457,7 @@ mod tests {
                 partition: "test_same_section".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Create journal with data in multiple sections
@@ -2481,7 +2521,7 @@ mod tests {
                 partition: "test_precise_removal".into(),
                 compression: None,
                 codec_config: (),
-                write_buffer: 1024,
+                write_buffer: NZUsize!(1024),
             };
 
             // Create journal with data in sections 0-4

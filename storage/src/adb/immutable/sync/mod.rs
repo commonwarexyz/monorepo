@@ -11,7 +11,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{Array, NZU64};
+use commonware_utils::{Array, NZUsize, NZU64};
 use futures::{pin_mut, StreamExt};
 
 mod journal;
@@ -34,7 +34,7 @@ where
     let mut size = lower_bound;
     let mut current_section: Option<u64> = None;
     let mut index_in_section: u64 = 0;
-    let stream = journal.replay(1024).await?;
+    let stream = journal.replay(NZUsize!(1024)).await?;
     pin_mut!(stream);
     while let Some(item) = stream.next().await {
         match item {
@@ -243,10 +243,14 @@ mod tests {
     use commonware_cryptography::{sha256, Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, RwLock};
-    use commonware_utils::NZU64;
+    use commonware_utils::{NZUsize, NZU64};
     use futures::{channel::mpsc, SinkExt as _};
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
-    use std::{collections::HashMap, num::NonZeroU64, sync::Arc};
+    use std::{
+        collections::HashMap,
+        num::{NonZeroU64, NonZeroUsize},
+        sync::Arc,
+    };
     use test_case::test_case;
 
     /// Type alias for sync tests with simple codec config
@@ -264,20 +268,20 @@ mod tests {
 
     /// Create a simple config for sync tests
     fn create_sync_config(suffix: &str) -> immutable::Config<crate::translator::TwoCap, ()> {
-        const PAGE_SIZE: usize = 77;
-        const PAGE_CACHE_SIZE: usize = 9;
+        const PAGE_SIZE: NonZeroUsize = NZUsize!(77);
+        const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
         const ITEMS_PER_SECTION: u64 = 5;
 
         immutable::Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
             mmr_items_per_blob: 11,
-            mmr_write_buffer: 1024,
+            mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: format!("log_journal_{suffix}"),
             log_items_per_section: ITEMS_PER_SECTION,
             log_compression: None,
             log_codec_config: (),
-            log_write_buffer: 1024,
+            log_write_buffer: NZUsize!(1024),
             locations_journal_partition: format!("locations_journal_{suffix}"),
             locations_items_per_blob: 7,
             translator: TwoCap,

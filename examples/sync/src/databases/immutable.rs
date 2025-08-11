@@ -6,6 +6,7 @@ use commonware_storage::{
     adb::immutable::{self, Config},
     store::operation,
 };
+use commonware_utils::NZUsize;
 
 /// Database type alias.
 pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
@@ -19,17 +20,17 @@ pub fn create_config() -> Config<Translator, ()> {
         mmr_journal_partition: "mmr_journal".into(),
         mmr_metadata_partition: "mmr_metadata".into(),
         mmr_items_per_blob: 4096,
-        mmr_write_buffer: 1024,
+        mmr_write_buffer: NZUsize!(1024),
         log_journal_partition: "log_journal".into(),
         log_items_per_section: 512,
         log_compression: None,
         log_codec_config: (),
-        log_write_buffer: 1024,
+        log_write_buffer: NZUsize!(1024),
         locations_journal_partition: "locations_journal".into(),
         locations_items_per_blob: 4096,
         translator: commonware_storage::translator::EightCap,
         thread_pool: None,
-        buffer_pool: commonware_runtime::buffer::PoolRef::new(1024, 10),
+        buffer_pool: commonware_runtime::buffer::PoolRef::new(NZUsize!(1024), NZUsize!(10)),
     }
 }
 
