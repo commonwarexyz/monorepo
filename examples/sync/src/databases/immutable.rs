@@ -4,6 +4,7 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_storage::{
     adb::immutable::{self, Config},
+    mmr::hasher::Standard,
     store::operation,
 };
 use commonware_utils::NZUsize;
@@ -63,4 +64,70 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
     // Always end with a commit
     operations.push(Operation::Commit());
     operations
+}
+
+impl<E> super::Syncable for Database<E>
+where
+    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+{
+    type Operation = Operation;
+
+    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
+        create_test_operations(count, seed)
+    }
+
+    async fn add_operations(
+        database: &mut Self,
+        operations: Vec<Self::Operation>,
+    ) -> Result<(), commonware_storage::adb::Error> {
+        for operation in operations {
+            match operation {
+                Operation::Set(key, value) => {
+                    database.set(key, value).await?;
+                }
+                Operation::Commit() => {
+                    database.commit().await?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
+        self.commit().await
+    }
+
+    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
+        self.root(hasher)
+    }
+
+    fn op_count(&self) -> u64 {
+        self.op_count()
+    }
+
+    fn lower_bound_ops(&self) -> u64 {
+        self.oldest_retained_loc().unwrap_or(0)
+    }
+
+    fn historical_proof(
+        &self,
+        size: u64,
+        start_loc: u64,
+        max_ops: u64,
+    ) -> impl std::future::Future<
+        Output = Result<
+            (
+                commonware_storage::mmr::verification::Proof<Key>,
+                Vec<Self::Operation>,
+            ),
+            commonware_storage::adb::Error,
+        >,
+    > + Send {
+        self.historical_proof(size, start_loc, max_ops)
+    }
+
+    fn database_name() -> &'static str {
+        "Immutable"
+    }
 }

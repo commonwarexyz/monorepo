@@ -5,15 +5,12 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_macros::select;
 use commonware_runtime::{tokio as tokio_runtime, Listener, Metrics as _, Runner, RwLock};
-use commonware_storage::{
-    adb::{self, sync::Target},
-    mmr::{hasher::Standard, verification::Proof},
-};
+use commonware_storage::{adb::sync::Target, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any::{self},
     crate_version,
-    databases::DatabaseType,
+    databases::{DatabaseType, Syncable},
     immutable::{self},
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
@@ -23,7 +20,6 @@ use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
-    future::Future,
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
     time::{Duration, SystemTime},
@@ -35,184 +31,6 @@ const MAX_BATCH_SIZE: u64 = 100;
 
 /// Size of the channel for responses.
 const RESPONSE_BUFFER_SIZE: usize = 64;
-
-/// Helper trait for databases that can be synced.
-trait Syncable {
-    type Operation: Clone
-        + commonware_codec::Read<Cfg = ()>
-        + commonware_codec::Write
-        + commonware_codec::EncodeSize
-        + commonware_codec::Encode
-        + Send
-        + Sync
-        + 'static;
-
-    /// Create test operations with the given count and seed.
-    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation>;
-
-    /// Add operations to the database.
-    async fn add_operations(
-        database: &mut Self,
-        operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::adb::Error>;
-
-    /// Commit pending operations to the database.
-    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error>;
-
-    /// Get the root hash of the database.
-    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key;
-
-    /// Get the operation count of the database.
-    fn op_count(&self) -> u64;
-
-    /// Get the lower bound for operations (inactivity floor or oldest retained location).
-    fn lower_bound_ops(&self) -> u64;
-
-    /// Get historical proof and operations.
-    fn historical_proof(
-        &self,
-        size: u64,
-        start_loc: u64,
-        max_ops: u64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send;
-
-    /// Get the database type name for logging.
-    fn database_name() -> &'static str;
-}
-
-impl<E> Syncable for any::Database<E>
-where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-{
-    type Operation = any::Operation;
-
-    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
-        any::create_test_operations(count, seed)
-    }
-
-    async fn add_operations(
-        database: &mut Self,
-        operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::adb::Error> {
-        for operation in operations {
-            match operation {
-                any::Operation::Update(key, value) => {
-                    database.update(key, value).await?;
-                }
-                any::Operation::Delete(key) => {
-                    database.delete(key).await?;
-                }
-                any::Operation::CommitFloor(_) => {
-                    database.commit().await?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        self.commit().await
-    }
-
-    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
-        self.root(hasher)
-    }
-
-    fn op_count(&self) -> u64 {
-        self.op_count()
-    }
-
-    fn lower_bound_ops(&self) -> u64 {
-        self.inactivity_floor_loc()
-    }
-
-    fn historical_proof(
-        &self,
-        size: u64,
-        start_loc: u64,
-        max_ops: u64,
-    ) -> impl std::future::Future<
-        Output = Result<
-            (
-                commonware_storage::mmr::verification::Proof<Key>,
-                Vec<Self::Operation>,
-            ),
-            commonware_storage::adb::Error,
-        >,
-    > + Send {
-        self.historical_proof(size, start_loc, max_ops)
-    }
-
-    fn database_name() -> &'static str {
-        "Any"
-    }
-}
-
-impl<E> Syncable for immutable::Database<E>
-where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-{
-    type Operation = immutable::Operation;
-
-    fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation> {
-        immutable::create_test_operations(count, seed)
-    }
-
-    async fn add_operations(
-        database: &mut Self,
-        operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::adb::Error> {
-        for operation in operations {
-            match operation {
-                immutable::Operation::Set(key, value) => {
-                    database.set(key, value).await?;
-                }
-                immutable::Operation::Commit() => {
-                    database.commit().await?;
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-
-    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        self.commit().await
-    }
-
-    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
-        self.root(hasher)
-    }
-
-    fn op_count(&self) -> u64 {
-        self.op_count()
-    }
-
-    fn lower_bound_ops(&self) -> u64 {
-        self.oldest_retained_loc().unwrap_or(0)
-    }
-
-    fn historical_proof(
-        &self,
-        size: u64,
-        start_loc: u64,
-        max_ops: u64,
-    ) -> impl std::future::Future<
-        Output = Result<
-            (
-                commonware_storage::mmr::verification::Proof<Key>,
-                Vec<Self::Operation>,
-            ),
-            commonware_storage::adb::Error,
-        >,
-    > + Send {
-        self.historical_proof(size, start_loc, max_ops)
-    }
-
-    fn database_name() -> &'static str {
-        "Immutable"
-    }
-}
 
 /// Server configuration.
 #[derive(Debug)]
