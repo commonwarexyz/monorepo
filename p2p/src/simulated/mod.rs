@@ -77,10 +77,10 @@
 //! });
 //! ```
 
+pub mod helpers;
 mod ingress;
 mod metrics;
 mod network;
-pub mod helpers;
 
 use thiserror::Error;
 
