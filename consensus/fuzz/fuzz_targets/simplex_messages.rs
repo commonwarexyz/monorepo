@@ -18,10 +18,7 @@ use commonware_cryptography::{
     PrivateKeyExt as _, Sha256, Signer as _,
 };
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
-use commonware_runtime::{
-    deterministic::{self},
-    Clock, Metrics, Runner,
-};
+use commonware_runtime::{deterministic::{self}, Metrics, Runner};
 use commonware_utils::{NZUsize, NZU32};
 use governor::Quota;
 use libfuzzer_sys::fuzz_target;
@@ -33,8 +30,7 @@ fn fuzzer(input: FuzzInput) {
     let n = 4;
     let namespace = b"consensus_fuzz".to_vec();
     let cfg = deterministic::Config::new()
-        .with_seed(input.seed)
-        .with_timeout(Some(Duration::from_secs(15))); // Reduced timeout for faster cleanup
+        .with_seed(input.seed); // Reduced timeout for faster cleanup
     let executor = deterministic::Runner::new(cfg);
     executor.start(|context| async move {
         // Create simulated network
@@ -79,25 +75,24 @@ fn fuzzer(input: FuzzInput) {
 
         // Create engines
         let relay = Arc::new(relay::Relay::new());
-        let mut supervisors = Vec::new();
 
         // Start fuzzing actor (first validator)
-        let first_scheme = schemes.remove(0);
-        let first_validator = first_scheme.public_key();
-        let first_context = context.with_label(&format!("validator-{first_validator}"));
+        let scheme = schemes.remove(0);
+        let validator = scheme.public_key();
+        let context = context.with_label(&format!("validator-{validator}"));
         let first_supervisor_config = supervisor::Config {
             namespace: namespace.clone(),
             participants: view_validators.clone(),
         };
-        let first_supervisor = Supervisor::<PublicKey, Sha256Digest>::new(first_supervisor_config);
+        let supervisor = Supervisor::<PublicKey, Sha256Digest>::new(first_supervisor_config);
 
         let (voter, _) = registrations
-            .remove(&first_validator)
+            .remove(&validator)
             .expect("validator should be registered");
         let actor = Fuzzer::new(
-            first_context.with_label("fuzzing_actor"),
-            first_scheme,
-            first_supervisor,
+            context.with_label("fuzzing_actor"),
+            scheme,
+            supervisor,
             namespace.clone(),
             input,
         );
@@ -105,15 +100,14 @@ fn fuzzer(input: FuzzInput) {
 
         // Start regular consensus engines for the remaining validators
         for scheme in schemes.into_iter() {
-            let context = context.with_label(&format!("validator-{}", scheme.public_key()));
             let validator = scheme.public_key();
+            let context = context.with_label(&format!("validator-{validator}"));
             let supervisor_config = supervisor::Config {
                 namespace: namespace.clone(),
                 participants: view_validators.clone(),
             };
             let supervisor = Supervisor::<PublicKey, Sha256Digest>::new(supervisor_config);
 
-            supervisors.push(supervisor.clone());
             let application_cfg = application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
@@ -132,7 +126,7 @@ fn fuzzer(input: FuzzInput) {
                 reporter: supervisor.clone(),
                 partition: validator.to_string(),
                 compression: Some(3),
-                supervisor,
+                supervisor: supervisor.clone(),
                 mailbox_size: 1024,
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
@@ -154,13 +148,6 @@ fn fuzzer(input: FuzzInput) {
             let engine = Engine::new(context.with_label("engine"), cfg);
             engine.start(voter, resolver);
         }
-
-        context.sleep(Duration::from_secs(1)).await;
-
-        drop(supervisors);
-        drop(relay);
-        drop(registrations);
-        drop(oracle);
     });
 }
 

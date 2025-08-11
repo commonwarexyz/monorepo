@@ -26,7 +26,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone, Arbitrary)]
 pub enum PartitionStrategy {
     /// All validators can communicate with all others (full mesh)
-    AllToAll,
+    Connected,
 
     /// Validator 0 acts as byzantine, can talk to itself and both halves
     /// Other validators are split into two partitions that cannot communicate
@@ -37,7 +37,7 @@ pub enum PartitionStrategy {
     ManyPartitionsWithByzantine,
 
     /// No validator can communicate with any other (complete isolation)
-    AllIsolated,
+    Isolated,
 
     /// Validator i can send messages to itself or the next validator
     Linear,
@@ -66,8 +66,8 @@ fn linear(n: usize, i: usize, j: usize) -> bool {
 impl PartitionStrategy {
     pub fn create(&self) -> Option<fn(usize, usize, usize) -> bool> {
         match self {
-            PartitionStrategy::AllToAll => None,
-            PartitionStrategy::AllIsolated => Some(|_n, i, j| i == j),
+            PartitionStrategy::Connected => None,
+            PartitionStrategy::Isolated => Some(|_n, i, j| i == j),
             PartitionStrategy::TwoPartitionsWithByzantine => Some(two_partitions_with_byzantine),
             PartitionStrategy::ManyPartitionsWithByzantine => Some(many_partitions_with_byzantine),
             PartitionStrategy::Linear => Some(linear),
@@ -98,6 +98,7 @@ pub struct FuzzInput {
     pub max_steps: u16, // The number of steps the fuzzing actor can do before it stops.
     pub partition: PartitionStrategy,
 }
+
 pub struct Fuzzer<E: Clock + Spawner> {
     context: E,
     crypto: PrivateKey,

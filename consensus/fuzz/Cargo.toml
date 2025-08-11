@@ -28,7 +28,3 @@ path = "fuzz_targets/simplex_messages.rs"
 test = false
 doc = false
 bench = false
-
-[features]
-default = []
-
