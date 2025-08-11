@@ -11,7 +11,7 @@ pub type Database<E> = fixed::Any<E, Key, Value, Hasher, Translator>;
 /// Operation type alias.
 pub type Operation = operation::Fixed<Key, Value>;
 
-/// Create a database configuration with appropriate partitioning.
+/// Create a database configuration for use in tests.
 pub fn create_config() -> fixed::Config<Translator> {
     fixed::Config {
         mmr_journal_partition: "mmr_journal".into(),
@@ -24,7 +24,7 @@ pub fn create_config() -> fixed::Config<Translator> {
         translator: Translator::default(),
         thread_pool: None,
         buffer_pool: commonware_runtime::buffer::PoolRef::new(NZUsize!(1024), NZUsize!(10)),
-        pruning_delay: 10,
+        pruning_delay: 1024,
     }
 }
 
