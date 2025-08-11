@@ -73,7 +73,8 @@ fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
         let mut rng = StdRng::seed_from_u64(42);
         for i in 0u64..num_elements {
             let k = hash(&i.to_be_bytes());
-            let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 14) + 8) as usize];
+            // Generate a random value with a length between 24 and 40 bytes (avg = 32).
+            let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize];
             db.update(k, v).await.unwrap();
         }
 
@@ -84,7 +85,8 @@ fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
                 db.delete(rand_key).await.unwrap();
                 continue;
             }
-            let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 13) + 7) as usize];
+            // Generate a random value with a length between 20 and 44 bytes (avg = 32).
+            let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
             db.update(rand_key, v).await.unwrap();
             if rng.next_u32() % COMMIT_FREQUENCY == 0 {
                 db.commit().await.unwrap();
