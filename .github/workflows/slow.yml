@@ -35,7 +35,7 @@ jobs:
             flags: ""
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Run ignored tests
@@ -68,7 +68,7 @@ jobs:
             benchmark_name: "commonware-coding"
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: Install nightly Rust toolchain
       run: rustup toolchain install nightly
     - name: Run setup
@@ -87,7 +87,7 @@ jobs:
         fuzz_dir: [codec/fuzz, coding/fuzz, cryptography/fuzz, storage/fuzz, stream/fuzz, utils/fuzz]
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: Install nightly Rust toolchain
       run: rustup toolchain install nightly
     - name: Get Rust version
