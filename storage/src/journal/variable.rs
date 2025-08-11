@@ -108,10 +108,7 @@ use commonware_runtime::{
     Blob, Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;
-use futures::{
-    future::try_join_all,
-    stream::{self, Stream, StreamExt},
-};
+use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     collections::{btree_map::Entry, BTreeMap},
@@ -195,7 +192,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 Err(_) => return Err(Error::InvalidBlobName(hex_name)),
             };
             debug!(section, blob = hex_name, size, "loaded section");
-            blobs.insert(section, (blob, size));
+            let blob = Append::new(blob, size, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
+            blobs.insert(section, blob);
         }
 
         // Initialize metrics
@@ -207,16 +205,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         context.register("pruned", "Number of blobs pruned", pruned.clone());
         tracked.set(blobs.len() as i64);
 
-        // Wrap all blobs with Append wrappers
-        let blobs = try_join_all(blobs.into_iter().map(|(section, (blob, size))| {
-            let pool = cfg.buffer_pool.clone();
-            async move {
-                let blob = Append::new(blob, size, cfg.write_buffer, pool).await?;
-                Ok::<_, Error>((section, blob))
-            }
-        }))
-        .await?;
-
         // Create journal instance
         Ok(Self {
             context,
@@ -224,7 +212,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
             oldest_allowed: None,
 
-            blobs: blobs.into_iter().collect(),
+            blobs,
             tracked,
             synced,
             pruned,
