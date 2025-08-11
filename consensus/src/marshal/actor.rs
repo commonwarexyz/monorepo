@@ -25,9 +25,9 @@ use commonware_storage::{
     archive::{self, immutable, prunable, Archive as _, Identifier},
     translator::TwoCap,
 };
+use commonware_utils::futures::{AbortHook, AbortablePool};
 use futures::{
     channel::{mpsc, oneshot},
-    stream::FuturesUnordered,
     try_join, StreamExt,
 };
 use governor::{clock::Clock as GClock, Quota};
@@ -40,20 +40,12 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
-/// Result of a waiter future completion.
-enum WaiterResult<B: Block> {
-    /// A block was received for the given commitment.
-    Block(B::Commitment, B),
-    /// The waiter was canceled for the given commitment.
-    Canceled(B::Commitment),
-}
-
 /// A waiter entry that can be canceled.
 struct WaiterEntry<B: Block> {
     // The responders to the request
     responders: Vec<oneshot::Sender<B>>,
-    // Sender to cancel the waiter future
-    cancellation_tx: oneshot::Sender<()>,
+    // Hook that aborts the waiter future when dropped
+    _hook: AbortHook,
 }
 
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
@@ -328,49 +320,26 @@ impl<
             .spawn(|_| finalizer.run());
 
         // Create a local pool for waiter futures
-        let mut waiter_futures = FuturesUnordered::<
-            std::pin::Pin<Box<dyn std::future::Future<Output = WaiterResult<B>> + Send>>,
-        >::new();
+        let mut waiter_futures = AbortablePool::<(B::Commitment, B)>::default();
 
         // Handle messages
         loop {
+            // Remove any dropped waiters
+            self.waiters.retain(|_, waiter| {
+                // Remove any canceled responders. If all responders are canceled, remove and drop
+                // the waiter, which also aborts the waiter future.
+                waiter.responders.retain(|tx| !tx.is_canceled());
+                !waiter.responders.is_empty()
+            });
+
             // Select messages
             select! {
-                // Handle waiter completions first (only if there are active waiters)
-                waiter_result = waiter_futures.next() => {
-                    if let Some(waiter_result) = waiter_result {
-                        match waiter_result {
-                            WaiterResult::Block(commitment, block) => {
-                                if let Some(mut waiter) = self.waiters.remove(&commitment) {
-                                    for responder in waiter.responders.drain(..) {
-                                        let _ = responder.send(block.clone());
-                                    }
-                                }
-                            }
-                            WaiterResult::Canceled(commitment) => {
-                                // Just remove the waiter entry, nothing to respond to
-                                self.waiters.remove(&commitment);
-                            }
-                        }
-
-                        // Check for waiters with canceled responders and cancel them
-                        let mut to_cancel = Vec::new();
-                        self.waiters.retain(|commitment, waiter| {
-                            waiter.responders.retain(|tx| !tx.is_canceled());
-                            if waiter.responders.is_empty() {
-                                to_cancel.push(*commitment);
-                                false
-                            } else {
-                                true
-                            }
-                        });
-
-                        for commitment in to_cancel {
-                            if let Some(waiter) = self.waiters.remove(&commitment) {
-                                let _ = waiter.cancellation_tx.send(());
-                            }
-                        }
-                    }
+                // Handle waiter completions first
+                waiter_result = waiter_futures.next_completed() => {
+                    let Ok((commitment, block)) = waiter_result else {
+                        continue; // Aborted future
+                    };
+                    self.resolve_waiter(commitment, &block).await;
                 },
                 // Handle consensus before finalizer or backfiller
                 mailbox_message = self.mailbox.next() => {
@@ -459,28 +428,12 @@ impl<
                                 Entry::Vacant(entry) => {
                                     let (tx, rx) = oneshot::channel();
                                     buffer.subscribe_prepared(None, commitment, None, tx).await;
-
-                                    let (cancel_tx, cancel_rx) = oneshot::channel();
-                                    let waiter_future = {
-                                        async move {
-                                            select! {
-                                                result = rx => {
-                                                    match result {
-                                                        Ok(block) => WaiterResult::Block(commitment, block),
-                                                        Err(_) => WaiterResult::Canceled(commitment),
-                                                    }
-                                                },
-                                                _ = cancel_rx => {
-                                                    WaiterResult::Canceled(commitment)
-                                                },
-                                            }
-                                        }
-                                    };
-
-                                    waiter_futures.push(Box::pin(waiter_future));
                                     entry.insert(WaiterEntry {
                                         responders: vec![response],
-                                        cancellation_tx: cancel_tx,
+                                        _hook: waiter_futures.push(async move {
+                                            let block = rx.await.unwrap();
+                                            (commitment, block)
+                                        }),
                                     });
                                 }
                             }
