@@ -25,7 +25,7 @@ use commonware_storage::{
     archive::{self, immutable, prunable, Archive as _, Identifier},
     translator::TwoCap,
 };
-use commonware_utils::futures::{AbortHook, AbortablePool};
+use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
     channel::{mpsc, oneshot},
     try_join, StreamExt,
@@ -40,12 +40,12 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
-/// An entry for multiple listeners for a block.
-struct ListenerEntry<B: Block> {
-    // The listeners that are waiting for the block
-    listeners: Vec<oneshot::Sender<B>>,
-    // Hook that aborts the waiter future when dropped
-    _hook: AbortHook,
+/// A struct that holds multiple subscriptions for a block.
+struct BlockSubscription<B: Block> {
+    // The subscribers that are waiting for the block
+    subscribers: Vec<oneshot::Sender<B>>,
+    // Aborter that aborts the waiter future when dropped
+    _aborter: Aborter,
 }
 
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
@@ -100,8 +100,8 @@ pub struct Actor<
     // Last view processed
     last_processed_view: u64,
 
-    // Outstanding listeners for blocks
-    listeners: BTreeMap<B::Commitment, ListenerEntry<B>>,
+    // Outstanding subscriptions for blocks
+    block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
 
     // ---------- Prunable Storage ----------
     // Verified blocks stored by view
@@ -265,7 +265,7 @@ impl<
                 partition_prefix: config.partition_prefix,
 
                 last_processed_view: 0,
-                listeners: BTreeMap::new(),
+                block_subscriptions: BTreeMap::new(),
 
                 verified_blocks,
                 notarized_blocks,
@@ -324,10 +324,10 @@ impl<
 
         // Handle messages
         loop {
-            // Remove any dropped listeners. If all listeners are dropped, abort the waiter.
-            self.listeners.retain(|_, listener| {
-                listener.listeners.retain(|tx| !tx.is_canceled());
-                !listener.listeners.is_empty()
+            // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
+            self.block_subscriptions.retain(|_, bs| {
+                bs.subscribers.retain(|tx| !tx.is_canceled());
+                !bs.subscribers.is_empty()
             });
 
             // Select messages
@@ -337,7 +337,7 @@ impl<
                     let Ok((commitment, block)) = result else {
                         continue; // Aborted future
                     };
-                    self.resolve_listeners(commitment, &block).await;
+                    self.notify_subscribers(commitment, &block).await;
                 },
                 // Handle consensus before finalizer or backfiller
                 mailbox_message = self.mailbox.next() => {
@@ -417,21 +417,21 @@ impl<
                                 resolver.fetch(Request::<B>::Notarized { view }).await;
                             }
 
-                            // Register listener
-                            debug!(view, ?commitment, "registering listener");
-                            match self.listeners.entry(commitment) {
+                            // Register subscriber
+                            debug!(view, ?commitment, "registering subscriber");
+                            match self.block_subscriptions.entry(commitment) {
                                 Entry::Occupied(mut entry) => {
-                                    entry.get_mut().listeners.push(response);
+                                    entry.get_mut().subscribers.push(response);
                                 }
                                 Entry::Vacant(entry) => {
                                     let (tx, rx) = oneshot::channel();
                                     buffer.subscribe_prepared(None, commitment, None, tx).await;
-                                    let hook = waiters.push(async move {
-                                        (commitment, rx.await.unwrap())
+                                    let aborter = waiters.push(async move {
+                                        (commitment, rx.await.expect("buffer subscriber closed"))
                                     });
-                                    entry.insert(ListenerEntry {
-                                        listeners: vec![response],
-                                        _hook: hook,
+                                    entry.insert(BlockSubscription {
+                                        subscribers: vec![response],
+                                        _aborter: aborter,
                                     });
                                 }
                             }
@@ -706,11 +706,11 @@ impl<
 
     // -------------------- Waiters --------------------
 
-    /// Resolve any listeners for the given commitment with the provided block.
-    async fn resolve_listeners(&mut self, commitment: B::Commitment, block: &B) {
-        if let Some(mut listener) = self.listeners.remove(&commitment) {
-            for listener in listener.listeners.drain(..) {
-                let _ = listener.send(block.clone());
+    /// Notify any subscribers for the given commitment with the provided block.
+    async fn notify_subscribers(&mut self, commitment: B::Commitment, block: &B) {
+        if let Some(mut bs) = self.block_subscriptions.remove(&commitment) {
+            for subscriber in bs.subscribers.drain(..) {
+                let _ = subscriber.send(block.clone());
             }
         }
     }
@@ -719,7 +719,7 @@ impl<
 
     /// Add a verified block to the archive.
     async fn put_verified_block(&mut self, view: u64, commitment: B::Commitment, block: B) {
-        self.resolve_listeners(commitment, &block).await;
+        self.notify_subscribers(commitment, &block).await;
 
         match self.verified_blocks.put_sync(view, commitment, block).await {
             Ok(_) => {
@@ -784,7 +784,7 @@ impl<
 
     /// Add a notarized block to the archive.
     async fn put_notarized_block(&mut self, view: u64, commitment: B::Commitment, block: B) {
-        self.resolve_listeners(commitment, &block).await;
+        self.notify_subscribers(commitment, &block).await;
 
         match self
             .notarized_blocks
@@ -814,7 +814,7 @@ impl<
         block: B,
         notifier: &mut mpsc::Sender<()>,
     ) {
-        self.resolve_listeners(commitment, &block).await;
+        self.notify_subscribers(commitment, &block).await;
 
         if let Err(e) = self
             .finalized_blocks
@@ -835,7 +835,7 @@ impl<
         block: B,
         notifier: &mut mpsc::Sender<()>,
     ) {
-        self.resolve_listeners(commitment, &block).await;
+        self.notify_subscribers(commitment, &block).await;
 
         if let Err(e) = try_join!(
             self.finalizations_by_height

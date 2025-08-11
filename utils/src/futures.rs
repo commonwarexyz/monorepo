@@ -70,16 +70,16 @@ impl<T: Send> Pool<T> {
     }
 }
 
-/// A hook that can be used to abort a specific future in an [AbortablePool].
+/// A handle that can be used to abort a specific future in an [AbortablePool].
 ///
-/// When the hook is dropped, the associated future is aborted.
-pub struct AbortHook {
-    handle: AbortHandle,
+/// When the aborter is dropped, the associated future is aborted.
+pub struct Aborter {
+    inner: AbortHandle,
 }
 
-impl Drop for AbortHook {
+impl Drop for Aborter {
     fn drop(&mut self) {
-        self.handle.abort();
+        self.inner.abort();
     }
 }
 
@@ -88,7 +88,7 @@ type AbortablePooledFuture<T> = Pin<Box<dyn Future<Output = Result<T, Aborted>> 
 
 /// An unordered pool of futures that can be individually aborted.
 ///
-/// Each future added to the pool returns an [AbortHook]. When the hook is dropped,
+/// Each future added to the pool returns an [Aborter]. When the aborter is dropped,
 /// the associated future is aborted.
 ///
 /// **Note:** This pool is not thread-safe and should not be used across threads without external
@@ -119,15 +119,15 @@ impl<T: Send> AbortablePool<T> {
         self.len() == 0
     }
 
-    /// Adds a future to the pool and returns an [AbortHook] that can be used to abort it.
+    /// Adds a future to the pool and returns an [Aborter] that can be used to abort it.
     ///
     /// The future must be `'static` and `Send` to ensure it can be safely stored and executed.
-    /// When the returned [AbortHook] is dropped, the future will be aborted.
-    pub fn push(&mut self, future: impl Future<Output = T> + Send + 'static) -> AbortHook {
+    /// When the returned [Aborter] is dropped, the future will be aborted.
+    pub fn push(&mut self, future: impl Future<Output = T> + Send + 'static) -> Aborter {
         let (handle, registration) = AbortHandle::new_pair();
         let abortable_future = Abortable::new(future, registration);
         self.pool.push(Box::pin(abortable_future));
-        AbortHook { handle }
+        Aborter { inner: handle }
     }
 
     /// Returns a future that resolves to the next future in the pool that resolves.

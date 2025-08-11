@@ -97,6 +97,7 @@ mod tests {
         sha256::{self, Digest as Sha256Digest},
         Digestible, PrivateKeyExt as _, Signer as _,
     };
+    use commonware_macros::test_traced;
     use commonware_p2p::simulated::{self, Link, Network, Oracle};
     use commonware_resolver::p2p as resolver;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
@@ -270,7 +271,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_traced("WARN")]
     fn test_finalize_good_links() {
         let link = Link {
             latency: 100.0,
@@ -286,7 +287,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_traced("WARN")]
     fn test_finalize_bad_links() {
         let link = Link {
             latency: 200.0,
@@ -406,7 +407,7 @@ mod tests {
         })
     }
 
-    #[test]
+    #[test_traced("WARN")]
     fn test_subscribe_basic_block_delivery() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
@@ -460,7 +461,7 @@ mod tests {
         })
     }
 
-    #[test]
+    #[test_traced("WARN")]
     fn test_subscribe_multiple_subscriptions() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
@@ -528,7 +529,7 @@ mod tests {
         })
     }
 
-    #[test]
+    #[test_traced("WARN")]
     fn test_subscribe_canceled_subscriptions() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
@@ -590,7 +591,7 @@ mod tests {
         })
     }
 
-    #[test]
+    #[test_traced("WARN")]
     fn test_subscribe_blocks_from_different_sources() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
