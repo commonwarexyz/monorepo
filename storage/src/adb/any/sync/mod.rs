@@ -1,9 +1,10 @@
 use crate::{
     adb::{
+        self,
         any::{self, fixed::Any},
         sync,
     },
-    journal,
+    journal::fixed,
     mmr::hasher::Standard,
     store::operation::Fixed,
     translator::Translator,
@@ -12,9 +13,9 @@ use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
-pub type Error = crate::adb::Error;
+pub type Error = adb::Error;
 
-impl<E, K, V, H, T> crate::adb::sync::Database for Any<E, K, V, H, T>
+impl<E, K, V, H, T> adb::sync::Database for Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -22,13 +23,13 @@ where
     H: Hasher,
     T: Translator,
 {
-    type Op = Fixed<K, V>;
-    type Journal = crate::journal::fixed::Journal<E, Fixed<K, V>>;
-    type Hasher = H;
-    type Error = crate::adb::Error;
-    type Config = crate::adb::any::fixed::Config<T>;
-    type Digest = H::Digest;
     type Context = E;
+    type Op = Fixed<K, V>;
+    type Journal = fixed::Journal<E, Fixed<K, V>>;
+    type Hasher = H;
+    type Error = adb::Error;
+    type Config = adb::any::fixed::Config<T>;
+    type Digest = H::Digest;
 
     async fn create_journal(
         context: Self::Context,
@@ -36,14 +37,14 @@ where
         lower_bound: u64,
         upper_bound: u64,
     ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
-        let journal_config = journal::fixed::Config {
+        let journal_config = fixed::Config {
             partition: config.log_journal_partition.clone(),
             items_per_blob: config.log_items_per_blob,
             write_buffer: config.log_write_buffer,
             buffer_pool: config.buffer_pool.clone(),
         };
 
-        journal::fixed::Journal::<E, Fixed<K, V>>::init_sync(
+        fixed::Journal::<E, Fixed<K, V>>::init_sync(
             context.with_label("log"),
             journal_config,
             lower_bound,
@@ -64,8 +65,7 @@ where
         target: sync::Target<Self::Digest>,
         apply_batch_size: usize,
     ) -> Result<Self, Self::Error> {
-        // Build the complete database from the journal
-        let db = Any::init_synced(
+        Any::init_synced(
             context,
             any::fixed::SyncConfig {
                 db_config,
@@ -76,9 +76,7 @@ where
                 apply_batch_size,
             },
         )
-        .await?;
-
-        Ok(db)
+        .await
     }
 
     fn root(&self) -> Self::Digest {
@@ -93,22 +91,19 @@ where
         lower_bound: u64,
         upper_bound: u64,
     ) -> Result<Self::Journal, Self::Error> {
-        let size = journal.size().await.map_err(crate::adb::Error::from)?;
+        let size = journal.size().await.map_err(adb::Error::from)?;
 
         if size <= lower_bound {
             // Close the existing journal before creating a new one
-            journal.close().await.map_err(crate::adb::Error::from)?;
+            journal.close().await.map_err(adb::Error::from)?;
 
             // Create a new journal with the new bounds
             Self::create_journal(context, config, lower_bound, upper_bound)
                 .await
-                .map_err(crate::adb::Error::from)
+                .map_err(adb::Error::from)
         } else {
             // Just prune to the lower bound
-            journal
-                .prune(lower_bound)
-                .await
-                .map_err(crate::adb::Error::from)?;
+            journal.prune(lower_bound).await.map_err(adb::Error::from)?;
             Ok(journal)
         }
     }
