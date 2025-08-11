@@ -10,6 +10,7 @@ use commonware_storage::{
     adb::current::{Config as CConfig, Current},
     translator::EightCap,
 };
+use commonware_utils::NZUsize;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::time::Instant;
@@ -41,14 +42,14 @@ fn current_cfg(pool: Option<ThreadPool>) -> CConfig<EightCap> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
-        mmr_write_buffer: 1024,
+        mmr_write_buffer: NZUsize!(1024),
         log_journal_partition: format!("log_journal_{PARTITION_SUFFIX}"),
         log_items_per_blob: ITEMS_PER_BLOB,
-        log_write_buffer: 1024,
+        log_write_buffer: NZUsize!(1024),
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: pool,
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         pruning_delay: 10,
     }
 }
