@@ -23,7 +23,7 @@ use crate::{
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use commonware_utils::{Array, NZUsize};
 use futures::{
     future::{try_join_all, TryFutureExt},
@@ -81,7 +81,7 @@ pub struct Config<T: Translator> {
 }
 
 /// Configuration for syncing an [Any] to a pruned target state.
-pub struct SyncConfig<E: RStorage + Metrics, K: Array, V: Array, T: Translator, D: Digest> {
+pub struct SyncConfig<E: Storage + Metrics, K: Array, V: Array, T: Translator, D: Digest> {
     /// Database configuration.
     pub db_config: Config<T>,
 
@@ -109,7 +109,7 @@ pub struct SyncConfig<E: RStorage + Metrics, K: Array, V: Array, T: Translator, 
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator> {
+pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
@@ -154,7 +154,7 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T:
     pub(crate) pruning_delay: u64,
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator>
+impl<E: Storage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator>
     Any<E, K, V, H, T>
 {
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
