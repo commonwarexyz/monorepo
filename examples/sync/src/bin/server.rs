@@ -5,7 +5,8 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_macros::select;
 use commonware_runtime::{
-    tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, Spawner, Storage,
+    tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner,
+    Storage, StreamOf,
 };
 use commonware_storage::{adb::sync::Target, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
@@ -70,7 +71,7 @@ struct State<DB> {
 impl<DB> State<DB> {
     fn new<E>(context: E, database: DB) -> Self
     where
-        E: commonware_runtime::Metrics,
+        E: Metrics,
     {
         let state = Self {
             database: RwLock::new(database),
@@ -285,8 +286,8 @@ where
 async fn handle_client<DB, E>(
     context: E,
     state: Arc<State<DB>>,
-    mut sink: commonware_runtime::SinkOf<E>,
-    mut stream: commonware_runtime::StreamOf<E>,
+    mut sink: SinkOf<E>,
+    mut stream: StreamOf<E>,
     client_addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
@@ -360,7 +361,7 @@ async fn initialize_database<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable,
-    E: rand::RngCore,
+    E: RngCore,
 {
     info!("starting {} database", DB::name());
 
@@ -454,13 +455,7 @@ where
 /// Run the Any database server.
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: commonware_runtime::Storage
-        + commonware_runtime::Clock
-        + commonware_runtime::Metrics
-        + commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + rand::RngCore
-        + Clone,
+    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     // Create and initialize database
     let db_config = any::create_config();
@@ -472,13 +467,7 @@ where
 /// Run the Immutable database server.
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: commonware_runtime::Storage
-        + commonware_runtime::Clock
-        + commonware_runtime::Metrics
-        + commonware_runtime::Network
-        + commonware_runtime::Spawner
-        + rand::RngCore
-        + Clone,
+    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     // Create and initialize database
     let db_config = immutable::create_config();
