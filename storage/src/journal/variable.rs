@@ -2230,7 +2230,7 @@ mod tests {
             // Initialize journal with sync boundaries when no existing data exists
             let lower_bound = 10;
             let upper_bound = 25;
-            let items_per_section = NonZeroU64::new(5).unwrap();
+            let items_per_section = NZU64!(5);
             let sync_journal = Journal::<deterministic::Context, u64>::init_sync(
                 context.clone(),
                 cfg.clone(),
@@ -2287,7 +2287,7 @@ mod tests {
                     .await
                     .expect("Failed to create initial journal");
 
-            let items_per_section = NonZeroU64::new(5).unwrap();
+            let items_per_section = NZU64!(5);
 
             // Add data to sections 0, 1, 2, 3 (simulating operations 0-19 with items_per_section=5)
             for section in 0..4 {
@@ -2377,7 +2377,7 @@ mod tests {
                     .expect("Failed to create initial journal");
 
             // Add data to sections 1, 2, 3 (operations 5-19 with items_per_section=5)
-            let items_per_section = NonZeroU64::new(5).unwrap();
+            let items_per_section = NZU64!(5);
             for section in 1..4 {
                 for item in 0..items_per_section.get() {
                     journal.append(section, section * 100 + item).await.unwrap();
@@ -2462,7 +2462,7 @@ mod tests {
                     .expect("Failed to create initial journal");
 
             // Add data to sections 0-5 (operations 0-29 with items_per_section=5)
-            let items_per_section = NonZeroU64::new(5).unwrap();
+            let items_per_section = NZU64!(5);
             for section in 0..6 {
                 for item in 0..items_per_section.get() {
                     journal
@@ -2554,7 +2554,7 @@ mod tests {
                     .expect("Failed to create initial journal");
 
             // Add data to sections 0, 1 (operations 0-9 with items_per_section=5)
-            let items_per_section = NonZeroU64::new(5).unwrap();
+            let items_per_section = NZU64!(5);
             for section in 0..2 {
                 for item in 0..items_per_section.get() {
                     journal.append(section, section * 100 + item).await.unwrap();
@@ -2604,9 +2604,9 @@ mod tests {
             let result = Journal::<deterministic::Context, u64>::init_sync(
                 context.clone(),
                 cfg.clone(),
-                10,                          // lower_bound
-                5,                           // upper_bound (invalid: < lower_bound)
-                NonZeroU64::new(5).unwrap(), // items_per_section
+                10,        // lower_bound
+                5,         // upper_bound (invalid: < lower_bound)
+                NZU64!(5), // items_per_section
             )
             .await;
             assert!(matches!(result, Err(super::Error::InvalidSyncRange(10, 5))));
@@ -2632,7 +2632,7 @@ mod tests {
                     .await
                     .expect("Failed to create initial journal");
 
-            let items_per_section = NonZeroU64::new(5).unwrap();
+            let items_per_section = NZU64!(5);
 
             // Add data to sections 0, 1, 2, 3, 4
             for section in 0..5 {
@@ -2705,7 +2705,7 @@ mod tests {
                     .await
                     .expect("Failed to create initial journal");
 
-            let items_per_section = NonZeroU64::new(5).unwrap();
+            let items_per_section = NZU64!(5);
 
             // Add data to sections 0, 1, 2
             for section in 0..3 {
@@ -2787,15 +2787,18 @@ mod tests {
                     .await
                     .expect("Failed to create initial journal");
 
+            let items_per_section = NZU64!(5);
+
             for section in 0..5 {
-                journal.append(section, section * 10).await.unwrap();
+                for item in 0..items_per_section.get() {
+                    journal.append(section, section * 10 + item).await.unwrap();
+                }
             }
             journal.close().await.unwrap();
 
             // Sync with precise upper bound that should remove section 3+
             let lower_bound = 5; // operation 5 (section 1)
             let upper_bound = 14; // operation 14 (section 2: 14/5 = 2)
-            let items_per_section = NonZeroU64::new(5).unwrap();
             let journal = Journal::<deterministic::Context, u64>::init_sync(
                 context.clone(),
                 cfg.clone(),
@@ -2805,9 +2808,6 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal with precise upper bound");
-
-            let _lower_section = lower_bound / items_per_section; // 1
-            let _upper_section = upper_bound / items_per_section; // 2
 
             // Verify precise section management
             assert!(!journal.blobs.contains_key(&0)); // Pruned (< lower_section)
@@ -3008,7 +3008,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let items_per_section = 3; // Small sections for easier testing
+            let items_per_section = 3;
 
             // Create journal with data across multiple sections
             let mut journal =
@@ -3020,7 +3020,7 @@ mod tests {
             // Section 1: ops 3, 4, 5
             // Section 2: ops 6, 7, 8
             for section in 0..3 {
-                for i in 0..3 {
+                for i in 0..items_per_section {
                     let op_value = section * items_per_section + i;
                     journal.append(section, op_value).await.unwrap();
                 }
