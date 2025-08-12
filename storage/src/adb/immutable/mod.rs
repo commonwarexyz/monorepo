@@ -209,21 +209,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         })
     }
 
-    /// Returns an [Immutable] initialized from sync data in `cfg` for use in state sync.
-    ///
-    /// # Behavior
-    ///
-    /// This method handles different initialization scenarios based on existing data:
-    /// - If the MMR journal is empty or the last item is before `lower_bound`, it creates a
-    ///   fresh MMR from the provided `pinned_nodes`
-    /// - If the MMR journal has data but is incomplete (< `upper_bound`), missing operations
-    ///   from the log are applied to bring it up to the target state
-    /// - If the MMR journal has data beyond the `upper_bound`, it is rewound to match the sync target
-    ///
-    /// # Returns
-    ///
-    /// An [Immutable] db populated with the state from `cfg.lower_bound` to `cfg.upper_bound`, inclusive.
-    /// The pruning boundary is set to `cfg.lower_bound`.
+    /// Returns an [Immutable] built from the config and sync data in `cfg`.
     #[allow(clippy::type_complexity)]
     pub async fn init_synced(
         context: E,

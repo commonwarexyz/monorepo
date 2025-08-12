@@ -489,12 +489,6 @@ mod tests {
         });
     }
 
-    // TODO: Test that sync fails gracefully when the resolver fails
-    // Note: FailResolver is designed for Fixed operations, but Immutable uses Variable operations
-    // This test is commented out until we create a proper FailResolver for Variable operations
-    // #[test_traced("WARN")]
-    // fn test_sync_resolver_failure() { ... }
-
     /// Test demonstrating that a synced database can be reopened and retain its state.
     #[test_traced("WARN")]
     fn test_sync_database_persistence() {
