@@ -35,7 +35,6 @@ where
         E: Network + Spawner,
     {
         let (sink, stream) = context.dial(server_addr).await?;
-        // TODO use handle to abort the resolver when the network is closed
         let (request_tx, _handle) = io::run(context, sink, stream)?;
         Ok(Self {
             request_id_generator: request_id::Generator::new(),

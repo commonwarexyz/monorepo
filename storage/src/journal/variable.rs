@@ -422,7 +422,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                     current_offset = next_slot;
                 }
                 Err(Error::Runtime(commonware_runtime::Error::BlobInsufficientLength)) => {
-                    // This sections has fewer than `operations_count` operations.
+                    // This section has fewer than `operations_count` operations.
                     break;
                 }
                 Err(e) => return Err(e),

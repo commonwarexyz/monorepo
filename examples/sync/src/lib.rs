@@ -9,7 +9,6 @@ pub mod error;
 pub use error::Error;
 pub mod databases;
 pub mod net;
-
 pub use databases::{any, immutable};
 
 /// Returns the version of the crate.

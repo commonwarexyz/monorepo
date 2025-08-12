@@ -1,10 +1,13 @@
 //! Core sync engine components that are shared across sync clients.
 
 use crate::{
-    adb::sync::{
-        requests::Requests,
-        resolver::{FetchResult, Resolver},
-        Database, Error, Journal, Target,
+    adb::{
+        self,
+        sync::{
+            requests::Requests,
+            resolver::{FetchResult, Resolver},
+            Database, Error, Journal, Target,
+        },
     },
     mmr::hasher,
 };
@@ -397,51 +400,47 @@ where
         self.outstanding_requests.remove(fetch_result.start_loc);
 
         let start_loc = fetch_result.start_loc;
-        match fetch_result.result {
-            Ok(FetchResult {
-                proof,
-                operations,
-                success_tx,
-            }) => {
-                // Validate batch size
-                let operations_len = operations.len() as u64;
-                if operations_len == 0 || operations_len > self.fetch_batch_size.get() {
-                    // Invalid batch size - notify resolver of failure
-                    let _ = success_tx.send(false);
-                } else {
-                    // Verify the proof
-                    let proof_valid = crate::adb::verify_proof(
-                        &mut self.hasher,
-                        &proof,
-                        start_loc,
-                        &operations,
-                        &self.target.root,
-                    );
+        let FetchResult {
+            proof,
+            operations,
+            success_tx,
+        } = fetch_result.result.map_err(Error::Resolver)?;
 
-                    // Report success or failure to the resolver
-                    let _ = success_tx.send(proof_valid);
+        // Validate batch size
+        let operations_len = operations.len() as u64;
+        if operations_len == 0 || operations_len > self.fetch_batch_size.get() {
+            // Invalid batch size - notify resolver of failure.
+            // We will request these operations again when we scan for unfetched operations.
+            let _ = success_tx.send(false);
+            return Ok(());
+        }
 
-                    if proof_valid {
-                        // Extract pinned nodes if we don't have them and this is the first batch
-                        if self.pinned_nodes.is_none() && start_loc == self.target.lower_bound_ops {
-                            if let Ok(nodes) =
-                                crate::adb::extract_pinned_nodes(&proof, start_loc, operations_len)
-                            {
-                                self.pinned_nodes = Some(nodes);
-                            }
-                        }
+        // Verify the proof
+        let proof_valid = adb::verify_proof(
+            &mut self.hasher,
+            &proof,
+            start_loc,
+            &operations,
+            &self.target.root,
+        );
 
-                        // Store operations for later application
-                        self.store_operations(start_loc, operations);
-                    }
+        // Report success or failure to the resolver
+        let _ = success_tx.send(proof_valid);
+
+        if proof_valid {
+            // Extract pinned nodes if we don't have them and this is the first batch
+            if self.pinned_nodes.is_none() && start_loc == self.target.lower_bound_ops {
+                if let Ok(nodes) =
+                    crate::adb::extract_pinned_nodes(&proof, start_loc, operations_len)
+                {
+                    self.pinned_nodes = Some(nodes);
                 }
             }
-            Err(e) => {
-                // Resolver error - propagate it up to fail the sync.
-                // TODO: How should we handle a resolver error?
-                return Err(Error::Resolver(e));
-            }
+
+            // Store operations for later application
+            self.store_operations(start_loc, operations);
         }
+
         Ok(())
     }
 
