@@ -77,10 +77,8 @@ impl<B: Blob> Append<B> {
                 assert_eq!(buf.len(), leftover_size as usize);
             } else {
                 // Otherwise, read trailing bytes from disk.
-                buf = blob
-                    .read_at(vec![0; leftover_size as usize], page_aligned_size)
-                    .await?
-                    .into();
+                buf.resize(leftover_size as usize, 0);
+                buf = blob.read_at(buf, page_aligned_size).await?.into();
             }
         }
 
