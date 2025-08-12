@@ -350,6 +350,85 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_missing_items() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Initialize the store
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+            let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            // Test 1: Empty store - should return no items
+            assert_eq!(store.missing_items(0, 5), Vec::<u64>::new());
+            assert_eq!(store.missing_items(100, 10), Vec::<u64>::new());
+
+            // Test 2: Insert values with gaps
+            store.put(1, FixedBytes::new([1u8; 32])).await.unwrap();
+            store.put(2, FixedBytes::new([2u8; 32])).await.unwrap();
+            store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
+            store.put(6, FixedBytes::new([6u8; 32])).await.unwrap();
+            store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
+
+            // Test 3: Find missing items from the beginning
+            assert_eq!(store.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
+            assert_eq!(store.missing_items(0, 6), vec![0, 3, 4, 7, 8, 9]);
+            assert_eq!(store.missing_items(0, 7), vec![0, 3, 4, 7, 8, 9]);
+
+            // Test 4: Find missing items from within a gap
+            assert_eq!(store.missing_items(3, 3), vec![3, 4, 7]);
+            assert_eq!(store.missing_items(4, 2), vec![4, 7]);
+
+            // Test 5: Find missing items from within a range
+            assert_eq!(store.missing_items(1, 3), vec![3, 4, 7]);
+            assert_eq!(store.missing_items(2, 4), vec![3, 4, 7, 8]);
+            assert_eq!(store.missing_items(5, 2), vec![7, 8]);
+
+            // Test 6: Find missing items after the last range (no more gaps)
+            assert_eq!(store.missing_items(11, 5), Vec::<u64>::new());
+            assert_eq!(store.missing_items(100, 10), Vec::<u64>::new());
+
+            // Test 7: Large gap scenario
+            store.put(1000, FixedBytes::new([100u8; 32])).await.unwrap();
+
+            // Gap between 10 and 1000
+            let items = store.missing_items(11, 10);
+            assert_eq!(items, vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+
+            // Request more items than available in gap
+            let items = store.missing_items(990, 15);
+            assert_eq!(
+                items,
+                vec![990, 991, 992, 993, 994, 995, 996, 997, 998, 999]
+            );
+
+            // Test 8: After syncing (data should remain consistent)
+            store.sync().await.unwrap();
+            assert_eq!(store.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
+            assert_eq!(store.missing_items(3, 3), vec![3, 4, 7]);
+
+            // Test 9: Cross-blob boundary scenario
+            store.put(9999, FixedBytes::new([99u8; 32])).await.unwrap();
+            store
+                .put(10001, FixedBytes::new([101u8; 32]))
+                .await
+                .unwrap();
+
+            // Find missing items across blob boundary (10000 is the boundary)
+            let items = store.missing_items(9998, 5);
+            assert_eq!(items, vec![9998, 10000]);
+
+            store.close().await.expect("Failed to close store");
+        });
+    }
+
+    #[test_traced]
     fn test_restart() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
