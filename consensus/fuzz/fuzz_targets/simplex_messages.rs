@@ -20,7 +20,7 @@ use commonware_p2p::simulated::{
 };
 use commonware_runtime::{
     deterministic::{self},
-    Metrics, Runner,
+    Clock, Metrics, Runner,
 };
 use commonware_utils::{NZUsize, NZU32};
 use governor::Quota;
@@ -150,9 +150,12 @@ fn fuzzer(input: FuzzInput) {
             let engine = Engine::new(context.with_label("engine"), cfg);
             engine.start(voter, resolver);
         }
+
+        context.sleep(Duration::from_secs(60)).await;
     });
 }
 
 fuzz_target!(|input: FuzzInput| {
     fuzzer(input);
+    //panic!("11");
 });

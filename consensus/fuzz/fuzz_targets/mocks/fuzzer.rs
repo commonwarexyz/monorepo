@@ -133,20 +133,22 @@ impl<E: Clock + Spawner> Fuzzer<E> {
                 result = receiver.recv().fuse() => {
                     match result {
                         Ok((s, msg)) => {
+                            steps += 1;
                             self.handle_received_message(&mut sender, s, msg.to_vec())
                                 .await;
                         }
                         Err(_) => {
+                            steps += 1;
                             self.send_random_message(&mut sender).await;
                         }
                     }
                 },
 
                 _ = Delay::new(DEFAULT_TIMEOUT).fuse() => {
+                    steps += 1;
                     self.send_random_message(&mut sender).await;
                 }
             }
-            steps += 1;
         }
     }
 
