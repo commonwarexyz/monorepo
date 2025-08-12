@@ -73,7 +73,7 @@ async fn test_sync<
     let sync_config: sync::engine::Config<Any<_, Key, Value, Sha256, TwoCap>, R> =
         sync::engine::Config {
             context,
-            update_receiver: None,
+            update_rx: None,
             db_config,
             fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
             target,

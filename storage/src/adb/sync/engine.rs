@@ -68,8 +68,13 @@ async fn wait_for_event<Op, D: Digest, E>(
     }
 }
 
-/// Configuration for creating a new [Engine]
-pub struct Config<DB: Database, R: Resolver<Op = DB::Op, Digest = DB::Digest>> {
+/// Configuration for creating a new Engine
+pub struct Config<DB, R>
+where
+    DB: Database,
+    R: Resolver<Op = DB::Op, Digest = DB::Digest>,
+    DB::Op: Encode,
+{
     /// Runtime context for creating database components
     pub context: DB::Context,
     /// Network resolver for fetching operations and proofs
@@ -85,10 +90,10 @@ pub struct Config<DB: Database, R: Resolver<Op = DB::Op, Digest = DB::Digest>> {
     /// Database-specific configuration
     pub db_config: DB::Config,
     /// Channel for receiving sync target updates
-    pub update_receiver: Option<mpsc::Receiver<Target<DB::Digest>>>,
+    pub update_rx: Option<mpsc::Receiver<Target<DB::Digest>>>,
 }
 /// A shared sync engine that manages the core synchronization state and operations.
-pub struct Engine<DB: Database, R: Resolver<Op = DB::Op, Digest = DB::Digest>>
+pub(crate) struct Engine<DB, R>
 where
     DB: Database,
     R: Resolver<Op = DB::Op, Digest = DB::Digest>,
@@ -98,40 +103,52 @@ where
     outstanding_requests: Requests<DB::Op, DB::Digest, R::Error>,
 
     /// Operations that have been fetched but not yet applied to the log
-    pub fetched_operations: BTreeMap<u64, Vec<DB::Op>>,
+    fetched_operations: BTreeMap<u64, Vec<DB::Op>>,
 
     /// Pinned MMR nodes extracted from proofs, used for database construction
-    pub pinned_nodes: Option<Vec<DB::Digest>>,
+    pinned_nodes: Option<Vec<DB::Digest>>,
 
     /// The current sync target (root digest and operation bounds)
-    pub target: Target<DB::Digest>,
+    target: Target<DB::Digest>,
 
     /// Maximum number of parallel outstanding requests
-    pub max_outstanding_requests: usize,
+    max_outstanding_requests: usize,
 
     /// Maximum operations to fetch in a single batch
-    pub fetch_batch_size: NonZeroU64,
+    fetch_batch_size: NonZeroU64,
 
     /// Number of operations to apply in a single batch
-    pub apply_batch_size: usize,
+    apply_batch_size: usize,
 
     /// Journal that operations are applied to during sync
-    pub journal: DB::Journal,
+    journal: DB::Journal,
 
     /// Resolver for fetching operations and proofs from the sync source
-    pub resolver: R,
+    resolver: R,
 
     /// Hasher used for proof verification
-    pub hasher: crate::mmr::hasher::Standard<DB::Hasher>,
+    hasher: crate::mmr::hasher::Standard<DB::Hasher>,
 
     /// Runtime context for database operations
-    pub context: DB::Context,
+    context: DB::Context,
 
     /// Configuration for building the final database
-    pub config: DB::Config,
+    config: DB::Config,
 
     /// Optional receiver for target updates during sync
-    pub update_receiver: Option<mpsc::Receiver<Target<DB::Digest>>>,
+    update_receiver: Option<mpsc::Receiver<Target<DB::Digest>>>,
+}
+
+#[cfg(test)]
+impl<DB, R> Engine<DB, R>
+where
+    DB: Database,
+    R: Resolver<Op = DB::Op, Digest = DB::Digest>,
+    DB::Op: Encode,
+{
+    pub(crate) fn journal(&self) -> &DB::Journal {
+        &self.journal
+    }
 }
 
 impl<DB, R> Engine<DB, R>
@@ -172,17 +189,14 @@ where
             hasher: hasher::Standard::<DB::Hasher>::new(),
             context: config.context,
             config: config.db_config,
-            update_receiver: config.update_receiver,
+            update_receiver: config.update_rx,
         };
         engine.schedule_requests().await?;
         Ok(engine)
     }
 
-    /// Schedule new fetch requests based on gap analysis and request limits.
-    ///
-    /// This method implements the core request scheduling logic that can be used
-    /// across different ADB sync implementations.
-    pub async fn schedule_requests(&mut self) -> Result<(), Error<DB::Error, R::Error>> {
+    /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
+    async fn schedule_requests(&mut self) -> Result<(), Error<DB::Error, R::Error>> {
         let target_size = self.target.upper_bound_ops + 1;
 
         // Special case: If we don't have pinned nodes, we need to extract them from a proof
@@ -282,16 +296,6 @@ where
     /// Store a batch of fetched operations
     pub fn store_operations(&mut self, start_loc: u64, operations: Vec<DB::Op>) {
         self.fetched_operations.insert(start_loc, operations);
-    }
-
-    /// Check if we have pinned nodes
-    pub fn has_pinned_nodes(&self) -> bool {
-        self.pinned_nodes.is_some()
-    }
-
-    /// Set pinned nodes from a proof
-    pub fn set_pinned_nodes(&mut self, nodes: Vec<DB::Digest>) {
-        self.pinned_nodes = Some(nodes);
     }
 
     /// Apply fetched operations to the journal if we have them.

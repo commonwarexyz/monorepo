@@ -144,7 +144,7 @@ where
             resolver,
             apply_batch_size: 1024,
             max_outstanding_requests: config.max_outstanding_requests,
-            update_receiver: Some(update_receiver),
+            update_rx: Some(update_receiver),
         };
 
         let database: AnyDb<_> = sync::sync(sync_config).await?;
@@ -205,7 +205,7 @@ where
                 resolver,
                 apply_batch_size: 1024,
                 max_outstanding_requests: config.max_outstanding_requests,
-                update_receiver: Some(update_receiver),
+                update_rx: Some(update_receiver),
             };
 
         let database: immutable::Database<_> = sync::sync(sync_config).await?;

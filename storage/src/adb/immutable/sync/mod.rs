@@ -386,7 +386,7 @@ mod tests {
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
-                update_receiver: None,
+                update_rx: None,
             };
             let mut got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -470,7 +470,7 @@ mod tests {
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
-                update_receiver: None,
+                update_rx: None,
             };
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -528,7 +528,7 @@ mod tests {
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
-                update_receiver: None,
+                update_rx: None,
             };
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -615,17 +615,16 @@ mod tests {
                     fetch_batch_size: NZU64!(2), // Very small batch size to ensure multiple batches needed
                     max_outstanding_requests: 10,
                     apply_batch_size: 1024,
-                    update_receiver: Some(update_receiver),
+                    update_rx: Some(update_receiver),
                 };
                 let mut client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
-                client.schedule_requests().await.unwrap();
                 loop {
                     // Step the client until we have processed a batch of operations
                     client = match client.step().await.unwrap() {
                         NextStep::Continue(new_client) => new_client,
                         NextStep::Complete(_) => panic!("client should not be complete"),
                     };
-                    let log_size = client.journal.size().await.unwrap();
+                    let log_size = client.journal().size().await.unwrap();
                     if log_size > initial_lower_bound {
                         break client;
                     }
@@ -693,7 +692,7 @@ mod tests {
                 resolver: Arc::new(commonware_runtime::RwLock::new(target_db)),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
-                update_receiver: None,
+                update_rx: None,
             };
             let result: Result<ImmutableSyncTest, _> = sync::sync(config).await;
             assert!(matches!(
@@ -740,7 +739,7 @@ mod tests {
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
-                update_receiver: None,
+                update_rx: None,
             };
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -805,7 +804,7 @@ mod tests {
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
-                update_receiver: None,
+                update_rx: None,
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -866,7 +865,7 @@ mod tests {
                 resolver: resolver.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
-                update_receiver: None,
+                update_rx: None,
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -916,7 +915,7 @@ mod tests {
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
-                update_receiver: Some(update_receiver),
+                update_rx: Some(update_receiver),
             };
             let client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
 
@@ -975,7 +974,7 @@ mod tests {
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
-                update_receiver: Some(update_receiver),
+                update_rx: Some(update_receiver),
             };
             let client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
 
@@ -1052,7 +1051,7 @@ mod tests {
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
-                update_receiver: Some(update_receiver),
+                update_rx: Some(update_receiver),
             };
 
             // Send target update with increased bounds
@@ -1114,7 +1113,7 @@ mod tests {
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
-                update_receiver: Some(update_receiver),
+                update_rx: Some(update_receiver),
             };
             let client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
 
@@ -1170,7 +1169,7 @@ mod tests {
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
-                update_receiver: Some(update_receiver),
+                update_rx: Some(update_receiver),
             };
 
             // Complete the sync
