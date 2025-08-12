@@ -304,7 +304,7 @@ where
                 match incoming {
                     Ok(message_data) => {
                         // Parse the message.
-                        let message: wire::Message<DB::Operation, Key> = match wire::Message::decode(&message_data[..]) {
+                        let message = match wire::Message::decode(&message_data[..]) {
                             Ok(msg) => msg,
                             Err(e) => {
                                 warn!(client_addr = %client_addr, error = %e, "failed to parse message");
