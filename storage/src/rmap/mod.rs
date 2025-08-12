@@ -314,6 +314,100 @@ impl RMap {
 
         (current_range_end, next_range_start)
     }
+
+    /// Returns up to `n` missing items starting from `starting_index`.
+    ///
+    /// This method iterates through gaps between existing ranges, collecting missing indices
+    /// until either `n` items are found or there are no more gaps to fill.
+    ///
+    /// # Arguments
+    ///
+    /// * `starting_index`: The index to start searching from (inclusive).
+    /// * `n`: The maximum number of missing items to return.
+    ///
+    /// # Returns
+    ///
+    /// A vector containing up to `n` missing indices from gaps between ranges.
+    /// The vector may contain fewer than `n` items if there aren't enough gaps.
+    /// If there are no more ranges after the current position, no items are returned.
+    ///
+    /// # Complexity
+    ///
+    /// O(n * log N) where n is the number of missing items to find and N is the number of ranges.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use commonware_storage::rmap::RMap;
+    ///
+    /// let mut map = RMap::new();
+    /// map.insert(1); map.insert(2); // Map: [1, 2]
+    /// map.insert(5); map.insert(6); // Map: [1, 2], [5, 6]
+    /// map.insert(10);                // Map: [1, 2], [5, 6], [10, 10]
+    ///
+    /// // Starting from 0, find up to 5 missing items
+    /// assert_eq!(map.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
+    ///
+    /// // Starting from 3, find up to 3 missing items
+    /// assert_eq!(map.missing_items(3, 3), vec![3, 4, 7]);
+    ///
+    /// // Starting from 7, find up to 10 missing items (only gaps are returned)
+    /// assert_eq!(map.missing_items(7, 10), vec![7, 8, 9]);
+    ///
+    /// // Starting from 11, there are no more ranges, so no gaps
+    /// assert_eq!(map.missing_items(11, 5), vec![]);
+    /// ```
+    pub fn missing_items(&self, starting_index: u64, n: usize) -> Vec<u64> {
+        if n == 0 {
+            return Vec::new();
+        }
+
+        let mut missing = Vec::with_capacity(n.min(1000)); // Cap pre-allocation at 1000
+        let mut current = starting_index;
+
+        while missing.len() < n {
+            let (current_range_end, next_range_start) = self.next_gap(current);
+
+            match current_range_end {
+                Some(end) => {
+                    // We're in a range, skip to the end and move to the gap
+                    if end == u64::MAX {
+                        // No more gaps possible
+                        break;
+                    }
+                    current = end + 1;
+                }
+                None => {
+                    // We're in a gap
+                    match next_range_start {
+                        Some(next_start) => {
+                            // Collect missing items up to the next range or until we have n items
+                            let gap_end = next_start.saturating_sub(1);
+                            let items_to_collect =
+                                (n - missing.len()).min((gap_end - current + 1) as usize);
+
+                            for i in 0..items_to_collect {
+                                missing.push(current + i as u64);
+                            }
+
+                            if missing.len() >= n {
+                                break;
+                            }
+
+                            // Move to the next range
+                            current = next_start;
+                        }
+                        None => {
+                            // No more ranges after this point, so no gaps to fill
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        missing
+    }
 }
 
 #[cfg(test)]
@@ -777,5 +871,155 @@ mod tests {
         assert_eq!(map.next_gap(11), (Some(11), Some(14)));
         assert_eq!(map.next_gap(12), (None, Some(14)));
         assert_eq!(map.next_gap(14), (Some(14), None));
+    }
+
+    #[test]
+    fn test_missing_items_empty_map() {
+        let map = RMap::new();
+        assert_eq!(map.missing_items(0, 5), Vec::<u64>::new());
+        assert_eq!(map.missing_items(100, 10), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn test_missing_items_single_gap() {
+        let mut map = RMap::new();
+        map.insert(1);
+        map.insert(2); // [1, 2]
+        map.insert(5);
+        map.insert(6); // [1, 2], [5, 6]
+
+        // Gap between ranges: 3, 4
+        assert_eq!(map.missing_items(3, 5), vec![3, 4]);
+        assert_eq!(map.missing_items(3, 2), vec![3, 4]);
+        assert_eq!(map.missing_items(3, 1), vec![3]);
+        assert_eq!(map.missing_items(4, 1), vec![4]);
+    }
+
+    #[test]
+    fn test_missing_items_multiple_gaps() {
+        let mut map = RMap::new();
+        map.insert(1);
+        map.insert(2); // [1, 2]
+        map.insert(5);
+        map.insert(6); // [1, 2], [5, 6]
+        map.insert(10); // [1, 2], [5, 6], [10, 10]
+
+        // Starting from 0 (before first range)
+        assert_eq!(map.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
+        assert_eq!(map.missing_items(0, 6), vec![0, 3, 4, 7, 8, 9]);
+        assert_eq!(map.missing_items(0, 7), vec![0, 3, 4, 7, 8, 9]);
+
+        // Starting from within first gap
+        assert_eq!(map.missing_items(3, 3), vec![3, 4, 7]);
+        assert_eq!(map.missing_items(4, 2), vec![4, 7]);
+
+        // Starting from within second gap
+        assert_eq!(map.missing_items(7, 10), vec![7, 8, 9]);
+        assert_eq!(map.missing_items(8, 2), vec![8, 9]);
+
+        // Starting after last range (no more gaps)
+        assert_eq!(map.missing_items(11, 5), Vec::<u64>::new());
+        assert_eq!(map.missing_items(100, 10), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn test_missing_items_starting_in_range() {
+        let mut map = RMap::new();
+        map.insert(1);
+        map.insert(2);
+        map.insert(3); // [1, 3]
+        map.insert(7);
+        map.insert(8);
+        map.insert(9); // [1, 3], [7, 9]
+
+        // Starting within first range
+        assert_eq!(map.missing_items(1, 3), vec![4, 5, 6]);
+        assert_eq!(map.missing_items(2, 4), vec![4, 5, 6]);
+        assert_eq!(map.missing_items(3, 2), vec![4, 5]);
+
+        // Starting within second range
+        assert_eq!(map.missing_items(7, 5), Vec::<u64>::new());
+        assert_eq!(map.missing_items(8, 3), Vec::<u64>::new());
+        assert_eq!(map.missing_items(9, 1), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn test_missing_items_zero_n() {
+        let mut map = RMap::new();
+        map.insert(1);
+        map.insert(5);
+
+        assert_eq!(map.missing_items(0, 0), Vec::<u64>::new());
+        assert_eq!(map.missing_items(3, 0), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn test_missing_items_large_gap() {
+        let mut map = RMap::new();
+        map.insert(1);
+        map.insert(1000);
+
+        // Large gap between 1 and 1000
+        assert_eq!(map.missing_items(2, 5), vec![2, 3, 4, 5, 6]);
+        assert_eq!(map.missing_items(995, 5), vec![995, 996, 997, 998, 999]);
+
+        // Request more items than exist in gap
+        let items = map.missing_items(2, 998);
+        assert_eq!(items.len(), 998);
+        assert_eq!(items[0], 2);
+        assert_eq!(items[997], 999);
+    }
+
+    #[test]
+    fn test_missing_items_at_boundaries() {
+        let mut map = RMap::new();
+        map.insert(5);
+        map.insert(6); // [5, 6]
+        map.insert(10); // [5, 6], [10, 10]
+
+        // Starting at exact boundary of range start
+        assert_eq!(map.missing_items(5, 3), vec![7, 8, 9]);
+
+        // Starting at exact boundary of range end
+        assert_eq!(map.missing_items(6, 3), vec![7, 8, 9]);
+
+        // Starting at isolated range
+        assert_eq!(map.missing_items(10, 5), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn test_missing_items_near_max() {
+        let mut map = RMap::new();
+        map.insert(u64::MAX - 5);
+        map.insert(u64::MAX - 3);
+        map.insert(u64::MAX);
+
+        // Gap: MAX-4, MAX-2, MAX-1
+        assert_eq!(
+            map.missing_items(u64::MAX - 6, 5),
+            vec![u64::MAX - 6, u64::MAX - 4, u64::MAX - 2, u64::MAX - 1]
+        );
+        assert_eq!(
+            map.missing_items(u64::MAX - 4, 3),
+            vec![u64::MAX - 4, u64::MAX - 2, u64::MAX - 1]
+        );
+
+        // Starting at MAX (no gaps possible)
+        assert_eq!(map.missing_items(u64::MAX, 5), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn test_missing_items_contiguous_ranges() {
+        let mut map = RMap::new();
+        map.insert(1);
+        map.insert(2);
+        map.insert(3); // [1, 3]
+        map.insert(4);
+        map.insert(5);
+        map.insert(6); // [1, 6] (merged)
+
+        // No gaps in contiguous range
+        assert_eq!(map.missing_items(0, 3), vec![0]);
+        assert_eq!(map.missing_items(7, 5), Vec::<u64>::new());
     }
 }
