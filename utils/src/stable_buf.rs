@@ -101,49 +101,6 @@ impl StableBuf {
             StableBuf::BytesMut(b) => b.truncate(len),
         }
     }
-
-    /// Splits the buffer into two at the given index.
-    ///
-    /// Returns a new `StableBuf` containing the bytes from `at` to the end,
-    /// while `self` retains bytes from 0 to `at`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `at > len`.
-    pub fn split_off(&mut self, at: usize) -> StableBuf {
-        match self {
-            StableBuf::Vec(v) => StableBuf::Vec(v.split_off(at)),
-            StableBuf::BytesMut(b) => StableBuf::BytesMut(b.split_off(at)),
-        }
-    }
-
-    /// Absorbs a buffer that was previously split off.
-    ///
-    /// Appends the contents of `other` to `self`, consuming `other`.
-    /// This is the inverse of `split_off`.
-    ///
-    /// # Performance
-    ///
-    /// This operation is O(1) only when both buffers are [StableBuf::BytesMut]
-    /// variants that were previously split from the same buffer and haven't
-    /// been mutated in a way that caused reallocation (e.g. growing beyond
-    /// capacity). In all other cases it requires copying the data.
-    pub fn unsplit(&mut self, other: StableBuf) {
-        match (self, other) {
-            (StableBuf::Vec(v), StableBuf::Vec(mut other_v)) => {
-                v.append(&mut other_v);
-            }
-            (StableBuf::BytesMut(b), StableBuf::BytesMut(other_b)) => {
-                b.unsplit(other_b);
-            }
-            (StableBuf::Vec(v), StableBuf::BytesMut(other_b)) => {
-                v.extend_from_slice(&other_b);
-            }
-            (StableBuf::BytesMut(b), StableBuf::Vec(other_v)) => {
-                b.extend_from_slice(&other_v);
-            }
-        }
-    }
 }
 
 impl AsRef<[u8]> for StableBuf {
