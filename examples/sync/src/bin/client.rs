@@ -1,6 +1,6 @@
-//! This client demonstrates how to use the [commonware_storage::adb::any::sync] functionality
-//! to synchronize to the server's state. It uses the [Resolver] to fetch operations and sync
-//! target updates from the server, and continuously syncs to demonstrate that sync works
+//! This client binary creates or opens an [commonware_storage::adb::any] database and
+//! synchronizes it to a remote server's state. It uses the [Resolver] to fetch operations and
+//! sync target updates from the server, and continuously syncs to demonstrate that sync works
 //! with both empty and already-initialized databases.
 
 use clap::{Arg, Command};
