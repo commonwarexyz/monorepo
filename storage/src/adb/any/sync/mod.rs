@@ -1,9 +1,5 @@
 use crate::{
-    adb::{
-        self,
-        any::fixed::{Any, Config},
-        sync,
-    },
+    adb::{self, any, sync},
     index::Index,
     journal::fixed::{self, Journal},
     mmr::{
@@ -21,9 +17,9 @@ use commonware_utils::Array;
 pub type Error = adb::Error;
 
 /// Configuration for syncing an [Any] to a pruned target state.
-pub struct SyncConfig<E: Storage + Metrics, K: Array, V: Array, T: Translator, D: Digest> {
+pub struct Config<E: Storage + Metrics, K: Array, V: Array, T: Translator, D: Digest> {
     /// Database configuration.
-    pub db_config: Config<T>,
+    pub db_config: any::fixed::Config<T>,
 
     /// The [Any]'s log of operations. It has elements from `lower_bound` to `upper_bound`, inclusive.
     /// Reports `lower_bound` as its pruning boundary (oldest retained operation index).
@@ -47,7 +43,7 @@ pub struct SyncConfig<E: Storage + Metrics, K: Array, V: Array, T: Translator, D
     pub apply_batch_size: usize,
 }
 
-impl<E, K, V, H, T> adb::sync::Database for Any<E, K, V, H, T>
+impl<E, K, V, H, T> adb::sync::Database for any::fixed::Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -138,12 +134,12 @@ where
         // Build the snapshot from the log.
         let mut snapshot =
             Index::init(context.with_label("snapshot"), db_config.translator.clone());
-        let inactivity_floor_loc = Any::<E, K, V, H, T>::build_snapshot_from_log::<
+        let inactivity_floor_loc = any::fixed::Any::<E, K, V, H, T>::build_snapshot_from_log::<
             0, /* UNUSED_N */
         >(lower_bound, &log, &mut snapshot, None)
         .await?;
 
-        let mut db = Any {
+        let mut db = any::fixed::Any {
             mmr,
             log,
             snapshot,
@@ -158,7 +154,7 @@ where
 
     fn root(&self) -> Self::Digest {
         let mut standard_hasher = Standard::<H>::new();
-        Any::root(self, &mut standard_hasher)
+        any::fixed::Any::root(self, &mut standard_hasher)
     }
 
     async fn resize_journal(
