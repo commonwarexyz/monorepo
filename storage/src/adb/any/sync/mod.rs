@@ -85,10 +85,6 @@ where
         .await
     }
 
-    fn create_hasher() -> Standard<H> {
-        Standard::<H>::new()
-    }
-
     async fn from_sync_result(
         context: Self::Context,
         db_config: Self::Config,

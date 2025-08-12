@@ -118,10 +118,6 @@ where
         ))
     }
 
-    fn create_hasher() -> Standard<H> {
-        Standard::<H>::new()
-    }
-
     /// Returns a [super::Immutable] initialized data collected in the sync process.
     ///
     /// # Behavior

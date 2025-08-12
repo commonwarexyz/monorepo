@@ -28,10 +28,6 @@ pub trait Database: Sized {
         upper_bound: u64,
     ) -> impl Future<Output = Result<Self::Journal, <Self::Journal as Journal>::Error>>;
 
-    /// Create a verifier for proof validation  
-    /// Create a hasher instance for proof verification.
-    fn create_hasher() -> crate::mmr::hasher::Standard<Self::Hasher>;
-
     /// Build a database from a completed sync journal and configuration
     fn from_sync_result(
         context: Self::Context,

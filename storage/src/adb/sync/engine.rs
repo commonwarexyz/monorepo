@@ -1,9 +1,12 @@
 //! Core sync engine components that are shared across sync clients.
 
-use crate::adb::sync::{
-    requests::Requests,
-    resolver::{FetchResult, Resolver},
-    Database, Error, Journal, Target,
+use crate::{
+    adb::sync::{
+        requests::Requests,
+        resolver::{FetchResult, Resolver},
+        Database, Error, Journal, Target,
+    },
+    mmr::hasher,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
@@ -156,8 +159,6 @@ where
         .await
         .map_err(Error::database)?;
 
-        let hasher = DB::create_hasher();
-
         let mut engine = Self {
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
@@ -168,7 +169,7 @@ where
             apply_batch_size: config.apply_batch_size,
             journal,
             resolver: config.resolver.clone(),
-            hasher,
+            hasher: hasher::Standard::<DB::Hasher>::new(),
             context: config.context,
             config: config.db_config,
             update_receiver: config.update_receiver,
