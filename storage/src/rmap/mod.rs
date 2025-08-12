@@ -347,7 +347,7 @@ impl RMap {
     /// assert_eq!(map.missing_items(7, 10), vec![7, 8, 9]);
     ///
     /// // Starting from 11, there are no more ranges, so no gaps
-    /// assert_eq!(map.missing_items(11, 5), vec![]);
+    /// assert_eq!(map.missing_items(11, 5), Vec::<u64>::new());
     /// ```
     pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
         // Ensure input is valid
