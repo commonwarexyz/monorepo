@@ -711,9 +711,7 @@ where
     V: Array,
 {
     let start_pos = leaf_num_to_pos(start_loc);
-
     let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
-
     proof.verify_range_inclusion(hasher, &elements, start_pos, root)
 }
 

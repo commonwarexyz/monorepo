@@ -3,7 +3,7 @@ use crate::{
     index::Index,
     journal::fixed,
     mmr::{
-        hasher::Standard,
+        hasher::{self, Standard},
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
     },
     store::operation::Fixed,
@@ -116,7 +116,7 @@ where
             snapshot,
             inactivity_floor_loc,
             uncommitted_ops: 0,
-            hasher: Standard::<H>::new(),
+            hasher: hasher::Standard::<H>::new(),
             pruning_delay: db_config.pruning_delay,
         };
         db.sync().await?;
@@ -124,8 +124,7 @@ where
     }
 
     fn root(&self) -> Self::Digest {
-        let mut standard_hasher = Standard::<H>::new();
-        any::fixed::Any::root(self, &mut standard_hasher)
+        any::fixed::Any::root(self, &mut hasher::Standard::<H>::new())
     }
 
     async fn resize_journal(
