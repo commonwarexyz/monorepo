@@ -45,14 +45,21 @@ impl<B: Blob> Immutable<B> {
 
     /// Create a new [Immutable] wrapper with a specific pool ID.
     ///
-    /// This is used internally when converting from [Append] to reuse the same pool ID.
-    pub(crate) fn new_in_pool(blob: B, size: u64, id: u64, pool_ref: PoolRef) -> Self {
+    /// This is used internally when converting from [Append] to reuse the same
+    /// pool ID and avoid re-reading trailing bytes from disk.
+    pub(crate) fn new_in_pool(
+        blob: B,
+        size: u64,
+        id: u64,
+        pool_ref: PoolRef,
+        trailing: Vec<u8>,
+    ) -> Self {
         Self {
             blob,
             id,
             pool_ref,
             size,
-            trailing: Arc::new(RwLock::new(Vec::new())),
+            trailing: Arc::new(RwLock::new(trailing)),
         }
     }
 

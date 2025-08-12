@@ -168,12 +168,12 @@ impl<B: Blob> Append<B> {
     /// The caller *must* sync the [Append] before calling this conversion,
     /// otherwise any unflushed data in the write buffer will be lost.
     pub async fn into_immutable(self) -> Immutable<B> {
-        Immutable::new_in_pool(
-            self.blob,
-            self.buffer.read().await.1,
-            self.id,
-            self.pool_ref,
-        )
+        // After sync the append buffer contains only the trailing bytes.
+        let (buffer, blob_size) = &*self.buffer.read().await;
+        let trailing_size = blob_size.saturating_sub(buffer.offset) as usize;
+        let trailing = buffer.data[..trailing_size].to_vec();
+
+        Immutable::new_in_pool(self.blob, *blob_size, self.id, self.pool_ref, trailing)
     }
 
     /// Clones and returns the underlying blob.
