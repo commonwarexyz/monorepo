@@ -396,14 +396,17 @@ mod tests {
 
             // Test 7: Large gap scenario
             store.put(1000, FixedBytes::new([100u8; 32])).await.unwrap();
-            
+
             // Gap between 10 and 1000
             let items = store.missing_items(11, 10);
             assert_eq!(items, vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
-            
+
             // Request more items than available in gap
             let items = store.missing_items(990, 15);
-            assert_eq!(items, vec![990, 991, 992, 993, 994, 995, 996, 997, 998, 999]);
+            assert_eq!(
+                items,
+                vec![990, 991, 992, 993, 994, 995, 996, 997, 998, 999]
+            );
 
             // Test 8: After syncing (data should remain consistent)
             store.sync().await.unwrap();
@@ -412,8 +415,11 @@ mod tests {
 
             // Test 9: Cross-blob boundary scenario
             store.put(9999, FixedBytes::new([99u8; 32])).await.unwrap();
-            store.put(10001, FixedBytes::new([101u8; 32])).await.unwrap();
-            
+            store
+                .put(10001, FixedBytes::new([101u8; 32]))
+                .await
+                .unwrap();
+
             // Find missing items across blob boundary (10000 is the boundary)
             let items = store.missing_items(9998, 5);
             assert_eq!(items, vec![9998, 10000]);
