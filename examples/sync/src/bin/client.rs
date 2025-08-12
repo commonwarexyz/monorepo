@@ -39,7 +39,7 @@ struct Config {
     /// Server address to connect to.
     server: SocketAddr,
     /// Batch size for fetching operations.
-    batch_size: u64,
+    batch_size: NonZeroU64,
     /// Storage directory.
     storage_dir: String,
     /// Port on which metrics are exposed.
@@ -138,7 +138,7 @@ where
             sync::engine::Config::<any::Database<_>, Resolver<any::Operation, Digest>> {
                 context: context.clone(),
                 db_config,
-                fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
+                fetch_batch_size: config.batch_size,
                 target: initial_target,
                 resolver,
                 apply_batch_size: 1024,
@@ -196,7 +196,7 @@ where
             sync::engine::Config::<immutable::Database<_>, Resolver<immutable::Operation, Key>> {
                 context: context.clone(),
                 db_config,
-                fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
+                fetch_batch_size: config.batch_size,
                 target: initial_target,
                 resolver,
                 apply_batch_size: 1024,
