@@ -96,7 +96,7 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
     log_size: u64,
 
     /// The number of items to put in each section of the journal.
-    log_items_per_section: NonZeroU64,
+    log_items_per_section: u64,
 
     /// A fixed-length journal that maps an operation's location to its offset within its respective
     /// section of the log. (The section number is derived from location.)
@@ -182,7 +182,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             log_size,
             oldest_retained_loc,
             locations,
-            log_items_per_section: cfg.log_items_per_section,
+            log_items_per_section: cfg.log_items_per_section.get(),
             snapshot,
             hasher,
         })
@@ -249,7 +249,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             log_size,
             oldest_retained_loc,
             locations,
-            log_items_per_section: cfg.db_config.log_items_per_section,
+            log_items_per_section: cfg.db_config.log_items_per_section.get(),
             snapshot,
             hasher: Standard::<H>::new(),
         };
@@ -391,7 +391,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Returns the section of the log where we are currently writing new items.
     fn current_section(&self) -> u64 {
-        self.log_size / self.log_items_per_section.get()
+        self.log_size / self.log_items_per_section
     }
 
     /// Return the oldest location that remains retrievable.
@@ -413,9 +413,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // actual pruning boundary. This procedure ensures all log operations always have
         // corresponding MMR & location entries, even in the event of failures, with no need for
         // special recovery.
-        let section = loc / self.log_items_per_section.get();
+        let section = loc / self.log_items_per_section;
         self.log.prune(section).await?;
-        self.oldest_retained_loc = section * self.log_items_per_section.get();
+        self.oldest_retained_loc = section * self.log_items_per_section;
 
         // Prune the MMR & locations map up to the oldest retained item in the log after pruning.
         self.locations.prune(self.oldest_retained_loc).await?;
@@ -480,7 +480,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return Err(Error::OperationPruned(loc));
         }
 
-        let section = loc / self.log_items_per_section.get();
+        let section = loc / self.log_items_per_section;
         let Some(Variable::Set(k, v)) = self.log.get(section, offset).await? else {
             panic!("didn't find Set operation at location {loc} and offset {offset}");
         };
