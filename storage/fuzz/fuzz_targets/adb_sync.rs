@@ -6,7 +6,7 @@ use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
 use commonware_storage::{
     adb::{
         any::fixed::{Any, Config},
-        sync::{self, engine::EngineConfig, resolver::Resolver, Target},
+        sync,
     },
     mmr::hasher::Standard,
     store::operation::Fixed,
@@ -55,11 +55,14 @@ fn test_config(test_name: &str, pruning_delay: u64) -> Config<TwoCap> {
 }
 
 async fn test_sync<
-    R: Resolver<Digest = commonware_cryptography::sha256::Digest, Op = Fixed<Key, Value>>,
+    R: sync::resolver::Resolver<
+        Digest = commonware_cryptography::sha256::Digest,
+        Op = Fixed<Key, Value>,
+    >,
 >(
     context: deterministic::Context,
     resolver: R,
-    target: Target<commonware_cryptography::sha256::Digest>,
+    target: sync::Target<commonware_cryptography::sha256::Digest>,
     fetch_batch_size: u64,
     test_name: &str,
     pruning_delay: u64,
@@ -67,16 +70,17 @@ async fn test_sync<
     let db_config = test_config(test_name, pruning_delay);
     let expected_root = target.root;
 
-    let sync_config: EngineConfig<Any<_, Key, Value, Sha256, TwoCap>, R> = EngineConfig {
-        context,
-        update_receiver: None,
-        db_config,
-        fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
-        target,
-        resolver,
-        apply_batch_size: 100,
-        max_outstanding_requests: 10,
-    };
+    let sync_config: sync::engine::EngineConfig<Any<_, Key, Value, Sha256, TwoCap>, R> =
+        sync::engine::EngineConfig {
+            context,
+            update_receiver: None,
+            db_config,
+            fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
+            target,
+            resolver,
+            apply_batch_size: 100,
+            max_outstanding_requests: 10,
+        };
 
     if let Ok(synced) = sync::sync(sync_config).await {
         let mut hasher = Standard::<Sha256>::new();
@@ -132,7 +136,7 @@ fn fuzz(input: FuzzInput) {
                         .expect("Commit before sync should not fail");
 
                     let mut hasher = Standard::<Sha256>::new();
-                    let target = Target {
+                    let target = sync::Target {
                         root: src.root(&mut hasher),
                         lower_bound_ops: src.inactivity_floor_loc(),
                         upper_bound_ops: src.op_count() - 1,
