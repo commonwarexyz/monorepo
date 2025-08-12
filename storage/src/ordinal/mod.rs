@@ -394,11 +394,7 @@ mod tests {
             assert_eq!(store.missing_items(11, 5), Vec::<u64>::new());
             assert_eq!(store.missing_items(100, 10), Vec::<u64>::new());
 
-            // Test 7: Zero items requested
-            assert_eq!(store.missing_items(0, 0), Vec::<u64>::new());
-            assert_eq!(store.missing_items(3, 0), Vec::<u64>::new());
-
-            // Test 8: Large gap scenario
+            // Test 7: Large gap scenario
             store.put(1000, FixedBytes::new([100u8; 32])).await.unwrap();
             
             // Gap between 10 and 1000
@@ -409,12 +405,12 @@ mod tests {
             let items = store.missing_items(990, 15);
             assert_eq!(items, vec![990, 991, 992, 993, 994, 995, 996, 997, 998, 999]);
 
-            // Test 9: After syncing (data should remain consistent)
+            // Test 8: After syncing (data should remain consistent)
             store.sync().await.unwrap();
             assert_eq!(store.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
             assert_eq!(store.missing_items(3, 3), vec![3, 4, 7]);
 
-            // Test 10: Cross-blob boundary scenario
+            // Test 9: Cross-blob boundary scenario
             store.put(9999, FixedBytes::new([99u8; 32])).await.unwrap();
             store.put(10001, FixedBytes::new([101u8; 32])).await.unwrap();
             

@@ -351,47 +351,41 @@ impl RMap {
     /// ```
     pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
         assert!(max > 0, "max must be greater than 0");
+
         let mut missing = Vec::with_capacity(max);
         let mut current = start;
 
         while missing.len() < max {
             let (current_range_end, next_range_start) = self.next_gap(current);
-            match current_range_end {
-                Some(end) => {
-                    // We're in a range, skip to the end and move to the gap
-                    if end == u64::MAX {
-                        // No more gaps possible
-                        break;
-                    }
-                    current = end + 1;
+
+            // If we're inside a range, skip to just after it
+            if let Some(end) = current_range_end {
+                // Check if we can move past this range
+                if end == u64::MAX {
+                    break; // No gaps possible after u64::MAX
                 }
-                None => {
-                    // We're in a gap
-                    match next_range_start {
-                        Some(next_start) => {
-                            // Collect missing items up to the next range or until we have n items
-                            let gap_end = next_start.saturating_sub(1);
-                            let items_to_collect =
-                                (max - missing.len()).min((gap_end - current + 1) as usize);
-
-                            for i in 0..items_to_collect {
-                                missing.push(current + i as u64);
-                            }
-
-                            if missing.len() >= max {
-                                break;
-                            }
-
-                            // Move to the next range
-                            current = next_start;
-                        }
-                        None => {
-                            // No more ranges after this point, so no gaps to fill
-                            break;
-                        }
-                    }
-                }
+                current = end + 1;
+                continue;
             }
+
+            // We're in a gap - check if there's a next range
+            let Some(next_start) = next_range_start else {
+                break; // No more ranges, so no more gaps to fill
+            };
+
+            // Calculate how many items to collect from this gap
+            let gap_end = next_start - 1;
+            let remaining_needed = max - missing.len();
+            
+            // Safely compute gap size, capping at remaining_needed to avoid overflow
+            let gap_size = gap_end.saturating_sub(current).saturating_add(1);
+            let items_to_collect = remaining_needed.min(gap_size.try_into().unwrap_or(remaining_needed));
+
+            // Collect items from this gap
+            missing.extend((0..items_to_collect).map(|i| current + i as u64));
+
+            // Move to the start of the next range to check for more gaps
+            current = next_start;
         }
 
         missing
