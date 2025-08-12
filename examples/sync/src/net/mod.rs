@@ -1,16 +1,21 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{DecodeExt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use std::mem::size_of;
 
 /// Maximum message size in bytes (10MB).
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
 pub mod request_id;
-pub use request_id::{Generator, RequestId};
+pub use request_id::RequestId;
 pub mod io;
 pub mod resolver;
 pub mod wire;
 pub use resolver::Resolver;
+
+/// A message that can be sent over the wire.
+pub(super) trait Message: Encode + DecodeExt<()> + Sized + Send + Sync + 'static {
+    fn request_id(&self) -> RequestId;
+}
 
 /// Error codes for protocol errors.
 #[derive(Debug, Clone)]
@@ -62,7 +67,7 @@ impl Read for ErrorCode {
     }
 }
 
-/// Error response shared by Any/Immutable protocols.
+/// Error from the server.
 #[derive(Debug, Clone)]
 pub struct ErrorResponse {
     /// Unique identifier matching the original request.
@@ -95,7 +100,6 @@ impl Read for ErrorResponse {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let request_id = RequestId::read_cfg(buf, &())?;
         let error_code = ErrorCode::read(buf)?;
-        // Read string as Vec<u8> and convert to String
         let message_bytes = Vec::<u8>::read_range(buf, 0..=MAX_MESSAGE_SIZE)?;
         let message = String::from_utf8(message_bytes)
             .map_err(|_| Error::Invalid("ErrorResponse", "invalid UTF-8 in message"))?;
@@ -105,12 +109,6 @@ impl Read for ErrorResponse {
             message,
         })
     }
-}
-
-/// A message that can be sent over the wire.
-pub trait WireMessage: Encode + Sized + Send + Sync + 'static {
-    fn request_id(&self) -> RequestId;
-    fn decode_from(bytes: &[u8]) -> Result<Self, Error>;
 }
 
 #[cfg(test)]

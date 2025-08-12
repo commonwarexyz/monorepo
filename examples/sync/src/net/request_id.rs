@@ -32,7 +32,7 @@ impl Generator {
 
 #[cfg(test)]
 mod tests {
-    use crate::net::Generator;
+    use super::Generator;
 
     #[test]
     fn test_request_id_generation() {

@@ -1,7 +1,5 @@
 //! Any database types and helpers for the sync example.
 
-use std::future::Future;
-
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_runtime::{buffer, Clock, Metrics, Storage};
@@ -11,6 +9,7 @@ use commonware_storage::{
     store::operation,
 };
 use commonware_utils::{NZUsize, NZU64};
+use std::future::Future;
 
 /// Database type alias.
 pub type Database<E> = fixed::Any<E, Key, Value, Hasher, Translator>;

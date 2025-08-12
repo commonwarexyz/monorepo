@@ -1,5 +1,5 @@
 use crate::{
-    net::{request_id::RequestId, WireMessage, MAX_MESSAGE_SIZE},
+    net::{request_id::RequestId, Message, MAX_MESSAGE_SIZE},
     Error,
 };
 use commonware_macros::select;
@@ -14,9 +14,9 @@ use std::collections::HashMap;
 const REQUEST_BUFFER_SIZE: usize = 64;
 
 /// A request and callback for a response.
-pub struct Request<M: WireMessage> {
-    pub request: M,
-    pub response_tx: oneshot::Sender<Result<M, Error>>,
+pub(super) struct Request<M: Message> {
+    pub(super) request: M,
+    pub(super) response_tx: oneshot::Sender<Result<M, Error>>,
 }
 
 /// Run the I/O loop which:
@@ -30,7 +30,7 @@ async fn run_loop<Si, St, M>(
 ) where
     Si: Sink,
     St: Stream,
-    M: WireMessage,
+    M: Message,
 {
     loop {
         select! {
@@ -53,7 +53,7 @@ async fn run_loop<Si, St, M>(
             incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
                 match incoming {
                     Ok(response_data) => {
-                        match M::decode_from(&response_data[..]) {
+                        match M::decode(&response_data[..]) {
                             Ok(message) => {
                                 let request_id = message.request_id();
                                 if let Some(sender) = pending_requests.remove(&request_id) {
@@ -78,7 +78,7 @@ async fn run_loop<Si, St, M>(
 /// Starts the I/O task and returns a sender for requests and a handle to the task.
 /// The I/O task is responsible for sending and receiving messages over the network.
 /// The I/O task uses a oneshot channel to send responses back to the caller.
-pub fn run<E, Si, St, M>(
+pub(super) fn run<E, Si, St, M>(
     context: E,
     sink: Si,
     stream: St,
@@ -87,7 +87,7 @@ where
     E: Spawner,
     Si: Sink,
     St: Stream,
-    M: WireMessage,
+    M: Message,
 {
     let (request_tx, request_rx) = mpsc::channel(REQUEST_BUFFER_SIZE);
     let handle = context.spawn(move |_| run_loop(sink, stream, request_rx, HashMap::new()));

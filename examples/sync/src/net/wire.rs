@@ -1,7 +1,7 @@
-use crate::net::{ErrorResponse, RequestId, WireMessage};
+use crate::net::{ErrorResponse, RequestId};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    DecodeExt, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::Digest;
 use commonware_storage::{adb::sync::Target, mmr::verification::Proof};
@@ -74,16 +74,13 @@ where
     }
 }
 
-impl<Op, D> WireMessage for Message<Op, D>
+impl<Op, D> super::Message for Message<Op, D>
 where
     Op: Encode + Read<Cfg = ()> + Send + Sync + 'static,
     D: Digest,
 {
     fn request_id(&self) -> RequestId {
         self.request_id()
-    }
-    fn decode_from(bytes: &[u8]) -> Result<Self, commonware_codec::Error> {
-        Self::decode(bytes)
     }
 }
 
