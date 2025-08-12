@@ -25,7 +25,7 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(500_000);
 const PARTITION_SUFFIX: &str = "store_bench_partition";
 
 /// Use a "prod sized" page size to test the performance of the journal.
-const PAGE_SIZE: NonZeroUsize = NZUsize!(16384);
+const PAGE_SIZE: NonZeroUsize = NZUsize!(16_384);
 
 /// The number of pages to cache in the buffer pool.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);

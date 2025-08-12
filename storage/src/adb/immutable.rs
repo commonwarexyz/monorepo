@@ -148,6 +148,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 partition: cfg.log_journal_partition,
                 compression: cfg.log_compression,
                 codec_config: cfg.log_codec_config,
+                buffer_pool: cfg.buffer_pool.clone(),
                 write_buffer: cfg.log_write_buffer,
             },
         )
@@ -159,7 +160,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 partition: cfg.locations_journal_partition,
                 items_per_blob: cfg.locations_items_per_blob,
                 write_buffer: cfg.log_write_buffer,
-                buffer_pool: cfg.buffer_pool.clone(),
+                buffer_pool: cfg.buffer_pool,
             },
         )
         .await?;

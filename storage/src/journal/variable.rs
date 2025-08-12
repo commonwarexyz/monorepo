@@ -77,7 +77,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic};
+//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
 //! use commonware_storage::journal::variable::{Journal, Config};
 //! use commonware_utils::NZUsize;
 //!
@@ -88,6 +88,7 @@
 //!         partition: "partition".to_string(),
 //!         compression: None,
 //!         codec_config: (),
+//!         buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
 //!         write_buffer: NZUsize!(1024 * 1024),
 //!     }).await.unwrap();
 //!
@@ -103,7 +104,7 @@ use super::Error;
 use bytes::BufMut;
 use commonware_codec::Codec;
 use commonware_runtime::{
-    buffer::{Read, Write},
+    buffer::{Append, PoolRef, Read},
     Blob, Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;
@@ -131,6 +132,9 @@ pub struct Config<C> {
     /// The codec configuration to use for encoding and decoding items.
     pub codec_config: C,
 
+    /// The buffer pool to use for caching data.
+    pub buffer_pool: PoolRef,
+
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
 }
@@ -157,7 +161,7 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
 
     oldest_allowed: Option<u64>,
 
-    blobs: BTreeMap<u64, Write<E::Blob>>,
+    blobs: BTreeMap<u64, Append<E::Blob>>,
 
     tracked: Gauge,
     synced: Counter,
@@ -188,7 +192,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 Err(_) => return Err(Error::InvalidBlobName(hex_name)),
             };
             debug!(section, blob = hex_name, size, "loaded section");
-            let blob = Write::new(blob, size, cfg.write_buffer);
+            let blob = Append::new(blob, size, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
             blobs.insert(section, blob);
         }
 
@@ -231,7 +235,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     async fn read(
         compressed: bool,
         cfg: &V::Cfg,
-        blob: &Write<E::Blob>,
+        blob: &Append<E::Blob>,
         offset: u32,
     ) -> Result<(u32, u32, V), Error> {
         // Read item size
@@ -279,7 +283,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Helper function to read an item from a [Read].
     async fn read_buffered(
-        reader: &mut Read<Write<E::Blob>>,
+        reader: &mut Read<Append<E::Blob>>,
         offset: u32,
         cfg: &V::Cfg,
         compressed: bool,
@@ -340,7 +344,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     async fn read_exact(
         compressed: bool,
         cfg: &V::Cfg,
-        blob: &Write<E::Blob>,
+        blob: &Append<E::Blob>,
         offset: u32,
         len: u32,
     ) -> Result<V, Error> {
@@ -550,25 +554,44 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             Entry::Vacant(entry) => {
                 let name = section.to_be_bytes();
                 let (blob, size) = self.context.open(&self.cfg.partition, &name).await?;
-                let blob = Write::new(blob, size, self.cfg.write_buffer);
+                let blob = Append::new(
+                    blob,
+                    size,
+                    self.cfg.write_buffer,
+                    self.cfg.buffer_pool.clone(),
+                )
+                .await?;
                 self.tracked.inc();
                 entry.insert(blob)
             }
         };
 
-        // Populate buffer
-        let mut buf = Vec::with_capacity(entry_len);
-        buf.put_u32(item_len);
-        buf.put_slice(&encoded);
-        let checksum = crc32fast::hash(&buf);
-        buf.put_u32(checksum);
-        assert_eq!(buf.len(), entry_len);
-
-        // Append item to blob
+        // Calculate alignment
         let cursor = blob.size().await;
         let offset = compute_next_offset(cursor)?;
         let aligned_cursor = offset as u64 * ITEM_ALIGNMENT;
-        blob.write_at(buf, aligned_cursor).await?;
+        let padding = (aligned_cursor - cursor) as usize;
+
+        // Populate buffer
+        let mut buf = Vec::with_capacity(padding + entry_len);
+
+        // Add padding bytes if necessary
+        if padding > 0 {
+            buf.resize(padding, 0);
+        }
+
+        // Add entry data
+        let entry_start = buf.len();
+        buf.put_u32(item_len);
+        buf.put_slice(&encoded);
+
+        // Calculate checksum only for the entry data (without padding)
+        let checksum = crc32fast::hash(&buf[entry_start..]);
+        buf.put_u32(checksum);
+        assert_eq!(buf[entry_start..].len(), entry_len);
+
+        // Append item to blob
+        blob.append(buf).await?;
         trace!(blob = section, offset, "appended item");
         Ok((offset, item_len))
     }
@@ -781,10 +804,15 @@ mod tests {
     use bytes::BufMut;
     use commonware_cryptography::hash;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, Error as RError, Runner, Storage};
+    use commonware_runtime::{
+        buffer::PoolRef, deterministic, Blob, Error as RError, Runner, Storage,
+    };
     use commonware_utils::{NZUsize, StableBuf};
     use futures::{pin_mut, StreamExt};
     use prometheus_client::registry::Metric;
+
+    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     #[test_traced]
     fn test_journal_append_and_read() {
@@ -798,6 +826,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let index = 1u64;
@@ -824,6 +853,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
@@ -867,6 +897,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -940,6 +971,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1038,6 +1070,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1069,6 +1102,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1121,6 +1155,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1177,6 +1212,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1243,6 +1279,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1323,6 +1360,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1493,6 +1531,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1626,6 +1665,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1763,6 +1803,7 @@ mod tests {
                 partition: "partition".to_string(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let context = MockStorage {
@@ -1790,6 +1831,7 @@ mod tests {
                 partition: "partition".to_string(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let context = MockStorage {
@@ -1814,6 +1856,7 @@ mod tests {
                 partition: "test_partition".to_string(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context, cfg).await.unwrap();
@@ -1868,6 +1911,7 @@ mod tests {
                 partition: "test_partition".to_string(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context, cfg).await.unwrap();
@@ -1925,6 +1969,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 

@@ -160,7 +160,6 @@ pub struct Config<T: Translator, C> {
     pub translator: T,
 
     /// The buffer pool to use for caching data.
-    // TODO: Use this for the variable journal as well (#1223)
     pub buffer_pool: PoolRef,
 }
 
@@ -229,6 +228,7 @@ where
                 partition: cfg.log_journal_partition,
                 compression: cfg.log_compression,
                 codec_config: cfg.log_codec_config,
+                buffer_pool: cfg.buffer_pool.clone(),
                 write_buffer: cfg.log_write_buffer,
             },
         )
@@ -240,7 +240,7 @@ where
                 partition: cfg.locations_journal_partition,
                 items_per_blob: cfg.locations_items_per_blob,
                 write_buffer: cfg.log_write_buffer,
-                buffer_pool: cfg.buffer_pool.clone(),
+                buffer_pool: cfg.buffer_pool,
             },
         )
         .await?;

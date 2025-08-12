@@ -1,6 +1,7 @@
 use super::types::{Activity, Context, Epoch};
 use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Signer};
+use commonware_runtime::buffer::PoolRef;
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the [super::Engine].
@@ -82,4 +83,7 @@ pub struct Config<
 
     /// Compression level for the journal.
     pub journal_compression: Option<u8>,
+
+    /// Buffer pool for the journal.
+    pub journal_buffer_pool: PoolRef,
 }

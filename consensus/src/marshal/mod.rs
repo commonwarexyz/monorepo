@@ -100,11 +100,15 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{self, Link, Network, Oracle};
     use commonware_resolver::p2p as resolver;
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU64};
     use governor::Quota;
     use rand::{seq::SliceRandom, Rng};
-    use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
+    use std::{
+        collections::BTreeMap,
+        num::{NonZeroU32, NonZeroUsize},
+        time::Duration,
+    };
 
     type D = Sha256Digest;
     type B = Block<D>;
@@ -112,6 +116,9 @@ mod tests {
     type V = MinPk;
     type Sh = Share;
     type E = PrivateKey;
+
+    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     const NAMESPACE: &[u8] = b"test";
     const NUM_VALIDATORS: u32 = 4;
@@ -147,6 +154,7 @@ mod tests {
             freezer_table_resize_chunk_size: 10,
             freezer_journal_target_size: 1024,
             freezer_journal_compression: None,
+            freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             immutable_items_per_section: NZU64!(10),
         };
 

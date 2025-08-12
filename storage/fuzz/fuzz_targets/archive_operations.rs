@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     archive::{
         prunable::{Archive, Config},
@@ -11,6 +11,7 @@ use commonware_storage::{
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
+use std::num::NonZeroUsize;
 
 type Key = FixedBytes<16>;
 type Value = FixedBytes<32>;
@@ -39,6 +40,9 @@ struct FuzzInput {
     operations: Vec<ArchiveOperation>,
 }
 
+const PAGE_SIZE: NonZeroUsize = NZUsize!(555);
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(100);
+
 fn fuzz(data: FuzzInput) {
     let runner = deterministic::Runner::default();
 
@@ -51,6 +55,7 @@ fn fuzz(data: FuzzInput) {
             replay_buffer: NZUsize!(1024*1024),
             compression: None,
             codec_config: (),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
 
         let mut archive = Archive::<_, _, Key, Value>::init(context.clone(), cfg.clone()).await.expect("init failed");

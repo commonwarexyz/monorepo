@@ -24,7 +24,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic};
+//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
 //! use commonware_cryptography::hash;
 //! use commonware_storage::{
 //!     archive::{
@@ -46,6 +46,7 @@
 //!         freezer_journal_partition: "journal".into(),
 //!         freezer_journal_target_size: 1024,
 //!         freezer_journal_compression: Some(3),
+//!         freezer_journal_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
 //!         ordinal_partition: "ordinal".into(),
 //!         items_per_section: NZU64!(1024),
 //!         write_buffer: NZUsize!(1024),
@@ -62,6 +63,7 @@
 //! });
 
 mod storage;
+use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 pub use storage::Archive;
 
@@ -92,6 +94,9 @@ pub struct Config<C> {
     /// The compression level to use for the archive's freezer journal.
     pub freezer_journal_compression: Option<u8>,
 
+    /// The buffer pool to use for the archive's freezer journal.
+    pub freezer_journal_buffer_pool: PoolRef,
+
     /// The partition to use for the archive's ordinal.
     pub ordinal_partition: String,
 
@@ -114,8 +119,11 @@ mod tests {
     use super::*;
     use crate::archive::Archive as ArchiveTrait;
     use commonware_cryptography::{hash, sha256::Digest};
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
     use commonware_utils::{NZUsize, NZU64};
+
+    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     #[test]
     fn test_unclean_shutdown() {
@@ -130,6 +138,7 @@ mod tests {
                 freezer_journal_partition: "test_journal2".into(),
                 freezer_journal_target_size: 1024 * 1024,
                 freezer_journal_compression: Some(3),
+                freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 ordinal_partition: "test_ordinal2".into(),
                 items_per_section: NZU64!(512),
                 write_buffer: NZUsize!(1024),

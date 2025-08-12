@@ -129,6 +129,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
                 journal_compression: cfg.freezer_journal_compression,
                 journal_write_buffer: cfg.write_buffer,
                 journal_target_size: cfg.freezer_journal_target_size,
+                journal_buffer_pool: cfg.freezer_journal_buffer_pool,
                 table_partition: cfg.freezer_table_partition,
                 table_initial_size: cfg.freezer_table_initial_size,
                 table_resize_frequency: cfg.freezer_table_resize_frequency,
