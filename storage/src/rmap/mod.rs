@@ -350,15 +350,15 @@ impl RMap {
     /// assert_eq!(map.missing_items(11, 5), vec![]);
     /// ```
     pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
+        // Ensure input is valid
         assert!(max > 0, "max must be greater than 0");
-
-        let mut missing = Vec::with_capacity(max);
         let mut current = start;
 
+        // Collect missing items
+        let mut missing = Vec::with_capacity(max);
         while missing.len() < max {
-            let (current_range_end, next_range_start) = self.next_gap(current);
-
             // If we're inside a range, skip to just after it
+            let (current_range_end, next_range_start) = self.next_gap(current);
             if let Some(end) = current_range_end {
                 // Check if we can move past this range
                 if end == u64::MAX {
@@ -381,7 +381,7 @@ impl RMap {
                     break;
                 }
             }
-            
+
             // Move to the start of the next range to check for more gaps
             current = next_start;
         }
