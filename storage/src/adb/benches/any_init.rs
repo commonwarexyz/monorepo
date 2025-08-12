@@ -24,7 +24,7 @@ const ITEMS_PER_BLOB: u64 = 500_000;
 const PARTITION_SUFFIX: &str = "any_bench_partition";
 
 /// Use a "prod sized" page size to test the performance of the journal.
-const PAGE_SIZE: usize = 16384;
+const PAGE_SIZE: usize = 16_384;
 
 /// The number of pages to cache in the buffer pool.
 const PAGE_CACHE_SIZE: usize = 10_000;

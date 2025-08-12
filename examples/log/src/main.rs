@@ -214,7 +214,7 @@ fn main() {
             max_participants: participants.len(),
             fetch_concurrent: 2,
             fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-            buffer_pool: PoolRef::new(NZUsize!(16384), NZUsize!(10_000)),
+            buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
         };
         let engine = simplex::Engine::new(context.with_label("engine"), cfg);
 
