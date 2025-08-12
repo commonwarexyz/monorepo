@@ -276,6 +276,10 @@ impl RMap {
     /// - The first element (`current_range_end`) is `Some(end)` of the range that contains `value`. It's `None` if `value` is before all ranges, the map is empty, or `value` is not in any range.
     /// - The second element (`next_range_start`) is `Some(start)` of the first range that begins strictly after `value`. It's `None` if no range starts after `value` or the map is empty.
     ///
+    /// # Complexity
+    ///
+    /// O(log N) where N is the number of ranges in [RMap].
+    ///
     /// # Example
     ///
     /// ```
@@ -326,6 +330,12 @@ impl RMap {
     /// A vector containing up to `max` missing indices from gaps between ranges.
     /// The vector may contain fewer than `max` items if there aren't enough gaps.
     /// If there are no more ranges after the current position, no items are returned.
+    ///
+    /// # Complexity
+    ///
+    /// O(G log N + M) where N is the number of ranges in [RMap], G is the number of gaps
+    /// visited (at most N), and M is the number of missing items returned (at most `max`).
+    /// Each gap requires a `next_gap` call (O(log N)) and collecting items (O(items in gap)).
     ///
     /// # Example
     ///
