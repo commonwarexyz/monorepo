@@ -1,7 +1,7 @@
 use crate::net::{ErrorResponse, RequestId};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    DecodeExt, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::Digest;
 use commonware_storage::{adb::sync::Target, mmr::verification::Proof};
@@ -76,7 +76,7 @@ where
 
 impl<Op, D> super::Message for Message<Op, D>
 where
-    Op: Encode + Read<Cfg = ()> + Send + Sync + 'static,
+    Op: Encode + DecodeExt<()> + Send + Sync + 'static,
     D: Digest,
 {
     fn request_id(&self) -> RequestId {

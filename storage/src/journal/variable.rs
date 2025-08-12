@@ -224,24 +224,43 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Initialize a Variable journal for use in state sync.
     ///
-    /// When opened in this mode, we attempt to configure the journal within the given operation range
-    /// with persisted data. The bounds are operation locations (not section numbers).
-    /// If the journal is empty, we create a fresh journal ready to accept operations starting from the lower bound.
-    /// If the journal has existing data, we prune sections before the lower bound and rewind sections beyond the upper bound.
+    /// The bounds are logical operation locations (not section numbers). This function prepares the
+    /// on-disk journal so that subsequent appends go to the correct physical location for the
+    /// requested logical range.
+    ///
+    /// Behavior by existing on-disk state:
+    /// - Fresh (no data): returns an empty journal with no sections created. No pruning is applied
+    ///   (`oldest_allowed == None`). The caller may begin appending at `lower_bound / items_per_section`.
+    /// - Stale (all data strictly before `lower_bound`): destroys existing blobs and returns a fresh
+    ///   journal (same result as the fresh case above).
+    /// - Overlap within [`lower_bound`, `upper_bound`]:
+    ///   - Prunes sections strictly below `lower_bound / items_per_section` (section-aligned).
+    ///   - Removes any sections strictly greater than `upper_bound / items_per_section`.
+    ///   - Truncates the final retained section so that no operation with logical location greater
+    ///     than `upper_bound` remains physically present (intra-section truncation at an exact item
+    ///     boundary).
+    ///
+    /// Notes that pruning is section-aligned. This means the first retained section may still
+    /// contain operations whose logical locations are < `lower_bound`. Callers must ignore those
+    /// when computing logical size. Intra-section truncation is only applied to the upper section.
     ///
     /// # Arguments
-    /// * `context` - The storage context
-    /// * `cfg` - Configuration for the journal  
-    /// * `lower_bound` - The first operation location to retain (inclusive)
-    /// * `upper_bound` - The last operation location to retain (inclusive)
-    /// * `items_per_section` - Number of operations per section (from database config)
+    /// - `context`: storage context
+    /// - `cfg`: journal configuration
+    /// - `lower_bound`: first operation location to retain (inclusive)
+    /// - `upper_bound`: last operation location to retain (inclusive)
+    /// - `items_per_section`: number of operations per section
     ///
     /// # Returns
-    /// A journal configured for the specified sync range
+    /// A journal whose sections satisfy:
+    /// - No section index < `lower_bound / items_per_section` exists.
+    /// - No section index > `upper_bound / items_per_section` exists.
+    /// - The last retained section is truncated so that its last item’s logical location is
+    ///   `<= upper_bound`.
     ///
     /// # Invariants
-    /// The returned journal will be ready to accept operations starting from any location >= lower_bound
-    /// and <= upper_bound + 1.
+    /// The returned journal can accept further appends at the logical next location within
+    /// [`lower_bound`, `upper_bound`].
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config<V::Cfg>,
