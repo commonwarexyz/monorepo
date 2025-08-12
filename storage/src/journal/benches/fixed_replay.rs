@@ -5,16 +5,19 @@ use commonware_runtime::{
     Runner as _,
 };
 use commonware_storage::journal::fixed::Journal;
-use commonware_utils::{sequence::FixedBytes, NZUsize};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use criterion::{black_box, criterion_group, Criterion};
 use futures::{pin_mut, StreamExt};
-use std::time::{Duration, Instant};
+use std::{
+    num::NonZeroU64,
+    time::{Duration, Instant},
+};
 
 /// Partition name to use in the journal config.
 const PARTITION: &str = "test_partition";
 
 /// Value of items_per_blob to use in the journal config.
-const ITEMS_PER_BLOB: u64 = 100_000;
+const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(100_000);
 
 /// Size of each journal item in bytes.
 const ITEM_SIZE: usize = 32;

@@ -5,6 +5,7 @@ use commonware_cryptography::{
     Digest, Signer,
 };
 use commonware_p2p::Blocker;
+use commonware_runtime::buffer::PoolRef;
 use governor::Quota;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -63,6 +64,9 @@ pub struct Config<
 
     /// The size of the write buffer to use for each blob in the journal.
     pub write_buffer: NonZeroUsize,
+
+    /// Buffer pool for the journal.
+    pub buffer_pool: PoolRef,
 
     /// Amount of time to wait for a leader to propose a payload
     /// in a view.

@@ -23,6 +23,7 @@ use commonware_p2p::{
     Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
+    buffer::PoolRef,
     telemetry::metrics::{
         histogram,
         status::{CounterExt, Status},
@@ -153,6 +154,9 @@ pub struct Engine<
     // Compression level for the journal.
     journal_compression: Option<u8>,
 
+    // Buffer pool for the journal.
+    journal_buffer_pool: PoolRef,
+
     // A map of sequencer public keys to their journals.
     #[allow(clippy::type_complexity)]
     journals: BTreeMap<C::PublicKey, Journal<E, Node<C::PublicKey, V, D>>>,
@@ -243,6 +247,7 @@ impl<
             journal_write_buffer: cfg.journal_write_buffer,
             journal_name_prefix: cfg.journal_name_prefix,
             journal_compression: cfg.journal_compression,
+            journal_buffer_pool: cfg.journal_buffer_pool,
             journals: BTreeMap::new(),
             tip_manager: TipManager::<C::PublicKey, V, D>::new(),
             ack_manager: AckManager::<C::PublicKey, V, D>::new(),
@@ -963,6 +968,7 @@ impl<
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
             compression: self.journal_compression,
             codec_config: (),
+            buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };
         let journal =

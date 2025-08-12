@@ -1381,7 +1381,7 @@ mod tests {
                 context.clone(),
                 journal::fixed::Config {
                     partition: "sync_basic_log".into(),
-                    items_per_blob: 1000,
+                    items_per_blob: NZU64!(1000),
                     write_buffer: NZUsize!(1024),
                     buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 },
@@ -1458,7 +1458,7 @@ mod tests {
                 context.clone().with_label("ops_log"),
                 JConfig {
                     partition: format!("ops_log_{}", context.next_u64()),
-                    items_per_blob: 1024,
+                    items_per_blob: NZU64!(1024),
                     write_buffer: NZUsize!(64),
                     buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                 },
@@ -1550,7 +1550,7 @@ mod tests {
                     context.clone().with_label("boundary_log"),
                     JConfig {
                         partition: format!("boundary_log_{}_{}", lower_bound, context.next_u64()),
-                        items_per_blob: 1024,
+                        items_per_blob: NZU64!(1024),
                         write_buffer: NZUsize!(64),
                         buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
                     },

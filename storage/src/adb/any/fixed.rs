@@ -29,7 +29,7 @@ use futures::{
     future::{try_join_all, TryFutureExt},
     pin_mut, try_join, StreamExt,
 };
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
 /// Indicator that the generic parameter N is unused by the call. N is only
@@ -47,7 +47,7 @@ pub struct Config<T: Translator> {
     pub mmr_journal_partition: String,
 
     /// The items per blob configuration value used by the MMR journal.
-    pub mmr_items_per_blob: u64,
+    pub mmr_items_per_blob: NonZeroU64,
 
     /// The size of the write buffer to use for each blob in the MMR journal.
     pub mmr_write_buffer: NonZeroUsize,
@@ -59,7 +59,7 @@ pub struct Config<T: Translator> {
     pub log_journal_partition: String,
 
     /// The items per blob configuration value used by the log journal.
-    pub log_items_per_blob: u64,
+    pub log_items_per_blob: NonZeroU64,
 
     /// The size of the write buffer to use for each blob in the log journal.
     pub log_write_buffer: NonZeroUsize,
@@ -729,6 +729,7 @@ pub(super) mod test {
         deterministic::{self, Context},
         Runner as _,
     };
+    use commonware_utils::NZU64;
     use rand::{
         rngs::{OsRng, StdRng},
         RngCore, SeedableRng,
@@ -743,10 +744,10 @@ pub(super) mod test {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
-            mmr_items_per_blob: 11,
+            mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: format!("log_journal_{suffix}"),
-            log_items_per_blob: 7,
+            log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
             thread_pool: None,
@@ -769,10 +770,10 @@ pub(super) mod test {
         Config {
             mmr_journal_partition: format!("mmr_journal_{seed}"),
             mmr_metadata_partition: format!("mmr_metadata_{seed}"),
-            mmr_items_per_blob: 1024,
+            mmr_items_per_blob: NZU64!(1024),
             mmr_write_buffer: NZUsize!(64),
             log_journal_partition: format!("log_journal_{seed}"),
-            log_items_per_blob: 1024,
+            log_items_per_blob: NZU64!(1024),
             log_write_buffer: NZUsize!(64),
             translator: TwoCap,
             thread_pool: None,

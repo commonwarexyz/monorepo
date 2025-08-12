@@ -11,6 +11,7 @@ use crate::{adb::sync, journal::variable, store::operation::Variable};
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;
+use std::num::NonZeroU64;
 
 /// Wraps a [variable::Journal] to provide a sync-compatible interface.
 /// Namely, it provides a `size` method that returns the number of operations in the journal,
@@ -26,7 +27,7 @@ where
     inner: variable::Journal<E, Variable<K, V>>,
 
     /// Logical operations per storage section.
-    items_per_section: u64,
+    items_per_section: NonZeroU64,
 
     /// Logical next append location (number of ops present).
     /// Invariant: computed by caller so `lower_bound <= size <= upper_bound + 1`.
@@ -48,7 +49,7 @@ where
     /// * `size` - Logical next append location to report.
     pub fn new(
         inner: variable::Journal<E, Variable<K, V>>,
-        items_per_section: u64,
+        items_per_section: NonZeroU64,
         size: u64,
     ) -> Self {
         Self {

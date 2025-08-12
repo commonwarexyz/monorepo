@@ -11,7 +11,7 @@ use commonware_storage::{
     mmr::{hasher::Standard, verification::Proof},
     store::operation,
 };
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, NZU64};
 use std::future::Future;
 
 /// Database type alias.
@@ -25,15 +25,15 @@ pub fn create_config() -> Config<Translator, ()> {
     Config {
         mmr_journal_partition: "mmr_journal".into(),
         mmr_metadata_partition: "mmr_metadata".into(),
-        mmr_items_per_blob: 4096,
+        mmr_items_per_blob: NZU64!(4096),
         mmr_write_buffer: NZUsize!(1024),
         log_journal_partition: "log_journal".into(),
-        log_items_per_section: 512,
+        log_items_per_section: NZU64!(512),
         log_compression: None,
         log_codec_config: (),
         log_write_buffer: NZUsize!(1024),
         locations_journal_partition: "locations_journal".into(),
-        locations_items_per_blob: 4096,
+        locations_items_per_blob: NZU64!(4096),
         translator: commonware_storage::translator::EightCap,
         thread_pool: None,
         buffer_pool: commonware_runtime::buffer::PoolRef::new(NZUsize!(1024), NZUsize!(10)),

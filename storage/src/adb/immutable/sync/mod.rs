@@ -11,8 +11,9 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{Array, NZUsize, NZU64};
+use commonware_utils::{Array, NZUsize};
 use futures::{pin_mut, StreamExt};
+use std::num::NonZeroU64;
 
 mod journal;
 
@@ -22,7 +23,7 @@ pub type Error = crate::adb::Error;
 // counting only items whose logical location is within [lower_bound, upper_bound].
 async fn compute_size<E, K, V>(
     journal: &variable::Journal<E, Variable<K, V>>,
-    items_per_section: u64,
+    items_per_section: NonZeroU64,
     lower_bound: u64,
     upper_bound: u64,
 ) -> Result<u64, crate::journal::Error>
@@ -31,6 +32,7 @@ where
     K: Array,
     V: Codec,
 {
+    let items_per_section = items_per_section.get();
     let mut size = lower_bound;
     let mut current_section: Option<u64> = None;
     let mut index_in_section: u64 = 0;
@@ -92,10 +94,11 @@ where
                 compression: config.log_compression,
                 codec_config: config.log_codec_config.clone(),
                 write_buffer: config.log_write_buffer,
+                buffer_pool: config.buffer_pool.clone(),
             },
             lower_bound_loc,
             upper_bound_loc,
-            NZU64!(config.log_items_per_section),
+            config.log_items_per_section,
         )
         .await?;
 
@@ -180,8 +183,8 @@ where
             let mut variable_journal = journal.into_inner();
 
             // Use Variable journal's section-based pruning
-            let items_per_section = NZU64!(config.log_items_per_section);
-            let lower_section = lower_bound / items_per_section.get();
+            let items_per_section = config.log_items_per_section.get();
+            let lower_section = lower_bound / items_per_section;
             variable_journal
                 .prune(lower_section)
                 .await
@@ -286,12 +289,12 @@ mod tests {
     fn create_sync_config(suffix: &str) -> immutable::Config<crate::translator::TwoCap, ()> {
         const PAGE_SIZE: NonZeroUsize = NZUsize!(77);
         const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
-        const ITEMS_PER_SECTION: u64 = 5;
+        const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
         immutable::Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
-            mmr_items_per_blob: 11,
+            mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: format!("log_journal_{suffix}"),
             log_items_per_section: ITEMS_PER_SECTION,
@@ -299,7 +302,7 @@ mod tests {
             log_codec_config: (),
             log_write_buffer: NZUsize!(1024),
             locations_journal_partition: format!("locations_journal_{suffix}"),
-            locations_items_per_blob: 7,
+            locations_items_per_blob: NZU64!(7),
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),

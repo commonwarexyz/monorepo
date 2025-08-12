@@ -541,6 +541,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
             compression: config.journal_compression,
             codec_config: config.codec_config,
             write_buffer: config.journal_write_buffer,
+            buffer_pool: config.journal_buffer_pool,
         };
         let mut journal = Journal::init(context.clone(), journal_config).await?;
 

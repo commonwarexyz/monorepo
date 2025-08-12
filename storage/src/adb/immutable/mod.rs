@@ -22,7 +22,7 @@ use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::{sequence::U32, Array, NZUsize};
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
 pub mod sync;
@@ -57,7 +57,7 @@ pub struct Config<T: Translator, C> {
     pub mmr_journal_partition: String,
 
     /// The items per blob configuration value used by the MMR journal.
-    pub mmr_items_per_blob: u64,
+    pub mmr_items_per_blob: NonZeroU64,
 
     /// The size of the write buffer to use for each blob in the MMR journal.
     pub mmr_write_buffer: NonZeroUsize,
@@ -78,13 +78,13 @@ pub struct Config<T: Translator, C> {
     pub log_codec_config: C,
 
     /// The number of items to put in each section of the journal.
-    pub log_items_per_section: u64,
+    pub log_items_per_section: NonZeroU64,
 
     /// The name of the [RStorage] partition used for the location map.
     pub locations_journal_partition: String,
 
     /// The number of items to put in each blob in the location map.
-    pub locations_items_per_blob: u64,
+    pub locations_items_per_blob: NonZeroU64,
 
     /// The translator used by the compressed index.
     pub translator: T,
@@ -117,7 +117,7 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
     log_size: u64,
 
     /// The number of items to put in each section of the journal.
-    log_items_per_section: u64,
+    log_items_per_section: NonZeroU64,
 
     /// A fixed-length journal that maps an operation's location to its offset within its respective
     /// section of the log. (The section number is derived from location.)
@@ -168,6 +168,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 partition: cfg.log_journal_partition,
                 compression: cfg.log_compression,
                 codec_config: cfg.log_codec_config,
+                buffer_pool: cfg.buffer_pool.clone(),
                 write_buffer: cfg.log_write_buffer,
             },
         )
@@ -179,7 +180,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 partition: cfg.locations_journal_partition,
                 items_per_blob: cfg.locations_items_per_blob,
                 write_buffer: cfg.log_write_buffer,
-                buffer_pool: cfg.buffer_pool.clone(),
+                buffer_pool: cfg.buffer_pool,
             },
         )
         .await?;
@@ -196,7 +197,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let db = Immutable {
+        Ok(Immutable {
             mmr,
             log,
             log_size,
@@ -205,9 +206,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             log_items_per_section: cfg.log_items_per_section,
             snapshot,
             hasher,
-        };
-
-        Ok(db)
+        })
     }
 
     /// Returns an [Immutable] initialized from sync data in `cfg` for use in state sync.
@@ -308,7 +307,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// equal.
     pub(super) async fn build_snapshot_from_log(
         hasher: &mut Standard<H>,
-        log_items_per_section: u64,
+        log_items_per_section: NonZeroU64,
         mmr: &mut Mmr<E, H>,
         log: &mut VJournal<E, Variable<K, V>>,
         locations: &mut FJournal<E, U32>,
@@ -354,7 +353,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     }
                     Ok((section, offset, _, op)) => {
                         if oldest_retained_loc.is_none() {
-                            log_size = section * log_items_per_section;
+                            log_size = section * log_items_per_section.get();
                             oldest_retained_loc = Some(log_size);
                         }
                         let loc = log_size; // location of the current operation.
@@ -362,7 +361,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
                         // Consistency check: confirm the provided section matches what we expect from this operation's
                         // index.
-                        let expected = loc / log_items_per_section;
+                        let expected = loc / log_items_per_section.get();
                         assert_eq!(section, expected,
                                 "section {section} did not match expected session {expected} from location {loc}");
 
@@ -403,7 +402,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 op_count = uncommitted_ops.len(),
                 "rewinding over uncommitted operations at end of log"
             );
-            let new_last_section = end_loc / log_items_per_section;
+            let new_last_section = end_loc / log_items_per_section.get();
             log.rewind_to_offset(new_last_section, end_offset).await?;
             log.sync(new_last_section).await?;
             log_size = end_loc;
@@ -427,7 +426,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Returns the section of the log where we are currently writing new items.
     fn current_section(&self) -> u64 {
-        self.log_size / self.log_items_per_section
+        self.log_size / self.log_items_per_section.get()
     }
 
     /// Return the oldest location that remains retrievable.
@@ -449,9 +448,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // actual pruning boundary. This procedure ensures all log operations always have
         // corresponding MMR & location entries, even in the event of failures, with no need for
         // special recovery.
-        let section = loc / self.log_items_per_section;
+        let section = loc / self.log_items_per_section.get();
         self.log.prune(section).await?;
-        self.oldest_retained_loc = section * self.log_items_per_section;
+        self.oldest_retained_loc = section * self.log_items_per_section.get();
 
         // Prune the MMR & locations map up to the oldest retained item in the log after pruning.
         self.locations.prune(self.oldest_retained_loc).await?;
@@ -516,7 +515,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return Err(Error::OperationPruned(loc));
         }
 
-        let section = loc / self.log_items_per_section;
+        let section = loc / self.log_items_per_section.get();
         let Some(Variable::Set(k, v)) = self.log.get(section, offset).await? else {
             panic!("didn't find Set operation at location {loc} and offset {offset}");
         };
@@ -748,7 +747,7 @@ pub(super) mod test {
         deterministic::{self},
         Runner as _,
     };
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, NZU64};
 
     const PAGE_SIZE: usize = 77;
     const PAGE_CACHE_SIZE: usize = 9;
@@ -758,15 +757,15 @@ pub(super) mod test {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
-            mmr_items_per_blob: 11,
+            mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: format!("log_journal_{suffix}"),
-            log_items_per_section: ITEMS_PER_SECTION,
+            log_items_per_section: NZU64!(ITEMS_PER_SECTION),
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             log_write_buffer: NZUsize!(1024),
             locations_journal_partition: format!("locations_journal_{suffix}"),
-            locations_items_per_blob: 7,
+            locations_items_per_blob: NZU64!(7),
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),

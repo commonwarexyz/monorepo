@@ -17,6 +17,7 @@ use commonware_p2p::{
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
+    buffer::PoolRef,
     telemetry::metrics::{
         histogram,
         status::{CounterExt, Status},
@@ -142,6 +143,7 @@ pub struct Engine<
     journal_replay_buffer: NonZeroUsize,
     journal_heights_per_section: u64,
     journal_compression: Option<u8>,
+    journal_buffer_pool: PoolRef,
 
     // ---------- Network ----------
     /// Whether to send acks as priority messages.
@@ -202,6 +204,7 @@ impl<
             journal_replay_buffer: cfg.journal_replay_buffer,
             journal_heights_per_section: cfg.journal_heights_per_section.into(),
             journal_compression: cfg.journal_compression,
+            journal_buffer_pool: cfg.journal_buffer_pool,
             priority_acks: cfg.priority_acks,
             _phantom: PhantomData,
             metrics,
@@ -235,6 +238,7 @@ impl<
             partition: self.journal_partition.clone(),
             compression: self.journal_compression,
             codec_config: (),
+            buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };
         let journal = Journal::init(self.context.with_label("journal"), journal_cfg)

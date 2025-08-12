@@ -8,7 +8,7 @@ use commonware_storage::{
     mmr::{hasher::Standard, verification::Proof},
     store::operation,
 };
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, NZU64};
 
 /// Database type alias.
 pub type Database<E> = fixed::Any<E, Key, Value, Hasher, Translator>;
@@ -21,10 +21,10 @@ pub fn create_config() -> fixed::Config<Translator> {
     fixed::Config {
         mmr_journal_partition: "mmr_journal".into(),
         mmr_metadata_partition: "mmr_metadata".into(),
-        mmr_items_per_blob: 4096,
+        mmr_items_per_blob: NZU64!(4096),
         mmr_write_buffer: NZUsize!(1024),
         log_journal_partition: "log_journal".into(),
-        log_items_per_blob: 4096,
+        log_items_per_blob: NZU64!(4096),
         log_write_buffer: NZUsize!(1024),
         translator: Translator::default(),
         thread_pool: None,

@@ -26,6 +26,7 @@ use commonware_p2p::{
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
+    buffer::PoolRef,
     telemetry::metrics::histogram::{self, Buckets},
     Clock, Handle, Metrics, Spawner, Storage,
 };
@@ -452,6 +453,7 @@ pub struct Actor<
     compression: Option<u8>,
     replay_buffer: NonZeroUsize,
     write_buffer: NonZeroUsize,
+    buffer_pool: PoolRef,
     journal: Option<Journal<E, Voter<V, D>>>,
 
     genesis: Option<D>,
@@ -559,6 +561,7 @@ impl<
                 compression: cfg.compression,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
+                buffer_pool: cfg.buffer_pool,
                 journal: None,
 
                 genesis: None,
@@ -1673,6 +1676,7 @@ impl<
                 partition: self.partition.clone(),
                 compression: self.compression,
                 codec_config: (),
+                buffer_pool: self.buffer_pool.clone(),
                 write_buffer: self.write_buffer,
             },
         )

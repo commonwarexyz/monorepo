@@ -13,7 +13,7 @@ use commonware_cryptography::{
     ed25519, PrivateKeyExt as _, Sha256, Signer as _,
 };
 use commonware_p2p::authenticated;
-use commonware_runtime::{tokio, Metrics, Network, Runner};
+use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
 use commonware_stream::public_key::{self, Connection};
 use commonware_utils::{from_hex, quorum, union, NZUsize, NZU32};
 use governor::Quota;
@@ -247,6 +247,7 @@ fn main() {
                 max_fetch_count: 32,
                 fetch_concurrent: 2,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
             },
         );
 
