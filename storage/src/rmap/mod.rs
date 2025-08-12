@@ -356,13 +356,13 @@ impl RMap {
 
         // Collect missing items
         let mut missing = Vec::with_capacity(max);
-        while missing.len() < max {
+        loop {
             // If we're inside a range, skip to just after it
             let (current_range_end, next_range_start) = self.next_gap(current);
             if let Some(end) = current_range_end {
                 // Check if we can move past this range
                 if end == u64::MAX {
-                    break; // No gaps possible after u64::MAX
+                    break missing; // No gaps possible after u64::MAX
                 }
                 current = end + 1;
                 continue;
@@ -370,23 +370,25 @@ impl RMap {
 
             // We're in a gap - check if there's a next range
             let Some(next_start) = next_range_start else {
-                break; // No more ranges, so no more gaps to fill
+                break missing; // No more ranges, so no more gaps to fill
             };
 
             // Collect items from this gap until we hit the next range or have enough
             let gap_end = next_start - 1; // next_start must be greater than or equal to 1
+            let items_needed = max - missing.len(); // there must be at least one item to collect
+            let gap_end = gap_end.min(current.saturating_add(items_needed as u64 - 1));
             for index in current..=gap_end {
                 missing.push(index);
-                if missing.len() >= max {
-                    break;
-                }
+            }
+
+            // If we have enough items, break
+            if missing.len() >= max {
+                break missing;
             }
 
             // Move to the start of the next range to check for more gaps
             current = next_start;
         }
-
-        missing
     }
 }
 
