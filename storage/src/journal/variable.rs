@@ -2345,7 +2345,7 @@ mod tests {
                 .unwrap();
             assert_eq!(item, None); // Next element should not exist
 
-            // Verify functional correctness: journal can accept new operations
+            // Assert journal can accept new operations
             let mut journal = journal;
             let (offset, _) = journal.append(next_element_section, 999).await.unwrap();
             assert_eq!(
@@ -2430,7 +2430,7 @@ mod tests {
                 .unwrap();
             assert_eq!(item, None); // Next element should not exist
 
-            // Verify functional correctness: journal can accept new operations
+            // Assert journal can accept new operations
             let mut journal = journal;
             let (offset, _) = journal.append(next_element_section, 999).await.unwrap();
             assert_eq!(
@@ -2526,7 +2526,7 @@ mod tests {
             let result = journal.get(3, 3).await;
             assert!(result.is_err()); // Operation 18 should be inaccessible (beyond upper_bound=17)
 
-            // Verify functional correctness: journal can accept new operations
+            // Assert journal can accept new operations
             let (offset, _) = journal.append(3, 999).await.unwrap();
             assert_eq!(journal.get(3, offset).await.unwrap(), Some(999));
 
@@ -2675,7 +2675,7 @@ mod tests {
             let item = journal.get(next_element_section, 0).await.unwrap();
             assert_eq!(item, None); // Next element should not exist
 
-            // Verify functional correctness: journal can accept new operations
+            // Assert journal can accept new operations
             let (offset, _) = journal.append(next_element_section, 999).await.unwrap();
             assert_eq!(
                 journal.get(next_element_section, offset).await.unwrap(),
@@ -2756,7 +2756,7 @@ mod tests {
             let item = journal.get(2, 0).await.unwrap();
             assert_eq!(item, None); // Section 2 was removed, so no items
 
-            // Verify functional correctness: journal can accept new operations
+            // Assert journal can accept new operations
             let mut journal = journal;
             let (offset, _) = journal.append(target_section, 999).await.unwrap();
             assert_eq!(
@@ -2825,7 +2825,7 @@ mod tests {
             let item = journal.get(3, 0).await.unwrap();
             assert_eq!(item, None); // Section 3 was removed
 
-            // Verify functional correctness: journal can accept new operations
+            // Assert journal can accept new operations
             let mut journal = journal;
             let (offset, _) = journal.append(2, 999).await.unwrap();
             assert_eq!(journal.get(2, offset).await.unwrap(), Some(999));
