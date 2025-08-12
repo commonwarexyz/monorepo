@@ -19,6 +19,7 @@ use commonware_p2p::simulated::{
     Config as NetworkConfig, Link, Network,
 };
 use commonware_runtime::{
+    buffer::PoolRef,
     deterministic::{self},
     Clock, Metrics, Runner,
 };
@@ -26,7 +27,10 @@ use commonware_utils::{NZUsize, NZU32};
 use governor::Quota;
 use libfuzzer_sys::fuzz_target;
 use mocks::{FuzzInput, Fuzzer};
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc, time::Duration};
+
+const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
 fn fuzzer(input: FuzzInput) {
     // Create context
@@ -143,6 +147,7 @@ fn fuzzer(input: FuzzInput) {
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, resolver) = registrations
                 .remove(&validator)
