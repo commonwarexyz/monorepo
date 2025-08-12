@@ -77,20 +77,25 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
+        buffer::PoolRef,
         deterministic::{self, Context},
         Clock, Metrics, Runner, Spawner,
     };
-    use commonware_utils::NonZeroDuration;
+    use commonware_utils::{NZUsize, NonZeroDuration};
     use futures::{channel::oneshot, future::join_all};
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         collections::{BTreeMap, HashMap},
+        num::NonZeroUsize,
         sync::{Arc, Mutex},
         time::Duration,
     };
     use tracing::debug;
 
     type Registrations<P> = BTreeMap<P, (Sender<P>, Receiver<P>)>;
+
+    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     /// Reliable network link configuration for testing.
     const RELIABLE_LINK: Link = Link {
@@ -225,10 +230,11 @@ mod tests {
                     epoch_bounds: (1, 1),
                     window: std::num::NonZeroU64::new(10).unwrap(),
                     journal_partition: format!("aggregation/{validator}"),
-                    journal_write_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
-                    journal_replay_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
+                    journal_write_buffer: NZUsize!(4096),
+                    journal_replay_buffer: NZUsize!(4096),
                     journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                     journal_compression: Some(3),
+                    journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             );
 
@@ -434,10 +440,11 @@ mod tests {
                                 window: std::num::NonZeroU64::new(10).unwrap(),
                                 // Use validator-specific partition for journal recovery
                                 journal_partition: format!("unclean_shutdown_test/{validator}"),
-                                journal_write_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
-                                journal_replay_buffer: std::num::NonZeroUsize::new(4096).unwrap(),
+                                journal_write_buffer: NZUsize!(4096),
+                                journal_replay_buffer: NZUsize!(4096),
                                 journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                                 journal_compression: Some(3),
+                                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                             },
                         );
 

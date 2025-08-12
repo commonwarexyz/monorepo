@@ -71,6 +71,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
+        buffer::PoolRef,
         deterministic::{self, Context},
         Clock, Metrics, Runner, Spawner,
     };
@@ -79,10 +80,14 @@ mod tests {
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
+        num::NonZeroUsize,
         sync::{Arc, Mutex},
         time::Duration,
     };
     use tracing::debug;
+
+    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     type Registrations<P> = BTreeMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))>;
 
@@ -236,6 +241,7 @@ mod tests {
                     journal_write_buffer: NZUsize!(4096),
                     journal_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
                     journal_compression: Some(3),
+                    journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             );
 
@@ -866,6 +872,7 @@ mod tests {
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
                         journal_compression: Some(3),
+                        journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     },
                 );
 
@@ -919,6 +926,7 @@ mod tests {
                             sequencer.public_key()
                         ),
                         journal_compression: Some(3),
+                        journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     },
                 );
 

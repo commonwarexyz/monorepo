@@ -2,6 +2,7 @@ use super::types::{Activity, Epoch, Index};
 use crate::{Automaton, Monitor, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
 use commonware_p2p::Blocker;
+use commonware_runtime::buffer::PoolRef;
 use commonware_utils::{Array, NonZeroDuration};
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -71,4 +72,7 @@ pub struct Config<
 
     /// Compression level for the journal.
     pub journal_compression: Option<u8>,
+
+    /// Buffer pool for the journal.
+    pub journal_buffer_pool: PoolRef,
 }

@@ -25,6 +25,7 @@ use commonware_storage::{
     archive::{self, immutable, prunable, Archive as _, Identifier},
     translator::TwoCap,
 };
+use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
     channel::{mpsc, oneshot},
     try_join, StreamExt,
@@ -39,27 +40,12 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
-/// A waiter for a block.
-struct Waiter<B: Block> {
-    // The receiver registered with the buffer
-    receiver: oneshot::Receiver<B>,
-    // The responders to the request
-    responders: Vec<oneshot::Sender<B>>,
-}
-
-impl<B: Block> Waiter<B> {
-    /// Create a new waiter.
-    fn new(receiver: oneshot::Receiver<B>, responder: oneshot::Sender<B>) -> Self {
-        Self {
-            receiver,
-            responders: vec![responder],
-        }
-    }
-
-    /// Add a responder to the waiter.
-    fn add_responder(&mut self, responder: oneshot::Sender<B>) {
-        self.responders.push(responder);
-    }
+/// A struct that holds multiple subscriptions for a block.
+struct BlockSubscription<B: Block> {
+    // The subscribers that are waiting for the block
+    subscribers: Vec<oneshot::Sender<B>>,
+    // Aborter that aborts the waiter future when dropped
+    _aborter: Aborter,
 }
 
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
@@ -114,8 +100,8 @@ pub struct Actor<
     // Last view processed
     last_processed_view: u64,
 
-    // Outstanding waiters for blocks
-    waiters: BTreeMap<B::Commitment, Waiter<B>>,
+    // Outstanding subscriptions for blocks
+    block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
 
     // ---------- Prunable Storage ----------
     // Verified blocks stored by view
@@ -198,6 +184,7 @@ impl<
                 ),
                 freezer_journal_target_size: config.freezer_journal_target_size,
                 freezer_journal_compression: config.freezer_journal_compression,
+                freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
                 ordinal_partition: format!(
                     "{}-finalizations-by-height-ordinal",
                     config.partition_prefix
@@ -234,6 +221,7 @@ impl<
                 ),
                 freezer_journal_target_size: config.freezer_journal_target_size,
                 freezer_journal_compression: config.freezer_journal_compression,
+                freezer_journal_buffer_pool: config.freezer_journal_buffer_pool,
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: config.immutable_items_per_section,
                 codec_config: config.codec_config.clone(),
@@ -279,7 +267,7 @@ impl<
                 partition_prefix: config.partition_prefix,
 
                 last_processed_view: 0,
-                waiters: BTreeMap::new(),
+                block_subscriptions: BTreeMap::new(),
 
                 verified_blocks,
                 notarized_blocks,
@@ -333,31 +321,26 @@ impl<
             .with_label("finalizer")
             .spawn(|_| finalizer.run());
 
+        // Create a local pool for waiter futures
+        let mut waiters = AbortablePool::<(B::Commitment, B)>::default();
+
         // Handle messages
         loop {
-            // Check for completed waiters
-            self.waiters.retain(|_, waiter| {
-                // Check for any canceled requests
-                waiter.responders.retain(|tx| !tx.is_canceled());
-                if waiter.responders.is_empty() {
-                    return false;
-                }
-
-                // Check for any completed receivers
-                match waiter.receiver.try_recv() {
-                    Ok(Some(block)) => {
-                        for responder in waiter.responders.drain(..) {
-                            let _ = responder.send(block.clone());
-                        }
-                        false
-                    }
-                    Ok(None) => true, // Block not ready, keep waiting
-                    Err(oneshot::Canceled) => false,
-                }
+            // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
+            self.block_subscriptions.retain(|_, bs| {
+                bs.subscribers.retain(|tx| !tx.is_canceled());
+                !bs.subscribers.is_empty()
             });
 
             // Select messages
             select! {
+                // Handle waiter completions first
+                result = waiters.next_completed() => {
+                    let Ok((commitment, block)) = result else {
+                        continue; // Aborted future
+                    };
+                    self.notify_subscribers(commitment, &block).await;
+                },
                 // Handle consensus before finalizer or backfiller
                 mailbox_message = self.mailbox.next() => {
                     let Some(message) = mailbox_message else {
@@ -436,16 +419,22 @@ impl<
                                 resolver.fetch(Request::<B>::Notarized { view }).await;
                             }
 
-                            // Register waiter
-                            debug!(view, ?commitment, "registering waiter");
-                            match self.waiters.entry(commitment) {
+                            // Register subscriber
+                            debug!(view, ?commitment, "registering subscriber");
+                            match self.block_subscriptions.entry(commitment) {
                                 Entry::Occupied(mut entry) => {
-                                    entry.get_mut().add_responder(response);
+                                    entry.get_mut().subscribers.push(response);
                                 }
                                 Entry::Vacant(entry) => {
                                     let (tx, rx) = oneshot::channel();
                                     buffer.subscribe_prepared(None, commitment, None, tx).await;
-                                    entry.insert(Waiter::new(rx, response));
+                                    let aborter = waiters.push(async move {
+                                        (commitment, rx.await.expect("buffer subscriber closed"))
+                                    });
+                                    entry.insert(BlockSubscription {
+                                        subscribers: vec![response],
+                                        _aborter: aborter,
+                                    });
                                 }
                             }
                         }
@@ -675,6 +664,7 @@ impl<
             items_per_section: config.prunable_items_per_section,
             compression: None,
             codec_config,
+            buffer_pool: config.freezer_journal_buffer_pool.clone(),
             replay_buffer: config.replay_buffer,
             write_buffer: config.write_buffer,
         };
@@ -719,11 +709,11 @@ impl<
 
     // -------------------- Waiters --------------------
 
-    /// Remove a waiter for a digest and send the block to all responders.
-    async fn resolve_waiter(&mut self, commitment: B::Commitment, block: &B) {
-        if let Some(mut waiter) = self.waiters.remove(&commitment) {
-            for responder in waiter.responders.drain(..) {
-                let _ = responder.send(block.clone());
+    /// Notify any subscribers for the given commitment with the provided block.
+    async fn notify_subscribers(&mut self, commitment: B::Commitment, block: &B) {
+        if let Some(mut bs) = self.block_subscriptions.remove(&commitment) {
+            for subscriber in bs.subscribers.drain(..) {
+                let _ = subscriber.send(block.clone());
             }
         }
     }
@@ -732,7 +722,7 @@ impl<
 
     /// Add a verified block to the archive.
     async fn put_verified_block(&mut self, view: u64, commitment: B::Commitment, block: B) {
-        self.resolve_waiter(commitment, &block).await;
+        self.notify_subscribers(commitment, &block).await;
 
         match self.verified_blocks.put_sync(view, commitment, block).await {
             Ok(_) => {
@@ -797,7 +787,7 @@ impl<
 
     /// Add a notarized block to the archive.
     async fn put_notarized_block(&mut self, view: u64, commitment: B::Commitment, block: B) {
-        self.resolve_waiter(commitment, &block).await;
+        self.notify_subscribers(commitment, &block).await;
 
         match self
             .notarized_blocks
@@ -827,7 +817,7 @@ impl<
         block: B,
         notifier: &mut mpsc::Sender<()>,
     ) {
-        self.resolve_waiter(commitment, &block).await;
+        self.notify_subscribers(commitment, &block).await;
 
         if let Err(e) = self
             .finalized_blocks
@@ -848,7 +838,7 @@ impl<
         block: B,
         notifier: &mut mpsc::Sender<()>,
     ) {
-        self.resolve_waiter(commitment, &block).await;
+        self.notify_subscribers(commitment, &block).await;
 
         if let Err(e) = try_join!(
             self.finalizations_by_height
