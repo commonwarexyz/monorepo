@@ -125,11 +125,8 @@ impl<E: Clock + Spawner> Fuzzer<E> {
 
         loop {
             // Send a random message each 10 loop
-            match self.rng.gen_range(0..100) {
-                0..10 => {
-                    self.send_random_message(&mut sender).await;
-                }
-                _ => {}
+            if let 0..10 = self.rng.gen_range(0..100) {
+                self.send_random_message(&mut sender).await;
             }
 
             select! {
