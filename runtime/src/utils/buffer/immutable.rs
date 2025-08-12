@@ -47,7 +47,7 @@ impl<B: Blob> Immutable<B> {
     ///
     /// This is used internally when converting from [Append] to reuse the same
     /// pool ID and avoid re-reading trailing bytes from disk.
-    pub(crate) fn new_in_pool(
+    pub(super) fn new_in_pool(
         blob: B,
         size: u64,
         id: u64,

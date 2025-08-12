@@ -49,7 +49,7 @@ impl<B: Blob> Append<B> {
     /// The `trailing` buffer allows passing already-loaded trailing bytes to avoid re-reading
     /// from disk. This method will panic if `trailing` doesn't contain the entire trailing
     /// bytes (consistent with `size` and pool page size).
-    pub(crate) async fn new_in_pool(
+    pub(super) async fn new_in_pool(
         blob: B,
         size: u64,
         buffer_size: NonZeroUsize,
