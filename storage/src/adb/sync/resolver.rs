@@ -1,8 +1,5 @@
 use crate::{
-    adb::{
-        any::{fixed::Any, sync::Error},
-        immutable::Immutable,
-    },
+    adb::{self, any::fixed::Any, immutable::Immutable},
     mmr::verification::Proof,
     store::operation::{Fixed, Variable},
     translator::Translator,
@@ -62,7 +59,7 @@ where
 {
     type Digest = H::Digest;
     type Op = Fixed<K, V>;
-    type Error = Error;
+    type Error = adb::Error;
 
     async fn get_operations(
         &self,
@@ -94,14 +91,14 @@ where
 {
     type Digest = H::Digest;
     type Op = Fixed<K, V>;
-    type Error = Error;
+    type Error = adb::Error;
 
     async fn get_operations(
         &self,
         size: u64,
         start_loc: u64,
         max_ops: NonZeroU64,
-    ) -> Result<FetchResult<Self::Op, Self::Digest>, Error> {
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, adb::Error> {
         let db = self.read().await;
         db.historical_proof(size, start_loc, max_ops.get())
             .await
@@ -197,15 +194,15 @@ pub(crate) mod tests {
     {
         type Digest = D;
         type Op = Fixed<K, V>;
-        type Error = Error;
+        type Error = adb::Error;
 
         async fn get_operations(
             &self,
             _size: u64,
             _start_loc: u64,
             _max_ops: NonZeroU64,
-        ) -> Result<FetchResult<Self::Op, Self::Digest>, Error> {
-            Err(Error::KeyNotFound) // Arbitrary dummy error
+        ) -> Result<FetchResult<Self::Op, Self::Digest>, adb::Error> {
+            Err(adb::Error::KeyNotFound) // Arbitrary dummy error
         }
     }
 
