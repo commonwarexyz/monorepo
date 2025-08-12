@@ -357,15 +357,13 @@ impl RMap {
     /// // Starting from 11, there are no more ranges, so no gaps
     /// assert_eq!(map.missing_items(11, 5), vec![]);
     /// ```
-    pub fn missing_items(&self, starting_index: u64, n: usize) -> Vec<u64> {
-        if n == 0 {
-            return Vec::new();
-        }
+    pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
+        assert!(max > 0, "max must be greater than 0");
 
-        let mut missing = Vec::with_capacity(n.min(1000)); // Cap pre-allocation at 1000
-        let mut current = starting_index;
+        let mut missing = Vec::with_capacity(max.min(1000)); // Cap pre-allocation at 1000
+        let mut current = start;
 
-        while missing.len() < n {
+        while missing.len() < max {
             let (current_range_end, next_range_start) = self.next_gap(current);
 
             match current_range_end {
@@ -384,13 +382,13 @@ impl RMap {
                             // Collect missing items up to the next range or until we have n items
                             let gap_end = next_start.saturating_sub(1);
                             let items_to_collect =
-                                (n - missing.len()).min((gap_end - current + 1) as usize);
+                                (max - missing.len()).min((gap_end - current + 1) as usize);
 
                             for i in 0..items_to_collect {
                                 missing.push(current + i as u64);
                             }
 
-                            if missing.len() >= n {
+                            if missing.len() >= max {
                                 break;
                             }
 
@@ -944,13 +942,13 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
     fn test_missing_items_zero_n() {
         let mut map = RMap::new();
         map.insert(1);
         map.insert(5);
 
-        assert_eq!(map.missing_items(0, 0), Vec::<u64>::new());
-        assert_eq!(map.missing_items(3, 0), Vec::<u64>::new());
+        map.missing_items(1, 0);
     }
 
     #[test]
