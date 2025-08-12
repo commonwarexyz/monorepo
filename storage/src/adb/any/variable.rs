@@ -582,20 +582,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok((proof, ops))
     }
 
-    /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
-    /// the log with the provided root.
-    pub fn verify_proof(
-        hasher: &mut Standard<H>,
-        proof: &Proof<H::Digest>,
-        start_loc: u64,
-        ops: &[Operation<K, V>],
-        root: &H::Digest,
-    ) -> bool {
-        crate::adb::verify_proof::<Operation<K, V>, H, H::Digest>(
-            hasher, proof, start_loc, ops, root,
-        )
-    }
-
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Also raises the inactivity floor according to the schedule,
     /// and prunes those operations below it. Batch operations will be parallelized if a thread pool
@@ -780,6 +766,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 pub(super) mod test {
     use super::*;
     use crate::{
+        adb::verify_proof,
         mmr::{hasher::Standard, mem::Mmr as MemMmr},
         translator::TwoCap,
     };
@@ -1067,7 +1054,7 @@ pub(super) mod test {
 
             for i in start_loc..end_loc {
                 let (proof, log) = db.proof(i, max_ops).await.unwrap();
-                assert!(AnyTest::verify_proof(&mut hasher, &proof, i, &log, &root));
+                assert!(verify_proof(&mut hasher, &proof, i, &log, &root));
             }
 
             db.destroy().await.unwrap();

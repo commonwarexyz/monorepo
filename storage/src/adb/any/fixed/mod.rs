@@ -696,29 +696,11 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator
     }
 }
 
-/// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
-/// the log with the provided root.
-pub fn verify_proof<H, K, V>(
-    hasher: &mut Standard<H>,
-    proof: &Proof<H::Digest>,
-    start_loc: u64,
-    ops: &[Operation<K, V>],
-    root: &H::Digest,
-) -> bool
-where
-    H: CHasher,
-    K: Array,
-    V: Array,
-{
-    let start_pos = leaf_num_to_pos(start_loc);
-    let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_range_inclusion(hasher, &elements, start_pos, root)
-}
-
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
     use crate::{
+        adb::verify_proof,
         mmr::{hasher::Standard, mem::Mmr as MemMmr},
         translator::TwoCap,
     };

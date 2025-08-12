@@ -24,24 +24,6 @@ use tracing::{debug, warn};
 
 pub mod sync;
 
-/// Verify a proof for a range of operations in an Immutable database
-pub fn verify_proof<H, K, V>(
-    hasher: &mut Standard<H>,
-    proof: &Proof<H::Digest>,
-    start_loc: u64,
-    ops: &[Variable<K, V>],
-    root: &H::Digest,
-) -> bool
-where
-    H: CHasher,
-    K: Array,
-    V: Codec,
-{
-    let start_pos = leaf_num_to_pos(start_loc);
-    let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_range_inclusion(hasher, &elements, start_pos, root)
-}
-
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot. The exact value does not impact performance significantly as long as it is large
 /// enough, so we don't make it configurable.
@@ -605,24 +587,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok((proof, ops))
     }
 
-    /// Return true if the given sequence of `ops` were applied starting at the operation with
-    /// insertion order `start_loc` in the database with the provided root.
-    pub fn verify_proof(
-        hasher: &mut Standard<H>,
-        proof: &Proof<H::Digest>,
-        start_loc: u64,
-        ops: &[Variable<K, V>],
-        root_digest: &H::Digest,
-    ) -> bool {
-        crate::adb::verify_proof::<Variable<K, V>, H, H::Digest>(
-            hasher,
-            proof,
-            start_loc,
-            ops,
-            root_digest,
-        )
-    }
-
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Batch operations will be parallelized if a thread pool
     /// is provided.
@@ -723,7 +687,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
-    use crate::{mmr::mem::Mmr as MemMmr, translator::TwoCap};
+    use crate::{adb::verify_proof, mmr::mem::Mmr as MemMmr, translator::TwoCap};
     use commonware_cryptography::{hash, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -892,13 +856,7 @@ pub(super) mod test {
             let max_ops = 5;
             for i in 0..db.op_count() {
                 let (proof, log) = db.proof(i, max_ops).await.unwrap();
-                assert!(ImmutableTest::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    i,
-                    &log,
-                    &root
-                ));
+                assert!(verify_proof(&mut hasher, &proof, i, &log, &root));
             }
 
             db.destroy().await.unwrap();
