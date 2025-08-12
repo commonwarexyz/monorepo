@@ -8,14 +8,9 @@ use commonware_codec::{Encode, Read};
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Metrics, Network, Runner, Spawner, Storage,
 };
-use commonware_storage::adb::sync;
+use commonware_storage::{adb::sync, mmr::hasher};
 use commonware_sync::{
-    any::{create_config, Database as AnyDb, Operation as AnyOp},
-    crate_version,
-    databases::DatabaseType,
-    immutable,
-    net::Resolver,
-    Digest, Error, Key,
+    any, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest, Error, Key,
 };
 use commonware_utils::parse_duration;
 use futures::channel::mpsc;
@@ -78,7 +73,9 @@ where
 
         match resolver.get_sync_target().await {
             Ok(new_target) => {
+                // Check if target has changed
                 if new_target.root != current_target.root {
+                    // Send new target to the sync client
                     match update_tx.clone().try_send(new_target.clone()) {
                         Ok(()) => {
                             info!(old_target = ?current_target, new_target = ?new_target, "target updated");
@@ -114,11 +111,12 @@ where
     info!("starting Any database sync process");
     let mut iteration = 0u32;
     loop {
-        let resolver = Resolver::<AnyOp, Digest>::connect(context.clone(), config.server).await?;
+        let resolver =
+            Resolver::<any::Operation, Digest>::connect(context.clone(), config.server).await?;
 
         let initial_target = resolver.get_sync_target().await?;
 
-        let db_config = create_config();
+        let db_config = any::create_config();
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {
@@ -136,22 +134,20 @@ where
             })
         };
 
-        let sync_config = sync::engine::Config::<AnyDb<_>, Resolver<AnyOp, Digest>> {
-            context: context.clone(),
-            db_config,
-            fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
-            target: initial_target,
-            resolver,
-            apply_batch_size: 1024,
-            max_outstanding_requests: config.max_outstanding_requests,
-            update_rx: Some(update_receiver),
-        };
+        let sync_config =
+            sync::engine::Config::<any::Database<_>, Resolver<any::Operation, Digest>> {
+                context: context.clone(),
+                db_config,
+                fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
+                target: initial_target,
+                resolver,
+                apply_batch_size: 1024,
+                max_outstanding_requests: config.max_outstanding_requests,
+                update_rx: Some(update_receiver),
+            };
 
-        let database: AnyDb<_> = sync::sync(sync_config).await?;
-        let got_root = {
-            let mut hasher = commonware_storage::mmr::hasher::Standard::new();
-            database.root(&mut hasher)
-        };
+        let database: any::Database<_> = sync::sync(sync_config).await?;
+        let got_root = database.root(&mut hasher::Standard::new());
         info!(
             sync_iteration = iteration,
             root = %got_root,
@@ -171,7 +167,7 @@ where
     E: Storage + Clock + Metrics + Network + Spawner,
 {
     info!("starting Immutable database sync process");
-    let mut iteration = 1u32;
+    let mut iteration = 0u32;
     loop {
         let resolver =
             Resolver::<immutable::Operation, Key>::connect(context.clone(), config.server).await?;
@@ -209,10 +205,7 @@ where
             };
 
         let database: immutable::Database<_> = sync::sync(sync_config).await?;
-        let got_root = {
-            let mut hasher = commonware_storage::mmr::hasher::Standard::new();
-            database.root(&mut hasher)
-        };
+        let got_root = database.root(&mut hasher::Standard::new());
         info!(
             sync_iteration = iteration,
             root = %got_root,
