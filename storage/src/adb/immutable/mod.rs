@@ -2,7 +2,7 @@
 //! deletions), where values can have varying sizes.
 
 use crate::{
-    adb::Error,
+    adb::{any::fixed::sync::init_journal, Error},
     index::Index,
     journal::{fixed, variable},
     mmr::{
@@ -215,7 +215,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         .map_err(Error::Mmr)?;
 
         // Initialize locations journal for sync
-        let mut locations = fixed::Journal::<E, U32>::init_sync(
+        let mut locations = init_journal(
             context.with_label("locations"),
             fixed::Config {
                 partition: cfg.db_config.locations_journal_partition,

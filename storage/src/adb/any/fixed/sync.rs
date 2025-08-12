@@ -46,7 +46,7 @@ where
             buffer_pool: config.buffer_pool.clone(),
         };
 
-        fixed::Journal::<E, Fixed<K, V>>::init_sync(
+        init_journal(
             context.with_label("log"),
             journal_config,
             lower_bound,
@@ -155,158 +155,153 @@ where
     }
 }
 
-impl<E, A> fixed::Journal<E, A>
-where
-    E: Storage + Metrics,
-    A: Codec<Cfg = ()> + FixedSize,
-{
-    /// Initialize a [fixed::Journal] for synchronization, reusing existing data if possible.
-    ///
-    /// Handles three sync scenarios based on existing journal data vs. the given sync boundaries.
-    ///
-    /// 1. **Fresh Start**: existing_size ≤ lower_bound
-    ///    - Deletes existing data (if any)
-    ///    - Creates new [fixed::Journal] pruned to `lower_bound` and size `lower_bound`
-    ///
-    /// 2. **Prune and Reuse**: lower_bound < existing_size ≤ upper_bound + 1
-    ///    - Prunes the journal to `lower_bound`
-    ///    - Reuses existing journal data overlapping with the sync range
-    ///
-    /// 3. **Prune and Rewind**: existing_size > upper_bound + 1
-    ///    - Prunes the journal to `lower_bound`
-    ///    - Rewinds the journal to size `upper_bound + 1`
-    ///
-    /// # Invariants
-    ///
-    /// The returned [fixed::Journal] has size in [`lower_bound`, `upper_bound + 1`].
-    pub async fn init_sync(
-        context: E,
-        cfg: fixed::Config,
-        lower_bound: u64,
-        upper_bound: u64,
-    ) -> Result<Self, crate::journal::Error> {
-        if lower_bound > upper_bound {
-            return Err(crate::journal::Error::InvalidSyncRange(
-                lower_bound,
-                upper_bound,
-            ));
-        }
+/// Initialize a [fixed::Journal] for synchronization, reusing existing data if possible.
+///
+/// Handles three sync scenarios based on existing journal data vs. the given sync boundaries.
+///
+/// 1. **Fresh Start**: existing_size ≤ lower_bound
+///    - Deletes existing data (if any)
+///    - Creates new [fixed::Journal] pruned to `lower_bound` and size `lower_bound`
+///
+/// 2. **Prune and Reuse**: lower_bound < existing_size ≤ upper_bound + 1
+///    - Prunes the journal to `lower_bound`
+///    - Reuses existing journal data overlapping with the sync range
+///
+/// 3. **Prune and Rewind**: existing_size > upper_bound + 1
+///    - Prunes the journal to `lower_bound`
+///    - Rewinds the journal to size `upper_bound + 1`
+///
+/// # Invariants
+///
+/// The returned [fixed::Journal] has size in [`lower_bound`, `upper_bound + 1`].
+pub(crate) async fn init_journal<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize>(
+    context: E,
+    cfg: fixed::Config,
+    lower_bound: u64,
+    upper_bound: u64,
+) -> Result<fixed::Journal<E, A>, crate::journal::Error> {
+    if lower_bound > upper_bound {
+        return Err(crate::journal::Error::InvalidSyncRange(
+            lower_bound,
+            upper_bound,
+        ));
+    }
 
-        let mut journal = Self::init(context.clone(), cfg.clone()).await?;
-        let journal_size = journal.size().await?;
-        let journal = if journal_size <= lower_bound {
-            debug!(
-                journal_size,
-                lower_bound, "Existing journal data is stale, re-initializing in pruned state"
-            );
-            journal.destroy().await?;
-            Self::init_at_size(context, cfg, lower_bound).await?
-        } else if journal_size <= upper_bound + 1 {
-            debug!(
-                journal_size,
-                lower_bound,
-                upper_bound,
-                "Existing journal data within sync range, pruning to lower bound"
-            );
-            journal.prune(lower_bound).await?;
-            journal
-        } else {
-            debug!(
+    let mut journal = fixed::Journal::<E, A>::init(context.clone(), cfg.clone()).await?;
+    let journal_size = journal.size().await?;
+    let journal = if journal_size <= lower_bound {
+        debug!(
+            journal_size,
+            lower_bound, "Existing journal data is stale, re-initializing in pruned state"
+        );
+        journal.destroy().await?;
+        init_journal_at_size(context, cfg, lower_bound).await?
+    } else if journal_size <= upper_bound + 1 {
+        debug!(
+            journal_size,
+            lower_bound,
+            upper_bound,
+            "Existing journal data within sync range, pruning to lower bound"
+        );
+        journal.prune(lower_bound).await?;
+        journal
+    } else {
+        debug!(
                 journal_size,
                 lower_bound,
                 upper_bound,
                 "Existing journal data exceeds sync range, pruning to lower bound and rewinding to upper bound"
             );
-            journal.prune(lower_bound).await?;
-            journal.rewind(upper_bound + 1).await?; // +1 because upper_bound is inclusive
-            journal
-        };
-        let journal_size = journal.size().await?;
-        assert!(journal_size <= upper_bound + 1);
-        assert!(journal_size >= lower_bound);
-        Ok(journal)
-    }
+        journal.prune(lower_bound).await?;
+        journal.rewind(upper_bound + 1).await?; // +1 because upper_bound is inclusive
+        journal
+    };
+    let journal_size = journal.size().await?;
+    assert!(journal_size <= upper_bound + 1);
+    assert!(journal_size >= lower_bound);
+    Ok(journal)
+}
 
-    /// Initialize a new [fixed::Journal] instance in a pruned state at a given size.
-    ///
-    /// # Arguments
-    /// * `context` - The storage context
-    /// * `cfg` - Configuration for the journal
-    /// * `size` - The number of operations that have been pruned.
-    ///
-    /// # Behavior
-    /// - Creates only the tail blob at the index that would contain the operation at `size`
-    /// - Sets the tail blob size to represent the "leftover" operations within that blob.
-    /// - The [fixed::Journal] is not `sync`ed before being returned.
-    ///
-    /// # Invariants
-    /// - The directory given by `cfg.partition` is empty.
-    ///
-    /// For example, if `items_per_blob = 10` and `size = 25`:
-    /// - Tail blob index would be 25 / 10 = 2 (third blob, 0-indexed)
-    /// - Tail blob size would be (25 % 10) * CHUNK_SIZE = 5 * CHUNK_SIZE
-    /// - Tail blob is filled with dummy data up to its size -- this shouldn't be read.
-    /// - No blobs are created for indices 0 and 1 (the pruned range)
-    /// - Reading from positions 0-19 will return `ItemPruned` since those blobs don't exist
-    /// - This represents a journal that had operations 0-24, with operations 0-19 pruned,
-    ///   leaving operations 20-24 in tail blob 2.
-    pub async fn init_at_size(
-        context: E,
-        cfg: fixed::Config,
-        size: u64,
-    ) -> Result<Self, crate::journal::Error> {
-        // Calculate the tail blob index and number of items in the tail
-        let tail_index = size / cfg.items_per_blob;
-        let tail_items = size % cfg.items_per_blob;
-        let tail_size = tail_items * Self::CHUNK_SIZE_U64;
+/// Initialize a new [fixed::Journal] instance in a pruned state at a given size.
+///
+/// # Arguments
+/// * `context` - The storage context
+/// * `cfg` - Configuration for the journal
+/// * `size` - The number of operations that have been pruned.
+///
+/// # Behavior
+/// - Creates only the tail blob at the index that would contain the operation at `size`
+/// - Sets the tail blob size to represent the "leftover" operations within that blob.
+/// - The [fixed::Journal] is not `sync`ed before being returned.
+///
+/// # Invariants
+/// - The directory given by `cfg.partition` is empty.
+///
+/// For example, if `items_per_blob = 10` and `size = 25`:
+/// - Tail blob index would be 25 / 10 = 2 (third blob, 0-indexed)
+/// - Tail blob size would be (25 % 10) * CHUNK_SIZE = 5 * CHUNK_SIZE
+/// - Tail blob is filled with dummy data up to its size -- this shouldn't be read.
+/// - No blobs are created for indices 0 and 1 (the pruned range)
+/// - Reading from positions 0-19 will return `ItemPruned` since those blobs don't exist
+/// - This represents a journal that had operations 0-24, with operations 0-19 pruned,
+///   leaving operations 20-24 in tail blob 2.
+async fn init_journal_at_size<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize>(
+    context: E,
+    cfg: fixed::Config,
+    size: u64,
+) -> Result<fixed::Journal<E, A>, crate::journal::Error> {
+    // Calculate the tail blob index and number of items in the tail
+    let tail_index = size / cfg.items_per_blob;
+    let tail_items = size % cfg.items_per_blob;
+    let tail_size = tail_items * fixed::Journal::<E, A>::CHUNK_SIZE_U64;
 
-        debug!(
-            size,
-            tail_index, tail_items, tail_size, "Initializing fresh journal at size"
-        );
+    debug!(
+        size,
+        tail_index, tail_items, tail_size, "Initializing fresh journal at size"
+    );
 
-        // Create the tail blob with the correct size to reflect the position
-        let (tail_blob, tail_actual_size) = context
-            .open(&cfg.partition, &tail_index.to_be_bytes())
+    // Create the tail blob with the correct size to reflect the position
+    let (tail_blob, tail_actual_size) = context
+        .open(&cfg.partition, &tail_index.to_be_bytes())
+        .await
+        .map_err(crate::journal::Error::Runtime)?;
+    assert_eq!(
+        tail_actual_size, 0,
+        "Expected empty blob for fresh initialization"
+    );
+
+    let tail = Append::new(tail_blob, 0, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
+    if tail_items > 0 {
+        tail.resize(tail_size)
             .await
             .map_err(crate::journal::Error::Runtime)?;
-        assert_eq!(
-            tail_actual_size, 0,
-            "Expected empty blob for fresh initialization"
-        );
-
-        let tail = Append::new(tail_blob, 0, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
-        if tail_items > 0 {
-            tail.resize(tail_size)
-                .await
-                .map_err(crate::journal::Error::Runtime)?;
-        }
-
-        // Initialize metrics
-        let tracked = Gauge::default();
-        tracked.set(tail_index as i64 + 1);
-        let synced = Counter::default();
-        let pruned = Counter::default();
-        context.register("tracked", "Number of blobs", tracked.clone());
-        context.register("synced", "Number of syncs", synced.clone());
-        context.register("pruned", "Number of blobs pruned", pruned.clone());
-
-        Ok(Self {
-            context,
-            cfg,
-            blobs: BTreeMap::new(),
-            tail,
-            tail_index,
-            tracked,
-            synced,
-            pruned,
-            _array: PhantomData,
-        })
     }
+
+    // Initialize metrics
+    let tracked = Gauge::default();
+    tracked.set(tail_index as i64 + 1);
+    let synced = Counter::default();
+    let pruned = Counter::default();
+    context.register("tracked", "Number of blobs", tracked.clone());
+    context.register("synced", "Number of syncs", synced.clone());
+    context.register("pruned", "Number of blobs pruned", pruned.clone());
+
+    Ok(fixed::Journal::<E, A> {
+        context,
+        cfg,
+        blobs: BTreeMap::new(),
+        tail,
+        tail_index,
+        tracked,
+        synced,
+        pruned,
+        _array: PhantomData,
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
         adb::{
             self,
@@ -338,7 +333,7 @@ mod tests {
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
-        Metrics as _, Runner as _, RwLock,
+        Runner as _, RwLock,
     };
     use commonware_utils::{NZUsize, NZU64};
     use futures::{channel::mpsc, future::join_all, SinkExt as _};
@@ -1568,7 +1563,7 @@ mod tests {
             let target_hash = source_db.root(&mut hasher);
 
             // Create log with operations
-            let mut log = fixed::Journal::<_, Fixed<Digest, Digest>>::init_sync(
+            let mut log = init_journal(
                 context.clone().with_label("ops_log"),
                 fixed::Config {
                     partition: format!("ops_log_{}", context.next_u64()),
@@ -1660,7 +1655,7 @@ mod tests {
                 let upper_bound = std::cmp::min(lower_bound + 49, total_ops - 1);
 
                 // Create log with operations
-                let mut log = fixed::Journal::<_, Fixed<Digest, Digest>>::init_sync(
+                let mut log = init_journal(
                     context.clone().with_label("boundary_log"),
                     fixed::Config {
                         partition: format!("boundary_log_{}_{}", lower_bound, context.next_u64()),
@@ -1907,14 +1902,10 @@ mod tests {
             // Initialize journal with sync boundaries when no existing data exists
             let lower_bound = 10;
             let upper_bound = 25;
-            let mut sync_journal = fixed::Journal::<Context, Digest>::init_sync(
-                context.clone(),
-                cfg.clone(),
-                lower_bound,
-                upper_bound,
-            )
-            .await
-            .expect("Failed to initialize journal with sync boundaries");
+            let mut sync_journal =
+                init_journal(context.clone(), cfg.clone(), lower_bound, upper_bound)
+                    .await
+                    .expect("Failed to initialize journal with sync boundaries");
 
             // Verify the journal is initialized at the lower bound
             assert_eq!(sync_journal.size().await.unwrap(), lower_bound);
@@ -1976,14 +1967,9 @@ mod tests {
             // Upper bound: 30 (beyond existing data, so existing data should be kept)
             let lower_bound = 8;
             let upper_bound = 30;
-            let mut journal = fixed::Journal::<Context, Digest>::init_sync(
-                context.clone(),
-                cfg.clone(),
-                lower_bound,
-                upper_bound,
-            )
-            .await
-            .expect("Failed to initialize journal with overlap");
+            let mut journal = init_journal(context.clone(), cfg.clone(), lower_bound, upper_bound)
+                .await
+                .expect("Failed to initialize journal with overlap");
 
             // Verify the journal size matches the original (no rewind needed)
             assert_eq!(journal.size().await.unwrap(), journal_size);
@@ -2050,14 +2036,9 @@ mod tests {
             // Upper bound: 19 (existing data ends at 19, so no rewinding needed)
             let lower_bound = 6;
             let upper_bound = 19;
-            let mut journal = fixed::Journal::<Context, Digest>::init_sync(
-                context.clone(),
-                cfg.clone(),
-                lower_bound,
-                upper_bound,
-            )
-            .await
-            .expect("Failed to initialize journal with exact match");
+            let mut journal = init_journal(context.clone(), cfg.clone(), lower_bound, upper_bound)
+                .await
+                .expect("Failed to initialize journal with exact match");
 
             // Verify the journal size remains the same (no rewinding needed)
             assert_eq!(journal.size().await.unwrap(), initial_size);
@@ -2125,14 +2106,9 @@ mod tests {
             let lower_bound = 8;
             let upper_bound = 22;
             let expected_final_size = upper_bound + 1; // upper_bound is inclusive
-            let mut journal = fixed::Journal::<Context, Digest>::init_sync(
-                context.clone(),
-                cfg.clone(),
-                lower_bound,
-                upper_bound,
-            )
-            .await
-            .expect("Failed to initialize journal with rewind");
+            let mut journal = init_journal(context.clone(), cfg.clone(), lower_bound, upper_bound)
+                .await
+                .expect("Failed to initialize journal with rewind");
 
             // Verify the journal has been rewound to the upper bound + 1
             assert_eq!(journal.size().await.unwrap(), expected_final_size);
@@ -2188,7 +2164,7 @@ mod tests {
 
             let lower_bound = 6;
             let upper_bound = 5;
-            let result = fixed::Journal::<Context, Fixed<Digest, Digest>>::init_sync(
+            let result = init_journal::<Context, Digest>(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -2221,13 +2197,9 @@ mod tests {
 
             // Test 1: Initialize at size 0 (empty journal)
             {
-                let mut journal = fixed::Journal::<Context, Digest>::init_at_size(
-                    context.clone(),
-                    cfg.clone(),
-                    0,
-                )
-                .await
-                .expect("Failed to initialize journal at size 0");
+                let mut journal = init_journal_at_size(context.clone(), cfg.clone(), 0)
+                    .await
+                    .expect("Failed to initialize journal at size 0");
 
                 assert_eq!(journal.size().await.unwrap(), 0);
                 assert_eq!(journal.tail_index, 0);
@@ -2243,13 +2215,9 @@ mod tests {
 
             // Test 2: Initialize at size exactly at blob boundary (10 with items_per_blob=5)
             {
-                let mut journal = fixed::Journal::<Context, Digest>::init_at_size(
-                    context.clone(),
-                    cfg.clone(),
-                    10,
-                )
-                .await
-                .expect("Failed to initialize journal at size 10");
+                let mut journal = init_journal_at_size(context.clone(), cfg.clone(), 10)
+                    .await
+                    .expect("Failed to initialize journal at size 10");
 
                 assert_eq!(journal.size().await.unwrap(), 10);
                 assert_eq!(journal.tail_index, 2); // 10 / 5 = 2
@@ -2272,13 +2240,9 @@ mod tests {
 
             // Test 3: Initialize at size in middle of blob (7 with items_per_blob=5)
             {
-                let mut journal = fixed::Journal::<Context, Digest>::init_at_size(
-                    context.clone(),
-                    cfg.clone(),
-                    7,
-                )
-                .await
-                .expect("Failed to initialize journal at size 7");
+                let mut journal = init_journal_at_size(context.clone(), cfg.clone(), 7)
+                    .await
+                    .expect("Failed to initialize journal at size 7");
 
                 assert_eq!(journal.size().await.unwrap(), 7);
                 assert_eq!(journal.tail_index, 1); // 7 / 5 = 1
@@ -2308,13 +2272,9 @@ mod tests {
 
             // Test 4: Initialize at larger size spanning multiple pruned blobs
             {
-                let mut journal = fixed::Journal::<Context, Digest>::init_at_size(
-                    context.clone(),
-                    cfg.clone(),
-                    23,
-                )
-                .await
-                .expect("Failed to initialize journal at size 23");
+                let mut journal = init_journal_at_size(context.clone(), cfg.clone(), 23)
+                    .await
+                    .expect("Failed to initialize journal at size 23");
 
                 assert_eq!(journal.size().await.unwrap(), 23);
                 assert_eq!(journal.tail_index, 4); // 23 / 5 = 4
