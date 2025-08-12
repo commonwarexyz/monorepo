@@ -1,5 +1,7 @@
 //! Any database types and helpers for the sync example.
 
+use std::future::Future;
+
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_runtime::{buffer, Clock, Metrics, Storage};
@@ -108,8 +110,7 @@ where
         size: u64,
         start_loc: u64,
         max_ops: u64,
-    ) -> impl std::future::Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send
-    {
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
         self.historical_proof(size, start_loc, max_ops)
     }
 
