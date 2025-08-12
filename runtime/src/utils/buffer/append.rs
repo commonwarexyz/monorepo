@@ -167,11 +167,22 @@ impl<B: Blob> Append<B> {
     /// otherwise any unflushed data in the write buffer will be lost.
     pub async fn into_immutable(self) -> Immutable<B> {
         // After sync the append buffer contains only the trailing bytes.
-        let (buffer, blob_size) = &*self.buffer.read().await;
-        let trailing_size = blob_size.saturating_sub(buffer.offset) as usize;
-        let trailing = buffer.data[..trailing_size].to_vec();
+        // Take ownership of the append buffer if possible to avoid cloning.
+        let (blob_size, trailing) = match Arc::try_unwrap(self.buffer) {
+            Ok(buffer) => {
+                let (mut buffer, blob_size) = buffer.into_inner();
+                let trailing_size = blob_size.saturating_sub(buffer.offset) as usize;
+                buffer.data.truncate(trailing_size);
+                (blob_size, buffer.data)
+            }
+            Err(buffer) => {
+                let (buffer, blob_size) = &*buffer.read().await;
+                let trailing_size = blob_size.saturating_sub(buffer.offset) as usize;
+                (*blob_size, buffer.data[..trailing_size].to_vec())
+            }
+        };
 
-        Immutable::new_in_pool(self.blob, *blob_size, self.id, self.pool_ref, trailing)
+        Immutable::new_in_pool(self.blob, blob_size, self.id, self.pool_ref, trailing)
     }
 
     /// Clones and returns the underlying blob.

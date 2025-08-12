@@ -68,7 +68,7 @@ impl<B: Blob> Immutable<B> {
     pub async fn into_append(self, buffer_size: NonZeroUsize) -> Result<Append<B>, Error> {
         // Extract trailing bytes, taking ownership if possible to avoid cloning.
         let trailing = match Arc::try_unwrap(self.trailing) {
-            Ok(lock) => lock.into_inner(),
+            Ok(trailing) => trailing.into_inner(),
             Err(trailing) => trailing.read().await.clone(),
         };
 
