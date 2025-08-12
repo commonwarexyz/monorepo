@@ -17,8 +17,6 @@ use std::num::NonZeroU64;
 
 mod journal;
 
-pub type Error = crate::adb::Error;
-
 // Compute the next append location (size) by scanning the variable journal and
 // counting only items whose logical location is within [lower_bound, upper_bound].
 async fn compute_size<E, K, V>(

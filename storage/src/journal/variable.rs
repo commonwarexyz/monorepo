@@ -224,25 +224,22 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Initialize a Variable journal for use in state sync.
     ///
-    /// The bounds are logical operation locations (not section numbers). This function prepares the
+    /// The bounds are operation locations (not section numbers). This function prepares the
     /// on-disk journal so that subsequent appends go to the correct physical location for the
-    /// requested logical range.
+    /// requested range.
     ///
     /// Behavior by existing on-disk state:
-    /// - Fresh (no data): returns an empty journal with no sections created. No pruning is applied
-    ///   (`oldest_allowed == None`). The caller may begin appending at `lower_bound / items_per_section`.
-    /// - Stale (all data strictly before `lower_bound`): destroys existing blobs and returns a fresh
-    ///   journal (same result as the fresh case above).
+    /// - Fresh (no data): returns an empty journal.
+    /// - Stale (all data strictly before `lower_bound`): destroys existing data and returns an
+    ///   empty journal.
     /// - Overlap within [`lower_bound`, `upper_bound`]:
     ///   - Prunes sections strictly below `lower_bound / items_per_section` (section-aligned).
     ///   - Removes any sections strictly greater than `upper_bound / items_per_section`.
-    ///   - Truncates the final retained section so that no operation with logical location greater
-    ///     than `upper_bound` remains physically present (intra-section truncation at an exact item
-    ///     boundary).
+    ///   - Truncates the final retained section so that no operation with location greater
+    ///     than `upper_bound` remains.
     ///
-    /// Notes that pruning is section-aligned. This means the first retained section may still
-    /// contain operations whose logical locations are < `lower_bound`. Callers must ignore those
-    /// when computing logical size. Intra-section truncation is only applied to the upper section.
+    /// Note that lower-bound pruning is section-aligned. This means the first retained section may
+    /// still contain operations whose locations are < `lower_bound`. Callers should ignore these.
     ///
     /// # Arguments
     /// - `context`: storage context
@@ -255,12 +252,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// A journal whose sections satisfy:
     /// - No section index < `lower_bound / items_per_section` exists.
     /// - No section index > `upper_bound / items_per_section` exists.
-    /// - The last retained section is truncated so that its last item’s logical location is
-    ///   `<= upper_bound`.
-    ///
-    /// # Invariants
-    /// The returned journal can accept further appends at the logical next location within
-    /// [`lower_bound`, `upper_bound`].
+    /// - The last retained section is truncated so that its last item’s location is `<= upper_bound`.
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config<V::Cfg>,
@@ -389,14 +381,14 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         )
         .await?;
 
-        // Cut the section at that precise boundary
+        // Rewind to the appropriate position to remove operations beyond the upper bound
         journal
             .rewind_section(upper_section, target_byte_size)
             .await?;
 
         debug!(
             upper_section,
-            operations_to_keep, target_byte_size, "section truncated to exact byte boundary"
+            operations_to_keep, target_byte_size, "section truncated"
         );
 
         Ok(())
@@ -2231,7 +2223,7 @@ mod tests {
             let lower_bound = 10;
             let upper_bound = 25;
             let items_per_section = NZU64!(5);
-            let sync_journal = Journal::<deterministic::Context, u64>::init_sync(
+            let mut journal = Journal::<deterministic::Context, u64>::init_sync(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -2242,12 +2234,11 @@ mod tests {
             .expect("Failed to initialize journal with sync boundaries");
 
             // Verify the journal is ready for sync operations
-            assert!(sync_journal.blobs.is_empty()); // No sections created yet
-            assert_eq!(sync_journal.oldest_allowed, None); // No pruning applied
+            assert!(journal.blobs.is_empty()); // No sections created yet
+            assert_eq!(journal.oldest_allowed, None); // No pruning applied
 
             // Verify that operations can be appended starting from the sync position
             let lower_section = lower_bound / items_per_section; // 10/5 = 2
-            let mut journal = sync_journal;
 
             // Append an element
             let (offset, _) = journal.append(lower_section, 42u64).await.unwrap();
@@ -2301,7 +2292,7 @@ mod tests {
             // lower_bound: 8 (section 1), upper_bound: 30 (section 6)
             let lower_bound = 8;
             let upper_bound = 30;
-            let journal = Journal::<deterministic::Context, u64>::init_sync(
+            let mut journal = Journal::<deterministic::Context, u64>::init_sync(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -2346,7 +2337,6 @@ mod tests {
             assert_eq!(item, None); // Next element should not exist
 
             // Assert journal can accept new operations
-            let mut journal = journal;
             let (offset, _) = journal.append(next_element_section, 999).await.unwrap();
             assert_eq!(
                 journal.get(next_element_section, offset).await.unwrap(),
@@ -2388,7 +2378,7 @@ mod tests {
             // Initialize with sync boundaries that exactly match existing data
             let lower_bound = 5; // section 1
             let upper_bound = 19; // section 3
-            let journal = Journal::<deterministic::Context, u64>::init_sync(
+            let mut journal = Journal::<deterministic::Context, u64>::init_sync(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -2431,7 +2421,6 @@ mod tests {
             assert_eq!(item, None); // Next element should not exist
 
             // Assert journal can accept new operations
-            let mut journal = journal;
             let (offset, _) = journal.append(next_element_section, 999).await.unwrap();
             assert_eq!(
                 journal.get(next_element_section, offset).await.unwrap(),
@@ -2718,7 +2707,7 @@ mod tests {
             // Test sync boundaries within the same section
             let lower_bound = 6; // operation 6 (section 1: 6/5 = 1)
             let upper_bound = 8; // operation 8 (section 1: 8/5 = 1)
-            let journal = Journal::<deterministic::Context, u64>::init_sync(
+            let mut journal = Journal::<deterministic::Context, u64>::init_sync(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -2757,7 +2746,6 @@ mod tests {
             assert_eq!(item, None); // Section 2 was removed, so no items
 
             // Assert journal can accept new operations
-            let mut journal = journal;
             let (offset, _) = journal.append(target_section, 999).await.unwrap();
             assert_eq!(
                 journal.get(target_section, offset).await.unwrap(),
@@ -2965,7 +2953,7 @@ mod tests {
             // Should keep: ops 2, 3, 4 (sections 0 partially removed, 1 truncated, 2 removed)
             let lower_bound = 2;
             let upper_bound = 4;
-            let synced_journal = Journal::<deterministic::Context, u64>::init_sync(
+            let mut journal = Journal::<deterministic::Context, u64>::init_sync(
                 context.clone(),
                 cfg.clone(),
                 lower_bound,
@@ -2976,27 +2964,26 @@ mod tests {
             .expect("Failed to initialize synced journal");
 
             // Verify section 0 is partially present (only op 2)
-            assert!(synced_journal.blobs.contains_key(&0));
-            assert_eq!(synced_journal.get(0, 2).await.unwrap(), Some(2));
+            assert!(journal.blobs.contains_key(&0));
+            assert_eq!(journal.get(0, 2).await.unwrap(), Some(2));
 
             // Verify section 1 is truncated (ops 3, 4 only)
-            assert!(synced_journal.blobs.contains_key(&1));
-            assert_eq!(synced_journal.get(1, 0).await.unwrap(), Some(3));
-            assert_eq!(synced_journal.get(1, 1).await.unwrap(), Some(4));
+            assert!(journal.blobs.contains_key(&1));
+            assert_eq!(journal.get(1, 0).await.unwrap(), Some(3));
+            assert_eq!(journal.get(1, 1).await.unwrap(), Some(4));
 
             // Operation 5 should be inaccessible (truncated)
-            let result = synced_journal.get(1, 2).await;
+            let result = journal.get(1, 2).await;
             assert!(result.is_err());
 
             // Verify section 2 is completely removed
-            assert!(!synced_journal.blobs.contains_key(&2));
+            assert!(!journal.blobs.contains_key(&2));
 
             // Test that new appends work correctly after truncation
-            let mut synced_journal = synced_journal;
-            let (offset, _) = synced_journal.append(1, 999).await.unwrap();
-            assert_eq!(synced_journal.get(1, offset).await.unwrap(), Some(999));
+            let (offset, _) = journal.append(1, 999).await.unwrap();
+            assert_eq!(journal.get(1, offset).await.unwrap(), Some(999));
 
-            synced_journal.destroy().await.unwrap();
+            journal.destroy().await.unwrap();
         });
     }
 }
