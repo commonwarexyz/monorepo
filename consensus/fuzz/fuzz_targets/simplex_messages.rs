@@ -36,7 +36,7 @@ fn fuzzer(input: FuzzInput) {
     // Create context
     let n = 4;
     let namespace = b"consensus_fuzz".to_vec();
-    let cfg = deterministic::Config::new().with_seed(input.seed); // Reduced timeout for faster cleanup
+    let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
     executor.start(|context| async move {
         // Create simulated network
@@ -82,7 +82,7 @@ fn fuzzer(input: FuzzInput) {
         // Create engines
         let relay = Arc::new(relay::Relay::new());
 
-        // Start fuzzing actor (first validator)
+        // Start a consensus engine for the fuzzing actor (first validator).
         let scheme = schemes.remove(0);
         let validator = scheme.public_key();
         let context = context.with_label(&format!("validator-{validator}"));
@@ -104,7 +104,7 @@ fn fuzzer(input: FuzzInput) {
         );
         actor.start(voter);
 
-        // Start regular consensus engines for the remaining validators
+        // Start regular consensus engines for the remaining validators.
         for scheme in schemes.into_iter() {
             let validator = scheme.public_key();
             let context = context.with_label(&format!("validator-{validator}"));
@@ -156,11 +156,10 @@ fn fuzzer(input: FuzzInput) {
             engine.start(voter, resolver);
         }
 
-        context.sleep(Duration::from_secs(60)).await;
+        context.sleep(Duration::from_secs(15)).await;
     });
 }
 
 fuzz_target!(|input: FuzzInput| {
     fuzzer(input);
-    //panic!("11");
 });
