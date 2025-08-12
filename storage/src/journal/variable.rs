@@ -2770,7 +2770,7 @@ mod tests {
 
     /// Test `init_sync` with edge case where upper_bound requires section removal.
     #[test_traced]
-    fn test_init_sync_precise_upper_bound_removal() {
+    fn test_truncate_section_to_upper_bound() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -2996,9 +2996,9 @@ mod tests {
         });
     }
 
-    /// Test intra-section truncation integration with real sync scenarios.
+    /// Test intra-section truncation.
     #[test_traced]
-    fn test_intra_section_truncation_integration() {
+    fn test_truncate_section_mid_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
