@@ -374,7 +374,7 @@ impl RMap {
             };
 
             // Collect items from this gap until we hit the next range or have enough
-            let gap_end = next_start - 1;
+            let gap_end = next_start - 1; // next_start must be greater than or equal to 1
             for index in current..=gap_end {
                 missing.push(index);
                 if missing.len() >= max {
