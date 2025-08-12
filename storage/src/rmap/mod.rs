@@ -373,17 +373,15 @@ impl RMap {
                 break; // No more ranges, so no more gaps to fill
             };
 
-            // Calculate how many items to collect from this gap
+            // Collect items from this gap until we hit the next range or have enough
             let gap_end = next_start - 1;
-            let remaining_needed = max - missing.len();
+            for index in current..=gap_end {
+                missing.push(index);
+                if missing.len() >= max {
+                    break;
+                }
+            }
             
-            // Safely compute gap size, capping at remaining_needed to avoid overflow
-            let gap_size = gap_end.saturating_sub(current).saturating_add(1);
-            let items_to_collect = remaining_needed.min(gap_size.try_into().unwrap_or(remaining_needed));
-
-            // Collect items from this gap
-            missing.extend((0..items_to_collect).map(|i| current + i as u64));
-
             // Move to the start of the next range to check for more gaps
             current = next_start;
         }
