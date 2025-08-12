@@ -1,9 +1,9 @@
 use crate::{
     buffer::{Append, PoolRef},
-    Blob, Error,
+    Blob, Error, RwLock,
 };
 use commonware_utils::StableBuf;
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, sync::Arc};
 
 /// A [Blob] wrapper that provides read-only access with buffer-pool managed read caching.
 ///
@@ -23,6 +23,12 @@ pub struct Immutable<B: Blob> {
 
     /// The size of the blob at creation time.
     size: u64,
+
+    /// Buffer containing the trailing bytes (data after the last full page).
+    ///
+    /// This buffer will be fully populated on first access to trailing bytes (i.e. all
+    /// trailing bytes will be read from the underlying blob at once).
+    trailing: Arc<RwLock<Vec<u8>>>,
 }
 
 impl<B: Blob> Immutable<B> {
@@ -33,6 +39,7 @@ impl<B: Blob> Immutable<B> {
             id: pool_ref.next_id().await,
             pool_ref,
             size,
+            trailing: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -45,6 +52,7 @@ impl<B: Blob> Immutable<B> {
             id,
             pool_ref,
             size,
+            trailing: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -98,17 +106,42 @@ impl<B: Blob> Blob for Immutable<B> {
                 .await?;
         }
 
-        // If we need to read trailing bytes, read them directly from the blob.
-        if pool_read_len < buf.len() {
-            let mut trailing_part = buf.split_off(pool_read_len);
-
-            trailing_part = self
-                .blob
-                .read_at(trailing_part, offset + pool_read_len as u64)
-                .await?;
-
-            buf.unsplit(trailing_part);
+        // We read all the requested data from the pool.
+        if pool_read_len >= buf.len() {
+            return Ok(buf);
         }
+
+        // Read trailing bytes from the trailing buffer, populating it if needed.
+        let trailing_offset = (offset + pool_read_len as u64 - trailing_bytes_start) as usize;
+        let trailing_read_len = buf.len() - pool_read_len;
+
+        // Check if the buffer is already populated and copy from it.
+        {
+            let trailing = self.trailing.read().await;
+            if !trailing.is_empty() {
+                buf.as_mut()[pool_read_len..].copy_from_slice(
+                    &trailing[trailing_offset..trailing_offset + trailing_read_len],
+                );
+                return Ok(buf);
+            }
+        }
+
+        // The buffer is not initializated yet, read the entire trailing bytes from
+        // the blob.
+        let mut trailing = self.trailing.write().await;
+
+        // Another task may have populated the buffer while we waited.
+        if trailing.is_empty() {
+            let trailing_size = (self.size - trailing_bytes_start) as usize;
+            *trailing = self
+                .blob
+                .read_at(vec![0u8; trailing_size], trailing_bytes_start)
+                .await?
+                .into();
+        }
+
+        buf.as_mut()[pool_read_len..]
+            .copy_from_slice(&trailing[trailing_offset..trailing_offset + trailing_read_len]);
 
         Ok(buf)
     }
