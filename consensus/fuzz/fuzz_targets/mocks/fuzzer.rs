@@ -18,7 +18,7 @@ use commonware_macros::select;
 use commonware_p2p::{simulated::helpers::PartitionStrategy, Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use futures_timer::Delay;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::time::Duration;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
@@ -42,8 +42,6 @@ pub enum Message {
 #[derive(Debug, Arbitrary)]
 pub struct FuzzInput {
     pub seed: u64, // Seed for rng
-    #[arbitrary(with = |u: &mut Unstructured| u.int_in_range(32..=3000))]
-    pub max_steps: u16, // The number of steps the fuzzing actor can do before it stops.
     pub partition: PartitionStrategy,
 }
 
@@ -54,7 +52,6 @@ pub struct Fuzzer<E: Clock + Spawner> {
     namespace: Vec<u8>,
     rng: StdRng,
     view: u64,
-    max_steps: u16,
 }
 
 impl<E: Clock + Spawner> Fuzzer<E> {
@@ -72,7 +69,6 @@ impl<E: Clock + Spawner> Fuzzer<E> {
             supervisor,
             namespace,
             rng: StdRng::seed_from_u64(input.seed),
-            max_steps: input.max_steps,
         }
     }
 
@@ -126,26 +122,30 @@ impl<E: Clock + Spawner> Fuzzer<E> {
 
     async fn run(mut self, voter_network: (impl Sender, impl Receiver)) {
         let (mut sender, mut receiver) = voter_network;
-        let mut steps = 0;
 
-        while steps < self.max_steps {
+        loop {
+            // Send a random message each 10 loop
+            match self.rng.gen_range(0..100) {
+                0..10 => {
+                    self.send_random_message(&mut sender).await;
+                }
+                _ => {}
+            }
+
             select! {
                 result = receiver.recv().fuse() => {
                     match result {
                         Ok((s, msg)) => {
-                            steps += 1;
                             self.handle_received_message(&mut sender, s, msg.to_vec())
                                 .await;
                         }
                         Err(_) => {
-                            steps += 1;
                             self.send_random_message(&mut sender).await;
                         }
                     }
                 },
 
                 _ = Delay::new(DEFAULT_TIMEOUT).fuse() => {
-                    steps += 1;
                     self.send_random_message(&mut sender).await;
                 }
             }

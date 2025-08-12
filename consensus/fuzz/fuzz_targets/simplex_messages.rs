@@ -156,7 +156,7 @@ fn fuzzer(input: FuzzInput) {
             engine.start(voter, resolver);
         }
 
-        context.sleep(Duration::from_secs(15)).await;
+        context.sleep(Duration::from_secs(30)).await;
     });
 }
 
