@@ -4,10 +4,7 @@
 use crate::{
     adb::Error,
     index::Index,
-    journal::{
-        fixed::{Config as FConfig, Journal as FJournal},
-        variable::{Config as VConfig, Journal as VJournal},
-    },
+    journal::{fixed, variable},
     mmr::{
         hasher::Standard,
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
@@ -110,7 +107,7 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
     /// A log of all operations applied to the db in order of occurrence. The _location_ of an
     /// operation is its order of occurrence with respect to this log, and corresponds to its leaf
     /// number in the MMR.
-    log: VJournal<E, Variable<K, V>>,
+    log: variable::Journal<E, Variable<K, V>>,
 
     /// The number of operations that have been appended to the log (which must equal the number of
     /// leaves in the MMR).
@@ -121,7 +118,7 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
 
     /// A fixed-length journal that maps an operation's location to its offset within its respective
     /// section of the log. (The section number is derived from location.)
-    locations: FJournal<E, U32>,
+    locations: fixed::Journal<E, U32>,
 
     /// The location of the oldest retained operation, or 0 if no operations have been added.
     oldest_retained_loc: u64,
@@ -162,9 +159,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let mut log = VJournal::init(
+        let mut log = variable::Journal::init(
             context.with_label("log"),
-            VConfig {
+            variable::Config {
                 partition: cfg.log_journal_partition,
                 compression: cfg.log_compression,
                 codec_config: cfg.log_codec_config,
@@ -174,9 +171,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let mut locations = FJournal::init(
+        let mut locations = fixed::Journal::init(
             context.with_label("locations"),
-            FConfig {
+            fixed::Config {
                 partition: cfg.locations_journal_partition,
                 items_per_blob: cfg.locations_items_per_blob,
                 write_buffer: cfg.log_write_buffer,
@@ -236,9 +233,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         .map_err(Error::Mmr)?;
 
         // Initialize locations journal for sync
-        let mut locations = FJournal::init_sync(
+        let mut locations = fixed::Journal::<E, U32>::init_sync(
             context.with_label("locations"),
-            FConfig {
+            fixed::Config {
                 partition: cfg.db_config.locations_journal_partition,
                 items_per_blob: cfg.db_config.locations_items_per_blob,
                 write_buffer: cfg.db_config.log_write_buffer,
@@ -295,8 +292,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         hasher: &mut Standard<H>,
         log_items_per_section: NonZeroU64,
         mmr: &mut Mmr<E, H>,
-        log: &mut VJournal<E, Variable<K, V>>,
-        locations: &mut FJournal<E, U32>,
+        log: &mut variable::Journal<E, Variable<K, V>>,
+        locations: &mut fixed::Journal<E, U32>,
         snapshot: &mut Index<T, u64>,
     ) -> Result<(u64, u64), Error> {
         // Align the mmr with the location map. Any elements we remove here that are still in the
