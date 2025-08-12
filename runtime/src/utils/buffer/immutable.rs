@@ -59,7 +59,21 @@ impl<B: Blob> Immutable<B> {
     /// Convert this [Immutable] wrapper back to an [Append] wrapper with a write buffer
     /// with capacity `buffer_size`.
     pub async fn into_append(self, buffer_size: NonZeroUsize) -> Result<Append<B>, Error> {
-        Append::new_in_pool(self.blob, self.size, buffer_size, self.id, self.pool_ref).await
+        // Extract trailing bytes, taking ownership if possible to avoid cloning.
+        let trailing = match Arc::try_unwrap(self.trailing) {
+            Ok(lock) => lock.into_inner(),
+            Err(trailing) => trailing.read().await.clone(),
+        };
+
+        Append::new_in_pool(
+            self.blob,
+            self.size,
+            buffer_size,
+            self.id,
+            self.pool_ref,
+            Some(trailing),
+        )
+        .await
     }
 
     /// Clones and returns the underlying blob.

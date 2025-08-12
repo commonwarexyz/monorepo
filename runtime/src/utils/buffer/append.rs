@@ -40,18 +40,22 @@ impl<B: Blob> Append<B> {
         pool_ref: PoolRef,
     ) -> Result<Self, Error> {
         let pool_id = pool_ref.next_id().await;
-        Self::new_in_pool(blob, size, buffer_size, pool_id, pool_ref).await
+        Self::new_in_pool(blob, size, buffer_size, pool_id, pool_ref, None).await
     }
 
     /// Create a new [Append] with a specific pool ID.
     ///
     /// This is used internally when converting from [Immutable] to reuse the same pool ID.
+    /// The `trailing` buffer allows passing already-loaded trailing bytes to avoid re-reading
+    /// from disk. This method will panic if `trailing` doesn't contain the entire trailing
+    /// bytes (consistent with `size` and pool page size).
     pub(crate) async fn new_in_pool(
         blob: B,
         size: u64,
         buffer_size: NonZeroUsize,
         id: u64,
         pool_ref: PoolRef,
+        trailing: Option<Vec<u8>>,
     ) -> Result<Self, Error> {
         // Set a floor on the write buffer size to make sure we always write at least 1 page of new
         // data with each flush. We multiply page_size by two here since we could be storing up to
@@ -64,12 +68,23 @@ impl<B: Blob> Append<B> {
         // ensure its offset into the blob is always page aligned.
         let leftover_size = size % pool_ref.page_size as u64;
         let page_aligned_size = size - leftover_size;
-        let mut buffer = Buffer::new(page_aligned_size, NZUsize!(buffer_size));
+
+        let mut buf = trailing.unwrap_or_else(|| Vec::with_capacity(buffer_size));
+
         if leftover_size != 0 {
-            let page_buf = vec![0; leftover_size as usize];
-            let buf = blob.read_at(page_buf, page_aligned_size).await?;
-            assert!(!buffer.append(buf.as_ref()));
+            // If we have trailing bytes, verify they match expected size.
+            if !buf.is_empty() {
+                assert_eq!(buf.len(), leftover_size as usize);
+            } else {
+                // Otherwise, read trailing bytes from disk.
+                buf = blob
+                    .read_at(vec![0; leftover_size as usize], page_aligned_size)
+                    .await?
+                    .into();
+            }
         }
+
+        let buffer = Buffer::from_vec(buf, page_aligned_size, NZUsize!(buffer_size));
 
         Ok(Self {
             blob,
