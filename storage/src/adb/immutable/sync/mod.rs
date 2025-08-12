@@ -1,5 +1,6 @@
 use crate::{
     adb::{
+        any::variable::sync::init_journal,
         immutable,
         sync::{self, Journal as _},
     },
@@ -85,7 +86,7 @@ where
         upper_bound_loc: u64,
     ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
         // Open the journal and discard operations outside the sync range.
-        let journal = variable::Journal::init_sync(
+        let journal = init_journal(
             context.with_label("log"),
             variable::Config {
                 partition: config.log_journal_partition.clone(),
