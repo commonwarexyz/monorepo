@@ -13,52 +13,57 @@ use commonware_storage::{
 use commonware_utils::{NZUsize, NZU64};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::time::Instant;
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    time::Instant,
+};
 use tracing::info;
 
 const NUM_ELEMENTS: u64 = 100_000;
 const NUM_OPERATIONS: u64 = 1_000_000;
 const COMMIT_FREQUENCY: u32 = 10_000;
 const DELETE_FREQUENCY: u32 = 10; // 1/10th of the updates will be deletes.
-const ITEMS_PER_BLOB: u64 = 500_000;
+const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(500_000);
 const PARTITION_SUFFIX: &str = "current_bench_partition";
 
 /// Use a "prod sized" page size to test the performance of the journal.
-const PAGE_SIZE: usize = 16384;
+const PAGE_SIZE: NonZeroUsize = NZUsize!(16384);
 
 /// The number of pages to cache in the buffer pool.
-const PAGE_CACHE_SIZE: usize = 10_000;
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
-/// current_init is multithreaded, and will have different performance for different number of threads.
-/// So we benchmark with no thread pool and 8 threads to compare singlethreaded and multithreaded performance.
+/// current_init is multi-threaded, and will have different performance for different number of
+/// threads. So we benchmark with no thread pool and 8 threads to compare single-threaded and
+/// multi-threaded performance.
 const SINGLE_THREADED: usize = 1;
 const MULTI_THREADED: usize = 8;
 
-/// Chunk size for the current ADB bitmap - must be a power of 2 (as assumed in current::grafting_height()) and a multiple of digest size.
+/// Chunk size for the current ADB bitmap - must be a power of 2 (as assumed in
+/// current::grafting_height()) and a multiple of digest size.
 const CHUNK_SIZE: usize = 32;
 
 fn current_cfg(pool: Option<ThreadPool>) -> CConfig<EightCap> {
     CConfig::<EightCap> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
-        mmr_items_per_blob: NZU64!(ITEMS_PER_BLOB),
+        mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: NZUsize!(1024),
         log_journal_partition: format!("log_journal_{PARTITION_SUFFIX}"),
-        log_items_per_blob: NZU64!(ITEMS_PER_BLOB),
+        log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: NZUsize!(1024),
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: pool,
-        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         pruning_delay: 10,
     }
 }
 
-/// Generate a large current db with random data. The function seeds the db with exactly `num_elements`
-/// elements by inserting them in order, each with a new random value. Then, it performs
-/// `num_operations` over these elements, each selected uniformly at random for each operation. The
-/// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
-/// after every `COMMIT_FREQUENCY` operations.
+/// Generate a large current db with random data. The function seeds the db with exactly
+/// `num_elements` elements by inserting them in order, each with a new random value. Then, it
+/// performs `num_operations` over these elements, each selected uniformly at random for each
+/// operation. The ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database
+/// is committed after every `COMMIT_FREQUENCY` operations.
 fn gen_random_current(cfg: Config, num_elements: u64, num_operations: u64, threads: usize) {
     let runner = Runner::new(cfg.clone());
     runner.start(|ctx| async move {
