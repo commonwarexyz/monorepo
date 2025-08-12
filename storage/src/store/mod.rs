@@ -44,7 +44,7 @@
 //!     store::{Config, Store},
 //!     translator::TwoCap,
 //! };
-//! use commonware_utils::NZUsize;
+//! use commonware_utils::{NZUsize, NZU64};
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
 //! use commonware_runtime::{buffer::PoolRef, deterministic::Runner, Metrics, Runner as _};
 //!
@@ -58,9 +58,9 @@
 //!         log_write_buffer: NZUsize!(64 * 1024),
 //!         log_compression: None,
 //!         log_codec_config: (),
-//!         log_items_per_section: 4,
+//!         log_items_per_section: NZU64!(4),
 //!         locations_journal_partition: "locations_partition".to_string(),
-//!         locations_items_per_blob: 4,
+//!         locations_items_per_blob: NZU64!(4),
 //!         translator: TwoCap,
 //!         buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
 //!     };
@@ -109,7 +109,10 @@ use commonware_codec::{Codec, Read};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::{sequence::U32, Array, NZUsize};
 use futures::{pin_mut, try_join, StreamExt};
-use std::{collections::HashMap, num::NonZeroUsize};
+use std::{
+    collections::HashMap,
+    num::{NonZeroU64, NonZeroUsize},
+};
 use tracing::{debug, warn};
 
 pub mod operation;
@@ -145,13 +148,13 @@ pub struct Config<T: Translator, C> {
     pub log_codec_config: C,
 
     /// The number of operations to store in each section of the [`VJournal`].
-    pub log_items_per_section: u64,
+    pub log_items_per_section: NonZeroU64,
 
     /// The name of the [`RStorage`] partition used for the location map.
     pub locations_journal_partition: String,
 
     /// The number of items to put in each blob in the location map.
-    pub locations_items_per_blob: u64,
+    pub locations_items_per_blob: NonZeroU64,
 
     /// The [`Translator`] used by the compressed index.
     pub translator: T,
@@ -245,7 +248,7 @@ where
         let db = Self {
             log,
             snapshot,
-            log_items_per_section: cfg.log_items_per_section,
+            log_items_per_section: cfg.log_items_per_section.get(),
             locations,
             inactivity_floor_loc: 0,
             oldest_retained_loc: 0,
@@ -692,6 +695,7 @@ mod test {
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
+    use commonware_utils::{NZUsize, NZU64};
 
     const PAGE_SIZE: usize = 77;
     const PAGE_CACHE_SIZE: usize = 9;
@@ -705,9 +709,9 @@ mod test {
             log_write_buffer: NZUsize!(64 * 1024),
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
-            log_items_per_section: 7,
+            log_items_per_section: NZU64!(7),
             locations_journal_partition: "locations_journal".to_string(),
-            locations_items_per_blob: 11,
+            locations_items_per_blob: NZU64!(11),
             translator: TwoCap,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         };
