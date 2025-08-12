@@ -247,7 +247,7 @@ mod tests {
             immutable,
             sync::{
                 self,
-                engine::{EngineConfig, NextStep},
+                engine::{Config, NextStep},
                 Engine, Journal, Target,
             },
         },
@@ -374,7 +374,7 @@ mod tests {
             let db_config = create_sync_config(&format!("sync_client_{}", context.next_u64()));
 
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 db_config: db_config.clone(),
                 fetch_batch_size,
                 target: Target {
@@ -458,7 +458,7 @@ mod tests {
 
             let db_config = create_sync_config(&format!("empty_sync_{}", context.next_u64()));
             let target_db = Arc::new(RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 db_config,
                 fetch_batch_size: NZU64!(10),
                 target: Target {
@@ -516,7 +516,7 @@ mod tests {
             let db_config = create_sync_config("persistence_test");
             let context_clone = context.clone();
             let target_db = Arc::new(RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 db_config: db_config.clone(),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
@@ -603,7 +603,7 @@ mod tests {
             // Create client with initial smaller target and very small batch size
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let client = {
-                let config = EngineConfig {
+                let config = Config {
                     context: context.clone(),
                     db_config: create_sync_config(&format!("update_test_{}", context.next_u64())),
                     target: Target {
@@ -681,7 +681,7 @@ mod tests {
         executor.start(|mut context| async move {
             let target_db = create_test_db(context.clone()).await;
             let db_config = create_sync_config(&format!("invalid_bounds_{}", context.next_u64()));
-            let config = EngineConfig {
+            let config = Config {
                 db_config,
                 fetch_batch_size: NZU64!(10),
                 target: Target {
@@ -728,7 +728,7 @@ mod tests {
             target_db.commit().await.unwrap();
 
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 db_config: create_sync_config(&format!("subset_{}", context.next_u64())),
                 fetch_batch_size: NZU64!(10),
                 target: Target {
@@ -793,7 +793,7 @@ mod tests {
 
             // Reopen the sync database and sync it to the target database
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 db_config: sync_db_config, // Use same config as before
                 fetch_batch_size: NZU64!(10),
                 target: Target {
@@ -854,7 +854,7 @@ mod tests {
 
             // Sync should complete immediately without fetching
             let resolver = Arc::new(commonware_runtime::RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 db_config: sync_config,
                 fetch_batch_size: NZU64!(10),
                 target: Target {
@@ -904,7 +904,7 @@ mod tests {
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 context: context.clone(),
                 db_config: create_sync_config(&format!("lb_dec_{}", context.next_u64())),
                 fetch_batch_size: NZU64!(5),
@@ -963,7 +963,7 @@ mod tests {
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 context: context.clone(),
                 db_config: create_sync_config(&format!("ub_dec_{}", context.next_u64())),
                 fetch_batch_size: NZU64!(5),
@@ -1040,7 +1040,7 @@ mod tests {
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 context: context.clone(),
                 db_config: create_sync_config(&format!("bounds_inc_{}", context.next_u64())),
                 fetch_batch_size: NZU64!(1),
@@ -1102,7 +1102,7 @@ mod tests {
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 context: context.clone(),
                 db_config: create_sync_config(&format!("invalid_update_{}", context.next_u64())),
                 fetch_batch_size: NZU64!(5),
@@ -1158,7 +1158,7 @@ mod tests {
             // Create client with target that will complete immediately
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 context: context.clone(),
                 db_config: create_sync_config(&format!("done_{}", context.next_u64())),
                 fetch_batch_size: NZU64!(20),

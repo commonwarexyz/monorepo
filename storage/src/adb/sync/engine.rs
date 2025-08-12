@@ -69,7 +69,7 @@ async fn wait_for_event<Op, D: Digest, E>(
 }
 
 /// Configuration for creating a new [Engine]
-pub struct EngineConfig<DB: Database, R: Resolver<Op = DB::Op, Digest = DB::Digest>> {
+pub struct Config<DB: Database, R: Resolver<Op = DB::Op, Digest = DB::Digest>> {
     /// Runtime context for creating database components
     pub context: DB::Context,
     /// Network resolver for fetching operations and proofs
@@ -141,7 +141,7 @@ where
     DB::Op: Encode,
 {
     /// Create a new sync engine with the given configuration
-    pub async fn new(config: EngineConfig<DB, R>) -> Result<Self, Error<DB::Error, R::Error>> {
+    pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB::Error, R::Error>> {
         if config.target.lower_bound_ops > config.target.upper_bound_ops {
             return Err(Error::InvalidTarget {
                 lower_bound_pos: config.target.lower_bound_ops,

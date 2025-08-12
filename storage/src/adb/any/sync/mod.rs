@@ -200,7 +200,7 @@ mod tests {
             },
             sync::{
                 self,
-                engine::{EngineConfig, NextStep},
+                engine::{Config, NextStep},
                 resolver::tests::FailResolver,
                 Engine, Target,
             },
@@ -287,7 +287,7 @@ mod tests {
             let db_config = create_test_config(context.next_u64());
 
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 db_config: db_config.clone(),
                 fetch_batch_size,
                 target: Target {
@@ -415,7 +415,7 @@ mod tests {
         executor.start(|mut context| async move {
             let target_db = create_test_db(context.clone()).await;
             let db_config = create_test_config(context.next_u64());
-            let config = EngineConfig {
+            let config = Config {
                 db_config,
                 fetch_batch_size: NZU64!(10),
                 target: Target {
@@ -466,7 +466,7 @@ mod tests {
             target_db.commit().await.unwrap();
 
             // Start of the sync range is after the inactivity floor
-            let config = EngineConfig {
+            let config = Config {
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(10),
                 target: Target {
@@ -544,7 +544,7 @@ mod tests {
 
             // Reopen the sync database and sync it to the target database
             let target_db = Arc::new(RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 db_config: sync_db_config, // Use same config as before
                 fetch_batch_size: NZU64!(10),
                 target: Target {
@@ -646,7 +646,7 @@ mod tests {
             // because it is already complete. Use a resolver that always fails
             // to ensure that it's not being used.
             let resolver = FailResolver::<sha256::Digest, sha256::Digest, sha256::Digest>::new();
-            let config = EngineConfig {
+            let config = Config {
                 db_config: sync_config, // Use same config to access same partitions
                 fetch_batch_size: NZU64!(10),
                 target: Target {
@@ -712,7 +712,7 @@ mod tests {
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(5),
@@ -773,7 +773,7 @@ mod tests {
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(5),
@@ -846,7 +846,7 @@ mod tests {
             let (mut update_sender, update_receiver) = mpsc::channel(1);
 
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(1),
@@ -912,7 +912,7 @@ mod tests {
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(5),
@@ -970,7 +970,7 @@ mod tests {
             // Create client with target that will complete immediately
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 context: context.clone(),
                 db_config: create_test_config(context.next_u64()),
                 fetch_batch_size: NZU64!(20),
@@ -1052,7 +1052,7 @@ mod tests {
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             // Step the client to process a batch
             let client = {
-                let config = EngineConfig {
+                let config = Config {
                     context: context.clone(),
                     db_config: create_test_config(context.next_u64()),
                     target: Target {
@@ -1180,7 +1180,7 @@ mod tests {
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             // Step the client to process a batch
             let client = {
-                let config = EngineConfig {
+                let config = Config {
                     context: context.clone(),
                     db_config: create_test_config(context.next_u64()),
                     target: Target {
@@ -1281,7 +1281,7 @@ mod tests {
             let db_config = create_test_config(42);
             let context_clone = context.clone();
             let target_db = Arc::new(RwLock::new(target_db));
-            let config = EngineConfig {
+            let config = Config {
                 db_config: db_config.clone(),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
@@ -1346,7 +1346,7 @@ mod tests {
             let target_root = sha256::Digest::from([0; 32]);
 
             let db_config = create_test_config(context.next_u64());
-            let engine_config = EngineConfig {
+            let engine_config = Config {
                 context,
                 target: Target {
                     root: target_root,

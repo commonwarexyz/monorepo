@@ -8,7 +8,7 @@ use commonware_codec::{Encode, Read};
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Metrics, Network, Runner, Spawner, Storage,
 };
-use commonware_storage::adb::sync::{self, engine::EngineConfig, Target};
+use commonware_storage::adb::sync;
 use commonware_sync::{
     any::{create_config, Database as AnyDb, Operation as AnyOp},
     crate_version,
@@ -62,9 +62,9 @@ struct Config {
 async fn target_update_task<E, Op, D>(
     context: E,
     resolver: Resolver<Op, D>,
-    update_tx: mpsc::Sender<Target<D>>,
+    update_tx: mpsc::Sender<sync::Target<D>>,
     interval_duration: Duration,
-    initial_target: Target<D>,
+    initial_target: sync::Target<D>,
 ) -> Result<(), Error>
 where
     E: Clock,
@@ -136,7 +136,7 @@ where
             })
         };
 
-        let sync_config = EngineConfig::<AnyDb<_>, Resolver<AnyOp, Digest>> {
+        let sync_config = sync::engine::Config::<AnyDb<_>, Resolver<AnyOp, Digest>> {
             context: context.clone(),
             db_config,
             fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),
@@ -197,7 +197,7 @@ where
         };
 
         let sync_config =
-            EngineConfig::<immutable::Database<_>, Resolver<immutable::Operation, Key>> {
+            sync::engine::Config::<immutable::Database<_>, Resolver<immutable::Operation, Key>> {
                 context: context.clone(),
                 db_config,
                 fetch_batch_size: NonZeroU64::new(config.batch_size).unwrap(),

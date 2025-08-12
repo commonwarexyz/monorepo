@@ -70,8 +70,8 @@ async fn test_sync<
     let db_config = test_config(test_name, pruning_delay);
     let expected_root = target.root;
 
-    let sync_config: sync::engine::EngineConfig<Any<_, Key, Value, Sha256, TwoCap>, R> =
-        sync::engine::EngineConfig {
+    let sync_config: sync::engine::Config<Any<_, Key, Value, Sha256, TwoCap>, R> =
+        sync::engine::Config {
             context,
             update_receiver: None,
             db_config,
