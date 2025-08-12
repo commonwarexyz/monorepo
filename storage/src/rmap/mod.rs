@@ -276,10 +276,6 @@ impl RMap {
     /// - The first element (`current_range_end`) is `Some(end)` of the range that contains `value`. It's `None` if `value` is before all ranges, the map is empty, or `value` is not in any range.
     /// - The second element (`next_range_start`) is `Some(start)` of the first range that begins strictly after `value`. It's `None` if no range starts after `value` or the map is empty.
     ///
-    /// # Complexity
-    ///
-    /// O(log N) due to `BTreeMap::range` lookups, where N is the number of ranges.
-    ///
     /// # Example
     ///
     /// ```
@@ -315,25 +311,21 @@ impl RMap {
         (current_range_end, next_range_start)
     }
 
-    /// Returns up to `n` missing items starting from `starting_index`.
+    /// Returns up to `max` missing items starting from `start`.
     ///
     /// This method iterates through gaps between existing ranges, collecting missing indices
-    /// until either `n` items are found or there are no more gaps to fill.
+    /// until either `max` items are found or there are no more gaps to fill.
     ///
     /// # Arguments
     ///
-    /// * `starting_index`: The index to start searching from (inclusive).
-    /// * `n`: The maximum number of missing items to return.
+    /// * `start`: The index to start searching from (inclusive).
+    /// * `max`: The maximum number of missing items to return.
     ///
     /// # Returns
     ///
-    /// A vector containing up to `n` missing indices from gaps between ranges.
-    /// The vector may contain fewer than `n` items if there aren't enough gaps.
+    /// A vector containing up to `max` missing indices from gaps between ranges.
+    /// The vector may contain fewer than `max` items if there aren't enough gaps.
     /// If there are no more ranges after the current position, no items are returned.
-    ///
-    /// # Complexity
-    ///
-    /// O(n * log N) where n is the number of missing items to find and N is the number of ranges.
     ///
     /// # Example
     ///
@@ -359,13 +351,11 @@ impl RMap {
     /// ```
     pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
         assert!(max > 0, "max must be greater than 0");
-
-        let mut missing = Vec::with_capacity(max.min(1000)); // Cap pre-allocation at 1000
+        let mut missing = Vec::with_capacity(max);
         let mut current = start;
 
         while missing.len() < max {
             let (current_range_end, next_range_start) = self.next_gap(current);
-
             match current_range_end {
                 Some(end) => {
                     // We're in a range, skip to the end and move to the gap
