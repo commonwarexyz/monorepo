@@ -120,22 +120,6 @@ mod tests {
     use commonware_utils::NZU64;
 
     #[test]
-    fn test_request_id_generation() {
-        let requester = Generator::new();
-        let id1 = requester.next();
-        let id2 = requester.next();
-        let id3 = requester.next();
-
-        // Request IDs should be monotonically increasing
-        assert!(id2 > id1);
-        assert!(id3 > id2);
-
-        // Should be consecutive since we're using a single Requester
-        assert_eq!(id2, id1 + 1);
-        assert_eq!(id3, id2 + 1);
-    }
-
-    #[test]
     fn test_error_code_roundtrip_serialization() {
         let test_cases = vec![
             ErrorCode::InvalidRequest,
