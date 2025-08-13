@@ -637,6 +637,20 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         reconstructed_root == *root
     }
+
+    /// Destroy the bitmap metadata from disk.
+    pub async fn destroy<C: RStorage + Metrics + Clock>(
+        context: C,
+        partition: &str,
+    ) -> Result<(), Error> {
+        let metadata_cfg = MConfig {
+            partition: partition.to_string(),
+            codec_config: ((0..).into(), ()),
+        };
+        let metadata =
+            Metadata::<_, U64, Vec<u8>>::init(context.with_label("metadata"), metadata_cfg).await?;
+        metadata.destroy().await.map_err(MetadataError)
+    }
 }
 
 #[cfg(test)]
