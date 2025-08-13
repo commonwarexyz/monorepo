@@ -119,6 +119,17 @@ struct State<B> {
     pending_sequences: HashMap<u64, bool>,
 }
 
+impl<B> Default for State<B> {
+    fn default() -> Self {
+        Self {
+            next: 1,
+            watermark: 0,
+            batch_counts: HashMap::new(),
+            pending_sequences: HashMap::new(),
+        }
+    }
+}
+
 /// Tracks delivery state across all messages.
 ///
 /// Note on sequence overflow: Using u64 for sequence numbers provides ample headroom.
@@ -133,12 +144,7 @@ struct Tracker<B: Eq + Hash + Clone> {
 impl<B: Eq + Hash + Clone> Tracker<B> {
     fn new() -> Self {
         Self {
-            state: Arc::new(Mutex::new(State {
-                next: 1,
-                watermark: 0,
-                batch_counts: HashMap::new(),
-                pending_sequences: HashMap::new(),
-            })),
+            state: Arc::new(Mutex::new(State::default())),
         }
     }
 
