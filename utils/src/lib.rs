@@ -8,6 +8,7 @@ pub mod sequence;
 pub use sequence::{Array, Span};
 mod bitvec;
 pub use bitvec::{BitIterator, BitVec};
+pub mod channels;
 mod time;
 pub use time::{parse_duration, SystemTimeExt};
 mod priority_set;
