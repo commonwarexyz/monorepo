@@ -2,7 +2,8 @@ mod actor;
 mod ingress;
 
 use crate::{
-    simplex::types::{Activity, Context, View},
+    simplex::types::{Activity, Context},
+    types::View,
     Automaton, Relay, Reporter, Supervisor,
 };
 pub use actor::Actor;
@@ -27,6 +28,7 @@ pub struct Config<
 
     pub partition: String,
     pub compression: Option<u8>,
+    pub epoch: u64,
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,
     pub leader_timeout: Duration,
@@ -131,6 +133,7 @@ mod tests {
                 supervisor,
                 partition: "test".to_string(),
                 compression: Some(3),
+                epoch: 0,
                 namespace: namespace.clone(),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),
@@ -328,6 +331,7 @@ mod tests {
                 supervisor,
                 partition: "test".to_string(),
                 compression: Some(3),
+                epoch: 0,
                 namespace: namespace.clone(),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),

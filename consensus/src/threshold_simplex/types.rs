@@ -1,6 +1,9 @@
 //! Types used in [crate::threshold_simplex].
 
-use crate::Viewable;
+use crate::{
+    types::{Epoch, Round, View},
+    Viewable,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
@@ -23,16 +26,11 @@ use std::{
     hash::Hash,
 };
 
-/// View is a monotonically increasing counter that represents the current focus of consensus.
-/// Each View corresponds to a round in the consensus protocol where validators attempt to agree
-/// on a block to commit.
-pub type View = u64;
-
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current view and the parent payload that new proposals are built on.
 #[derive(Clone)]
 pub struct Context<D: Digest> {
-    /// Current view (round) of consensus.
+    /// Current view of consensus.
     pub view: View,
 
     /// Parent the payload is built on.
@@ -577,7 +575,9 @@ impl<V: Variant, D: Digest> Viewable for Voter<V, D> {
 /// It includes the view number, the parent view, and the actual payload (typically a digest of block data).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Proposal<D: Digest> {
-    /// The view (round) in which this proposal is made
+    /// The epoch in which this proposal is made
+    pub epoch: Epoch,
+    /// The view in which this proposal is made
     pub view: View,
     /// The view of the parent proposal that this one builds upon
     pub parent: View,
@@ -587,17 +587,24 @@ pub struct Proposal<D: Digest> {
 
 impl<D: Digest> Proposal<D> {
     /// Creates a new proposal with the specified view, parent view, and payload.
-    pub fn new(view: View, parent: View, payload: D) -> Self {
+    pub fn new(epoch: Epoch, view: View, parent: View, payload: D) -> Self {
         Proposal {
+            epoch,
             view,
             parent,
             payload,
         }
     }
+
+    /// Returns the round in which this proposal is made.
+    pub fn round(&self) -> Round {
+        Round::from((self.epoch, self.view))
+    }
 }
 
 impl<D: Digest> Write for Proposal<D> {
     fn write(&self, writer: &mut impl BufMut) {
+        UInt(self.epoch).write(writer);
         UInt(self.view).write(writer);
         UInt(self.parent).write(writer);
         self.payload.write(writer)
@@ -608,10 +615,12 @@ impl<D: Digest> Read for Proposal<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let epoch = UInt::read(reader)?.into();
         let view = UInt::read(reader)?.into();
         let parent = UInt::read(reader)?.into();
         let payload = D::read(reader)?;
         Ok(Self {
+            epoch,
             view,
             parent,
             payload,
@@ -621,7 +630,10 @@ impl<D: Digest> Read for Proposal<D> {
 
 impl<D: Digest> EncodeSize for Proposal<D> {
     fn encode_size(&self) -> usize {
-        UInt(self.view).encode_size() + UInt(self.parent).encode_size() + self.payload.encode_size()
+        UInt(self.epoch).encode_size()
+            + UInt(self.view).encode_size()
+            + UInt(self.parent).encode_size()
+            + self.payload.encode_size()
     }
 }
 
@@ -849,6 +861,11 @@ impl<V: Variant, D: Digest> Notarization<V, D> {
             proposal_signature,
             seed_signature,
         }
+    }
+
+    /// Returns the round in which this notarization is made.
+    pub fn round(&self) -> Round {
+        self.proposal.round()
     }
 
     /// Verifies the threshold signatures on this [Notarization].
@@ -1109,6 +1126,8 @@ impl<V: Variant> EncodeSize for Nullify<V> {
 /// The threshold signatures provide compact verification compared to collecting individual signatures.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Nullification<V: Variant> {
+    /// The epoch in which this nullification is made
+    pub epoch: Epoch,
     /// The view that has been nullified
     pub view: View,
     /// The recovered threshold signature on the view
@@ -1119,12 +1138,23 @@ pub struct Nullification<V: Variant> {
 
 impl<V: Variant> Nullification<V> {
     /// Creates a new nullification with the given view and aggregated signatures.
-    pub fn new(view: View, view_signature: V::Signature, seed_signature: V::Signature) -> Self {
+    pub fn new(
+        epoch: Epoch,
+        view: View,
+        view_signature: V::Signature,
+        seed_signature: V::Signature,
+    ) -> Self {
         Nullification {
+            epoch,
             view,
             view_signature,
             seed_signature,
         }
+    }
+
+    /// Returns the round in which this nullification is made.
+    pub fn round(&self) -> Round {
+        Round::from((self.epoch, self.view))
     }
 
     /// Verifies the threshold signatures on this [Nullification].
@@ -1159,6 +1189,7 @@ impl<V: Variant> Viewable for Nullification<V> {
 
 impl<V: Variant> Write for Nullification<V> {
     fn write(&self, writer: &mut impl BufMut) {
+        UInt(self.epoch).write(writer);
         UInt(self.view).write(writer);
         self.view_signature.write(writer);
         self.seed_signature.write(writer);
@@ -1169,10 +1200,12 @@ impl<V: Variant> Read for Nullification<V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let epoch = UInt::read(reader)?.into();
         let view = UInt::read(reader)?.into();
         let view_signature = V::Signature::read(reader)?;
         let seed_signature = V::Signature::read(reader)?;
         Ok(Nullification {
+            epoch,
             view,
             view_signature,
             seed_signature,
@@ -1182,7 +1215,8 @@ impl<V: Variant> Read for Nullification<V> {
 
 impl<V: Variant> EncodeSize for Nullification<V> {
     fn encode_size(&self) -> usize {
-        UInt(self.view).encode_size()
+        UInt(self.epoch).encode_size()
+            + UInt(self.view).encode_size()
             + self.view_signature.encode_size()
             + self.seed_signature.encode_size()
     }
@@ -1357,6 +1391,11 @@ impl<V: Variant, D: Digest> Finalization<V, D> {
             proposal_signature,
             seed_signature,
         }
+    }
+
+    /// Returns the round in which this finalization is made.
+    pub fn round(&self) -> Round {
+        self.proposal.round()
     }
 
     /// Verifies the threshold signatures on this [Finalization].
@@ -1977,8 +2016,8 @@ impl<V: Variant, D: Digest> ConflictingNotarize<V, D> {
     /// Reconstructs the original proposals from this evidence.
     pub fn proposals(&self) -> (Proposal<D>, Proposal<D>) {
         (
-            Proposal::new(self.view, self.parent_1, self.payload_1),
-            Proposal::new(self.view, self.parent_2, self.payload_2),
+            Proposal::new(0, self.view, self.parent_1, self.payload_1),
+            Proposal::new(0, self.view, self.parent_2, self.payload_2),
         )
     }
 
@@ -2117,8 +2156,8 @@ impl<V: Variant, D: Digest> ConflictingFinalize<V, D> {
     /// Reconstructs the original proposals from this evidence.
     pub fn proposals(&self) -> (Proposal<D>, Proposal<D>) {
         (
-            Proposal::new(self.view, self.parent_1, self.payload_1),
-            Proposal::new(self.view, self.parent_2, self.payload_2),
+            Proposal::new(0, self.view, self.parent_1, self.payload_1),
+            Proposal::new(0, self.view, self.parent_2, self.payload_2),
         )
     }
 
@@ -2364,7 +2403,7 @@ mod tests {
 
     #[test]
     fn test_proposal_encode_decode() {
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(0, 10, 5, sample_digest(1));
         let encoded = proposal.encode();
         let decoded = Proposal::<Sha256>::decode(encoded).unwrap();
         assert_eq!(proposal, decoded);
@@ -2376,7 +2415,7 @@ mod tests {
         let t = quorum(n);
         let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(0, 10, 5, sample_digest(1));
         let notarize = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
 
         let encoded = notarize.encode();
@@ -2392,7 +2431,7 @@ mod tests {
         let t = quorum(n);
         let (identity, _, shares) = generate_test_data(n, t, 0);
 
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(0, 10, 5, sample_digest(1));
 
         // Create notarizes
         let notarizes: Vec<_> = shares
@@ -2460,7 +2499,7 @@ mod tests {
         let seed_signature = threshold_signature_recover::<MinSig, _>(t, seed_partials).unwrap();
 
         // Create nullification
-        let nullification = Nullification::new(10, view_signature, seed_signature);
+        let nullification = Nullification::new(333, 10, view_signature, seed_signature);
         let encoded = nullification.encode();
         let decoded = Nullification::<MinSig>::decode(encoded).unwrap();
         assert_eq!(nullification, decoded);
@@ -2484,7 +2523,7 @@ mod tests {
         let t = quorum(n);
         let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(0, 10, 5, sample_digest(1));
         let finalize = Finalize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
 
         let encoded = finalize.encode();
@@ -2500,7 +2539,7 @@ mod tests {
         let t = quorum(n);
         let (identity, _, shares) = generate_test_data(n, t, 0);
 
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(0, 10, 5, sample_digest(1));
 
         // Create finalizes
         let notarizes: Vec<_> = shares
@@ -2553,7 +2592,7 @@ mod tests {
         let (_, _, shares) = generate_test_data(n, t, 0);
 
         // Create a notarization
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(0, 10, 5, sample_digest(1));
         let notarizes: Vec<_> = shares
             .iter()
             .map(|s| Notarize::<MinSig, _>::sign(NAMESPACE, s, proposal.clone()))
@@ -2578,7 +2617,7 @@ mod tests {
         let seed_partials = nullifies.iter().map(|n| &n.seed_signature);
         let seed_signature = threshold_signature_recover::<MinSig, _>(t, seed_partials).unwrap();
 
-        let nullification = Nullification::new(11, view_signature, seed_signature);
+        let nullification = Nullification::new(333, 11, view_signature, seed_signature);
 
         // Create a response
         let response = Response::new(1, vec![notarization], vec![nullification]);
@@ -2603,7 +2642,7 @@ mod tests {
         let (identity, _, shares) = generate_test_data(n, t, 0);
 
         // Create a notarization
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(0, 10, 5, sample_digest(1));
         let notarizes: Vec<_> = shares
             .iter()
             .map(|s| Notarize::<MinSig, _>::sign(NAMESPACE, s, proposal.clone()))
@@ -2628,7 +2667,7 @@ mod tests {
         let seed_partials = nullifies.iter().map(|n| &n.seed_signature);
         let seed_signature = threshold_signature_recover::<MinSig, _>(t, seed_partials).unwrap();
 
-        let nullification = Nullification::new(11, view_signature, seed_signature);
+        let nullification = Nullification::new(333, 11, view_signature, seed_signature);
 
         // Create a response
         let response = Response::<MinSig, Sha256>::new(1, vec![notarization], vec![nullification]);
@@ -2656,8 +2695,8 @@ mod tests {
         let t = quorum(n);
         let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
-        let proposal1 = Proposal::new(10, 5, sample_digest(1));
-        let proposal2 = Proposal::new(10, 5, sample_digest(2));
+        let proposal1 = Proposal::new(0, 10, 5, sample_digest(1));
+        let proposal2 = Proposal::new(0, 10, 5, sample_digest(2));
         let notarize1 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal1);
         let notarize2 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal2);
         let conflicting_notarize = ConflictingNotarize::new(notarize1, notarize2);
@@ -2675,8 +2714,8 @@ mod tests {
         let t = quorum(n);
         let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
-        let proposal1 = Proposal::new(10, 5, sample_digest(1));
-        let proposal2 = Proposal::new(10, 5, sample_digest(2));
+        let proposal1 = Proposal::new(0, 10, 5, sample_digest(1));
+        let proposal2 = Proposal::new(0, 10, 5, sample_digest(2));
         let finalize1 = Finalize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal1);
         let finalize2 = Finalize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal2);
         let conflicting_finalize = ConflictingFinalize::new(finalize1, finalize2);
@@ -2694,7 +2733,7 @@ mod tests {
         let t = quorum(n);
         let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(0, 10, 5, sample_digest(1));
         let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], 10);
         let finalize = Finalize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
         let nullify_finalize = NullifyFinalize::new(nullify, finalize);
@@ -2712,7 +2751,7 @@ mod tests {
         let t = quorum(n);
         let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(0, 10, 5, sample_digest(1));
         let notarize = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
 
         // Verify with correct namespace and polynomial - should pass
@@ -2731,7 +2770,7 @@ mod tests {
         // Generate a different set of BLS keys/shares
         let (_, polynomial2, _) = generate_test_data(n, t, 1);
 
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(0, 10, 5, sample_digest(1));
         let notarize = Notarize::<MinSig, _>::sign(NAMESPACE, &shares1[0], proposal);
 
         // Verify with correct polynomial - should pass
@@ -2747,7 +2786,7 @@ mod tests {
         let t = quorum(n);
         let (identity, _, shares) = generate_test_data(n, t, 0);
 
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(0, 10, 5, sample_digest(1));
 
         // Create notarizes
         let notarizes: Vec<_> = shares
@@ -2782,7 +2821,7 @@ mod tests {
         let t = quorum(n);
         let (identity, _, shares) = generate_test_data(n, t, 0);
 
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(0, 10, 5, sample_digest(1));
 
         // Create notarizes
         let notarizes: Vec<_> = shares
@@ -2814,7 +2853,7 @@ mod tests {
         let t = quorum(n); // For n=5, t should be 4 (2f+1 where f=1)
         let (_, _, shares) = generate_test_data(n, t, 0);
 
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(0, 10, 5, sample_digest(1));
 
         // Create notarizes, but only collect t-1 of them
         let notarizes: Vec<_> = shares
@@ -2838,8 +2877,8 @@ mod tests {
         let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         // Create two different proposals for the same view
-        let proposal1 = Proposal::new(10, 5, sample_digest(1));
-        let proposal2 = Proposal::new(10, 5, sample_digest(2)); // Same view, different payload
+        let proposal1 = Proposal::new(0, 10, 5, sample_digest(1));
+        let proposal2 = Proposal::new(0, 10, 5, sample_digest(2)); // Same view, different payload
 
         // Create notarizes for both proposals from the same validator
         let notarize1 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal1.clone());
@@ -2882,7 +2921,7 @@ mod tests {
         let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], view);
 
         // Create a finalize for the same view
-        let proposal = Proposal::new(view, 5, sample_digest(1));
+        let proposal = Proposal::new(0, view, 5, sample_digest(1));
         let finalize = Finalize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
 
         // Create nullify+finalize evidence
@@ -2917,7 +2956,7 @@ mod tests {
         // Create a completely different key set
         let (wrong_identity, _, _) = generate_test_data(n, t, 1);
 
-        let proposal = Proposal::new(10, 5, sample_digest(1));
+        let proposal = Proposal::new(0, 10, 5, sample_digest(1));
 
         // Create finalizes and notarizes for threshold signatures
         let finalizes: Vec<_> = shares
@@ -2954,7 +2993,7 @@ mod tests {
         parent_view: View,
         payload_val: u8,
     ) -> Notarize<MinSig, Sha256> {
-        let proposal = Proposal::new(view, parent_view, sample_digest(payload_val));
+        let proposal = Proposal::new(0, view, parent_view, sample_digest(payload_val));
         Notarize::<MinSig, _>::sign(NAMESPACE, share, proposal)
     }
 
@@ -2970,7 +3009,7 @@ mod tests {
         parent_view: View,
         payload_val: u8,
     ) -> Finalize<MinSig, Sha256> {
-        let proposal = Proposal::new(view, parent_view, sample_digest(payload_val));
+        let proposal = Proposal::new(0, view, parent_view, sample_digest(payload_val));
         Finalize::<MinSig, _>::sign(NAMESPACE, share, proposal)
     }
 
@@ -2982,7 +3021,7 @@ mod tests {
         shares: &[Share],
         threshold: u32,
     ) -> Notarization<MinSig, Sha256> {
-        let proposal = Proposal::new(proposal_view, parent_view, sample_digest(payload_val));
+        let proposal = Proposal::new(0, proposal_view, parent_view, sample_digest(payload_val));
         let notarizes: Vec<_> = shares
             .iter()
             .take(threshold as usize)
@@ -3096,7 +3135,7 @@ mod tests {
         let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 125);
 
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
-        let proposal = Proposal::new(1, 0, sample_digest(1));
+        let proposal = Proposal::new(0, 1, 0, sample_digest(1));
 
         let notarize_s0 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal.clone());
         let notarize_s1 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[1], proposal.clone());
@@ -3265,7 +3304,7 @@ mod tests {
         let threshold = quorum(n_validators); // threshold = 4
         let (_, polynomial, shares) = generate_test_data(n_validators, threshold, 130);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
-        let leader_proposal = Proposal::new(1, 0, sample_digest(1));
+        let leader_proposal = Proposal::new(0, 1, 0, sample_digest(1));
 
         let finalize_s0 =
             Finalize::<MinSig, _>::sign(NAMESPACE, &shares[0], leader_proposal.clone());
@@ -3316,7 +3355,7 @@ mod tests {
 
         // Test with Notarizes
         let mut verifier_n = BatchVerifier::<MinSig, Sha256>::new(None);
-        let prop1 = Proposal::new(1, 0, sample_digest(1));
+        let prop1 = Proposal::new(0, 1, 0, sample_digest(1));
         let notarize1 = create_notarize(&shares[0], 1, 0, 1);
 
         assert!(!verifier_n.ready_notarizes()); // No leader/proposal
@@ -3364,8 +3403,8 @@ mod tests {
         let (_, _, shares) = generate_test_data(n_validators, threshold, 201);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
-        let proposal_a = Proposal::new(1, 0, sample_digest(10));
-        let proposal_b = Proposal::new(1, 0, sample_digest(20));
+        let proposal_a = Proposal::new(0, 1, 0, sample_digest(10));
+        let proposal_b = Proposal::new(0, 1, 0, sample_digest(20));
 
         let notarize_a_s0 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal_a.clone());
         let notarize_b_s1 = Notarize::<MinSig, _>::sign(NAMESPACE, &shares[1], proposal_b.clone());
@@ -3508,7 +3547,7 @@ mod tests {
         let threshold = quorum(n_validators);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
-        let leader_proposal = Proposal::new(1, 0, sample_digest(1));
+        let leader_proposal = Proposal::new(0, 1, 0, sample_digest(1));
         verifier.set_leader_proposal(leader_proposal); // This sets notarizes_force = true
 
         assert!(verifier.notarizes_force);
@@ -3607,7 +3646,7 @@ mod tests {
         let (_, _, shares) = generate_test_data(n_validators, threshold, 211);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
-        let leader_proposal = Proposal::new(1, 0, sample_digest(1));
+        let leader_proposal = Proposal::new(0, 1, 0, sample_digest(1));
         verifier.set_leader(shares[0].index);
         verifier.set_leader_proposal(leader_proposal.clone());
 
@@ -3678,7 +3717,7 @@ mod tests {
         let (_, _, shares) = generate_test_data(n_validators, threshold, 214);
         let mut verifier = BatchVerifier::<MinSig, Sha256>::new(Some(threshold));
 
-        let leader_proposal = Proposal::new(1, 0, sample_digest(1));
+        let leader_proposal = Proposal::new(0, 1, 0, sample_digest(1));
         verifier.set_leader(shares[0].index);
         verifier.set_leader_proposal(leader_proposal.clone());
 

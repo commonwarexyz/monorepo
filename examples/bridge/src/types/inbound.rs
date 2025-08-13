@@ -246,6 +246,7 @@ mod tests {
         seed_signature.mul(&scalar);
         Finalization {
             proposal: Proposal {
+                epoch: 333,
                 view: 12345,
                 parent: 54321,
                 payload: new_digest(),
