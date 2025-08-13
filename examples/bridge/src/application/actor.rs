@@ -64,9 +64,9 @@ impl<R: Rng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St
         let (mut indexer_sender, mut indexer_receiver) = self.indexer.split();
         while let Some(message) = self.mailbox.next().await {
             match message {
-                Message::Genesis { response } => {
-                    // Use the digest of the genesis message as the initial
-                    // payload.
+                Message::Genesis { epoch, response } => {
+                    assert_eq!(epoch, 0, "epoch must be 0");
+                    // Use the digest of the genesis message as the initial payload.
                     self.hasher.update(GENESIS);
                     let digest = self.hasher.finalize();
                     let _ = response.send(digest);

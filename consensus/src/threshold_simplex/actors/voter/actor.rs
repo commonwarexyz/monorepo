@@ -7,9 +7,10 @@ use crate::{
         min_active,
         types::{
             Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
-            Nullification, Nullify, Proposal, View, Voter,
+            Nullification, Nullify, Proposal, Voter,
         },
     },
+    types::{Epoch, View},
     Automaton, Relay, Reporter, ThresholdSupervisor, Viewable, LATENCY,
 };
 use commonware_cryptography::{
@@ -78,6 +79,7 @@ struct Round<
     start: SystemTime,
     supervisor: S,
 
+    epoch: Epoch,
     view: View,
     quorum: u32,
 
@@ -141,6 +143,7 @@ impl<
         context: &E,
         supervisor: S,
         recover_latency: histogram::Timed<E>,
+        epoch: Epoch,
         view: View,
     ) -> Self {
         let participants = supervisor.participants(view).unwrap().len();
@@ -149,6 +152,7 @@ impl<
             start: context.current(),
             supervisor,
 
+            epoch,
             view,
             quorum,
 
@@ -341,7 +345,8 @@ impl<
         timer.observe();
 
         // Construct nullification
-        let nullification = Nullification::new(self.view, view_signature, seed_signature);
+        let nullification =
+            Nullification::new(self.epoch, self.view, view_signature, seed_signature);
         self.broadcast_nullification = true;
         Some(nullification)
     }
@@ -423,7 +428,7 @@ pub struct Actor<
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
-    A: Automaton<Digest = D, Context = Context<D>>,
+    A: Automaton<Digest = D, Context = Context<D>, Epoch = u64>,
     R: Relay,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
@@ -452,6 +457,7 @@ pub struct Actor<
 
     genesis: Option<D>,
 
+    epoch: u64,
     namespace: Vec<u8>,
 
     leader_timeout: Duration,
@@ -481,7 +487,7 @@ impl<
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
-        A: Automaton<Digest = D, Context = Context<D>>,
+        A: Automaton<Digest = D, Context = Context<D>, Epoch = u64>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<
@@ -560,6 +566,7 @@ impl<
 
                 genesis: None,
 
+                epoch: cfg.epoch,
                 namespace: cfg.namespace,
 
                 leader_timeout: cfg.leader_timeout,
@@ -843,6 +850,7 @@ impl<
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
+            self.epoch,
             view,
         ));
 
@@ -1045,6 +1053,7 @@ impl<
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
+            self.epoch,
             view,
         ));
         round.leader_deadline = Some(self.context.current() + self.leader_timeout);
@@ -1101,6 +1110,7 @@ impl<
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
+            self.epoch,
             view,
         ));
 
@@ -1156,6 +1166,7 @@ impl<
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
+            self.epoch,
             view,
         ));
 
@@ -1213,6 +1224,7 @@ impl<
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
+            self.epoch,
             nullification.view,
         ));
 
@@ -1239,6 +1251,7 @@ impl<
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
+            self.epoch,
             view,
         ));
 
@@ -1294,6 +1307,7 @@ impl<
             &self.context,
             self.supervisor.clone(),
             self.recover_latency.clone(),
+            self.epoch,
             view,
         ));
 
@@ -1655,7 +1669,7 @@ impl<
             wrap::<_, _, Voter<V, D>>((), recovered_sender, recovered_receiver);
 
         // Compute genesis
-        let genesis = self.automaton.genesis().await;
+        let genesis = self.automaton.genesis(self.epoch).await;
         self.genesis = Some(genesis);
 
         // Add initial view
@@ -1889,6 +1903,7 @@ impl<
 
                     // Construct proposal
                     let proposal = Proposal::new(
+                        self.epoch,
                         context.view,
                         context.parent.0,
                         proposed,

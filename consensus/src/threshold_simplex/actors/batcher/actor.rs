@@ -6,9 +6,10 @@ use crate::{
         metrics::Inbound,
         types::{
             Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
-            Finalize, Notarize, Nullify, NullifyFinalize, View, Voter,
+            Finalize, Notarize, Nullify, NullifyFinalize, Voter,
         },
     },
+    types::View,
     Reporter, ThresholdSupervisor, Viewable,
 };
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};

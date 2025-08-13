@@ -202,6 +202,7 @@ fn main() {
             partition: String::from("log"),
             compression: Some(3),
             mailbox_size: 1024,
+            epoch: 0,
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             leader_timeout: Duration::from_secs(1),
