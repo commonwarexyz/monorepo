@@ -1,10 +1,6 @@
 use crate::{aggregation::types::Epoch, Supervisor as S, ThresholdSupervisor as TS};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group::Share,
-        poly::{self, Public},
-        variant::Variant,
-    },
+    bls12381::primitives::{group::Share, poly::Public, variant::Variant},
     PublicKey,
 };
 use std::{collections::HashMap, marker::PhantomData};
@@ -70,7 +66,7 @@ impl<P: PublicKey, V: Variant> S for Supervisor<P, V> {
 }
 
 impl<P: PublicKey, V: Variant> TS for Supervisor<P, V> {
-    type Identity = poly::Public<V>;
+    type Identity = Public<V>;
     type Seed = V::Signature;
     type Polynomial = Public<V>;
     type Share = Share;
