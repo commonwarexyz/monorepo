@@ -36,6 +36,7 @@ cargo run --bin server -- --port 8080 --initial-ops 50 --storage-dir /tmp/my_ser
 ```
 
 Server options:
+- `--db <any|immutable>`: Database type to use. Must be 'any' or 'immutable' (default: any)
 - `-p, --port <PORT>`: Port to listen on (default: 8080)
 - `-i, --initial-ops <COUNT>`: Number of initial operations to create (default: 100)
 - `-d, --storage-dir <PATH>`: Storage directory for database (default: /tmp/commonware-sync/server-{RANDOM_SUFFIX})
@@ -61,6 +62,8 @@ Client options:
 - `-m, --metrics-port <PORT>`: Port on which metrics are exposed (default: 9091)
 - `-t, --target-update-interval <DURATION>`: Interval for requesting target updates ('ms', 's', 'm', 'h') (default: 1s)
 - `-i, --sync-interval <DURATION>`: Interval between sync operations ('ms', 's', 'm', 'h') (default: 10s)
+
+_The client must use the same `--db` as the server it syncs from._
 
 ## Example Session
 
