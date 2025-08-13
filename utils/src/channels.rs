@@ -6,6 +6,7 @@ use futures::{
 };
 use std::{
     collections::HashMap,
+    hash::Hash,
     pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -16,13 +17,14 @@ use std::{
 
 /// A guard that tracks message delivery. When all clones are dropped, the message is marked as delivered.
 #[derive(Clone)]
-pub struct DeliveryGuard {
+pub struct DeliveryGuard<B: Eq + Hash + Clone> {
     sequence: u64,
-    _batch_id: Option<u64>,
-    tracker: Arc<DeliveryTrackerState>,
+    tracker: Arc<DeliveryTrackerState<B>>,
+
+    _batch: Option<B>,
 }
 
-impl Drop for DeliveryGuard {
+impl<B: Eq + Hash + Clone> Drop for DeliveryGuard<B> {
     fn drop(&mut self) {
         let mut pending = self.tracker.pending_sequences.lock().unwrap();
         if let Some(delivered) = pending.get_mut(&self.sequence) {
@@ -30,12 +32,12 @@ impl Drop for DeliveryGuard {
         }
 
         // Update batch count if this message had a batch ID
-        if let Some(bid) = self._batch_id {
+        if let Some(batch) = &self._batch {
             let mut batch_counts = self.tracker.batch_counts.lock().unwrap();
-            if let Some(count) = batch_counts.get_mut(&bid) {
+            if let Some(count) = batch_counts.get_mut(batch) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
-                    batch_counts.remove(&bid);
+                    batch_counts.remove(batch);
                 }
             }
         }
@@ -57,14 +59,14 @@ impl Drop for DeliveryGuard {
 }
 
 /// A tracked message containing the actual data and a delivery guard.
-pub struct TrackedMessage<T> {
+pub struct TrackedMessage<T, B: Eq + Hash + Clone> {
     pub data: T,
-    pub guard: Arc<DeliveryGuard>,
+    pub guard: Arc<DeliveryGuard<B>>,
 }
 
-struct DeliveryTrackerState {
+struct DeliveryTrackerState<B> {
     watermark: AtomicU64,
-    batch_counts: Mutex<HashMap<u64, usize>>,
+    batch_counts: Mutex<HashMap<B, usize>>,
     pending_sequences: Mutex<HashMap<u64, bool>>,
 }
 
@@ -75,12 +77,12 @@ struct DeliveryTrackerState {
 /// For systems requiring longer uptime without restart, consider implementing
 /// sequence number wrapping with careful watermark handling.
 #[derive(Clone)]
-struct DeliveryTracker {
-    state: Arc<DeliveryTrackerState>,
+struct DeliveryTracker<B: Eq + Hash + Clone> {
+    state: Arc<DeliveryTrackerState<B>>,
     next_sequence: Arc<AtomicU64>,
 }
 
-impl DeliveryTracker {
+impl<B: Eq + Hash + Clone> DeliveryTracker<B> {
     fn new() -> Self {
         Self {
             state: Arc::new(DeliveryTrackerState {
@@ -92,7 +94,7 @@ impl DeliveryTracker {
         }
     }
 
-    fn create_guard(&self, batch_id: Option<u64>) -> DeliveryGuard {
+    fn create_guard(&self, batch: Option<B>) -> DeliveryGuard<B> {
         let sequence = self.next_sequence.fetch_add(1, Ordering::SeqCst);
 
         // Track this sequence as not yet delivered
@@ -103,29 +105,30 @@ impl DeliveryTracker {
             .insert(sequence, false);
 
         // Update batch count if provided
-        if let Some(bid) = batch_id {
+        if let Some(batch) = &batch {
             let mut batch_counts = self.state.batch_counts.lock().unwrap();
-            *batch_counts.entry(bid).or_insert(0) += 1;
+            *batch_counts.entry(batch.clone()).or_insert(0) += 1;
         }
 
         DeliveryGuard {
             sequence,
-            _batch_id: batch_id,
             tracker: self.state.clone(),
+
+            _batch: batch,
         }
     }
 }
 
 /// A sender that wraps `Sender` and tracks message delivery.
 #[derive(Clone)]
-pub struct TrackedSender<T> {
-    inner: Sender<TrackedMessage<T>>,
-    tracker: DeliveryTracker,
+pub struct TrackedSender<T, B: Eq + Hash + Clone> {
+    inner: Sender<TrackedMessage<T, B>>,
+    tracker: DeliveryTracker<B>,
 }
 
-impl<T: Clone> TrackedSender<T> {
+impl<T, B: Eq + Hash + Clone> TrackedSender<T, B> {
     /// Sends a message with an optional batch ID and returns a delivery guard.
-    pub async fn send(&mut self, batch: Option<u64>, data: T) -> Result<u64, SendError> {
+    pub async fn send(&mut self, batch: Option<B>, data: T) -> Result<u64, SendError> {
         // Create the guard
         let guard = Arc::new(self.tracker.create_guard(batch));
         let watermark = guard.sequence;
@@ -140,9 +143,9 @@ impl<T: Clone> TrackedSender<T> {
     /// Tries to send a message without blocking.
     pub fn try_send(
         &mut self,
-        batch: Option<u64>,
+        batch: Option<B>,
         data: T,
-    ) -> Result<u64, TrySendError<TrackedMessage<T>>> {
+    ) -> Result<u64, TrySendError<TrackedMessage<T, B>>> {
         // Create the guard
         let guard = Arc::new(self.tracker.create_guard(batch));
         let watermark = guard.sequence;
@@ -160,7 +163,7 @@ impl<T: Clone> TrackedSender<T> {
     }
 
     /// Returns the number of pending messages for a specific batch ID.
-    pub fn batch_pending_count(&self, batch: u64) -> usize {
+    pub fn batch_pending_count(&self, batch: B) -> usize {
         self.tracker
             .state
             .batch_counts
@@ -173,24 +176,24 @@ impl<T: Clone> TrackedSender<T> {
 }
 
 /// A receiver that wraps `Receiver` and provides tracked messages.
-pub struct TrackedReceiver<T> {
-    inner: Receiver<TrackedMessage<T>>,
+pub struct TrackedReceiver<T, B: Eq + Hash + Clone> {
+    inner: Receiver<TrackedMessage<T, B>>,
 }
 
-impl<T> TrackedReceiver<T> {
+impl<T, B: Eq + Hash + Clone> TrackedReceiver<T, B> {
     /// Receives the next message.
-    pub async fn recv(&mut self) -> Option<TrackedMessage<T>> {
+    pub async fn recv(&mut self) -> Option<TrackedMessage<T, B>> {
         self.inner.next().await
     }
 
     /// Tries to receive a message without blocking.
-    pub fn try_recv(&mut self) -> Option<TrackedMessage<T>> {
+    pub fn try_recv(&mut self) -> Option<TrackedMessage<T, B>> {
         self.inner.try_next().ok().flatten()
     }
 }
 
-impl<T> Stream for TrackedReceiver<T> {
-    type Item = TrackedMessage<T>;
+impl<T, B: Eq + Hash + Clone> Stream for TrackedReceiver<T, B> {
+    type Item = TrackedMessage<T, B>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.inner).poll_next(cx)
@@ -239,7 +242,9 @@ impl<T> Stream for TrackedReceiver<T> {
 /// assert_eq!(sender.watermark(), 1);
 /// # });
 /// ```
-pub fn tracked_channel<T>(buffer: usize) -> (TrackedSender<T>, TrackedReceiver<T>) {
+pub fn tracked_channel<T, B: Eq + Hash + Clone>(
+    buffer: usize,
+) -> (TrackedSender<T, B>, TrackedReceiver<T, B>) {
     let (tx, rx) = mpsc::channel(buffer);
     let sender = TrackedSender {
         inner: tx,
@@ -257,7 +262,7 @@ mod tests {
     #[test]
     fn test_basic() {
         block_on(async move {
-            let (mut sender, mut receiver) = tracked_channel::<i32>(10);
+            let (mut sender, mut receiver) = tracked_channel::<i32, u64>(10);
 
             // Send a message without batch ID
             let watermark = sender.send(None, 42).await.unwrap();
@@ -278,7 +283,7 @@ mod tests {
     #[test]
     fn test_batch_tracking() {
         block_on(async move {
-            let (mut sender, mut receiver) = tracked_channel::<String>(10);
+            let (mut sender, mut receiver) = tracked_channel::<String, u64>(10);
 
             // Send messages with different batch IDs
             let watermark1 = sender.send(Some(100), "msg1".to_string()).await.unwrap();
@@ -314,7 +319,7 @@ mod tests {
     #[test]
     fn test_cloned_guards() {
         block_on(async move {
-            let (mut sender, mut receiver) = tracked_channel::<&str>(10);
+            let (mut sender, mut receiver) = tracked_channel::<&str, u64>(10);
 
             let watermark = sender.send(Some(1), "test").await.unwrap();
             assert_eq!(watermark, 1);
@@ -346,7 +351,7 @@ mod tests {
     #[test]
     fn test_try_send() {
         block_on(async move {
-            let (mut sender, mut receiver) = tracked_channel::<i32>(2);
+            let (mut sender, mut receiver) = tracked_channel::<i32, u64>(2);
 
             // Try send should work when buffer has space
             let watermark1 = sender.try_send(Some(10), 1).unwrap();
@@ -373,7 +378,7 @@ mod tests {
     #[test]
     fn test_channel_closure() {
         block_on(async move {
-            let (mut sender, receiver) = tracked_channel::<i32>(10);
+            let (mut sender, receiver) = tracked_channel::<i32, u64>(10);
 
             let _guard = sender.send(None, 1).await.unwrap();
 
