@@ -10,7 +10,7 @@ use commonware_consensus::{
     Supervisor as SupervisorTrait, Viewable,
 };
 use commonware_cryptography::{
-    ed25519::{PrivateKey, PublicKey},
+    ed25519::{PrivateKey, PublicKey, Signature},
     sha256::Digest as Sha256Digest,
     Digest, Signer as _,
 };
@@ -156,14 +156,10 @@ impl<E: Clock + Spawner> Fuzzer<E> {
         msg: Vec<u8>,
     ) {
         // Parse message
-        let msg =
-            match Voter::<commonware_cryptography::ed25519::Signature, Sha256Digest>::decode_cfg(
-                msg.as_slice(),
-                &usize::MAX,
-            ) {
-                Ok(msg) => msg,
-                Err(_) => return, // Skip malformed messages
-            };
+        let msg = match Voter::<Signature, Sha256Digest>::decode_cfg(msg.as_slice(), &usize::MAX) {
+            Ok(msg) => msg,
+            Err(_) => return, // Skip malformed messages
+        };
 
         // Store view.
         self.view = msg.view();
@@ -185,10 +181,7 @@ impl<E: Clock + Spawner> Fuzzer<E> {
                     public_key_index,
                     mutated_proposal,
                 );
-                let msg =
-                    Voter::<commonware_cryptography::ed25519::Signature, Sha256Digest>::Notarize(
-                        msg,
-                    )
+                let msg = Voter::<Signature, Sha256Digest>::Notarize(msg)
                     .encode()
                     .into();
                 sender.send(Recipients::All, msg, true).await.unwrap();
@@ -209,10 +202,7 @@ impl<E: Clock + Spawner> Fuzzer<E> {
                     public_key_index,
                     mutated_proposal,
                 );
-                let msg =
-                    Voter::<commonware_cryptography::ed25519::Signature, Sha256Digest>::Finalize(
-                        msg,
-                    )
+                let msg = Voter::<Signature, Sha256Digest>::Finalize(msg)
                     .encode()
                     .into();
                 sender.send(Recipients::All, msg, true).await.unwrap();
@@ -232,10 +222,7 @@ impl<E: Clock + Spawner> Fuzzer<E> {
                     public_key_index,
                     mutated_view,
                 );
-                let msg =
-                    Voter::<commonware_cryptography::ed25519::Signature, Sha256Digest>::Nullify(
-                        msg,
-                    )
+                let msg = Voter::<Signature, Sha256Digest>::Nullify(msg)
                     .encode()
                     .into();
                 sender.send(Recipients::All, msg, true).await.unwrap();
@@ -299,12 +286,9 @@ impl<E: Clock + Spawner> Fuzzer<E> {
                         public_key_index,
                         proposal,
                     );
-                    let encoded_msg = Voter::<
-                        commonware_cryptography::ed25519::Signature,
-                        Sha256Digest,
-                    >::Notarize(msg)
-                    .encode()
-                    .into();
+                    let encoded_msg = Voter::<Signature, Sha256Digest>::Notarize(msg)
+                        .encode()
+                        .into();
                     let _ = sender.send(Recipients::All, encoded_msg, true).await;
                 }
                 Message::Finalize => {
@@ -314,12 +298,9 @@ impl<E: Clock + Spawner> Fuzzer<E> {
                         public_key_index,
                         proposal,
                     );
-                    let encoded_msg = Voter::<
-                        commonware_cryptography::ed25519::Signature,
-                        Sha256Digest,
-                    >::Finalize(msg)
-                    .encode()
-                    .into();
+                    let encoded_msg = Voter::<Signature, Sha256Digest>::Finalize(msg)
+                        .encode()
+                        .into();
                     let _ = sender.send(Recipients::All, encoded_msg, true).await;
                 }
                 Message::Nullify => {
@@ -329,12 +310,9 @@ impl<E: Clock + Spawner> Fuzzer<E> {
                         public_key_index,
                         real_view,
                     );
-                    let encoded_msg = Voter::<
-                        commonware_cryptography::ed25519::Signature,
-                        Sha256Digest,
-                    >::Nullify(msg)
-                    .encode()
-                    .into();
+                    let encoded_msg = Voter::<Signature, Sha256Digest>::Nullify(msg)
+                        .encode()
+                        .into();
                     let _ = sender.send(Recipients::All, encoded_msg, true).await;
                 }
                 Message::Random => {
