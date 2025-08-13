@@ -22,8 +22,9 @@ impl<P: PublicKey> Automaton<P> {
 impl<P: PublicKey> A for Automaton<P> {
     type Context = Context<P>;
     type Digest = sha256::Digest;
+    type Epoch = u64;
 
-    async fn genesis(&mut self) -> Self::Digest {
+    async fn genesis(&mut self, _epoch: Self::Epoch) -> Self::Digest {
         unimplemented!()
     }
 

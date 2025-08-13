@@ -1,7 +1,7 @@
 use super::relay::Relay;
 use crate::{threshold_simplex::types::Context, Automaton as Au, Relay as Re};
 use bytes::{BufMut, Bytes};
-use commonware_codec::{DecodeExt, FixedSize};
+use commonware_codec::{DecodeExt, Encode, FixedSize};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Spawner};
@@ -19,6 +19,7 @@ use std::{
 
 pub enum Message<D: Digest> {
     Genesis {
+        epoch: u64,
         response: oneshot::Sender<D>,
     },
     Propose {
@@ -49,11 +50,12 @@ impl<D: Digest> Mailbox<D> {
 impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<D>;
+    type Epoch = u64;
 
-    async fn genesis(&mut self) -> Self::Digest {
+    async fn genesis(&mut self, epoch: Self::Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Genesis { response })
+            .send(Message::Genesis { epoch, response })
             .await
             .expect("Failed to send genesis");
         receiver.await.expect("Failed to receive genesis")
@@ -171,9 +173,9 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         panic!("[{:?}] {}", self.participant, msg);
     }
 
-    fn genesis(&mut self) -> H::Digest {
-        let payload = Bytes::from(GENESIS_BYTES);
-        self.hasher.update(&payload);
+    fn genesis(&mut self, epoch: u64) -> H::Digest {
+        self.hasher
+            .update(&(Bytes::from(GENESIS_BYTES), epoch).encode());
         let digest = self.hasher.finalize();
         self.verified.insert(digest);
         digest
@@ -266,8 +268,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         None => break,
                     };
                     match message {
-                        Message::Genesis { response } => {
-                            let digest = self.genesis();
+                        Message::Genesis { epoch, response } => {
+                            let digest = self.genesis(epoch);
                             let _ = response.send(digest);
                         }
                         Message::Propose { context, response } => {

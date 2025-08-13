@@ -17,6 +17,7 @@ pub mod aggregation;
 pub mod ordered_broadcast;
 pub mod simplex;
 pub mod threshold_simplex;
+pub mod types;
 
 /// Viewable is a trait that provides access to the view (round) number.
 /// Any consensus message or object that is associated with a specific view should implement this.
@@ -66,8 +67,10 @@ cfg_if::cfg_if! {
             /// Hash of an arbitrary payload.
             type Digest: Digest;
 
+            type Epoch;
+
             /// Payload used to initialize the consensus engine.
-            fn genesis(&mut self) -> impl Future<Output = Self::Digest> + Send;
+            fn genesis(&mut self, epoch: Self::Epoch) -> impl Future<Output = Self::Digest> + Send;
 
             /// Generate a new payload for the given context.
             ///

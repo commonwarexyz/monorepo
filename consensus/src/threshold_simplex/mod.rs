@@ -164,7 +164,7 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
-use types::View;
+use crate::types::View;
 
 pub mod types;
 
@@ -417,6 +417,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 0,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -683,6 +684,7 @@ mod tests {
                         supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
+                        epoch: 0,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -877,6 +879,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 0,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1000,6 +1003,7 @@ mod tests {
                 supervisor: supervisor.clone(),
                 partition: validator.to_string(),
                 mailbox_size: 1024,
+                epoch: 0,
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
@@ -1145,6 +1149,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 0,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1410,6 +1415,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 0,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1584,6 +1590,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 0,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1794,6 +1801,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 0,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2000,6 +2008,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 0,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2161,6 +2170,7 @@ mod tests {
                 if idx_scheme == 0 {
                     let cfg = mocks::conflicter::Config {
                         supervisor,
+                        epoch: 333,
                         namespace: namespace.clone(),
                     };
 
@@ -2194,6 +2204,7 @@ mod tests {
                         supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
+                        epoch: 0,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2384,6 +2395,7 @@ mod tests {
                         supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
+                        epoch: 0,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2565,6 +2577,7 @@ mod tests {
                         supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
+                        epoch: 0,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2738,6 +2751,7 @@ mod tests {
                         supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
+                        epoch: 0,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2925,6 +2939,7 @@ mod tests {
                         supervisor,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
+                        epoch: 0,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -3076,6 +3091,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 0,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -3236,6 +3252,7 @@ mod tests {
                     supervisor,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
+                    epoch: 0,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_millis(100),
                     notarization_timeout: Duration::from_millis(200),

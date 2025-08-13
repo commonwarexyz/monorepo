@@ -1,5 +1,5 @@
-use super::types::{Activity, Context, View};
-use crate::{Automaton, Relay, Reporter, Supervisor};
+use super::types::{Activity, Context};
+use crate::{types::View, Automaton, Relay, Reporter, Supervisor};
 use commonware_cryptography::{Digest, Signer};
 use commonware_runtime::buffer::PoolRef;
 use governor::Quota;
@@ -35,6 +35,9 @@ pub struct Config<
     /// Maximum number of messages to buffer on channels inside the consensus
     /// engine before blocking.
     pub mailbox_size: usize,
+
+    /// Epoch for the consensus engine.
+    pub epoch: u64,
 
     /// Prefix for all signed messages to prevent replay attacks.
     pub namespace: Vec<u8>,

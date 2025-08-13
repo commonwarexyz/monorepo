@@ -5,8 +5,9 @@ use super::{
 use crate::{
     threshold_simplex::{
         actors::voter,
-        types::{Backfiller, Notarization, Nullification, Request, Response, View, Voter},
+        types::{Backfiller, Notarization, Nullification, Request, Response, Voter},
     },
+    types::View,
     ThresholdSupervisor, Viewable,
 };
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};

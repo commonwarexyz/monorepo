@@ -53,7 +53,8 @@ impl<R: Rng + Spawner, P: PublicKey, S: Signature, H: Hasher> Application<R, P, 
     async fn run(mut self) {
         while let Some(message) = self.mailbox.next().await {
             match message {
-                Message::Genesis { response } => {
+                Message::Genesis { epoch, response } => {
+                    assert_eq!(epoch, 0, "epoch must be 0");
                     // Use the hash of the genesis message as the initial
                     // payload.
                     //

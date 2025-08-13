@@ -23,8 +23,9 @@ impl Application {
 impl A for Application {
     type Context = Index;
     type Digest = <Sha256 as Hasher>::Digest;
+    type Epoch = u64;
 
-    async fn genesis(&mut self) -> Self::Digest {
+    async fn genesis(&mut self, _epoch: Self::Epoch) -> Self::Digest {
         let mut hasher = Sha256::default();
         hasher.update(b"genesis");
         hasher.finalize()
