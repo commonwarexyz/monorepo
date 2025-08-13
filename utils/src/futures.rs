@@ -158,14 +158,12 @@ impl<T: Send> AbortablePool<T> {
 /// A guard that tracks message delivery. When all clones are dropped, the message is marked as delivered.
 #[derive(Clone)]
 pub struct DeliveryGuard {
-    #[allow(dead_code)]
-    inner: Arc<DeliveryGuardInner>,
+    _inner: Arc<DeliveryGuardInner>,
 }
 
 struct DeliveryGuardInner {
     sequence: u64,
-    #[allow(dead_code)]
-    batch_id: Option<u64>,
+    _batch_id: Option<u64>,
     tracker: Arc<DeliveryTrackerState>,
 }
 
@@ -245,9 +243,9 @@ impl DeliveryTracker {
         }
         
         DeliveryGuard {
-            inner: Arc::new(DeliveryGuardInner {
+            _inner: Arc::new(DeliveryGuardInner {
                 sequence,
-                batch_id,
+                _batch_id: batch_id,
                 tracker: self.state.clone(),
             }),
         }
