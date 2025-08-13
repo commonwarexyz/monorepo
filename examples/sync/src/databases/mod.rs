@@ -43,6 +43,7 @@ impl DatabaseType {
 
 /// Helper trait for databases that can be synced.
 pub trait Syncable {
+    /// The type of operations in the database.
     type Operation: Clone + Read<Cfg = ()> + Encode + Send + Sync + 'static;
 
     /// Create test operations with the given count and seed.

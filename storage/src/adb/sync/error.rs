@@ -1,13 +1,15 @@
 //! Shared sync error types that can be used across different database implementations.
 
-use std::fmt;
+use crate::adb::sync::Target;
+use commonware_cryptography::Digest;
 
 /// Errors that can occur during database synchronization.
 #[derive(Debug, thiserror::Error)]
-pub enum Error<T, U>
+pub enum Error<T, U, D>
 where
     T: std::error::Error + Send + 'static,
     U: std::error::Error + Send + 'static,
+    D: Digest,
 {
     /// Database error
     #[error("database error: {0}")]
@@ -17,10 +19,7 @@ where
     Resolver(U),
     /// Hash mismatch after sync
     #[error("root digest mismatch - expected {expected:?}, got {actual:?}")]
-    RootMismatch {
-        expected: Box<dyn fmt::Debug + Send + Sync>,
-        actual: Box<dyn fmt::Debug + Send + Sync>,
-    },
+    RootMismatch { expected: D, actual: D },
     /// Invalid target parameters
     #[error("invalid bounds: lower bound {lower_bound_pos} > upper bound {upper_bound_pos}")]
     InvalidTarget {
@@ -35,10 +34,7 @@ where
     SyncTargetRootUnchanged,
     /// Sync target moved backward
     #[error("sync target moved backward: {old:?} -> {new:?}")]
-    SyncTargetMovedBackward {
-        old: Box<dyn fmt::Debug + Send + Sync>,
-        new: Box<dyn fmt::Debug + Send + Sync>,
-    },
+    SyncTargetMovedBackward { old: Target<D>, new: Target<D> },
     /// Sync already completed
     #[error("sync already completed")]
     AlreadyComplete,
@@ -50,10 +46,11 @@ where
     PinnedNodes(String),
 }
 
-impl<T, U> Error<T, U>
+impl<T, U, D> Error<T, U, D>
 where
     T: std::error::Error + Send + 'static,
     U: std::error::Error + Send + 'static,
+    D: Digest,
 {
     pub fn resolver(err: impl Into<U>) -> Self {
         Self::Resolver(err.into())

@@ -32,8 +32,13 @@ impl<Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<Op, D> {
 
 /// Trait for network communication with the sync server
 pub trait Resolver: Send + Sync + Clone + 'static {
+    /// The digest type used in proofs returned by the resolver
     type Digest: Digest;
+
+    /// The type of operations returned by the resolver
     type Op;
+
+    /// The error type returned by the resolver
     type Error: std::error::Error + Send + 'static;
 
     /// Get the operations starting at `start_loc` in the database, up to `max_ops` operations.
@@ -78,8 +83,8 @@ where
     }
 }
 
-/// Implement Resolver directly for `Arc<RwLock<Any>>` to provide maximum ergonomics.
-/// This eliminates the need for wrapper types while allowing direct database access.
+/// Implement Resolver directly for `Arc<RwLock<Any>>` to eliminate the need for wrapper types
+/// while allowing direct database access.
 impl<E, K, V, H, T> Resolver for Arc<RwLock<Any<E, K, V, H, T>>>
 where
     E: Storage + Clock + Metrics,
@@ -141,8 +146,8 @@ where
     }
 }
 
-/// Implement Resolver directly for `Arc<RwLock<Immutable>>` to provide maximum ergonomics.
-/// This eliminates the need for wrapper types while allowing direct database access.
+/// Implement Resolver directly for `Arc<RwLock<Immutable>>` to eliminate the need for wrapper
+/// types while allowing direct database access.
 impl<E, K, V, H, T> Resolver for Arc<RwLock<Immutable<E, K, V, H, T>>>
 where
     E: Storage + Clock + Metrics,

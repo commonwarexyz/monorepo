@@ -24,7 +24,10 @@ pub use target::Target;
 
 mod requests;
 
-pub async fn sync<DB, R>(config: Config<DB, R>) -> Result<DB, Error<DB::Error, R::Error>>
+/// Create/open a database and sync it to a target state
+pub async fn sync<DB, R>(
+    config: Config<DB, R>,
+) -> Result<DB, Error<DB::Error, R::Error, DB::Digest>>
 where
     DB: Database,
     DB::Op: Encode,
