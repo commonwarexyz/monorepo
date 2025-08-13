@@ -64,7 +64,7 @@ pub struct Guard<B: Eq + Hash + Clone> {
     sequence: u64,
     tracker: Arc<Mutex<State<B>>>,
 
-    _batch: Option<B>,
+    batch: Option<B>,
 }
 
 impl<B: Eq + Hash + Clone> Drop for Guard<B> {
@@ -73,29 +73,29 @@ impl<B: Eq + Hash + Clone> Drop for Guard<B> {
         let mut state = self.tracker.lock().unwrap();
 
         // Mark the message as delivered
-        *state.pending_sequences.get_mut(&self.sequence).unwrap() = true;
+        *state.pending.get_mut(&self.sequence).unwrap() = true;
 
         // Update watermark if possible
         let mut current_watermark = state.watermark;
-        while let Some(delivered) = state.pending_sequences.get(&(current_watermark + 1)) {
+        while let Some(delivered) = state.pending.get(&(current_watermark + 1)) {
             // If the next message is not delivered, we can stop
             if !*delivered {
                 break;
             }
 
             // Remove the next message from the pending list
-            state.pending_sequences.remove(&(current_watermark + 1));
+            state.pending.remove(&(current_watermark + 1));
             current_watermark += 1;
             state.watermark = current_watermark;
         }
 
         // Update batch count (if necessary)
-        if let Some(batch) = &self._batch {
-            let count = state.batch_counts.get_mut(batch).unwrap();
+        if let Some(batch) = &self.batch {
+            let count = state.batches.get_mut(batch).unwrap();
             if *count > 1 {
                 *count -= 1;
             } else {
-                state.batch_counts.remove(batch);
+                state.batches.remove(batch);
             }
         }
     }
@@ -115,8 +115,8 @@ pub struct Message<T, B: Eq + Hash + Clone> {
 struct State<B> {
     next: u64,
     watermark: u64,
-    batch_counts: HashMap<B, usize>,
-    pending_sequences: HashMap<u64, bool>,
+    batches: HashMap<B, usize>,
+    pending: HashMap<u64, bool>,
 }
 
 impl<B> Default for State<B> {
@@ -124,8 +124,8 @@ impl<B> Default for State<B> {
         Self {
             next: 1,
             watermark: 0,
-            batch_counts: HashMap::new(),
-            pending_sequences: HashMap::new(),
+            batches: HashMap::new(),
+            pending: HashMap::new(),
         }
     }
 }
@@ -157,18 +157,18 @@ impl<B: Eq + Hash + Clone> Tracker<B> {
         state.next += 1;
 
         // Track this sequence as not yet delivered
-        state.pending_sequences.insert(sequence, false);
+        state.pending.insert(sequence, false);
 
         // Update batch count if provided
         if let Some(batch) = &batch {
-            *state.batch_counts.entry(batch.clone()).or_insert(0) += 1;
+            *state.batches.entry(batch.clone()).or_insert(0) += 1;
         }
 
         Guard {
             sequence,
             tracker: self.state.clone(),
 
-            _batch: batch,
+            batch,
         }
     }
 }
@@ -222,7 +222,7 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
             .state
             .lock()
             .unwrap()
-            .batch_counts
+            .batches
             .get(&batch)
             .copied()
             .unwrap_or(0)
