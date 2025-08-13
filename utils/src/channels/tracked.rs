@@ -1,4 +1,50 @@
-//! Utilities for working with channels.
+//! A channel that tracks message delivery.
+//!
+//! This channel provides message delivery tracking. Each sent message includes
+//! a [Guard] that tracks when the message has been fully processed. When ALL
+//! references to the guard are dropped, the message is marked as delivered.
+//
+//! # Features
+//!
+//! - **Watermarks**: Get the highest sequence number where all messages up to it have been delivered
+//! - **Batches**: Assign batches to messages and track pending counts per batch
+//! - **Clonable Guards**: Guards can be cloned and shared; delivery happens when all clones are dropped
+//
+//! # Sequence Number Overflow
+//!
+//! Uses [u64] for sequence numbers. At 100 messages per nanosecond, overflow occurs after ~5.85 years.
+//! Systems requiring more message throughput should implement periodic resets or use external sequence management.
+//
+//! # Example
+//!
+//! ```
+//! use futures::executor::block_on;
+//! use commonware_utils::channels::tracked;
+//! block_on(async {
+//!     let (mut sender, mut receiver) = tracked::bounded::<String, u64>(10);
+//
+//!     // Send a message with batch ID
+//!     let sequence = sender.send(Some(1), "hello".to_string()).await.unwrap();
+//
+//!     // Check pending messages
+//!     assert_eq!(sender.pending(1), 1);
+//!     assert_eq!(sender.watermark(), 0);
+//
+//!     // Receive and process
+//!     let msg = receiver.recv().await.unwrap();
+//!     assert_eq!(msg.data, "hello");
+//
+//!     // Clone the guard - delivery won't happen until all clones are dropped
+//!     let guard_clone = msg.guard.clone();
+//!     drop(msg.guard);
+//!     assert_eq!(sender.watermark(), 0); // Still not delivered
+//
+//!     // Drop the last guard reference to mark as delivered
+//!     drop(guard_clone);
+//!     assert_eq!(sender.pending(1), 0);
+//!     assert_eq!(sender.watermark(), 1);
+//! });
+//! ```
 
 use futures::{
     channel::mpsc::{self, Receiver as FutReceiver, SendError, Sender as FutSender, TrySendError},
@@ -65,7 +111,7 @@ pub struct Message<T, B: Eq + Hash + Clone> {
     pub guard: Arc<Guard<B>>,
 }
 
-/// The state of the tracker.
+/// The state of the [Tracker].
 struct State<B> {
     next: u64,
     watermark: u64,
@@ -202,52 +248,8 @@ impl<T, B: Eq + Hash + Clone> Stream for Receiver<T, B> {
     }
 }
 
-/// Creates a reliable bounded channel with delivery tracking.
-///
-/// This channel provides message delivery tracking. Each sent message includes
-/// a [Guard] that tracks when the message has been fully processed. When ALL
-/// references to the guard are dropped, the message is marked as delivered.
-///
-/// # Features
-/// - **Watermark tracking**: Get the highest sequence number where all messages up to it have been delivered
-/// - **Batch tracking**: Assign batch IDs to messages and track pending counts per batch
-/// - **Clonable guards**: Guards can be cloned and shared; delivery happens when all clones are dropped
-///
-/// # Sequence Number Overflow
-/// Uses u64 for sequence numbers. At 100 messages per nanosecond, overflow would occur after ~5.85 years.
-/// For most applications this is sufficient. Systems requiring longer continuous operation should
-/// implement periodic resets or use external sequence management.
-///
-/// # Example
-/// ```
-/// use futures::executor::block_on;
-/// use commonware_utils::channels::reliable;
-/// block_on(async {
-///     let (mut sender, mut receiver) = reliable::<String, u64>(10);
-///
-///     // Send a message with batch ID
-///     let sequence = sender.send(Some(1), "hello".to_string()).await.unwrap();
-///
-///     // Check pending messages
-///     assert_eq!(sender.pending(1), 1);
-///     assert_eq!(sender.watermark(), 0);
-///
-///     // Receive and process
-///     let msg = receiver.recv().await.unwrap();
-///     assert_eq!(msg.data, "hello");
-///
-///     // Clone the guard - delivery won't happen until all clones are dropped
-///     let guard_clone = msg.guard.clone();
-///     drop(msg.guard);
-///     assert_eq!(sender.watermark(), 0); // Still not delivered
-///
-///     // Drop the last guard reference to mark as delivered
-///     drop(guard_clone);
-///     assert_eq!(sender.pending(1), 0);
-///     assert_eq!(sender.watermark(), 1);
-/// });
-/// ```
-pub fn reliable<T, B: Eq + Hash + Clone>(buffer: usize) -> (Sender<T, B>, Receiver<T, B>) {
+/// Create a new bounded channel with delivery tracking.
+pub fn bounded<T, B: Eq + Hash + Clone>(buffer: usize) -> (Sender<T, B>, Receiver<T, B>) {
     let (tx, rx) = mpsc::channel(buffer);
     let sender = Sender {
         inner: tx,
@@ -265,7 +267,7 @@ mod tests {
     #[test]
     fn test_basic() {
         block_on(async move {
-            let (mut sender, mut receiver) = reliable::<i32, u64>(10);
+            let (mut sender, mut receiver) = bounded::<i32, u64>(10);
 
             // Send a message without batch ID
             let watermark = sender.send(None, 42).await.unwrap();
@@ -286,7 +288,7 @@ mod tests {
     #[test]
     fn test_batch_tracking() {
         block_on(async move {
-            let (mut sender, mut receiver) = reliable::<String, u64>(10);
+            let (mut sender, mut receiver) = bounded::<String, u64>(10);
 
             // Send messages with different batch IDs
             let watermark1 = sender.send(Some(100), "msg1".to_string()).await.unwrap();
@@ -322,7 +324,7 @@ mod tests {
     #[test]
     fn test_cloned_guards() {
         block_on(async move {
-            let (mut sender, mut receiver) = reliable::<&str, u64>(10);
+            let (mut sender, mut receiver) = bounded::<&str, u64>(10);
 
             let watermark = sender.send(Some(1), "test").await.unwrap();
             assert_eq!(watermark, 1);
@@ -354,7 +356,7 @@ mod tests {
     #[test]
     fn test_try_send() {
         block_on(async move {
-            let (mut sender, mut receiver) = reliable::<i32, u64>(2);
+            let (mut sender, mut receiver) = bounded::<i32, u64>(2);
 
             // Try send should work when buffer has space
             let watermark1 = sender.try_send(Some(10), 1).unwrap();
@@ -381,7 +383,7 @@ mod tests {
     #[test]
     fn test_channel_closure() {
         block_on(async move {
-            let (mut sender, receiver) = reliable::<i32, u64>(10);
+            let (mut sender, receiver) = bounded::<i32, u64>(10);
 
             let _guard = sender.send(None, 1).await.unwrap();
 
