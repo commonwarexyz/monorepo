@@ -1,5 +1,5 @@
 use crate::{
-    adb::{self, any::fixed::Any, immutable::Immutable},
+    adb::{self, any::fixed::Any, any::variable::Any as VarAny, immutable::Immutable},
     mmr::verification::Proof,
     store::operation::{Fixed, Variable},
     translator::Translator,
@@ -169,6 +169,65 @@ where
                 proof,
                 operations,
                 // Result of proof verification isn't used by this implementation.
+                success_tx: oneshot::channel().0,
+            })
+    }
+}
+
+impl<E, K, V, H, T> Resolver for Arc<VarAny<E, K, V, H, T>>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: commonware_codec::Codec + Send + Sync + 'static,
+    H: Hasher,
+    T: Translator + Send + Sync + 'static,
+    T::Key: Send + Sync,
+{
+    type Digest = H::Digest;
+    type Op = Variable<K, V>;
+    type Error = adb::Error;
+
+    async fn get_operations(
+        &self,
+        size: u64,
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+        self.historical_proof(size, start_loc, max_ops.get())
+            .await
+            .map(|(proof, operations)| FetchResult {
+                proof,
+                operations,
+                success_tx: oneshot::channel().0,
+            })
+    }
+}
+
+impl<E, K, V, H, T> Resolver for Arc<RwLock<VarAny<E, K, V, H, T>>>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: commonware_codec::Codec + Send + Sync + 'static,
+    H: Hasher,
+    T: Translator + Send + Sync + 'static,
+    T::Key: Send + Sync,
+{
+    type Digest = H::Digest;
+    type Op = Variable<K, V>;
+    type Error = adb::Error;
+
+    async fn get_operations(
+        &self,
+        size: u64,
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+        let db = self.read().await;
+        db.historical_proof(size, start_loc, max_ops.get())
+            .await
+            .map(|(proof, operations)| FetchResult {
+                proof,
+                operations,
                 success_tx: oneshot::channel().0,
             })
     }

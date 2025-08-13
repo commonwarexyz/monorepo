@@ -11,6 +11,7 @@ pub use error::Error;
 
 mod gaps;
 mod journal;
+pub mod variable_journal;
 
 pub(crate) use journal::Journal;
 

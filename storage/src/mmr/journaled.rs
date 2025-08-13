@@ -291,6 +291,9 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             }
         }
 
+        // Sync metadata to persist the pruning boundary and pinned nodes
+        metadata.sync().await.map_err(Error::MetadataError)?;
+
         // Create the in-memory MMR with the pinned nodes required for its size.
         let nodes_to_pin_mem = Proof::<H::Digest>::nodes_to_pin(journal_size);
         let mut mem_pinned_nodes = Vec::new();

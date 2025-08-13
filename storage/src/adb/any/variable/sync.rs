@@ -1,8 +1,251 @@
-use crate::journal::variable::{Config as VConfig, Journal as VJournal};
-use commonware_codec::Codec;
+use crate::adb::sync::Journal as _;
+use crate::{
+    adb::{self, any, sync},
+    index::Index,
+    journal::fixed,
+    journal::variable::{Config as VConfig, Journal as VJournal},
+    mmr::{
+        hasher::Standard,
+        iterator::{leaf_num_to_pos, leaf_pos_to_num},
+    },
+    store::operation::{Variable, Variable as Operation},
+    translator::Translator,
+};
+use commonware_codec::{Codec, Encode as _};
+use commonware_cryptography::Hasher;
+use commonware_runtime::{Clock, Storage as RStorage};
 use commonware_runtime::{Metrics, Storage};
+use commonware_utils::{Array, NZUsize};
+use futures::{pin_mut, StreamExt as _};
 use std::{num::NonZeroU64, ops::Bound};
 use tracing::debug;
+
+/// The size of the read buffer to use for replaying the operations log when rebuilding the
+/// snapshot.
+const SNAPSHOT_READ_BUFFER_SIZE: usize = 1024;
+
+impl<E, K, V, H, T> sync::Database for any::variable::Any<E, K, V, H, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    H: Hasher,
+    T: Translator,
+{
+    type Op = Variable<K, V>;
+    type Journal = crate::adb::sync::variable_journal::Journal<E, K, V>;
+    type Hasher = H;
+    type Error = adb::Error;
+    type Config = any::variable::Config<T, V::Cfg>;
+    type Digest = H::Digest;
+    type Context = E;
+
+    async fn create_journal(
+        context: Self::Context,
+        config: &Self::Config,
+        lower_bound: u64,
+        upper_bound: u64,
+    ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
+        let journal = init_journal(
+            context.with_label("log"),
+            VConfig {
+                partition: config.log_journal_partition.clone(),
+                compression: config.log_compression,
+                codec_config: config.log_codec_config.clone(),
+                write_buffer: config.log_write_buffer,
+                buffer_pool: config.buffer_pool.clone(),
+            },
+            lower_bound,
+            upper_bound,
+            config.log_items_per_section,
+        )
+        .await?;
+
+        let size = crate::adb::sync::variable_journal::compute_size(
+            &journal,
+            config.log_items_per_section,
+            lower_bound,
+            upper_bound,
+        )
+        .await?;
+
+        Ok(crate::adb::sync::variable_journal::Journal::new(
+            journal,
+            config.log_items_per_section,
+            size,
+        ))
+    }
+
+    async fn from_sync_result(
+        context: Self::Context,
+        db_config: Self::Config,
+        journal: Self::Journal,
+        pinned_nodes: Option<Vec<Self::Digest>>,
+        lower_bound: u64,
+        upper_bound: u64,
+        apply_batch_size: usize,
+    ) -> Result<Self, Self::Error> {
+        // Initialize MMR for sync with proper bounds and pinned nodes
+        let mut mmr = crate::mmr::journaled::Mmr::init_sync(
+            context.with_label("mmr"),
+            crate::mmr::journaled::SyncConfig {
+                config: crate::mmr::journaled::Config {
+                    journal_partition: db_config.mmr_journal_partition,
+                    metadata_partition: db_config.mmr_metadata_partition,
+                    items_per_blob: db_config.mmr_items_per_blob,
+                    write_buffer: db_config.mmr_write_buffer,
+                    thread_pool: db_config.thread_pool.clone(),
+                    buffer_pool: db_config.buffer_pool.clone(),
+                },
+                lower_bound: leaf_num_to_pos(lower_bound),
+                upper_bound: leaf_num_to_pos(upper_bound + 1) - 1,
+                pinned_nodes,
+            },
+        )
+        .await
+        .map_err(adb::Error::Mmr)?;
+
+        // Initialize locations journal for sync with proper bounds and pruning
+        let mut locations = crate::adb::any::fixed::sync::init_journal(
+            context.with_label("locations"),
+            fixed::Config {
+                partition: db_config.locations_journal_partition.clone(),
+                items_per_blob: db_config.locations_items_per_blob,
+                write_buffer: db_config.log_write_buffer,
+                buffer_pool: db_config.buffer_pool.clone(),
+            },
+            lower_bound,
+            upper_bound,
+        )
+        .await
+        .map_err(adb::Error::Journal)?;
+
+        // Convert MMR size to number of operations
+        let Some(mmr_ops) = leaf_pos_to_num(mmr.size()) else {
+            return Err(adb::Error::Mmr(crate::mmr::Error::InvalidSize(mmr.size())));
+        };
+
+        // Extract the inner variable journal
+        let inner_log = journal.into_inner();
+
+        // Process the variable journal in a single pass to populate MMR, locations, and snapshot
+        let mut hasher = Standard::<H>::new();
+        let mut snapshot =
+            Index::init(context.with_label("snapshot"), db_config.translator.clone());
+
+        {
+            let stream = inner_log
+                .replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
+                .await
+                .map_err(adb::Error::Journal)?;
+            pin_mut!(stream);
+
+            let mut operation_index = lower_bound;
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok((_section, offset, _size, op)) => {
+                        // Apply missing operations to MMR if needed
+                        if operation_index >= mmr_ops {
+                            mmr.add_batched(&mut hasher, &op.encode())
+                                .await
+                                .map_err(adb::Error::Mmr)?;
+                            if operation_index % apply_batch_size as u64 == 0 {
+                                mmr.sync(&mut hasher).await.map_err(adb::Error::Mmr)?;
+                            }
+                        }
+
+                        // Populate locations journal
+                        locations
+                            .append(offset.into())
+                            .await
+                            .map_err(adb::Error::Journal)?;
+
+                        // Build snapshot
+                        match &op {
+                            Operation::Set(key, _) | Operation::Update(key, _) => {
+                                snapshot.insert(key, operation_index);
+                            }
+                            Operation::Delete(key) => {
+                                let cursor = snapshot.get_mut(key);
+                                if let Some(mut cursor) = cursor {
+                                    while cursor.next().is_some() {
+                                        cursor.delete();
+                                    }
+                                }
+                            }
+                            Operation::Commit() | Operation::CommitFloor(_) => {
+                                // Handle commit operations - no snapshot changes needed
+                            }
+                        }
+                        operation_index += 1;
+                    }
+                    Err(e) => return Err(adb::Error::Journal(e)),
+                }
+            }
+        } // stream is dropped here, releasing the borrow on inner_log
+
+        // Create the database instance
+        let final_mmr_leaves = leaf_pos_to_num(mmr.size()).unwrap();
+        let mut db = any::variable::Any {
+            mmr,
+            log: inner_log,
+            log_size: final_mmr_leaves,
+            inactivity_floor_loc: lower_bound,
+            oldest_retained_loc: lower_bound,
+            locations,
+            log_items_per_section: db_config.log_items_per_section.get(),
+            uncommitted_ops: 0,
+            snapshot,
+            hasher,
+        };
+
+        // Persist state
+        db.sync().await?;
+        Ok(db)
+    }
+
+    fn root(&self) -> Self::Digest {
+        any::variable::Any::root(self, &mut Standard::<H>::new())
+    }
+
+    async fn resize_journal(
+        journal: Self::Journal,
+        context: Self::Context,
+        config: &Self::Config,
+        lower_bound: u64,
+        upper_bound: u64,
+    ) -> Result<Self::Journal, Self::Error> {
+        let size = journal.size().await.map_err(adb::Error::from)?;
+        if size <= lower_bound {
+            journal.close().await.map_err(adb::Error::from)?;
+            return Self::create_journal(context, config, lower_bound, upper_bound)
+                .await
+                .map_err(adb::Error::from);
+        }
+
+        // Prune in-place below the lower bound section and recompute logical size
+        let mut variable_journal = journal.into_inner();
+        let lower_section = lower_bound / config.log_items_per_section.get();
+        variable_journal
+            .prune(lower_section)
+            .await
+            .map_err(adb::Error::from)?;
+        let size = crate::adb::sync::variable_journal::compute_size(
+            &variable_journal,
+            config.log_items_per_section,
+            lower_bound,
+            upper_bound,
+        )
+        .await
+        .map_err(adb::Error::from)?;
+
+        Ok(crate::adb::sync::variable_journal::Journal::new(
+            variable_journal,
+            config.log_items_per_section,
+            size,
+        ))
+    }
+}
 
 /// Initialize a Variable journal for use in state sync.
 ///
@@ -215,14 +458,22 @@ async fn compute_offset<E: Storage + Metrics, V: Codec>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::{
-        adb::any::fixed::test::{PAGE_CACHE_SIZE, PAGE_SIZE},
+        adb::{
+            any::fixed::test::{PAGE_CACHE_SIZE, PAGE_SIZE},
+            sync::Target,
+        },
         journal::variable::ITEM_ALIGNMENT,
+        translator::TwoCap,
     };
+    use commonware_cryptography::{sha256, Digest as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, RwLock};
     use commonware_utils::{NZUsize, NZU64};
+    use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
 
     /// Test `init_journal` when there is no existing data on disk.
     #[test_traced]
@@ -995,6 +1246,115 @@ mod tests {
             assert_eq!(journal.get(1, offset).await.unwrap(), Some(999));
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    type VarAnySyncTest = crate::adb::any::variable::Any<
+        deterministic::Context,
+        sha256::Digest,
+        sha256::Digest,
+        Sha256,
+        TwoCap,
+    >;
+
+    fn create_sync_config(suffix: &str) -> crate::adb::any::variable::Config<TwoCap, ()> {
+        const PAGE_SIZE: usize = 77;
+        const PAGE_CACHE_SIZE: usize = 9;
+        crate::adb::any::variable::Config {
+            mmr_journal_partition: format!("journal_{suffix}"),
+            mmr_metadata_partition: format!("metadata_{suffix}"),
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
+            log_journal_partition: format!("log_journal_{suffix}"),
+            log_items_per_section: NZU64!(7),
+            log_compression: None,
+            log_codec_config: (),
+            log_write_buffer: NZUsize!(1024),
+            locations_journal_partition: format!("locations_journal_{suffix}"),
+            locations_items_per_blob: NZU64!(7),
+            translator: TwoCap,
+            thread_pool: None,
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+        }
+    }
+
+    async fn create_test_db(mut context: deterministic::Context) -> VarAnySyncTest {
+        let cfg = create_sync_config(&format!("var_any_sync_{}", context.next_u64()));
+        VarAnySyncTest::init(context, cfg).await.unwrap()
+    }
+
+    fn create_updates(count: usize) -> Vec<(sha256::Digest, sha256::Digest)> {
+        let mut rng = StdRng::seed_from_u64(1337);
+        (0..count)
+            .map(|_| {
+                (
+                    sha256::Digest::random(&mut rng),
+                    sha256::Digest::random(&mut rng),
+                )
+            })
+            .collect()
+    }
+
+    async fn apply_updates(db: &mut VarAnySyncTest, updates: &[(sha256::Digest, sha256::Digest)]) {
+        for (k, v) in updates.iter().copied() {
+            db.update(k, v).await.unwrap();
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_variable_any_sync_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate target database
+            let mut target_db = create_test_db(context.clone()).await;
+            let updates = create_updates(100);
+            apply_updates(&mut target_db, &updates).await;
+            target_db.commit().await.unwrap();
+
+            // Capture target state
+            let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
+            let root = target_db.root(&mut hasher);
+            let lower_bound = target_db.oldest_retained_loc().unwrap_or(0);
+            let upper_bound = target_db.op_count() - 1;
+
+            // Configure sync engine
+            let db_config = create_sync_config(&format!("client_{}", context.next_u64()));
+            let resolver = Arc::new(RwLock::new(target_db));
+            let engine_cfg = sync::engine::Config {
+                context: context.clone(),
+                resolver: resolver.clone(),
+                target: Target {
+                    root,
+                    lower_bound_ops: lower_bound,
+                    upper_bound_ops: upper_bound,
+                },
+                max_outstanding_requests: 2,
+                fetch_batch_size: NZU64!(10),
+                apply_batch_size: 256,
+                db_config: db_config.clone(),
+                update_rx: None,
+            };
+
+            // Run sync
+            let synced_db: VarAnySyncTest = sync::sync(engine_cfg).await.unwrap();
+
+            // Validate state
+            let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
+            assert_eq!(synced_db.root(&mut hasher), root);
+            assert_eq!(synced_db.op_count(), upper_bound + 1);
+            assert_eq!(synced_db.oldest_retained_loc().unwrap_or(0), lower_bound);
+
+            // Smoke: verify some keys
+            for (k, v) in updates.iter().take(10).copied() {
+                let got = synced_db.get(&k).await.unwrap();
+                assert_eq!(got, Some(v));
+            }
+
+            // Close and reopen to verify persistence
+            synced_db.close().await.unwrap();
+            let reopened = VarAnySyncTest::init(context, db_config).await.unwrap();
+            let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
+            assert_eq!(reopened.root(&mut hasher), root);
         });
     }
 }
