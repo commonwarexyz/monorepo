@@ -261,7 +261,7 @@ mod tests {
 
             // Send a message without batch ID
             let watermark = sender.send(None, 42).await.unwrap();
-            assert_eq!(watermark, 0);
+            assert_eq!(watermark, 1);
             assert_eq!(sender.watermark(), 0);
 
             // Receive the message but don't drop the guard yet
@@ -285,9 +285,9 @@ mod tests {
             let watermark2 = sender.send(Some(100), "msg2".to_string()).await.unwrap();
             let watermark3 = sender.send(Some(200), "msg3".to_string()).await.unwrap();
 
-            assert_eq!(watermark1, 0);
-            assert_eq!(watermark2, 1);
-            assert_eq!(watermark3, 2);
+            assert_eq!(watermark1, 1);
+            assert_eq!(watermark2, 2);
+            assert_eq!(watermark3, 3);
             assert_eq!(sender.batch_pending_count(100), 2);
             assert_eq!(sender.batch_pending_count(200), 1);
             assert_eq!(sender.batch_pending_count(300), 0);
@@ -295,6 +295,7 @@ mod tests {
             // Receive and process first message
             let msg1 = receiver.recv().await.unwrap();
             assert_eq!(msg1.data, "msg1");
+            drop(msg1.guard);
 
             assert_eq!(sender.batch_pending_count(100), 1);
             assert_eq!(sender.batch_pending_count(200), 1);
@@ -316,7 +317,7 @@ mod tests {
             let (mut sender, mut receiver) = tracked_channel::<&str>(10);
 
             let watermark = sender.send(Some(1), "test").await.unwrap();
-            assert_eq!(watermark, 0);
+            assert_eq!(watermark, 1);
 
             // Receive the message immediately
             let msg = receiver.recv().await.unwrap();
@@ -352,8 +353,8 @@ mod tests {
             let watermark2 = sender.try_send(Some(10), 2).unwrap();
 
             assert_eq!(sender.batch_pending_count(10), 2);
-            assert_eq!(watermark1, 0);
-            assert_eq!(watermark2, 1);
+            assert_eq!(watermark1, 1);
+            assert_eq!(watermark2, 2);
 
             // Receive messages
             let msg1 = receiver.recv().await.unwrap();
