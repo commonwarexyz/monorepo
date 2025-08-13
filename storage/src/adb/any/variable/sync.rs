@@ -1,9 +1,10 @@
-use crate::adb::sync::Journal as _;
 use crate::{
-    adb::{self, any, sync},
+    adb::{self, any, sync, sync::Journal as _},
     index::Index,
-    journal::fixed,
-    journal::variable::{Config as VConfig, Journal as VJournal},
+    journal::{
+        fixed,
+        variable::{Config as VConfig, Journal as VJournal},
+    },
     mmr::{
         hasher::Standard,
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
@@ -13,8 +14,7 @@ use crate::{
 };
 use commonware_codec::{Codec, Encode as _};
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Storage as RStorage};
-use commonware_runtime::{Metrics, Storage};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage, Storage};
 use commonware_utils::{Array, NZUsize};
 use futures::{pin_mut, StreamExt as _};
 use std::{num::NonZeroU64, ops::Bound};
@@ -458,8 +458,6 @@ async fn compute_offset<E: Storage + Metrics, V: Codec>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
     use crate::{
         adb::{
@@ -474,6 +472,7 @@ mod tests {
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, RwLock};
     use commonware_utils::{NZUsize, NZU64};
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
+    use std::sync::Arc;
 
     /// Test `init_journal` when there is no existing data on disk.
     #[test_traced]

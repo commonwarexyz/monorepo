@@ -1,5 +1,9 @@
 use crate::{
-    adb::{self, any::fixed::Any, any::variable::Any as VarAny, immutable::Immutable},
+    adb::{
+        self,
+        any::{fixed::Any, variable::Any as VarAny},
+        immutable::Immutable,
+    },
     mmr::verification::Proof,
     store::operation::{Fixed, Variable},
     translator::Translator,
