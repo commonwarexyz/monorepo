@@ -2,7 +2,10 @@ use std::future::Future;
 
 /// Journal of operations used by a [super::Database]
 pub trait Journal {
+    /// The type of operations in the journal
     type Op;
+
+    /// The error type returned by the journal
     type Error: std::error::Error + Send + 'static;
 
     /// Get the number of operations in the journal

@@ -6,6 +6,7 @@ use crate::{
         sync::{
             requests::Requests,
             resolver::{FetchResult, Resolver},
+            target::validate_update,
             Database, Error, Journal, Target,
         },
     },
@@ -17,6 +18,10 @@ use commonware_macros::select;
 use commonware_utils::NZU64;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
+
+/// Type alias for sync engine errors
+type EngineError<DB, R> =
+    Error<<DB as Database>::Error, <R as Resolver>::Error, <DB as Database>::Digest>;
 
 /// Whether sync should continue or complete
 #[derive(Debug)]
@@ -161,7 +166,7 @@ where
     DB::Op: Encode,
 {
     /// Create a new sync engine with the given configuration
-    pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB::Error, R::Error>> {
+    pub async fn new(config: Config<DB, R>) -> Result<Self, EngineError<DB, R>> {
         if config.target.lower_bound_ops > config.target.upper_bound_ops {
             return Err(Error::InvalidTarget {
                 lower_bound_pos: config.target.lower_bound_ops,
@@ -199,7 +204,7 @@ where
     }
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
-    async fn schedule_requests(&mut self) -> Result<(), Error<DB::Error, R::Error>> {
+    async fn schedule_requests(&mut self) -> Result<(), EngineError<DB, R>> {
         let target_size = self.target.upper_bound_ops + 1;
 
         // Special case: If we don't have pinned nodes, we need to extract them from a proof
@@ -268,7 +273,7 @@ where
     pub async fn reset_for_target_update(
         self,
         new_target: Target<DB::Digest>,
-    ) -> Result<Self, Error<DB::Error, R::Error>> {
+    ) -> Result<Self, EngineError<DB, R>> {
         let journal = DB::resize_journal(
             self.journal,
             self.context.clone(),
@@ -306,7 +311,7 @@ where
     /// This method finds operations that are contiguous with the current journal tip
     /// and applies them in order. It removes stale batches and handles partial
     /// application of batches when needed.
-    pub async fn apply_operations(&mut self) -> Result<(), Error<DB::Error, R::Error>> {
+    pub async fn apply_operations(&mut self) -> Result<(), EngineError<DB, R>> {
         let mut next_loc = self.journal.size().await.map_err(Error::database)?;
 
         // Remove any batches of operations with stale data.
@@ -350,10 +355,7 @@ where
     }
 
     /// Apply a batch of operations to the journal
-    async fn apply_operations_batch<I>(
-        &mut self,
-        operations: I,
-    ) -> Result<(), Error<DB::Error, R::Error>>
+    async fn apply_operations_batch<I>(&mut self, operations: I) -> Result<(), EngineError<DB, R>>
     where
         I: IntoIterator<Item = DB::Op>,
     {
@@ -366,7 +368,7 @@ where
     }
 
     /// Check if sync is complete based on the current journal size and target
-    pub async fn is_complete(&self) -> Result<bool, Error<DB::Error, R::Error>> {
+    pub async fn is_complete(&self) -> Result<bool, EngineError<DB, R>> {
         let journal_size = self.journal.size().await.map_err(Error::database)?;
 
         // Calculate the target journal size (upper bound is inclusive)
@@ -376,7 +378,7 @@ where
         if journal_size >= target_journal_size {
             if journal_size > target_journal_size {
                 // This shouldn't happen in normal operation - indicates a bug
-                return Err(Error::<DB::Error, R::Error>::InvalidState);
+                return Err(Error::InvalidState);
             }
             return Ok(true);
         }
@@ -395,7 +397,7 @@ where
     fn handle_fetch_result(
         &mut self,
         fetch_result: IndexedFetchResult<DB::Op, DB::Digest, R::Error>,
-    ) -> Result<(), Error<DB::Error, R::Error>> {
+    ) -> Result<(), EngineError<DB, R>> {
         // Mark request as complete
         self.outstanding_requests.remove(fetch_result.start_loc);
 
@@ -454,7 +456,7 @@ where
     ///
     /// Returns `StepResult::Complete(database)` when sync is finished, or
     /// `StepResult::Continue(self)` when more work remains.
-    pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, Error<DB::Error, R::Error>> {
+    pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, EngineError<DB, R>> {
         // Check if sync is complete
         if self.is_complete().await? {
             // Build the database from the completed sync
@@ -474,9 +476,9 @@ where
             let got_root = database.root();
             let expected_root = self.target.root;
             if got_root != expected_root {
-                return Err(Error::<DB::Error, R::Error>::RootMismatch {
-                    expected: Box::new(expected_root),
-                    actual: Box::new(got_root),
+                return Err(Error::RootMismatch {
+                    expected: expected_root,
+                    actual: got_root,
                 });
             }
 
@@ -486,12 +488,12 @@ where
         // Wait for the next synchronization event
         let event = wait_for_event(&mut self.update_receiver, &mut self.outstanding_requests)
             .await
-            .ok_or(Error::<DB::Error, R::Error>::SyncStalled)?;
+            .ok_or(Error::SyncStalled)?;
 
         match event {
             Event::TargetUpdate(new_target) => {
                 // Validate and handle the target update
-                crate::adb::sync::target::validate_update(&self.target, &new_target)?;
+                validate_update(&self.target, &new_target)?;
 
                 let mut updated_self = self.reset_for_target_update(new_target).await?;
 
@@ -522,7 +524,7 @@ where
     ///
     /// This method repeatedly calls `step()` until sync is complete. The `step()` method
     /// handles building the final database and verifying the root digest.
-    pub async fn sync(mut self) -> Result<DB, Error<DB::Error, R::Error>> {
+    pub async fn sync(mut self) -> Result<DB, EngineError<DB, R>> {
         // Run sync loop until completion
         loop {
             match self.step().await? {

@@ -1,6 +1,6 @@
 use crate::adb::sync;
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
 
 /// Target state to sync to
@@ -22,12 +22,8 @@ impl<D: Digest> Write for Target<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for Target<D> {
-    fn encode_size(&self) -> usize {
-        self.root.encode_size()
-            + self.lower_bound_ops.encode_size()
-            + self.upper_bound_ops.encode_size()
-    }
+impl<D: Digest> FixedSize for Target<D> {
+    const SIZE: usize = D::SIZE + u64::SIZE + u64::SIZE;
 }
 
 impl<D: Digest> Read for Target<D> {
@@ -49,7 +45,7 @@ impl<D: Digest> Read for Target<D> {
 pub fn validate_update<T, U, D>(
     old_target: &Target<D>,
     new_target: &Target<D>,
-) -> Result<(), sync::Error<T, U>>
+) -> Result<(), sync::Error<T, U, D>>
 where
     T: std::error::Error + Send + 'static,
     U: std::error::Error + Send + 'static,
@@ -66,8 +62,8 @@ where
         || new_target.upper_bound_ops < old_target.upper_bound_ops
     {
         return Err(sync::Error::SyncTargetMovedBackward {
-            old: Box::new(old_target.root),
-            new: Box::new(new_target.root),
+            old: old_target.clone(),
+            new: new_target.clone(),
         });
     }
 
@@ -81,6 +77,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::EncodeSize as _;
     use commonware_cryptography::sha256;
     use std::io::Cursor;
     use test_case::test_case;
@@ -111,7 +108,7 @@ mod tests {
         assert_eq!(target.upper_bound_ops, deserialized.upper_bound_ops);
     }
 
-    type TestError = sync::Error<std::io::Error, std::io::Error>;
+    type TestError = sync::Error<std::io::Error, std::io::Error, sha256::Digest>;
 
     #[test_case(
         Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
@@ -129,8 +126,16 @@ mod tests {
         Target { root: sha256::Digest::from([0; 32]), lower_bound_ops: 0, upper_bound_ops: 100 },
         Target { root: sha256::Digest::from([1; 32]), lower_bound_ops: 0, upper_bound_ops: 50 },
         Err(TestError::SyncTargetMovedBackward {
-            old: Box::new(sha256::Digest::from([0; 32])),
-            new: Box::new(sha256::Digest::from([1; 32]))
+            old: Target {
+                root: sha256::Digest::from([0; 32]),
+                lower_bound_ops: 0,
+                upper_bound_ops: 100,
+            },
+            new: Target {
+                root: sha256::Digest::from([1; 32]),
+                lower_bound_ops: 0,
+                upper_bound_ops: 50,
+            },
         });
         "moves backward"
     )]
