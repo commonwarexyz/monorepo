@@ -67,7 +67,7 @@ pub struct Message<T, B: Eq + Hash + Clone> {
 
 /// The state of the tracker.
 struct State<B> {
-    next_sequence: u64,
+    next: u64,
     watermark: u64,
     batch_counts: HashMap<B, usize>,
     pending_sequences: HashMap<u64, bool>,
@@ -88,7 +88,7 @@ impl<B: Eq + Hash + Clone> Tracker<B> {
     fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(State {
-                next_sequence: 1,
+                next: 1,
                 watermark: 0,
                 batch_counts: HashMap::new(),
                 pending_sequences: HashMap::new(),
@@ -96,13 +96,13 @@ impl<B: Eq + Hash + Clone> Tracker<B> {
         }
     }
 
-    fn create_guard(&self, batch: Option<B>) -> Guard<B> {
+    fn guard(&self, batch: Option<B>) -> Guard<B> {
         // Get state
         let mut state = self.state.lock().unwrap();
 
         // Get the next sequence
-        let sequence = state.next_sequence;
-        state.next_sequence += 1;
+        let sequence = state.next;
+        state.next += 1;
 
         // Track this sequence as not yet delivered
         state.pending_sequences.insert(sequence, false);
@@ -132,7 +132,7 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
     /// Sends a message with an optional batch ID and returns a delivery guard.
     pub async fn send(&mut self, batch: Option<B>, data: T) -> Result<u64, SendError> {
         // Create the guard
-        let guard = Arc::new(self.tracker.create_guard(batch));
+        let guard = Arc::new(self.tracker.guard(batch));
         let watermark = guard.sequence;
 
         // Send the message
@@ -149,7 +149,7 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
         data: T,
     ) -> Result<u64, TrySendError<Message<T, B>>> {
         // Create the guard
-        let guard = Arc::new(self.tracker.create_guard(batch));
+        let guard = Arc::new(self.tracker.guard(batch));
         let watermark = guard.sequence;
 
         // Send the message
@@ -164,8 +164,8 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
         self.tracker.state.lock().unwrap().watermark
     }
 
-    /// Returns the number of pending messages for a specific batch ID.
-    pub fn batch_pending_count(&self, batch: B) -> usize {
+    /// Returns the number of pending messages for a specific batch.
+    pub fn pending(&self, batch: B) -> usize {
         self.tracker
             .state
             .lock()
@@ -177,7 +177,7 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
     }
 }
 
-/// A receiver that wraps `Receiver` and provides tracked messages.
+/// A receiver that wraps [FutReceiver] and provides tracked messages.
 pub struct Receiver<T, B: Eq + Hash + Clone> {
     inner: FutReceiver<Message<T, B>>,
 }
@@ -202,48 +202,6 @@ impl<T, B: Eq + Hash + Clone> Stream for Receiver<T, B> {
     }
 }
 
-/// Creates a new tracked bounded channel.
-///
-/// This channel provides reliable delivery tracking of messages. Each sent message
-/// returns a `DeliveryGuard` that can be cloned. When ALL clones of the guard
-/// (including the one sent with the message) are dropped, the message is marked as delivered.
-///
-/// # Features
-/// - **Watermark tracking**: Get the highest sequence number where all messages up to it have been delivered
-/// - **Batch tracking**: Assign batch IDs to messages and track pending counts per batch
-/// - **Clonable guards**: Guards can be cloned and shared; delivery happens when all clones are dropped
-///
-/// # Sequence Number Overflow
-/// Uses u64 for sequence numbers. At 100 messages per nanosecond, overflow would occur after ~5.85 years.
-/// For most applications this is sufficient. Systems requiring longer continuous operation should
-/// implement periodic resets or use external sequence management.
-///
-/// # Example
-/// ```
-/// # use futures::executor::block_on;
-/// # use commonware_utils::futures::tracked_channel;
-/// # block_on(async {
-/// let (mut sender, mut receiver) = tracked_channel::<String>(10);
-///
-/// // Send a message with batch ID
-/// let guard = sender.send("hello".to_string(), Some(1)).await.unwrap();
-///
-/// // Check pending messages
-/// assert_eq!(sender.batch_pending_count(1), 1);
-/// assert_eq!(sender.watermark(), 0);
-///
-/// // Receive and process
-/// let msg = receiver.recv().await.unwrap();
-/// assert_eq!(msg.data, "hello");
-///
-/// // Drop both guards to mark as delivered
-/// drop(msg.guard);
-/// drop(guard);
-///
-/// assert_eq!(sender.batch_pending_count(1), 0);
-/// assert_eq!(sender.watermark(), 1);
-/// # });
-/// ```
 pub fn reliable<T, B: Eq + Hash + Clone>(buffer: usize) -> (Sender<T, B>, Receiver<T, B>) {
     let (tx, rx) = mpsc::channel(buffer);
     let sender = Sender {
@@ -293,17 +251,17 @@ mod tests {
             assert_eq!(watermark1, 1);
             assert_eq!(watermark2, 2);
             assert_eq!(watermark3, 3);
-            assert_eq!(sender.batch_pending_count(100), 2);
-            assert_eq!(sender.batch_pending_count(200), 1);
-            assert_eq!(sender.batch_pending_count(300), 0);
+            assert_eq!(sender.pending(100), 2);
+            assert_eq!(sender.pending(200), 1);
+            assert_eq!(sender.pending(300), 0);
 
             // Receive and process first message
             let msg1 = receiver.recv().await.unwrap();
             assert_eq!(msg1.data, "msg1");
             drop(msg1.guard);
 
-            assert_eq!(sender.batch_pending_count(100), 1);
-            assert_eq!(sender.batch_pending_count(200), 1);
+            assert_eq!(sender.pending(100), 1);
+            assert_eq!(sender.pending(200), 1);
 
             // Receive and process remaining messages
             let msg2 = receiver.recv().await.unwrap();
@@ -311,8 +269,8 @@ mod tests {
             drop(msg2.guard);
             drop(msg3.guard);
 
-            assert_eq!(sender.batch_pending_count(100), 0);
-            assert_eq!(sender.batch_pending_count(200), 0);
+            assert_eq!(sender.pending(100), 0);
+            assert_eq!(sender.pending(200), 0);
         });
     }
 
@@ -332,18 +290,18 @@ mod tests {
             let msg_guard_clone1 = msg.guard.clone();
             let msg_guard_clone2 = msg.guard.clone();
 
-            assert_eq!(sender.batch_pending_count(1), 1);
+            assert_eq!(sender.pending(1), 1);
             assert_eq!(sender.watermark(), 0);
 
             // Drop original and one clone
             drop(msg.guard);
             drop(msg_guard_clone1);
-            assert_eq!(sender.batch_pending_count(1), 1);
+            assert_eq!(sender.pending(1), 1);
             assert_eq!(sender.watermark(), 0);
 
             // Drop last clone
             drop(msg_guard_clone2);
-            assert_eq!(sender.batch_pending_count(1), 0);
+            assert_eq!(sender.pending(1), 0);
             assert_eq!(sender.watermark(), 1);
         });
     }
@@ -357,7 +315,7 @@ mod tests {
             let watermark1 = sender.try_send(Some(10), 1).unwrap();
             let watermark2 = sender.try_send(Some(10), 2).unwrap();
 
-            assert_eq!(sender.batch_pending_count(10), 2);
+            assert_eq!(sender.pending(10), 2);
             assert_eq!(watermark1, 1);
             assert_eq!(watermark2, 2);
 
@@ -366,12 +324,12 @@ mod tests {
             assert_eq!(msg1.data, 1);
             drop(msg1.guard);
 
-            assert_eq!(sender.batch_pending_count(10), 1);
+            assert_eq!(sender.pending(10), 1);
 
             let msg2 = receiver.recv().await.unwrap();
             drop(msg2.guard);
 
-            assert_eq!(sender.batch_pending_count(10), 0);
+            assert_eq!(sender.pending(10), 0);
         });
     }
 
