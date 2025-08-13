@@ -1317,7 +1317,7 @@ pub mod test {
             // Final commit to establish the inactivity floor
             db.commit().await.unwrap();
 
-            // Get the root hash
+            // Get the root digest
             let original_root = db.root(&mut hasher).await.unwrap();
 
             // Verify the pruning boundary is correct

@@ -2,12 +2,9 @@
 //! deletions), where values can have varying sizes.
 
 use crate::{
-    adb::Error,
+    adb::{any::fixed::sync::init_journal, Error},
     index::Index,
-    journal::{
-        fixed::{Config as FConfig, Journal as FJournal},
-        variable::{Config as VConfig, Journal as VJournal},
-    },
+    journal::{fixed, variable},
     mmr::{
         hasher::Standard,
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
@@ -23,7 +20,9 @@ use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, T
 use commonware_utils::{sequence::U32, Array, NZUsize};
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
-use tracing::warn;
+use tracing::{debug, warn};
+
+pub mod sync;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot. The exact value does not impact performance significantly as long as it is large
@@ -90,7 +89,7 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
     /// A log of all operations applied to the db in order of occurrence. The _location_ of an
     /// operation is its order of occurrence with respect to this log, and corresponds to its leaf
     /// number in the MMR.
-    log: VJournal<E, Variable<K, V>>,
+    log: variable::Journal<E, Variable<K, V>>,
 
     /// The number of operations that have been appended to the log (which must equal the number of
     /// leaves in the MMR).
@@ -101,7 +100,7 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
 
     /// A fixed-length journal that maps an operation's location to its offset within its respective
     /// section of the log. (The section number is derived from location.)
-    locations: FJournal<E, U32>,
+    locations: fixed::Journal<E, U32>,
 
     /// The location of the oldest retained operation, or 0 if no operations have been added.
     oldest_retained_loc: u64,
@@ -142,9 +141,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let mut log = VJournal::init(
+        let mut log = variable::Journal::init(
             context.with_label("log"),
-            VConfig {
+            variable::Config {
                 partition: cfg.log_journal_partition,
                 compression: cfg.log_compression,
                 codec_config: cfg.log_codec_config,
@@ -154,9 +153,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let mut locations = FJournal::init(
+        let mut locations = fixed::Journal::init(
             context.with_label("locations"),
-            FConfig {
+            fixed::Config {
                 partition: cfg.locations_journal_partition,
                 items_per_blob: cfg.locations_items_per_blob,
                 write_buffer: cfg.log_write_buffer,
@@ -169,7 +168,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
         let (log_size, oldest_retained_loc) = Self::build_snapshot_from_log(
             &mut hasher,
-            cfg.log_items_per_section.get(),
+            cfg.log_items_per_section,
             &mut mmr,
             &mut log,
             &mut locations,
@@ -177,7 +176,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let db = Immutable {
+        Ok(Immutable {
             mmr,
             log,
             log_size,
@@ -186,8 +185,76 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             log_items_per_section: cfg.log_items_per_section.get(),
             snapshot,
             hasher,
+        })
+    }
+
+    /// Returns an [Immutable] built from the config and sync data in `cfg`.
+    #[allow(clippy::type_complexity)]
+    pub async fn init_synced(
+        context: E,
+        mut cfg: sync::Config<E, K, V, T, H::Digest, <Variable<K, V> as Read>::Cfg>,
+    ) -> Result<Self, Error> {
+        // Initialize MMR for sync
+        let mut mmr = Mmr::init_sync(
+            context.with_label("mmr"),
+            crate::mmr::journaled::SyncConfig {
+                config: MmrConfig {
+                    journal_partition: cfg.db_config.mmr_journal_partition,
+                    metadata_partition: cfg.db_config.mmr_metadata_partition,
+                    items_per_blob: cfg.db_config.mmr_items_per_blob,
+                    write_buffer: cfg.db_config.mmr_write_buffer,
+                    thread_pool: cfg.db_config.thread_pool.clone(),
+                    buffer_pool: cfg.db_config.buffer_pool.clone(),
+                },
+                lower_bound: leaf_num_to_pos(cfg.lower_bound),
+                upper_bound: leaf_num_to_pos(cfg.upper_bound + 1) - 1,
+                pinned_nodes: cfg.pinned_nodes,
+            },
+        )
+        .await
+        .map_err(Error::Mmr)?;
+
+        // Initialize locations journal for sync
+        let mut locations = init_journal(
+            context.with_label("locations"),
+            fixed::Config {
+                partition: cfg.db_config.locations_journal_partition,
+                items_per_blob: cfg.db_config.locations_items_per_blob,
+                write_buffer: cfg.db_config.log_write_buffer,
+                buffer_pool: cfg.db_config.buffer_pool.clone(),
+            },
+            cfg.lower_bound,
+            cfg.upper_bound,
+        )
+        .await?;
+
+        // Build snapshot from the log
+        let mut snapshot = Index::init(
+            context.with_label("snapshot"),
+            cfg.db_config.translator.clone(),
+        );
+        let (log_size, oldest_retained_loc) = Self::build_snapshot_from_log(
+            &mut Standard::<H>::new(),
+            cfg.db_config.log_items_per_section,
+            &mut mmr,
+            &mut cfg.log,
+            &mut locations,
+            &mut snapshot,
+        )
+        .await?;
+
+        let mut db = Immutable {
+            mmr,
+            log: cfg.log,
+            log_size,
+            oldest_retained_loc,
+            locations,
+            log_items_per_section: cfg.db_config.log_items_per_section.get(),
+            snapshot,
+            hasher: Standard::<H>::new(),
         };
 
+        db.sync().await?;
         Ok(db)
     }
 
@@ -205,10 +272,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// equal.
     pub(super) async fn build_snapshot_from_log(
         hasher: &mut Standard<H>,
-        log_items_per_section: u64,
+        log_items_per_section: NonZeroU64,
         mmr: &mut Mmr<E, H>,
-        log: &mut VJournal<E, Variable<K, V>>,
-        locations: &mut FJournal<E, U32>,
+        log: &mut variable::Journal<E, Variable<K, V>>,
+        locations: &mut fixed::Journal<E, U32>,
         snapshot: &mut Index<T, u64>,
     ) -> Result<(u64, u64), Error> {
         // Align the mmr with the location map. Any elements we remove here that are still in the
@@ -251,7 +318,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     }
                     Ok((section, offset, _, op)) => {
                         if oldest_retained_loc.is_none() {
-                            log_size = section * log_items_per_section;
+                            log_size = section * log_items_per_section.get();
                             oldest_retained_loc = Some(log_size);
                         }
                         let loc = log_size; // location of the current operation.
@@ -259,12 +326,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
                         // Consistency check: confirm the provided section matches what we expect from this operation's
                         // index.
-                        let expected = loc / log_items_per_section;
+                        let expected = loc / log_items_per_section.get();
                         assert_eq!(section, expected,
                                 "section {section} did not match expected session {expected} from location {loc}");
 
                         if log_size > mmr_leaves {
-                            warn!(
+                            debug!(
                                 section,
                                 offset, "operation was missing from MMR/location map"
                             );
@@ -300,7 +367,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 op_count = uncommitted_ops.len(),
                 "rewinding over uncommitted operations at end of log"
             );
-            let new_last_section = end_loc / log_items_per_section;
+            let new_last_section = end_loc / log_items_per_section.get();
             log.rewind_to_offset(new_last_section, end_offset).await?;
             log.sync(new_last_section).await?;
             log_size = end_loc;
@@ -520,21 +587,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok((proof, ops))
     }
 
-    /// Return true if the given sequence of `ops` were applied starting at the operation with
-    /// insertion order `start_loc` in the database with the provided root.
-    pub fn verify_proof(
-        hasher: &mut Standard<H>,
-        proof: &Proof<H::Digest>,
-        start_loc: u64,
-        ops: &[Variable<K, V>],
-        root_digest: &H::Digest,
-    ) -> bool {
-        let start_pos = leaf_num_to_pos(start_loc);
-        let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
-
-        proof.verify_range_inclusion(hasher, &elements, start_pos, root_digest)
-    }
-
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Batch operations will be parallelized if a thread pool
     /// is provided.
@@ -635,7 +687,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
-    use crate::{mmr::mem::Mmr as MemMmr, translator::TwoCap};
+    use crate::{adb::verify_proof, mmr::mem::Mmr as MemMmr, translator::TwoCap};
     use commonware_cryptography::{hash, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -648,7 +700,7 @@ pub(super) mod test {
     const PAGE_CACHE_SIZE: usize = 9;
     const ITEMS_PER_SECTION: u64 = 5;
 
-    fn db_config(suffix: &str) -> Config<TwoCap, (commonware_codec::RangeCfg, ())> {
+    pub(crate) fn db_config(suffix: &str) -> Config<TwoCap, (commonware_codec::RangeCfg, ())> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -667,7 +719,7 @@ pub(super) mod test {
         }
     }
 
-    /// A type alias for the concrete [Any] type used in these unit tests.
+    /// A type alias for the concrete [Immutable] type used in these unit tests.
     type ImmutableTest = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     /// Return an [Immutable] database initialized with a fixed config.
@@ -804,13 +856,7 @@ pub(super) mod test {
             let max_ops = 5;
             for i in 0..db.op_count() {
                 let (proof, log) = db.proof(i, max_ops).await.unwrap();
-                assert!(ImmutableTest::verify_proof(
-                    &mut hasher,
-                    &proof,
-                    i,
-                    &log,
-                    &root
-                ));
+                assert!(verify_proof(&mut hasher, &proof, i, &log, &root));
             }
 
             db.destroy().await.unwrap();

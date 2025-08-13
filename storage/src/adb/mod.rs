@@ -15,6 +15,9 @@ use thiserror::Error;
 pub mod any;
 pub mod current;
 pub mod immutable;
+pub mod sync;
+pub mod verify;
+pub use verify::{extract_pinned_nodes, verify_proof};
 
 /// Errors that can occur when interacting with an authenticated database.
 #[derive(Error, Debug)]
