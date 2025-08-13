@@ -63,7 +63,7 @@ Client options:
 - `-t, --target-update-interval <DURATION>`: Interval for requesting target updates ('ms', 's', 'm', 'h') (default: 1s)
 - `-i, --sync-interval <DURATION>`: Interval between sync operations ('ms', 's', 'm', 'h') (default: 10s)
 
-Note that a client must use the same `--db` as the server it syncs from.
+_The client must use the same `--db` as the server it syncs from._
 
 ## Example Session
 
