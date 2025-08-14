@@ -139,8 +139,8 @@ impl<V: Variant, D: Digest> Ack<V, D> {
     ///
     /// Returns `true` if the signature is valid for the given namespace and public key.
     /// Domain separation is automatically applied to prevent signature reuse.
-    pub fn verify(&self, namespace: &[u8], identity: &[V::Public]) -> bool {
-        let Some(public) = identity.get(self.signature.index as usize) else {
+    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
+        let Some(public) = polynomial.get(self.signature.index as usize) else {
             return false;
         };
         ops::verify_message::<V>(
