@@ -145,36 +145,17 @@ impl<D: Digest> Proof<D> {
     }
 
     /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
-    /// of elements, or returns a [ReconstructionError] if the input data is invalid.
-    pub(crate) fn reconstruct_root<I, H, E>(
-        &self,
-        hasher: &mut H,
-        elements: &[E],
-        start_element_pos: u64,
-    ) -> Result<D, ReconstructionError>
-    where
-        I: CHasher<Digest = D>,
-        H: Hasher<I>,
-        E: AsRef<[u8]>,
-    {
-        let peak_digests =
-            self.reconstruct_peak_digests(hasher, elements, start_element_pos, None)?;
-
-        Ok(hasher.root(self.size, peak_digests.iter()))
-    }
-
-    /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
     /// of elements, returning the (position,digest) of every node whose digest was required by the
     /// process (including those from the proof itself). The root hash will be the final digest in
     /// the returned vector, and it will have the MMR size as its associated position. Returns a
-    /// [Error::InvalidProof] if the proof data is invalid for the given range, or
-    /// [Error::RootMismatch] if a root is provided and it does not match the computed root.
-    pub fn digests_from_range<I, H, E>(
+    /// [Error::InvalidProof] if the input data is invalid and [Error::RootMismatch] if the root
+    /// does not match the computed root.
+    pub fn verify_range_inclusion_and_reconstruct_digests<I, H, E>(
         &self,
         hasher: &mut H,
         elements: &[E],
         start_element_pos: u64,
-        root: Option<&D>,
+        root: &D,
     ) -> Result<Vec<(u64, D)>, Error>
     where
         I: CHasher<Digest = D>,
@@ -192,14 +173,31 @@ impl<D: Digest> Proof<D> {
         };
 
         let computed_root = hasher.root(self.size, peak_digests.iter());
-        if let Some(root) = root {
-            if *root != computed_root {
-                return Err(Error::RootMismatch);
-            }
+        if *root != computed_root {
+            return Err(Error::RootMismatch);
         }
         collected_digests.push((self.size, computed_root));
 
         Ok(collected_digests)
+    }
+
+    /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
+    /// of elements, or returns a [ReconstructionError] if the input data is invalid.
+    pub(crate) fn reconstruct_root<I, H, E>(
+        &self,
+        hasher: &mut H,
+        elements: &[E],
+        start_element_pos: u64,
+    ) -> Result<D, ReconstructionError>
+    where
+        I: CHasher<Digest = D>,
+        H: Hasher<I>,
+        E: AsRef<[u8]>,
+    {
+        let peak_digests =
+            self.reconstruct_peak_digests(hasher, elements, start_element_pos, None)?;
+
+        Ok(hasher.root(self.size, peak_digests.iter()))
     }
 
     /// Reconstruct the peak digests of the MMR that produced this proof, returning
@@ -1314,7 +1312,7 @@ mod tests {
             // in the tree, plus one extra for the root.
             let proof = mmr.range_proof(0, mmr.size() - 1).await.unwrap();
             let mut node_digests = proof
-                .digests_from_range(&mut hasher, &elements, 0, None)
+                .verify_range_inclusion_and_reconstruct_digests(&mut hasher, &elements, 0, &root)
                 .unwrap();
             assert_eq!(node_digests.len(), mmr.size() as usize + 1);
             node_digests.sort_by_key(|(pos, _)| *pos);
@@ -1325,14 +1323,17 @@ mod tests {
                 assert_eq!(pos, i as u64);
                 assert_eq!(mmr.get_node(pos).unwrap(), d);
             }
-            // Make sure the root-verifying version works.
-            assert!(proof
-                .digests_from_range(&mut hasher, &elements, 0, Some(&root))
-                .is_ok());
+            // Make sure the wrong root fails.
             let wrong_root = elements[0]; // any other digest will do
-            assert!(proof
-                .digests_from_range(&mut hasher, &elements, 0, Some(&wrong_root))
-                .is_err());
+            assert!(matches!(
+                proof.verify_range_inclusion_and_reconstruct_digests(
+                    &mut hasher,
+                    &elements,
+                    0,
+                    &wrong_root
+                ),
+                Err(Error::RootMismatch)
+            ));
 
             // Test 2: Single element range (first element)
             let single_proof = mmr
@@ -1340,7 +1341,12 @@ mod tests {
                 .await
                 .unwrap();
             let single_digests = single_proof
-                .digests_from_range(&mut hasher, &elements[0..1], element_positions[0], None)
+                .verify_range_inclusion_and_reconstruct_digests(
+                    &mut hasher,
+                    &elements[0..1],
+                    element_positions[0],
+                    &root,
+                )
                 .unwrap();
             assert!(single_digests.len() > 1);
             let single_root = single_digests.last().unwrap();
@@ -1354,11 +1360,11 @@ mod tests {
                 .await
                 .unwrap();
             let mid_digests = mid_proof
-                .digests_from_range(
+                .verify_range_inclusion_and_reconstruct_digests(
                     &mut hasher,
                     &elements[mid_idx..mid_idx + 1],
                     element_positions[mid_idx],
-                    None,
+                    &root,
                 )
                 .unwrap();
             assert!(mid_digests.len() > 1);
@@ -1373,11 +1379,11 @@ mod tests {
                 .await
                 .unwrap();
             let last_digests = last_proof
-                .digests_from_range(
+                .verify_range_inclusion_and_reconstruct_digests(
                     &mut hasher,
                     &elements[last_idx..],
                     element_positions[last_idx],
-                    None,
+                    &root,
                 )
                 .unwrap();
             assert!(last_digests.len() > 1);
@@ -1391,7 +1397,12 @@ mod tests {
                 .await
                 .unwrap();
             let small_digests = small_proof
-                .digests_from_range(&mut hasher, &elements[0..5], element_positions[0], None)
+                .verify_range_inclusion_and_reconstruct_digests(
+                    &mut hasher,
+                    &elements[0..5],
+                    element_positions[0],
+                    &root,
+                )
                 .unwrap();
             let small_root = small_digests.last().unwrap();
             assert_eq!(small_root.0, mmr.size());
@@ -1407,11 +1418,11 @@ mod tests {
                 .await
                 .unwrap();
             let mid_range_digests = mid_range_proof
-                .digests_from_range(
+                .verify_range_inclusion_and_reconstruct_digests(
                     &mut hasher,
                     &elements[mid_start..mid_end + 1],
                     element_positions[mid_start],
-                    None,
+                    &root,
                 )
                 .unwrap();
             let num_elements = mid_end - mid_start + 1;
