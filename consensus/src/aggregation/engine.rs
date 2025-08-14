@@ -80,7 +80,6 @@ pub struct Engine<
     TSu: ThresholdSupervisor<
         Index = Epoch,
         PublicKey = P,
-        Identity = V::Public,
         Polynomial = Vec<V::Public>,
         Share = group::Share,
     >,
@@ -170,7 +169,6 @@ impl<
         TSu: ThresholdSupervisor<
             Index = Epoch,
             PublicKey = P,
-            Identity = V::Public,
             Polynomial = Vec<V::Public>,
             Share = group::Share,
         >,
