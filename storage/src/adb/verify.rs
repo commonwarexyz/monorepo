@@ -55,7 +55,7 @@ pub fn nodes_required_for_range_proof<D: Digest>(
     start_loc: u64,
     end_loc: u64,
 ) -> Vec<u64> {
-    // TODO: convert size to pos?
+    let size = leaf_num_to_pos(size);
     let start_pos = leaf_num_to_pos(start_loc);
     let end_pos = leaf_num_to_pos(end_loc);
     Proof::<D>::nodes_required_for_range_proof(size, start_pos, end_pos)
