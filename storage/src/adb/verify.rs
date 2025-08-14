@@ -47,5 +47,5 @@ where
 {
     let start_pos = leaf_num_to_pos(start_loc);
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_range_inclusion_and_reconstruct_digests(hasher, &elements, start_pos, target_root)
+    proof.verify_range_inclusion_and_extract_digests(hasher, &elements, start_pos, target_root)
 }
