@@ -1,13 +1,16 @@
 #![no_main]
 
 mod mocks;
-use commonware_consensus::simplex::{
-    config::Config,
-    mocks::{
-        application, relay,
-        supervisor::{self, Supervisor},
+use commonware_consensus::{
+    simplex::{
+        config::Config,
+        mocks::{
+            application, relay,
+            supervisor::{self, Supervisor},
+        },
+        Engine,
     },
-    Engine,
+    Monitor,
 };
 use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
@@ -15,15 +18,16 @@ use commonware_cryptography::{
     PrivateKeyExt as _, Sha256, Signer as _,
 };
 use commonware_p2p::simulated::{
-    helpers::{link_peers, register_peers, Action},
+    helpers::{link_peers, register_peers, Action, PartitionStrategy},
     Config as NetworkConfig, Link, Network,
 };
 use commonware_runtime::{
     buffer::PoolRef,
     deterministic::{self},
-    Clock, Metrics, Runner,
+    Clock, Metrics, Runner, Spawner,
 };
 use commonware_utils::{NZUsize, NZU32};
+use futures::{future::join_all, StreamExt};
 use governor::Quota;
 use libfuzzer_sys::fuzz_target;
 use mocks::{FuzzInput, Fuzzer};
@@ -35,6 +39,7 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 fn fuzzer(input: FuzzInput) {
     // Create context
     let n = 4;
+    let required_containers = 10;
     let namespace = b"consensus_fuzz".to_vec();
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
@@ -63,6 +68,7 @@ fn fuzzer(input: FuzzInput) {
         schemes.sort_by_key(|s| s.public_key());
         let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
         let mut registrations = register_peers(&mut oracle, &validators).await;
+        let partition = input.partition.clone();
 
         // Link all validators
         // The first validator is byzantine.
@@ -81,6 +87,7 @@ fn fuzzer(input: FuzzInput) {
 
         // Create engines
         let relay = Arc::new(relay::Relay::new());
+        let mut supervisors = Vec::new();
 
         // Start a consensus engine for the fuzzing actor (first validator).
         let scheme = schemes.remove(0);
@@ -113,6 +120,7 @@ fn fuzzer(input: FuzzInput) {
                 participants: view_validators.clone(),
             };
             let supervisor = Supervisor::<PublicKey, Sha256Digest>::new(supervisor_config);
+            supervisors.push(supervisor.clone());
 
             let application_cfg = application::Config {
                 hasher: Sha256::default(),
@@ -156,7 +164,24 @@ fn fuzzer(input: FuzzInput) {
             engine.start(voter, resolver);
         }
 
-        context.sleep(Duration::from_secs(30)).await;
+        match partition {
+            PartitionStrategy::Connected | PartitionStrategy::TwoPartitionsWithByzantine => {
+                // Wait for all engines to finish
+                let mut finalizers = Vec::new();
+                for supervisor in supervisors.iter_mut() {
+                    let (mut latest, mut monitor) = supervisor.subscribe().await;
+                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                        while latest < required_containers {
+                            latest = monitor.next().await.expect("event missing");
+                        }
+                    }));
+                }
+                join_all(finalizers).await;
+            }
+            _ => {
+                context.sleep(Duration::from_secs(10)).await;
+            }
+        }
     });
 }
 

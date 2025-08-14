@@ -155,11 +155,16 @@ impl<E: Clock + Spawner> Fuzzer<E> {
         _sender_id: impl std::fmt::Debug,
         msg: Vec<u8>,
     ) {
+
         // Parse message
         let msg = match Voter::<Signature, Sha256Digest>::decode_cfg(msg.as_slice(), &usize::MAX) {
             Ok(msg) => msg,
             Err(_) => return, // Skip malformed messages
         };
+
+        if let 0..10 = self.rng.gen_range(0..100) {
+            sender.send(Recipients::All, msg, true).await.unwrap();
+        }
 
         // Store view.
         self.view = msg.view();
