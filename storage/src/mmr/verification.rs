@@ -1296,20 +1296,104 @@ mod tests {
                 elements.push(test_digest(i));
                 element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
+            let root = mmr.root(&mut hasher);
 
-            // compute_digests over the entire range should contain a digest for every node
+            // Test 1: compute_digests over the entire range should contain a digest for every node
             // in the tree, plus one extra for the root.
             let proof = mmr.range_proof(0, mmr.size() - 1).await.unwrap();
             let mut node_digests = proof.digests_from_range(&mut hasher, &elements, 0).unwrap();
             assert_eq!(node_digests.len(), mmr.size() as usize + 1);
             node_digests.sort_by_key(|(pos, _)| *pos);
-            let root = node_digests.pop().unwrap();
-            assert_eq!(root.0, mmr.size());
-            assert_eq!(root.1, mmr.root(&mut hasher));
+            let root_digest = node_digests.pop().unwrap();
+            assert_eq!(root_digest.0, mmr.size());
+            assert_eq!(root_digest.1, root);
             for (i, (pos, d)) in node_digests.into_iter().enumerate() {
                 assert_eq!(pos, i as u64);
                 assert_eq!(mmr.get_node(pos).unwrap(), d);
             }
+
+            // Test 2: Single element range (first element)
+            let single_proof = mmr
+                .range_proof(element_positions[0], element_positions[0])
+                .await
+                .unwrap();
+            let single_digests = single_proof
+                .digests_from_range(&mut hasher, &elements[0..1], element_positions[0])
+                .unwrap();
+            assert!(single_digests.len() > 1);
+            let single_root = single_digests.last().unwrap();
+            assert_eq!(single_root.0, mmr.size());
+            assert_eq!(single_root.1, root);
+
+            // Test 3: Single element range (middle element)
+            let mid_idx = 24;
+            let mid_proof = mmr
+                .range_proof(element_positions[mid_idx], element_positions[mid_idx])
+                .await
+                .unwrap();
+            let mid_digests = mid_proof
+                .digests_from_range(
+                    &mut hasher,
+                    &elements[mid_idx..mid_idx + 1],
+                    element_positions[mid_idx],
+                )
+                .unwrap();
+            assert!(mid_digests.len() > 1);
+            let mid_root = mid_digests.last().unwrap();
+            assert_eq!(mid_root.0, mmr.size());
+            assert_eq!(mid_root.1, root);
+
+            // Test 4: Single element range (last element)
+            let last_idx = elements.len() - 1;
+            let last_proof = mmr
+                .range_proof(element_positions[last_idx], element_positions[last_idx])
+                .await
+                .unwrap();
+            let last_digests = last_proof
+                .digests_from_range(
+                    &mut hasher,
+                    &elements[last_idx..],
+                    element_positions[last_idx],
+                )
+                .unwrap();
+            assert!(last_digests.len() > 1);
+            let last_root = last_digests.last().unwrap();
+            assert_eq!(last_root.0, mmr.size());
+            assert_eq!(last_root.1, root);
+
+            // Test 5: Small range at the beginning
+            let small_proof = mmr
+                .range_proof(element_positions[0], element_positions[4])
+                .await
+                .unwrap();
+            let small_digests = small_proof
+                .digests_from_range(&mut hasher, &elements[0..5], element_positions[0])
+                .unwrap();
+            let small_root = small_digests.last().unwrap();
+            assert_eq!(small_root.0, mmr.size());
+            assert_eq!(small_root.1, root);
+            // Verify that we get digests for the range elements and their ancestors
+            assert!(small_digests.len() > 5);
+
+            // Test 6: Medium range in the middle
+            let mid_start = 10;
+            let mid_end = 30;
+            let mid_range_proof = mmr
+                .range_proof(element_positions[mid_start], element_positions[mid_end])
+                .await
+                .unwrap();
+            let mid_range_digests = mid_range_proof
+                .digests_from_range(
+                    &mut hasher,
+                    &elements[mid_start..mid_end + 1],
+                    element_positions[mid_start],
+                )
+                .unwrap();
+            let num_elements = mid_end - mid_start + 1;
+            assert!(mid_range_digests.len() > num_elements);
+            let mid_range_root = mid_range_digests.last().unwrap();
+            assert_eq!(mid_range_root.0, mmr.size());
+            assert_eq!(mid_range_root.1, root);
         });
     }
 }
