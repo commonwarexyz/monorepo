@@ -665,6 +665,10 @@ impl<
 
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
+        // Clean up bitmap metadata partition.
+        Bitmap::<H, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
+
+        // Clean up Any components (MMR and log).
         self.any.destroy().await
     }
 
@@ -1313,7 +1317,7 @@ pub mod test {
             // Final commit to establish the inactivity floor
             db.commit().await.unwrap();
 
-            // Get the root hash
+            // Get the root digest
             let original_root = db.root(&mut hasher).await.unwrap();
 
             // Verify the pruning boundary is correct

@@ -5,6 +5,7 @@
 //! pruned.
 
 use crate::{
+    adb::any::fixed::sync::init_journal,
     journal::{
         fixed::{Config as JConfig, Journal},
         Error as JError,
@@ -256,7 +257,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///    - Sets in-memory MMR size to `upper_bound+1`
     ///    - Prunes the journal to `lower_bound`
     pub async fn init_sync(context: E, cfg: SyncConfig<H::Digest>) -> Result<Self, Error> {
-        let journal = Journal::<E, H::Digest>::init_sync(
+        let journal = init_journal(
             context.with_label("mmr_journal"),
             JConfig {
                 partition: cfg.config.journal_partition,

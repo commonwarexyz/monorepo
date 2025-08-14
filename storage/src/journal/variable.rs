@@ -139,7 +139,7 @@ pub struct Config<C> {
     pub write_buffer: NonZeroUsize,
 }
 
-const ITEM_ALIGNMENT: u64 = 16;
+pub(crate) const ITEM_ALIGNMENT: u64 = 16;
 
 /// Computes the next offset for an item using the underlying `u64`
 /// offset of `Blob`.
@@ -156,18 +156,18 @@ fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
 
 /// Implementation of `Journal` storage.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
-    context: E,
-    cfg: Config<V::Cfg>,
+    pub(crate) context: E,
+    pub(crate) cfg: Config<V::Cfg>,
 
-    oldest_allowed: Option<u64>,
+    pub(crate) oldest_allowed: Option<u64>,
 
-    blobs: BTreeMap<u64, Append<E::Blob>>,
+    pub(crate) blobs: BTreeMap<u64, Append<E::Blob>>,
 
-    tracked: Gauge,
-    synced: Counter,
-    pruned: Counter,
+    pub(crate) tracked: Gauge,
+    pub(crate) synced: Counter,
+    pub(crate) pruned: Counter,
 
-    _phantom: PhantomData<V>,
+    pub(crate) _phantom: PhantomData<V>,
 }
 
 impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
@@ -232,7 +232,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     }
 
     /// Reads an item from the blob at the given offset.
-    async fn read(
+    pub(crate) async fn read(
         compressed: bool,
         cfg: &V::Cfg,
         blob: &Append<E::Blob>,
@@ -804,9 +804,7 @@ mod tests {
     use bytes::BufMut;
     use commonware_cryptography::hash;
     use commonware_macros::test_traced;
-    use commonware_runtime::{
-        buffer::PoolRef, deterministic, Blob, Error as RError, Runner, Storage,
-    };
+    use commonware_runtime::{deterministic, Blob, Error as RError, Runner, Storage};
     use commonware_utils::{NZUsize, StableBuf};
     use futures::{pin_mut, StreamExt};
     use prometheus_client::registry::Metric;
