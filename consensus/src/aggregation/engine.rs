@@ -129,7 +129,7 @@ pub struct Engine<
     pending: BTreeMap<Index, Pending<V, D>>,
 
     /// A map of indices with a threshold signature. Cached in memory if needed to send to other peers.
-    confirmed: BTreeMap<Index, (D, V::Signature)>,
+    confirmed: BTreeMap<Index, Certificate<V, D>>,
 
     // ---------- Rebroadcasting ----------
     /// The frequency at which to rebroadcast pending indices.
@@ -506,13 +506,14 @@ impl<
         }
 
         // Store the threshold
-        self.confirmed.insert(index, (item.digest, threshold));
-
-        // Journal and notify the automaton
-        let certified = Activity::Certified(Certificate {
+        let certificate = Certificate {
             item,
             signature: threshold,
-        });
+        };
+        self.confirmed.insert(index, certificate.clone());
+
+        // Journal and notify the automaton
+        let certified = Activity::Certified(certificate);
         self.record(certified.clone()).await;
         self.sync(index).await;
         self.reporter.report(certified).await;
@@ -771,10 +772,8 @@ impl<
             .iter()
             .filter(|certificate| certificate.item.index >= tip)
             .for_each(|certificate| {
-                self.confirmed.insert(
-                    certificate.item.index,
-                    (certificate.item.digest, certificate.signature),
-                );
+                self.confirmed
+                    .insert(certificate.item.index, certificate.clone());
             });
         // Add any acks that haven't resulted in a threshold signature
         acks = acks
