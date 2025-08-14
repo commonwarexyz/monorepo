@@ -150,7 +150,7 @@ impl<D: Digest> Proof<D> {
     /// the returned vector, and it will have the MMR size as its associated position. Returns a
     /// [Error::InvalidProof] if the input data is invalid and [Error::RootMismatch] if the root
     /// does not match the computed root.
-    pub fn verify_range_inclusion_and_reconstruct_digests<I, H, E>(
+    pub fn verify_range_inclusion_and_extract_digests<I, H, E>(
         &self,
         hasher: &mut H,
         elements: &[E],
@@ -1312,7 +1312,7 @@ mod tests {
             // in the tree, plus one extra for the root.
             let proof = mmr.range_proof(0, mmr.size() - 1).await.unwrap();
             let mut node_digests = proof
-                .verify_range_inclusion_and_reconstruct_digests(&mut hasher, &elements, 0, &root)
+                .verify_range_inclusion_and_extract_digests(&mut hasher, &elements, 0, &root)
                 .unwrap();
             assert_eq!(node_digests.len(), mmr.size() as usize + 1);
             node_digests.sort_by_key(|(pos, _)| *pos);
@@ -1326,7 +1326,7 @@ mod tests {
             // Make sure the wrong root fails.
             let wrong_root = elements[0]; // any other digest will do
             assert!(matches!(
-                proof.verify_range_inclusion_and_reconstruct_digests(
+                proof.verify_range_inclusion_and_extract_digests(
                     &mut hasher,
                     &elements,
                     0,
@@ -1341,7 +1341,7 @@ mod tests {
                 .await
                 .unwrap();
             let single_digests = single_proof
-                .verify_range_inclusion_and_reconstruct_digests(
+                .verify_range_inclusion_and_extract_digests(
                     &mut hasher,
                     &elements[0..1],
                     element_positions[0],
@@ -1360,7 +1360,7 @@ mod tests {
                 .await
                 .unwrap();
             let mid_digests = mid_proof
-                .verify_range_inclusion_and_reconstruct_digests(
+                .verify_range_inclusion_and_extract_digests(
                     &mut hasher,
                     &elements[mid_idx..mid_idx + 1],
                     element_positions[mid_idx],
@@ -1379,7 +1379,7 @@ mod tests {
                 .await
                 .unwrap();
             let last_digests = last_proof
-                .verify_range_inclusion_and_reconstruct_digests(
+                .verify_range_inclusion_and_extract_digests(
                     &mut hasher,
                     &elements[last_idx..],
                     element_positions[last_idx],
@@ -1397,7 +1397,7 @@ mod tests {
                 .await
                 .unwrap();
             let small_digests = small_proof
-                .verify_range_inclusion_and_reconstruct_digests(
+                .verify_range_inclusion_and_extract_digests(
                     &mut hasher,
                     &elements[0..5],
                     element_positions[0],
@@ -1418,7 +1418,7 @@ mod tests {
                 .await
                 .unwrap();
             let mid_range_digests = mid_range_proof
-                .verify_range_inclusion_and_reconstruct_digests(
+                .verify_range_inclusion_and_extract_digests(
                     &mut hasher,
                     &elements[mid_start..mid_end + 1],
                     element_positions[mid_start],
