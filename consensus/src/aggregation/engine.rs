@@ -219,11 +219,8 @@ impl<
     }
 
     /// Inner run loop called by `start`.
-    async fn run(
-        mut self,
-        (net_sender, net_receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-    ) {
-        let (mut net_sender, mut net_receiver) = wrap((), net_sender, net_receiver);
+    async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
+        let (mut sender, mut receiver) = wrap((), network.0, network.1);
         let mut shutdown = self.context.stopped();
 
         // Initialize the epoch
@@ -318,7 +315,7 @@ impl<
                             self.metrics.digest.inc(Status::Dropped);
                         }
                         Ok(digest) => {
-                            if let Err(err) = self.handle_digest(index, digest, &mut net_sender).await {
+                            if let Err(err) = self.handle_digest(index, digest, &mut sender).await {
                                 warn!(?err, ?index, "handle_digest failed");
                                 continue;
                             }
@@ -327,7 +324,7 @@ impl<
                 },
 
                 // Handle incoming acks
-                msg = net_receiver.recv() => {
+                msg = receiver.recv() => {
                     // Error handling
                     let (sender, msg) = match msg {
                         Ok(r) => r,
@@ -383,7 +380,7 @@ impl<
                     // Get the next index to rebroadcast
                     let (index, _) = self.rebroadcast_deadlines.pop().expect("no rebroadcast deadline");
                     trace!("rebroadcasting: index {}", index);
-                    if let Err(err) = self.handle_rebroadcast(index, &mut net_sender).await {
+                    if let Err(err) = self.handle_rebroadcast(index, &mut sender).await {
                         warn!(?err, ?index, "rebroadcast failed");
                     };
                 }
