@@ -228,7 +228,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let db = Self {
             mmr,
             log,
-            log_size: 0,
+            log_size: oldest_retained_loc,
             inactivity_floor_loc: 0,
             oldest_retained_loc,
             metadata,
@@ -269,14 +269,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             mmr_leaves = locations_size;
         }
 
-        // The size of the log at the last commit point (including the commit operation), or 0 if
-        // none.
+        // The size of the log at the last commit point (including the commit operation), or 0 if none.
         let mut end_loc = 0;
         // The offset into the log at the end_loc.
         let mut end_offset = 0;
         // The set of operations that have not yet been committed.
         let mut uncommitted_ops = HashMap::new();
-        let mut oldest_retained_loc_found = false;
+        let mut uncommitted_log_size = self.log_size;
 
         // Replay the log from inception to build the snapshot, keeping track of any uncommitted
         // operations, and any log operations that need to be re-added to the MMR & locations.
@@ -284,89 +283,75 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             let stream = self.log.replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE)).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
-                match result {
-                    Err(e) => {
-                        return Err(Error::Journal(e));
-                    }
-                    Ok((section, offset, size, op)) => {
-                        if !oldest_retained_loc_found {
-                            self.log_size = section * self.log_items_per_section;
-                            self.oldest_retained_loc = self.log_size;
-                            oldest_retained_loc_found = true;
-                        }
-                        let loc = self.log_size; // location of the current operation.
-                        self.log_size += 1;
+                // In each iteration, tentative_log_size is the size of the log before the current operation.
+                let (section, offset, size, op) = result
+                    .map_err(|e| Error::Journal(e))
+                    .and_then(|(section, offset, size, op)| Ok((section, offset, size, op)))?;
 
-                        // Consistency check: confirm the provided section matches what we expect from this operation's
-                        // index.
-                        let expected = loc / self.log_items_per_section;
-                        assert_eq!(section, expected,
-                                "given section {section} did not match expected section {expected} from location {loc}");
-
-                        if self.log_size > mmr_leaves {
-                            warn!(
-                                section,
-                                offset, "operation was missing from MMR/location map"
-                            );
-                            self.mmr.add(&mut self.hasher, &op.encode()).await?;
-                            self.locations.append(offset.into()).await?;
-                            mmr_leaves += 1;
-                        }
-
-                        match op {
-                            Operation::Delete(key) => {
-                                let result = self.get_loc(&key).await?;
-                                if let Some(old_loc) = result {
-                                    uncommitted_ops.insert(key, (Some(old_loc), None));
-                                } else {
-                                    uncommitted_ops.remove(&key);
-                                }
-                            }
-                            Operation::Update(key, _) => {
-                                let result = self.get_loc(&key).await?;
-                                if let Some(old_loc) = result {
-                                    uncommitted_ops.insert(key, (Some(old_loc), Some(loc)));
-                                } else {
-                                    uncommitted_ops.insert(key, (None, Some(loc)));
-                                }
-                            }
-                            Operation::CommitFloor(loc) => {
-                                self.inactivity_floor_loc = loc;
-
-                                // Apply all uncommitted operations.
-                                for (key, (old_loc, new_loc)) in uncommitted_ops.iter() {
-                                    if let Some(old_loc) = old_loc {
-                                        if let Some(new_loc) = new_loc {
-                                            Self::update_loc(
-                                                &mut self.snapshot,
-                                                key,
-                                                *old_loc,
-                                                *new_loc,
-                                            );
-                                        } else {
-                                            Self::delete_loc(&mut self.snapshot, key, *old_loc);
-                                        }
-                                    } else {
-                                        assert!(new_loc.is_some());
-                                        self.snapshot.insert(key, new_loc.unwrap());
-                                    }
-                                }
-                                uncommitted_ops.clear();
-                                end_loc = self.log_size;
-                                end_offset = offset + size;
-                            }
-                            _ => unreachable!(
-                                "unexpected operation type at offset {offset} of section {section}"
-                            ),
-                        }
-                    }
+                if uncommitted_log_size >= mmr_leaves {
+                    warn!(
+                        section,
+                        offset, "operation was missing from MMR/location map"
+                    );
+                    self.mmr.add(&mut self.hasher, &op.encode()).await?;
+                    self.locations.append(offset.into()).await?;
+                    mmr_leaves += 1;
                 }
+
+                match op {
+                    Operation::Delete(key) => {
+                        let result = self.get_loc(&key).await?;
+                        if let Some(old_loc) = result {
+                            uncommitted_ops.insert(key, (Some(old_loc), None));
+                        } else {
+                            uncommitted_ops.remove(&key);
+                        }
+                    }
+                    Operation::Update(key, _) => {
+                        let result = self.get_loc(&key).await?;
+                        if let Some(old_loc) = result {
+                            uncommitted_ops
+                                .insert(key, (Some(old_loc), Some(uncommitted_log_size)));
+                        } else {
+                            uncommitted_ops.insert(key, (None, Some(uncommitted_log_size)));
+                        }
+                    }
+                    Operation::CommitFloor(loc) => {
+                        self.inactivity_floor_loc = loc;
+
+                        // Apply all uncommitted operations.
+                        for (key, (old_loc, new_loc)) in uncommitted_ops.iter() {
+                            if let Some(old_loc) = old_loc {
+                                if let Some(new_loc) = new_loc {
+                                    Self::update_loc(&mut self.snapshot, key, *old_loc, *new_loc);
+                                } else {
+                                    Self::delete_loc(&mut self.snapshot, key, *old_loc);
+                                }
+                            } else {
+                                self.snapshot.insert(key, new_loc.unwrap());
+                            }
+                        }
+                        uncommitted_ops.clear();
+
+                        // Track the position and offset after this commit
+                        self.log_size = uncommitted_log_size + 1;
+                        end_loc = self.log_size;
+                        end_offset = offset + size;
+                    }
+                    _ => unreachable!(
+                        "unexpected operation type at offset {offset} of section {section}"
+                    ),
+                }
+                uncommitted_log_size += 1;
             }
         }
-        if end_loc < self.log_size {
+
+        // Trim uncommitted operations from the log journal if any exist
+        if !uncommitted_ops.is_empty() {
             warn!(
                 op_count = uncommitted_ops.len(),
                 log_size = end_loc,
+                end_offset,
                 "rewinding over uncommitted operations at end of log"
             );
             // We use saturating_sub below for the case where end_loc == 0, which happens when there
@@ -752,7 +737,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // special recovery.
         let section_with_target = target_prune_loc / self.log_items_per_section;
         self.log.prune(section_with_target).await?;
-        self.oldest_retained_loc = section_with_target * self.log_items_per_section;
+        let new_oldest_retained_loc = section_with_target * self.log_items_per_section;
+
+        // For synced databases, don't move oldest_retained_loc backwards
+        if new_oldest_retained_loc > self.oldest_retained_loc {
+            self.oldest_retained_loc = new_oldest_retained_loc;
+        }
 
         // Prune the MMR & locations map up to the oldest retained item in the log after pruning.
         self.locations.prune(self.oldest_retained_loc).await?;
@@ -895,7 +885,11 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 1); // floor op added
             let root = db.root(&mut hasher);
             assert!(matches!(db.prune_inactive().await, Ok(())));
+            assert_eq!(db.op_count(), 1);
+            db.close().await.unwrap();
+
             let mut db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(&mut hasher), root);
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.

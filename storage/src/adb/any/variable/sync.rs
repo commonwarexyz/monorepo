@@ -1,21 +1,22 @@
 use crate::{
-    adb::{self, any, sync, sync::Journal as _},
+    adb::{
+        self,
+        any::{self, variable::OLDEST_RETAINED_LOC_PREFIX},
+        sync::{self, Journal as _},
+    },
     index::Index,
     journal::{
         fixed,
         variable::{Config as VConfig, Journal as VJournal},
     },
-    mmr::{
-        hasher::Standard,
-        iterator::{leaf_num_to_pos, leaf_pos_to_num},
-    },
+    mmr::{hasher::Standard, iterator::leaf_num_to_pos},
     store::operation::{Variable, Variable as Operation},
     translator::Translator,
 };
 use commonware_codec::{Codec, Encode as _};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage, Storage};
-use commonware_utils::{Array, NZUsize};
+use commonware_utils::{sequence::prefixed_u64::U64, Array, NZUsize};
 use futures::{pin_mut, StreamExt as _};
 use std::{num::NonZeroU64, ops::Bound};
 use tracing::debug;
@@ -179,7 +180,7 @@ where
         } // stream is dropped here, releasing the borrow on inner_log
 
         // Initialize metadata
-        let metadata = crate::metadata::Metadata::init(
+        let mut metadata = crate::metadata::Metadata::init(
             context.with_label("metadata"),
             crate::metadata::Config {
                 partition: db_config.metadata_partition,
@@ -188,14 +189,14 @@ where
         )
         .await
         .map_err(adb::Error::Metadata)?;
-        // TODO set oldest_retained_loc to lower_bound?
+        let oldest_retained_loc_key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
+        metadata.put(oldest_retained_loc_key, lower_bound.to_be_bytes().to_vec());
 
         // Create the database instance
-        let log_size = leaf_pos_to_num(mmr.size()).unwrap();
         let mut db = any::variable::Any {
             mmr,
             log: inner_log,
-            log_size,
+            log_size: upper_bound + 1,
             inactivity_floor_loc: lower_bound,
             oldest_retained_loc: lower_bound,
             metadata,
@@ -1417,10 +1418,12 @@ mod tests {
         executor.start(|mut context| async move {
             let mut target_db = create_test_db(context.clone()).await;
             let target_db_ops = create_test_ops(target_db_ops);
+
             apply_ops(&mut target_db, &target_db_ops).await;
             target_db.commit().await.unwrap();
             let target_op_count = target_db.op_count();
             let target_inactivity_floor = target_db.inactivity_floor_loc();
+
             let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
             let target_root = target_db.root(&mut hasher);
 
