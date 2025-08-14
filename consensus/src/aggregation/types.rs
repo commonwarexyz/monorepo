@@ -352,7 +352,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops,
+            dkg::ops::{self, evaluate_all},
             primitives::{ops::sign_message, variant::MinSig},
         },
         sha256,
@@ -371,6 +371,7 @@ mod tests {
         let namespace = b"test";
         let mut context = deterministic::Context::default();
         let (public, shares) = ops::generate_shares::<_, MinSig>(&mut context, None, 4, 3);
+        let polynomial = evaluate_all::<MinSig>(&public, 4);
         let item = Item {
             index: 100,
             digest: sha256::hash(b"test_item"),
@@ -382,8 +383,8 @@ mod tests {
 
         // Test Ack creation, signing, verification, and codec
         let ack: Ack<MinSig, _> = Ack::sign(namespace, 1, &shares[0], item.clone());
-        assert!(ack.verify(namespace, &public));
-        assert!(!ack.verify(b"wrong", &public));
+        assert!(ack.verify(namespace, &polynomial));
+        assert!(!ack.verify(b"wrong", &polynomial));
 
         let restored_ack: Ack<MinSig, sha256::Digest> = Ack::decode(ack.encode()).unwrap();
         assert_eq!(ack, restored_ack);
@@ -401,7 +402,7 @@ mod tests {
 
         // Test Activity codec - Recovered variant
         let signature = sign_message::<MinSig>(&shares[0].private, Some(b"test"), b"message");
-        let activity_recovered = Activity::Recovered(item, signature);
+        let activity_recovered = Activity::Recovered(Certificate { item, signature });
         let restored_activity_recovered: Activity<MinSig, sha256::Digest> =
             Activity::decode(activity_recovered.encode()).unwrap();
         assert_eq!(activity_recovered, restored_activity_recovered);
