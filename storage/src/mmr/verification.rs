@@ -465,6 +465,7 @@ impl<D: Digest> Proof<D> {
     }
 }
 
+/// Information about the current range of nodes being traversed.
 struct RangeInfo {
     pos: u64,           // current node position in the tree
     two_h: u64,         // 2^height of the current node
