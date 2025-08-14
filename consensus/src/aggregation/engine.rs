@@ -6,7 +6,7 @@ use super::{
     types::{Ack, Activity, Epoch, Error, Index, Item, TipAck},
     Config,
 };
-use crate::{Automaton, Monitor, Reporter, ThresholdSupervisor};
+use crate::{aggregation::types::Certificate, Automaton, Monitor, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, ops::threshold_signature_recover, variant::Variant},
     Digest, PublicKey,
@@ -511,7 +511,10 @@ impl<
         self.confirmed.insert(index, (item.digest, threshold));
 
         // Journal and notify the automaton
-        let recovered = Activity::Recovered(item, threshold);
+        let recovered = Activity::Recovered(Certificate {
+            item,
+            signature: threshold,
+        });
         self.record(recovered.clone()).await;
         self.sync(index).await;
         self.reporter.report(recovered).await;
@@ -755,8 +758,8 @@ impl<
                 Activity::Tip(index) => {
                     tip = max(tip, index);
                 }
-                Activity::Recovered(item, signature) => {
-                    recovered.push((item, signature));
+                Activity::Recovered(certificate) => {
+                    recovered.push(certificate);
                 }
                 Activity::Ack(ack) => {
                     acks.push(ack);
@@ -768,9 +771,12 @@ impl<
         // Add recovered signatures
         recovered
             .iter()
-            .filter(|(item, _)| item.index >= tip)
-            .for_each(|(item, signature)| {
-                self.confirmed.insert(item.index, (item.digest, *signature));
+            .filter(|certificate| certificate.item.index >= tip)
+            .for_each(|certificate| {
+                self.confirmed.insert(
+                    certificate.item.index,
+                    (certificate.item.digest, certificate.signature),
+                );
             });
         // Add any acks that haven't resulted in a threshold signature
         acks = acks
@@ -799,7 +805,7 @@ impl<
     async fn record(&mut self, activity: Activity<V, D>) {
         let index = match activity {
             Activity::Ack(ref ack) => ack.item.index,
-            Activity::Recovered(ref item, _) => item.index,
+            Activity::Recovered(ref certificate) => certificate.item.index,
             Activity::Tip(index) => index,
         };
         let section = self.get_journal_section(index);
