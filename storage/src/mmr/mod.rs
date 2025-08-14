@@ -121,4 +121,8 @@ pub enum Error {
     HistoricalSizeTooSmall(u64, u64),
     #[error("invalid size: {0}")]
     InvalidSize(u64),
+    #[error("root mismatch")]
+    RootMismatch,
+    #[error("invalid proof")]
+    InvalidProof,
 }
