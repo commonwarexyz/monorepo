@@ -64,6 +64,19 @@ pub fn quorum(n: u32) -> u32 {
     n - max_faults(n)
 }
 
+/// Compute the quorum size for a given slice.
+///
+/// # Panics
+///
+/// Panics if the slice length is greater than [u32::MAX].
+pub fn quorum_from_slice<T>(slice: &[T]) -> u32 {
+    let n: u32 = slice
+        .len()
+        .try_into()
+        .expect("slice length must be less than u32::MAX");
+    quorum(n)
+}
+
 /// Computes the union of two byte slices.
 pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
     let mut union = Vec::with_capacity(a.len() + b.len());

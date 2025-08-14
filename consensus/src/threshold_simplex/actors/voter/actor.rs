@@ -31,7 +31,7 @@ use commonware_runtime::{
     Clock, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
-use commonware_utils::quorum;
+use commonware_utils::{quorum, quorum_from_slice};
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
@@ -51,12 +51,6 @@ use std::{
 use tracing::{debug, info, trace, warn};
 
 const GENESIS_VIEW: View = 0;
-
-/// Compute the quorum for a given polynomial.
-fn polynomial_quorum<P>(polynomial: &[P]) -> u32 {
-    let n = polynomial.len() as u32;
-    quorum(n)
-}
 
 /// Action to take after processing a message.
 enum Action {
@@ -600,7 +594,7 @@ impl<
         }
         let proposal = round.proposal.as_ref()?;
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = polynomial_quorum(polynomial);
+        let threshold = quorum_from_slice(polynomial);
         if round.notarizes.len() >= threshold as usize {
             return Some(&proposal.payload);
         }
@@ -616,7 +610,7 @@ impl<
             Some(polynomial) => polynomial,
             None => return false,
         };
-        let threshold = polynomial_quorum(polynomial);
+        let threshold = quorum_from_slice(polynomial);
         round.nullification.is_some() || round.nullifies.len() >= threshold as usize
     }
 
@@ -627,7 +621,7 @@ impl<
         }
         let proposal = round.proposal.as_ref()?;
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = polynomial_quorum(polynomial);
+        let threshold = quorum_from_slice(polynomial);
         if round.finalizes.len() >= threshold as usize {
             return Some(&proposal.payload);
         }
@@ -1354,7 +1348,7 @@ impl<
 
         // Attempt to construct notarization
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = polynomial_quorum(polynomial);
+        let threshold = quorum_from_slice(polynomial);
         round.notarizable(threshold, force).await
     }
 
@@ -1368,7 +1362,7 @@ impl<
 
         // Attempt to construct nullification
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = polynomial_quorum(polynomial);
+        let threshold = quorum_from_slice(polynomial);
         round.nullifiable(threshold, force).await
     }
 
@@ -1406,7 +1400,7 @@ impl<
 
         // Attempt to construct finalization
         let polynomial = self.supervisor.polynomial(view)?;
-        let threshold = polynomial_quorum(polynomial);
+        let threshold = quorum_from_slice(polynomial);
         round.finalizable(threshold, force).await
     }
 
