@@ -211,8 +211,11 @@ mod tests {
             let automaton = mocks::Application::new(invalid_when);
             automatons.insert(validator.clone(), automaton.clone());
 
-            let (reporter, reporter_mailbox) =
-                mocks::Reporter::<V, Sha256Digest>::new(namespace, polynomial.clone());
+            let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
+                namespace,
+                validator_pks.len() as u32,
+                polynomial.clone(),
+            );
             context.with_label("reporter").spawn(|_| reporter.run());
             reporters.insert(validator.clone(), reporter_mailbox);
 
@@ -418,8 +421,11 @@ mod tests {
                             .unwrap()
                             .insert(validator.clone(), automaton.clone());
 
-                        let (reporter, reporter_mailbox) =
-                            mocks::Reporter::<V, Sha256Digest>::new(namespace, polynomial.clone());
+                        let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
+                            namespace,
+                            num_validators,
+                            polynomial.clone(),
+                        );
                         validator_context
                             .with_label("reporter")
                             .spawn(|_| reporter.run());

@@ -3,7 +3,13 @@ use crate::{
     Reporter as Z,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
+use commonware_cryptography::{
+    bls12381::{
+        dkg::ops::evaluate_all,
+        primitives::{poly, variant::Variant},
+    },
+    Digest,
+};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -51,10 +57,12 @@ pub struct Reporter<V: Variant, D: Digest> {
 impl<V: Variant, D: Digest> Reporter<V, D> {
     pub fn new(
         namespace: &[u8],
-        identity: V::Public,
-        polynomial: Vec<V::Public>,
+        participants: u32,
+        polynomial: poly::Public<V>,
     ) -> (Self, Mailbox<V, D>) {
         let (sender, receiver) = mpsc::channel(1024);
+        let identity = *poly::public::<V>(&polynomial);
+        let polynomial = evaluate_all::<V>(&polynomial, participants);
         (
             Reporter {
                 mailbox: receiver,
