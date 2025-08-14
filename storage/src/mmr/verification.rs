@@ -146,10 +146,9 @@ impl<D: Digest> Proof<D> {
 
     /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
     /// of elements, returning the (position,digest) of every node whose digest was required by the
-    /// process (including those from the proof itself). The root hash will be the final digest in
-    /// the returned vector, and it will have the MMR size as its associated position. Returns a
-    /// [Error::InvalidProof] if the input data is invalid and [Error::RootMismatch] if the root
-    /// does not match the computed root.
+    /// process (including those from the proof itself). Returns a [Error::InvalidProof] if the
+    /// input data is invalid and [Error::RootMismatch] if the root does not match the computed
+    /// root.
     pub fn verify_range_inclusion_and_extract_digests<I, H, E>(
         &self,
         hasher: &mut H,
@@ -172,11 +171,9 @@ impl<D: Digest> Proof<D> {
             return Err(Error::InvalidProof);
         };
 
-        let computed_root = hasher.root(self.size, peak_digests.iter());
-        if *root != computed_root {
+        if hasher.root(self.size, peak_digests.iter()) != *root {
             return Err(Error::RootMismatch);
         }
-        collected_digests.push((self.size, computed_root));
 
         Ok(collected_digests)
     }
@@ -1314,11 +1311,8 @@ mod tests {
             let mut node_digests = proof
                 .verify_range_inclusion_and_extract_digests(&mut hasher, &elements, 0, &root)
                 .unwrap();
-            assert_eq!(node_digests.len(), mmr.size() as usize + 1);
+            assert_eq!(node_digests.len(), mmr.size() as usize);
             node_digests.sort_by_key(|(pos, _)| *pos);
-            let root_digest = node_digests.pop().unwrap();
-            assert_eq!(root_digest.0, mmr.size());
-            assert_eq!(root_digest.1, root);
             for (i, (pos, d)) in node_digests.into_iter().enumerate() {
                 assert_eq!(pos, i as u64);
                 assert_eq!(mmr.get_node(pos).unwrap(), d);
@@ -1349,9 +1343,6 @@ mod tests {
                 )
                 .unwrap();
             assert!(single_digests.len() > 1);
-            let single_root = single_digests.last().unwrap();
-            assert_eq!(single_root.0, mmr.size());
-            assert_eq!(single_root.1, root);
 
             // Test 3: Single element range (middle element)
             let mid_idx = 24;
@@ -1368,9 +1359,6 @@ mod tests {
                 )
                 .unwrap();
             assert!(mid_digests.len() > 1);
-            let mid_root = mid_digests.last().unwrap();
-            assert_eq!(mid_root.0, mmr.size());
-            assert_eq!(mid_root.1, root);
 
             // Test 4: Single element range (last element)
             let last_idx = elements.len() - 1;
@@ -1387,9 +1375,6 @@ mod tests {
                 )
                 .unwrap();
             assert!(last_digests.len() > 1);
-            let last_root = last_digests.last().unwrap();
-            assert_eq!(last_root.0, mmr.size());
-            assert_eq!(last_root.1, root);
 
             // Test 5: Small range at the beginning
             let small_proof = mmr
@@ -1404,9 +1389,6 @@ mod tests {
                     &root,
                 )
                 .unwrap();
-            let small_root = small_digests.last().unwrap();
-            assert_eq!(small_root.0, mmr.size());
-            assert_eq!(small_root.1, root);
             // Verify that we get digests for the range elements and their ancestors
             assert!(small_digests.len() > 5);
 
@@ -1427,9 +1409,6 @@ mod tests {
                 .unwrap();
             let num_elements = mid_end - mid_start + 1;
             assert!(mid_range_digests.len() > num_elements);
-            let mid_range_root = mid_range_digests.last().unwrap();
-            assert_eq!(mid_range_root.0, mmr.size());
-            assert_eq!(mid_range_root.1, root);
         });
     }
 }
