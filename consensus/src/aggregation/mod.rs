@@ -196,7 +196,8 @@ mod tests {
             let monitor = mocks::Monitor::new(111);
             monitors.insert(validator.clone(), monitor.clone());
             let supervisor = {
-                let mut s = mocks::Supervisor::<PublicKey, V>::default();
+                let identity = *poly::public::<V>(&polynomial);
+                let mut s = mocks::Supervisor::<PublicKey, V>::new(identity);
                 s.add_epoch(
                     111,
                     share.clone(),
@@ -365,6 +366,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
         let (polynomial, mut shares_vec) =
             ops::generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
+        let identity = *poly::public::<V>(&polynomial);
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
         // Continue until all validators reach target or max shutdowns exceeded
@@ -409,7 +411,7 @@ mod tests {
                         let monitor = mocks::Monitor::new(111);
                         engine_monitors.insert(validator.clone(), monitor.clone());
                         let supervisor = {
-                            let mut s = mocks::Supervisor::<PublicKey, V>::default();
+                            let mut s = mocks::Supervisor::<PublicKey, V>::new(identity);
                             s.add_epoch(111, share.clone(), polynomial.clone(), pks.to_vec());
                             s
                         };
@@ -1032,6 +1034,7 @@ mod tests {
             let (polynomial, mut shares_vec) =
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+            let identity = *poly::public::<V>(&polynomial);
 
             let (oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
@@ -1050,7 +1053,7 @@ mod tests {
                 let context = context.with_label(&validator.to_string());
                 let monitor = mocks::Monitor::new(111);
                 let supervisor = {
-                    let mut s = mocks::Supervisor::<PublicKey, V>::default();
+                    let mut s = mocks::Supervisor::<PublicKey, V>::new(identity);
                     s.add_epoch(
                         111,
                         share.clone(),

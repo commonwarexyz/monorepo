@@ -6,25 +6,25 @@ use commonware_cryptography::{
     },
     PublicKey,
 };
-use std::{collections::HashMap, marker::PhantomData};
+use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct Supervisor<P: PublicKey, V: Variant> {
+    identity: V::Public,
     shares: HashMap<Epoch, Share>,
-    polynomials: HashMap<Epoch, (V::Public, Vec<V::Public>)>,
+    polynomials: HashMap<Epoch, Vec<V::Public>>,
     validators: HashMap<Epoch, Vec<P>>,
     validators_maps: HashMap<Epoch, HashMap<P, u32>>,
-    _phantom: PhantomData<(P, V)>,
 }
 
-impl<P: PublicKey, V: Variant> Default for Supervisor<P, V> {
-    fn default() -> Self {
+impl<P: PublicKey, V: Variant> Supervisor<P, V> {
+    pub fn new(identity: V::Public) -> Self {
         Self {
+            identity,
             shares: HashMap::new(),
             polynomials: HashMap::new(),
             validators: HashMap::new(),
             validators_maps: HashMap::new(),
-            _phantom: PhantomData,
         }
     }
 }
@@ -46,10 +46,12 @@ impl<P: PublicKey, V: Variant> Supervisor<P, V> {
 
         // Evaluate the polynomial
         let identity = *poly::public::<V>(&polynomial);
+        assert_eq!(identity, self.identity);
         let polynomial = evaluate_all::<V>(&polynomial, validators.len() as u32);
 
+        // Store artifacts
         self.shares.insert(epoch, share);
-        self.polynomials.insert(epoch, (identity, polynomial));
+        self.polynomials.insert(epoch, polynomial);
         self.validators.insert(epoch, validators);
         self.validators_maps.insert(epoch, validators_map);
     }
@@ -79,13 +81,7 @@ impl<P: PublicKey, V: Variant> TS for Supervisor<P, V> {
     type Share = Share;
 
     fn identity(&self) -> &Self::Identity {
-        // Return the identity from the first available polynomial
-        let next = self
-            .polynomials
-            .values()
-            .next()
-            .expect("No polynomials available");
-        &next.0
+        &self.identity
     }
 
     fn leader(&self, _: Self::Index, _: Self::Seed) -> Option<Self::PublicKey> {
@@ -93,9 +89,7 @@ impl<P: PublicKey, V: Variant> TS for Supervisor<P, V> {
     }
 
     fn polynomial(&self, epoch: Self::Index) -> Option<&Self::Polynomial> {
-        self.polynomials
-            .get(&epoch)
-            .map(|(_, polynomial)| polynomial)
+        self.polynomials.get(&epoch)
     }
 
     fn share(&self, epoch: Self::Index) -> Option<&Self::Share> {
