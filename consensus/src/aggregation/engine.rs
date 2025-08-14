@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{Automaton, Monitor, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
-    bls12381::primitives::{group, ops::threshold_signature_recover, poly, variant::Variant},
+    bls12381::primitives::{group, ops::threshold_signature_recover, variant::Variant},
     Digest, PublicKey,
 };
 use commonware_macros::select;
@@ -25,7 +25,7 @@ use commonware_runtime::{
     Clock, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
-use commonware_utils::{futures::Pool as FuturesPool, PrioritySet};
+use commonware_utils::{futures::Pool as FuturesPool, quorum, PrioritySet};
 use futures::{
     future::{self, Either},
     pin_mut, StreamExt,
@@ -37,6 +37,12 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
+
+/// Compute the quorum for a given polynomial.
+fn polynomial_quorum<P>(polynomial: &[P]) -> u32 {
+    let n = polynomial.len() as u32;
+    quorum(n)
+}
 
 /// An entry for an index that does not yet have a threshold signature.
 enum Pending<V: Variant, D: Digest> {
@@ -74,8 +80,9 @@ pub struct Engine<
     TSu: ThresholdSupervisor<
         Index = Epoch,
         PublicKey = P,
+        Identity = V::Public,
+        Polynomial = Vec<V::Public>,
         Share = group::Share,
-        Identity = poly::Public<V>,
     >,
 > {
     // ---------- Interfaces ----------
@@ -163,8 +170,9 @@ impl<
         TSu: ThresholdSupervisor<
             Index = Epoch,
             PublicKey = P,
+            Identity = V::Public,
+            Polynomial = Vec<V::Public>,
             Share = group::Share,
-            Identity = poly::Public<V>,
         >,
     > Engine<E, P, V, D, A, Z, M, B, TSu>
 {
@@ -453,7 +461,10 @@ impl<
     /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
     async fn handle_ack(&mut self, ack: &Ack<V, D>) -> Result<(), Error> {
         // Get the quorum
-        let quorum = self.validators.identity().required();
+        let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
+            return Err(Error::UnknownEpoch(ack.epoch));
+        };
+        let quorum = polynomial_quorum(polynomial);
 
         // Get the acks
         let acks_by_epoch = match self.pending.get_mut(&ack.item.index) {
@@ -601,7 +612,10 @@ impl<
         }
 
         // Validate partial signature
-        if !ack.verify(&self.namespace, self.validators.identity()) {
+        let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
+            return Err(Error::UnknownEpoch(ack.epoch));
+        };
+        if !ack.verify(&self.namespace, polynomial) {
             return Err(Error::InvalidAckSignature);
         }
 

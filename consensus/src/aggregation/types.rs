@@ -61,6 +61,9 @@ pub enum Error {
     /// The acknowledgement is for an index that already has a threshold
     #[error("Ack for index {0} already has a threshold")]
     AckThresholded(u64),
+    /// The epoch is unknown
+    #[error("Unknown epoch {0}")]
+    UnknownEpoch(u64),
 }
 
 impl Error {
@@ -159,12 +162,15 @@ impl<V: Variant, D: Digest> Ack<V, D> {
     ///
     /// Returns `true` if the signature is valid for the given namespace and public key.
     /// Domain separation is automatically applied to prevent signature reuse.
-    pub fn verify(&self, namespace: &[u8], identity: &poly::Public<V>) -> bool {
-        ops::partial_verify_message::<V>(
-            identity,
+    pub fn verify(&self, namespace: &[u8], identity: &[V::Public]) -> bool {
+        let Some(public) = identity.get(self.signature.index as usize) else {
+            return false;
+        };
+        ops::verify_message::<V>(
+            public,
             Some(ack_namespace(namespace).as_ref()),
             self.item.encode().as_ref(),
-            &self.signature,
+            &self.signature.value,
         )
         .is_ok()
     }
