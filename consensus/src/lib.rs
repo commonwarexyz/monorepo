@@ -123,6 +123,15 @@ cfg_if::cfg_if! {
             fn report(&mut self, activity: Self::Activity) -> impl Future<Output = ()> + Send;
         }
 
+        /// Epocher is the interface responsible for tracking epoch information.
+        pub trait Epocher: Clone + Send + Sync + 'static {
+            /// Epoch is the type used to represent a distinct validator configuration.
+            type Epoch;
+
+            /// Get the epoch for a given height.
+            fn epoch_for_height(&self, height: u64) -> Option<Self::Epoch>;
+        }
+
         /// Supervisor is the interface responsible for managing which participants are active at a given time.
         ///
         /// ## Synchronization
