@@ -1,6 +1,7 @@
 //! Byzantine participant that sends random messages.
 
 use arbitrary::{Arbitrary, Unstructured};
+use bytes::Bytes;
 use commonware_codec::{Decode, Encode};
 use commonware_consensus::{
     simplex::{
@@ -155,16 +156,19 @@ impl<E: Clock + Spawner> Fuzzer<E> {
         _sender_id: impl std::fmt::Debug,
         msg: Vec<u8>,
     ) {
+        // just mirror the message
+        if let 0..50 = self.rng.gen_range(0..100) {
+            sender
+                .send(Recipients::All, Bytes::from(msg.clone()), true)
+                .await
+                .unwrap();
+        }
 
         // Parse message
         let msg = match Voter::<Signature, Sha256Digest>::decode_cfg(msg.as_slice(), &usize::MAX) {
             Ok(msg) => msg,
             Err(_) => return, // Skip malformed messages
         };
-
-        if let 0..10 = self.rng.gen_range(0..100) {
-            sender.send(Recipients::All, msg, true).await.unwrap();
-        }
 
         // Store view.
         self.view = msg.view();

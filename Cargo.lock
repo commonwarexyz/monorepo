@@ -1128,6 +1128,7 @@ name = "commonware-consensus-fuzz"
 version = "0.0.57"
 dependencies = [
  "arbitrary",
+ "bytes",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
