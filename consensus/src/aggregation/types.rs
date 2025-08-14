@@ -101,6 +101,24 @@ pub struct Item<D: Digest> {
     pub digest: D,
 }
 
+impl<D: Digest> Item<D> {
+    // TODO: make returned item to call a proper object
+    pub fn verify<V: Variant>(
+        &self,
+        namespace: &[u8],
+        identity: &V::Public,
+        signature: &V::Signature,
+    ) -> bool {
+        ops::verify_message::<V>(
+            identity,
+            Some(ack_namespace(namespace).as_ref()),
+            self.encode().as_ref(),
+            signature,
+        )
+        .is_ok()
+    }
+}
+
 impl<D: Digest> Write for Item<D> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.index).write(writer);
