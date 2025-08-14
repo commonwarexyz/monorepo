@@ -293,8 +293,8 @@ pub enum Activity<V: Variant, D: Digest> {
     /// Received an ack from a participant.
     Ack(Ack<V, D>),
 
-    /// Recovered a threshold signature.
-    Recovered(Certificate<V, D>),
+    /// Certified an [Item].
+    Certified(Certificate<V, D>),
 
     /// Moved the tip to a new index.
     Tip(Index),
@@ -307,7 +307,7 @@ impl<V: Variant, D: Digest> Write for Activity<V, D> {
                 0u8.write(writer);
                 ack.write(writer);
             }
-            Activity::Recovered(certificate) => {
+            Activity::Certified(certificate) => {
                 1u8.write(writer);
                 certificate.write(writer);
             }
@@ -325,7 +325,7 @@ impl<V: Variant, D: Digest> Read for Activity<V, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             0 => Ok(Activity::Ack(Ack::read(reader)?)),
-            1 => Ok(Activity::Recovered(Certificate::read(reader)?)),
+            1 => Ok(Activity::Certified(Certificate::read(reader)?)),
             2 => Ok(Activity::Tip(UInt::read(reader)?.into())),
             _ => Err(CodecError::Invalid(
                 "consensus::aggregation::Activity",
@@ -339,7 +339,7 @@ impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Ack(ack) => ack.encode_size(),
-            Activity::Recovered(certificate) => certificate.encode_size(),
+            Activity::Certified(certificate) => certificate.encode_size(),
             Activity::Tip(index) => UInt(*index).encode_size(),
         }
     }
@@ -400,12 +400,12 @@ mod tests {
             Activity::decode(activity_ack.encode()).unwrap();
         assert_eq!(activity_ack, restored_activity_ack);
 
-        // Test Activity codec - Recovered variant
+        // Test Activity codec - Certified variant
         let signature = sign_message::<MinSig>(&shares[0].private, Some(b"test"), b"message");
-        let activity_recovered = Activity::Recovered(Certificate { item, signature });
-        let restored_activity_recovered: Activity<MinSig, sha256::Digest> =
-            Activity::decode(activity_recovered.encode()).unwrap();
-        assert_eq!(activity_recovered, restored_activity_recovered);
+        let activity_certified = Activity::Certified(Certificate { item, signature });
+        let restored_activity_certified: Activity<MinSig, sha256::Digest> =
+            Activity::decode(activity_certified.encode()).unwrap();
+        assert_eq!(activity_certified, restored_activity_certified);
 
         // Test Activity codec - Tip variant
         let activity_tip = Activity::Tip(123);

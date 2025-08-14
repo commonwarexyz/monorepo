@@ -511,13 +511,13 @@ impl<
         self.confirmed.insert(index, (item.digest, threshold));
 
         // Journal and notify the automaton
-        let recovered = Activity::Recovered(Certificate {
+        let certified = Activity::Certified(Certificate {
             item,
             signature: threshold,
         });
-        self.record(recovered.clone()).await;
+        self.record(certified.clone()).await;
         self.sync(index).await;
-        self.reporter.report(recovered).await;
+        self.reporter.report(certified).await;
 
         // Increase the tip if needed
         if index == self.tip {
@@ -745,7 +745,7 @@ impl<
     /// Replays the journal, updating the state of the engine.
     async fn replay(&mut self, journal: &Journal<E, Activity<V, D>>) {
         let mut tip = Index::default();
-        let mut recovered = Vec::new();
+        let mut certified = Vec::new();
         let mut acks = Vec::new();
         let stream = journal
             .replay(self.journal_replay_buffer)
@@ -758,8 +758,8 @@ impl<
                 Activity::Tip(index) => {
                     tip = max(tip, index);
                 }
-                Activity::Recovered(certificate) => {
-                    recovered.push(certificate);
+                Activity::Certified(certificate) => {
+                    certified.push(certificate);
                 }
                 Activity::Ack(ack) => {
                     acks.push(ack);
@@ -768,8 +768,8 @@ impl<
         }
         // Update the tip to the highest index in the journal
         self.tip = tip;
-        // Add recovered signatures
-        recovered
+        // Add certified items
+        certified
             .iter()
             .filter(|certificate| certificate.item.index >= tip)
             .for_each(|certificate| {
@@ -805,7 +805,7 @@ impl<
     async fn record(&mut self, activity: Activity<V, D>) {
         let index = match activity {
             Activity::Ack(ref ack) => ack.item.index,
-            Activity::Recovered(ref certificate) => certificate.item.index,
+            Activity::Certified(ref certificate) => certificate.item.index,
             Activity::Tip(index) => index,
         };
         let section = self.get_journal_section(index);

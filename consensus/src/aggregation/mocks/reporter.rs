@@ -19,7 +19,7 @@ use std::collections::{btree_map::Entry, BTreeMap, HashSet};
 #[allow(clippy::large_enum_variant)]
 enum Message<V: Variant, D: Digest> {
     Ack(Ack<V, D>),
-    Recovered(Certificate<V, D>),
+    Certified(Certificate<V, D>),
     Tip(Index),
     GetTip(oneshot::Sender<Option<(Index, Epoch)>>),
     GetContiguousTip(oneshot::Sender<Option<Index>>),
@@ -96,7 +96,7 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                     // Store the ack
                     self.acks.insert((ack.item.index, ack.epoch));
                 }
-                Message::Recovered(certificate) => {
+                Message::Certified(certificate) => {
                     // Verify threshold signature
                     assert!(certificate.verify(&self.namespace, &self.identity));
 
@@ -180,11 +180,11 @@ impl<V: Variant, D: Digest> Z for Mailbox<V, D> {
                     .await
                     .expect("Failed to send ack");
             }
-            Activity::Recovered(certificate) => {
+            Activity::Certified(certificate) => {
                 self.sender
-                    .send(Message::Recovered(certificate))
+                    .send(Message::Certified(certificate))
                     .await
-                    .expect("Failed to send recovered signature");
+                    .expect("Failed to send certified signature");
             }
             Activity::Tip(index) => {
                 self.sender
