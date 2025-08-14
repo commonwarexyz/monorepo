@@ -57,12 +57,7 @@ pub fn digests_required_for_proof<D: Digest>(size: u64, start_loc: u64, end_loc:
     Proof::<D>::nodes_required_for_range_proof(size, start_pos, end_pos)
 }
 
-pub fn construct_proof<Op, H, D>(size: u64, digests: Vec<D>) -> Proof<D>
-where
-    Op: Encode,
-    H: Hasher<Digest = D>,
-    D: Digest,
-{
+pub fn construct_proof<D: Digest>(size: u64, digests: Vec<D>) -> Proof<D> {
     let size = leaf_num_to_pos(size);
     Proof::<D> { size, digests }
 }
