@@ -1033,7 +1033,7 @@ mod tests {
                 ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (oracle, validators, pks, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
                 num_validators,
                 &mut shares_vec,
@@ -1045,21 +1045,59 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
 
             // Start only 2 out of 5 validators (below quorum of 3)
-            let insufficient_validators: Vec<_> = validators.iter().take(2).cloned().collect();
-            let insufficient_pks: Vec<_> = pks.iter().take(2).cloned().collect();
+            let namespace = b"my testing namespace";
+            for (validator, _scheme, share) in validators.iter().take(2) {
+                let context = context.with_label(&validator.to_string());
+                let monitor = mocks::Monitor::new(111);
+                let supervisor = {
+                    let mut s = mocks::Supervisor::<PublicKey, V>::default();
+                    s.add_epoch(
+                        111,
+                        share.clone(),
+                        polynomial.clone(),
+                        pks.to_vec(),
+                    );
+                    s
+                };
 
-            spawn_validator_engines::<V>(
-                context.with_label("validator"),
-                polynomial.clone(),
-                &insufficient_pks,
-                &insufficient_validators,
-                &mut registrations,
-                &mut automatons.lock().unwrap(),
-                &mut reporters,
-                &mut oracle,
-                Duration::from_secs(3),
-                |_| false,
-            );
+                let blocker = oracle.control(validator.clone());
+
+                let automaton = mocks::Application::new(|_| false);
+                automatons.lock().unwrap().insert(validator.clone(), automaton.clone());
+
+                let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
+                    namespace,
+                    pks.len() as u32,
+                    polynomial.clone(),
+                );
+                context.with_label("reporter").spawn(|_| reporter.run());
+                reporters.insert(validator.clone(), reporter_mailbox);
+
+                let engine = Engine::new(
+                    context.with_label("engine"),
+                    Config {
+                        monitor,
+                        validators: supervisor,
+                        automaton: automaton.clone(),
+                        reporter: reporters.get(validator).unwrap().clone(),
+                        blocker,
+                        namespace: namespace.to_vec(),
+                        priority_acks: false,
+                        rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(3)),
+                        epoch_bounds: (1, 1),
+                        window: std::num::NonZeroU64::new(10).unwrap(),
+                        journal_partition: format!("aggregation/{validator}"),
+                        journal_write_buffer: NZUsize!(4096),
+                        journal_replay_buffer: NZUsize!(4096),
+                        journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
+                        journal_compression: Some(3),
+                        journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    },
+                );
+
+                let (sender, receiver) = registrations.remove(validator).unwrap();
+                engine.start((sender, receiver));
+            }
 
             // With insufficient validators, consensus should not be achievable
             // Wait long enough for any potential consensus attempts to complete
