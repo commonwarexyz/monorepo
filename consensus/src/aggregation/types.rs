@@ -5,12 +5,7 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group::Share,
-        ops,
-        poly::{self, PartialSignature},
-        variant::Variant,
-    },
+    bls12381::primitives::{group::Share, ops, poly::PartialSignature, variant::Variant},
     Digest,
 };
 use commonware_utils::union;
@@ -102,24 +97,6 @@ pub struct Item<D: Digest> {
     pub index: Index,
     /// Cryptographic digest of the data being aggregated
     pub digest: D,
-}
-
-impl<D: Digest> Item<D> {
-    // TODO: make returned item to call a proper object
-    pub fn verify<V: Variant>(
-        &self,
-        namespace: &[u8],
-        identity: &V::Public,
-        signature: &V::Signature,
-    ) -> bool {
-        ops::verify_message::<V>(
-            identity,
-            Some(ack_namespace(namespace).as_ref()),
-            self.encode().as_ref(),
-            signature,
-        )
-        .is_ok()
-    }
 }
 
 impl<D: Digest> Write for Item<D> {
@@ -260,6 +237,54 @@ impl<V: Variant, D: Digest> EncodeSize for TipAck<V, D> {
     }
 }
 
+/// A recovered signature for some [Item].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Certificate<V: Variant, D: Digest> {
+    /// The item that was recovered.
+    pub item: Item<D>,
+    /// The recovered signature.
+    pub signature: V::Signature,
+}
+
+impl<V: Variant, D: Digest> Write for Certificate<V, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.item.write(writer);
+        self.signature.write(writer);
+    }
+}
+
+impl<V: Variant, D: Digest> Read for Certificate<V, D> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let item = Item::read(reader)?;
+        let signature = V::Signature::read(reader)?;
+        Ok(Self { item, signature })
+    }
+}
+
+impl<V: Variant, D: Digest> EncodeSize for Certificate<V, D> {
+    fn encode_size(&self) -> usize {
+        self.item.encode_size() + self.signature.encode_size()
+    }
+}
+
+impl<V: Variant, D: Digest> Certificate<V, D> {
+    /// Verifies the signature on this certificate.
+    ///
+    /// Returns `true` if the signature is valid for the given namespace and public key.
+    /// Domain separation is automatically applied to prevent signature reuse.
+    pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
+        ops::verify_message::<V>(
+            identity,
+            Some(ack_namespace(namespace).as_ref()),
+            self.item.encode().as_ref(),
+            &self.signature,
+        )
+        .is_ok()
+    }
+}
+
 /// Used as [Reporter::Activity](crate::Reporter::Activity) to report activities that occur during
 /// aggregation. Also used to journal events that are needed to initialize the aggregation engine
 /// when the node restarts.
@@ -269,7 +294,7 @@ pub enum Activity<V: Variant, D: Digest> {
     Ack(Ack<V, D>),
 
     /// Recovered a threshold signature.
-    Recovered(Item<D>, V::Signature),
+    Recovered(Certificate<V, D>),
 
     /// Moved the tip to a new index.
     Tip(Index),
@@ -282,10 +307,9 @@ impl<V: Variant, D: Digest> Write for Activity<V, D> {
                 0u8.write(writer);
                 ack.write(writer);
             }
-            Activity::Recovered(item, signature) => {
+            Activity::Recovered(certificate) => {
                 1u8.write(writer);
-                item.write(writer);
-                signature.write(writer);
+                certificate.write(writer);
             }
             Activity::Tip(index) => {
                 2u8.write(writer);
@@ -301,10 +325,7 @@ impl<V: Variant, D: Digest> Read for Activity<V, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             0 => Ok(Activity::Ack(Ack::read(reader)?)),
-            1 => Ok(Activity::Recovered(
-                Item::read(reader)?,
-                V::Signature::read(reader)?,
-            )),
+            1 => Ok(Activity::Recovered(Certificate::read(reader)?)),
             2 => Ok(Activity::Tip(UInt::read(reader)?.into())),
             _ => Err(CodecError::Invalid(
                 "consensus::aggregation::Activity",
@@ -318,7 +339,7 @@ impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Ack(ack) => ack.encode_size(),
-            Activity::Recovered(item, signature) => item.encode_size() + signature.encode_size(),
+            Activity::Recovered(certificate) => certificate.encode_size(),
             Activity::Tip(index) => UInt(*index).encode_size(),
         }
     }
