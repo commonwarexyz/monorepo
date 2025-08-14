@@ -209,6 +209,7 @@ where
 
         // Persist state
         db.sync().await?;
+        db.log.sync_all().await?;
         Ok(db)
     }
 
