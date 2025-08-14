@@ -178,6 +178,18 @@ where
             }
         } // stream is dropped here, releasing the borrow on inner_log
 
+        // Initialize metadata
+        let metadata = crate::metadata::Metadata::init(
+            context.with_label("metadata"),
+            crate::metadata::Config {
+                partition: db_config.metadata_partition,
+                codec_config: ((0..).into(), ()),
+            },
+        )
+        .await
+        .map_err(adb::Error::Metadata)?;
+        // TODO set oldest_retained_loc to lower_bound?
+
         // Create the database instance
         let log_size = leaf_pos_to_num(mmr.size()).unwrap();
         let mut db = any::variable::Any {
@@ -186,6 +198,7 @@ where
             log_size,
             inactivity_floor_loc: lower_bound,
             oldest_retained_loc: lower_bound,
+            metadata,
             locations,
             log_items_per_section: db_config.log_items_per_section.get(),
             uncommitted_ops: 0,
@@ -1257,7 +1270,7 @@ mod tests {
         const PAGE_CACHE_SIZE: usize = 9;
         crate::adb::any::variable::Config {
             mmr_journal_partition: format!("journal_{suffix}"),
-            mmr_metadata_partition: format!("metadata_{suffix}"),
+            mmr_metadata_partition: format!("mmr_metadata_{suffix}"),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: format!("log_journal_{suffix}"),
@@ -1267,6 +1280,7 @@ mod tests {
             log_write_buffer: NZUsize!(1024),
             locations_journal_partition: format!("locations_journal_{suffix}"),
             locations_items_per_blob: NZU64!(7),
+            metadata_partition: format!("adb_metadata_{suffix}"),
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
@@ -1407,51 +1421,8 @@ mod tests {
             target_db.commit().await.unwrap();
             let target_op_count = target_db.op_count();
             let target_inactivity_floor = target_db.inactivity_floor_loc();
-            let target_oldest_retained_loc = target_db.oldest_retained_loc().unwrap_or(0);
             let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
             let target_root = target_db.root(&mut hasher);
-
-            // Debug: Check sync bounds
-            println!("=== SYNC BOUNDS DEBUG ===");
-            println!("Target inactivity_floor: {}", target_inactivity_floor);
-            println!("Target oldest_retained_loc: {}", target_oldest_retained_loc);
-            println!("Target op_count: {}", target_op_count);
-            println!(
-                "Sync range: {} to {}",
-                target_inactivity_floor,
-                target_op_count - 1
-            );
-            println!(
-                "Expected synced oldest_retained_loc: {}",
-                target_oldest_retained_loc
-            );
-
-            println!("=== TARGET JOURNAL STRUCTURE ===");
-            for i in target_oldest_retained_loc..target_op_count {
-                let location = target_db.locations.read(i).await.unwrap();
-                println!("Target operation {} at offset {}", i, location);
-            }
-
-            // Also check what the target variable journal looks like when replayed
-            println!("=== TARGET VARIABLE JOURNAL REPLAY ===");
-            {
-                let target_stream = target_db.log.replay(NZUsize!(1024)).await.unwrap();
-                pin_mut!(target_stream);
-                let mut target_op_index = 0;
-                while let Some(result) = target_stream.next().await {
-                    if let Ok((section, offset, size, _op)) = result {
-                        println!(
-                            "Target stream: op_index={}, section={}, offset={}, size={}",
-                            target_op_index, section, offset, size
-                        );
-                        target_op_index += 1;
-                        if target_op_index >= target_op_count {
-                            break;
-                        }
-                    }
-                }
-            }
-            println!("=========================");
 
             // Capture target database state and deleted keys before moving into config
             let mut expected_kvs = std::collections::HashMap::new();
@@ -1510,23 +1481,15 @@ mod tests {
             // Verify the root digest matches the target
             assert_eq!(got_db.root(&mut hasher), target_root);
 
-            // Verify functional equivalence (not structural identity)
-            println!("=== FUNCTIONAL EQUIVALENCE VERIFICATION ===");
-
             // Verify operation counts match
             let target_guard = target_db.read().await;
-            assert_eq!(
-                got_db.op_count(),
-                target_guard.op_count(),
-                "Operation count mismatch"
-            );
+            assert_eq!(got_db.op_count(), target_guard.op_count(),);
 
             // Verify oldest retained location matches the sync lower bound
             // (synced database should only retain operations from lower_bound onwards)
             assert_eq!(
                 got_db.oldest_retained_loc,
                 target_inactivity_floor, // This should be the sync lower_bound
-                "Oldest retained location should match sync lower bound"
             );
 
             // Verify root hashes match (already checked above, but let's be explicit)
@@ -1534,12 +1497,8 @@ mod tests {
             assert_eq!(
                 got_db.root(&mut hasher),
                 target_guard.root(&mut target_hasher),
-                "Root hash mismatch"
             );
             drop(target_guard);
-
-            println!("Functional equivalence verification passed");
-            println!("======================================");
 
             // Verify that the synced database matches the target state
             for (key, expected_value) in &expected_kvs {
@@ -1550,22 +1509,6 @@ mod tests {
             for key in &deleted_keys {
                 assert!(got_db.get(key).await.unwrap().is_none());
             }
-
-            // Debug: Check state after initial sync verification
-            println!("=== AFTER INITIAL SYNC ===");
-            println!(
-                "Synced DB - op count: {}, uncommitted: {}, inactivity_floor: {}",
-                got_db.op_count(),
-                got_db.uncommitted_ops,
-                got_db.inactivity_floor_loc
-            );
-            println!(
-                "Target DB - op count: {}, uncommitted: {}, inactivity_floor: {}",
-                target_db.read().await.op_count(),
-                target_db.read().await.uncommitted_ops,
-                target_db.read().await.inactivity_floor_loc
-            );
-            println!("==========================");
 
             // Put more key-value pairs into both databases
             let mut new_ops = Vec::new();
@@ -1580,29 +1523,8 @@ mod tests {
             apply_ops(&mut got_db, &new_ops).await;
             apply_ops(&mut *target_db.write().await, &new_ops).await;
 
-            // Debug: Check uncommitted ops before commit
-            println!("=== BEFORE COMMIT ===");
-            println!(
-                "Synced DB - op count: {}, uncommitted: {}",
-                got_db.op_count(),
-                got_db.uncommitted_ops
-            );
-            println!(
-                "Target DB - op count: {}, uncommitted: {}",
-                target_db.read().await.op_count(),
-                target_db.read().await.uncommitted_ops
-            );
-
             got_db.commit().await.unwrap();
             target_db.write().await.commit().await.unwrap();
-
-            println!("=== AFTER COMMIT ===");
-            println!("Synced DB - op count: {}", got_db.op_count());
-            println!(
-                "Target DB - op count: {}",
-                target_db.read().await.op_count()
-            );
-            println!("====================");
 
             // Verify that the databases match
             for (key, value) in &new_kvs {
@@ -1612,25 +1534,8 @@ mod tests {
                 assert_eq!(got_value, *value);
             }
 
-            // Debug: Check state before final comparison
-            println!("=== BEFORE FINAL ROOT COMPARISON ===");
-            println!(
-                "Synced DB - op count: {}, oldest: {}",
-                got_db.op_count(),
-                got_db.oldest_retained_loc().unwrap()
-            );
-            println!(
-                "Target DB - op count: {}, oldest: {}",
-                target_db.read().await.op_count(),
-                target_db.read().await.oldest_retained_loc().unwrap()
-            );
-
             let final_target_root = target_db.write().await.root(&mut hasher);
             let final_synced_root = got_db.root(&mut hasher);
-            println!("Synced root: {:?}", final_synced_root);
-            println!("Target root: {:?}", final_target_root);
-            println!("=====================================");
-
             assert_eq!(final_synced_root, final_target_root);
 
             // Capture the database state before closing

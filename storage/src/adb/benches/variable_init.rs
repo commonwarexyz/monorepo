@@ -40,7 +40,8 @@ const THREADS: usize = 8;
 fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg, ())> {
     AConfig::<EightCap, (commonware_codec::RangeCfg, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
-        mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
+        mmr_metadata_partition: format!("mmr_metadata_{PARTITION_SUFFIX}"),
+        metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: NZUsize!(1024),
         log_journal_partition: format!("log_journal_{PARTITION_SUFFIX}"),

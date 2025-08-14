@@ -11,6 +11,7 @@ use crate::{
         fixed::{Config as FConfig, Journal as FJournal},
         variable::{Config as VConfig, Journal as VJournal},
     },
+    metadata::{Config as MetadataConfig, Metadata},
     mmr::{
         hasher::Standard,
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
@@ -23,7 +24,10 @@ use crate::{
 use commonware_codec::{Codec, Encode as _, Read};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
-use commonware_utils::{sequence::U32, Array, NZUsize};
+use commonware_utils::{
+    sequence::{prefixed_u64::U64, U32},
+    Array, NZUsize,
+};
 use futures::{future::TryFutureExt, pin_mut, try_join, StreamExt};
 use std::{
     collections::HashMap,
@@ -35,7 +39,10 @@ pub mod sync;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.
-const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
+const SNAPSHOT_READ_BUFFER_SIZE: usize = 1024;
+
+/// Prefix used for the oldest_retained_loc key in metadata.
+const OLDEST_RETAINED_LOC_PREFIX: u8 = 0;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
@@ -72,6 +79,9 @@ pub struct Config<T: Translator, C> {
 
     /// The number of items to put in each blob in the location map.
     pub locations_items_per_blob: NonZeroU64,
+
+    /// The name of the [RStorage] partition used for metadata storage.
+    pub metadata_partition: String,
 
     /// The translator used by the compressed index.
     pub translator: T,
@@ -122,6 +132,9 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T:
 
     /// The location of the oldest operation in the log that remains readable.
     oldest_retained_loc: u64,
+
+    /// Metadata storage for persisting database state.
+    metadata: Metadata<E, U64, Vec<u8>>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
@@ -183,17 +196,42 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 partition: cfg.locations_journal_partition,
                 items_per_blob: cfg.locations_items_per_blob,
                 write_buffer: cfg.log_write_buffer,
-                buffer_pool: cfg.buffer_pool,
+                buffer_pool: cfg.buffer_pool.clone(),
             },
         )
         .await?;
+
+        let metadata: Metadata<E, U64, Vec<u8>> = Metadata::init(
+            context.with_label("metadata"),
+            MetadataConfig {
+                partition: cfg.metadata_partition,
+                codec_config: ((0..).into(), ()),
+            },
+        )
+        .await?;
+
+        // Restore oldest_retained_loc from metadata or default to 0
+        let oldest_retained_loc_key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
+        let oldest_retained_loc = match metadata.get(&oldest_retained_loc_key) {
+            Some(bytes) => u64::from_be_bytes(
+                bytes
+                    .as_slice()
+                    .try_into()
+                    .expect("oldest_retained_loc bytes could not be converted to u64"),
+            ),
+            None => {
+                debug!("metadata does not contain oldest_retained_loc, initializing as 0");
+                0
+            }
+        };
 
         let db = Self {
             mmr,
             log,
             log_size: 0,
             inactivity_floor_loc: 0,
-            oldest_retained_loc: 0,
+            oldest_retained_loc,
+            metadata,
             locations,
             log_items_per_section: cfg.log_items_per_section.get(),
             uncommitted_ops: 0,
@@ -608,11 +646,22 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
     /// parallelized if a thread pool is provided.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
+        // Update the metadata with the current oldest_retained_loc.
+        let oldest_retained_loc_key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
+        self.metadata.put(
+            oldest_retained_loc_key,
+            self.oldest_retained_loc.to_be_bytes().to_vec(),
+        );
+
         let section = self.current_section();
         try_join!(
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
             self.log.sync(section).map_err(Error::Journal),
             self.locations.sync().map_err(Error::Journal),
+            // oldest_retained_loc is persisted last. In the event of a crash during sync, the
+            // persisted value may point to a location that's older than the actual oldest retained
+            // location.
+            self.metadata.sync().map_err(Error::Metadata),
         )?;
 
         Ok(())
@@ -722,11 +771,19 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             );
         }
 
+        // Update the metadata with the current oldest_retained_loc.
+        let oldest_retained_loc_key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
+        self.metadata.put(
+            oldest_retained_loc_key,
+            self.oldest_retained_loc.to_be_bytes().to_vec(),
+        );
+
         let section = self.current_section();
         try_join!(
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
             self.log.sync(section).map_err(Error::Journal),
             self.locations.sync().map_err(Error::Journal),
+            self.metadata.sync().map_err(Error::Metadata),
         )?;
 
         Ok(())
@@ -738,6 +795,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             self.log.destroy().map_err(Error::Journal),
             self.mmr.destroy().map_err(Error::Mmr),
             self.locations.destroy().map_err(Error::Journal),
+            self.metadata.destroy().map_err(Error::Metadata),
         )?;
 
         Ok(())
@@ -784,7 +842,7 @@ pub(super) mod test {
     fn db_config(suffix: &str) -> Config<TwoCap, (commonware_codec::RangeCfg, ())> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
-            mmr_metadata_partition: format!("metadata_{suffix}"),
+            mmr_metadata_partition: format!("mmr_metadata_{suffix}"),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
             log_journal_partition: format!("log_journal_{suffix}"),
@@ -794,6 +852,7 @@ pub(super) mod test {
             log_codec_config: ((0..=10000).into(), ()),
             locations_journal_partition: format!("locations_journal_{suffix}"),
             locations_items_per_blob: NZU64!(7),
+            metadata_partition: format!("adb_metadata_{suffix}"),
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
