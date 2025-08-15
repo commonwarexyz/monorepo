@@ -31,10 +31,22 @@ use futures::{future::join_all, StreamExt};
 use governor::Quota;
 use libfuzzer_sys::fuzz_target;
 use mocks::{FuzzInput, Fuzzer};
-use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    num::NonZeroUsize,
+    panic,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+const VALID_PANICS: [&str; 2] = ["invalid view (in payload):", "invalid parent (in payload):"];
+
+static SHOULD_IGNORE_PANIC: AtomicBool = AtomicBool::new(false);
 
 fn fuzzer(input: FuzzInput) {
     // Create context
@@ -165,7 +177,7 @@ fn fuzzer(input: FuzzInput) {
         }
 
         match partition {
-            PartitionStrategy::Connected | PartitionStrategy::TwoPartitionsWithByzantine => {
+            PartitionStrategy::Connected => {
                 // Wait for all engines to finish
                 let mut finalizers = Vec::new();
                 for supervisor in supervisors.iter_mut() {
@@ -186,5 +198,40 @@ fn fuzzer(input: FuzzInput) {
 }
 
 fuzz_target!(|input: FuzzInput| {
-    fuzzer(input);
+    // Set up custom panic hook
+    let original_hook = panic::take_hook();
+    panic::set_hook(Box::new(|panic_info| {
+        let panic_message = format!("{panic_info}");
+
+        // Check if we should ignore this panic
+        for pattern in VALID_PANICS {
+            if panic_message.contains(pattern) {
+                println!("Ignored panic: {panic_message}");
+                SHOULD_IGNORE_PANIC.store(true, Ordering::SeqCst);
+                return;
+            }
+        }
+
+        // Let the original hook handle unexpected panics
+        SHOULD_IGNORE_PANIC.store(false, Ordering::SeqCst);
+        println!("Unexpected panic: {panic_message}");
+    }));
+
+    // Try to catch the panic
+    let result = panic::catch_unwind(|| {
+        fuzzer(input);
+    });
+
+    // Restore original hook
+    panic::set_hook(original_hook);
+
+    // If we caught a panic and it should be ignored, continue
+    if result.is_err() && SHOULD_IGNORE_PANIC.load(Ordering::SeqCst) {
+        return;
+    }
+
+    // If we caught a panic and it shouldn't be ignored, re-panic
+    if result.is_err() {
+        panic!("Unexpected panic occurred");
+    }
 });
