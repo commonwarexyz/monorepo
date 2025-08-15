@@ -145,6 +145,40 @@ impl<D: Digest> Proof<D> {
     }
 
     /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
+    /// of elements, returning the (position,digest) of every node whose digest was required by the
+    /// process (including those from the proof itself). Returns a [Error::InvalidProof] if the
+    /// input data is invalid and [Error::RootMismatch] if the root does not match the computed
+    /// root.
+    pub fn verify_range_inclusion_and_extract_digests<I, H, E>(
+        &self,
+        hasher: &mut H,
+        elements: &[E],
+        start_element_pos: u64,
+        root: &D,
+    ) -> Result<Vec<(u64, D)>, Error>
+    where
+        I: CHasher<Digest = D>,
+        H: Hasher<I>,
+        E: AsRef<[u8]>,
+    {
+        let mut collected_digests = Vec::new();
+        let Ok(peak_digests) = self.reconstruct_peak_digests(
+            hasher,
+            elements,
+            start_element_pos,
+            Some(&mut collected_digests),
+        ) else {
+            return Err(Error::InvalidProof);
+        };
+
+        if hasher.root(self.size, peak_digests.iter()) != *root {
+            return Err(Error::RootMismatch);
+        }
+
+        Ok(collected_digests)
+    }
+
+    /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
     /// of elements, or returns a [ReconstructionError] if the input data is invalid.
     pub(crate) fn reconstruct_root<I, H, E>(
         &self,
@@ -157,18 +191,21 @@ impl<D: Digest> Proof<D> {
         H: Hasher<I>,
         E: AsRef<[u8]>,
     {
-        let peak_digests = self.reconstruct_peak_digests(hasher, elements, start_element_pos)?;
+        let peak_digests =
+            self.reconstruct_peak_digests(hasher, elements, start_element_pos, None)?;
 
         Ok(hasher.root(self.size, peak_digests.iter()))
     }
 
     /// Reconstruct the peak digests of the MMR that produced this proof, returning
-    /// [ReconstructionError] if the input data is invalid.
+    /// [ReconstructionError] if the input data is invalid.  If collected_digests is Some, then all
+    /// node digests used in the process will be added to the wrapped vector.
     fn reconstruct_peak_digests<I, H, E>(
         &self,
         hasher: &mut H,
         elements: &[E],
         start_element_pos: u64,
+        mut collected_digests: Option<&mut Vec<(u64, D)>>,
     ) -> Result<Vec<D>, ReconstructionError>
     where
         I: CHasher<Digest = D>,
@@ -207,17 +244,26 @@ impl<D: Digest> Proof<D> {
             if peak_pos >= start_element_pos && leftmost_pos <= end_element_pos {
                 let hash = peak_digest_from_range(
                     hasher,
-                    peak_pos,
-                    1 << height,
-                    start_element_pos,
-                    end_element_pos,
+                    RangeInfo {
+                        pos: peak_pos,
+                        two_h: 1 << height,
+                        leftmost_pos: start_element_pos,
+                        rightmost_pos: end_element_pos,
+                    },
                     &mut elements_iter,
                     &mut siblings_iter,
+                    collected_digests.as_deref_mut(),
                 )?;
                 peak_digests.push(hash);
+                if let Some(ref mut collected_digests) = collected_digests {
+                    collected_digests.push((peak_pos, hash));
+                }
             } else if let Some(hash) = proof_digests_iter.next() {
                 proof_digests_used += 1;
                 peak_digests.push(*hash);
+                if let Some(ref mut collected_digests) = collected_digests {
+                    collected_digests.push((peak_pos, *hash));
+                }
             } else {
                 return Err(ReconstructionError::MissingDigests);
             }
@@ -425,14 +471,20 @@ impl<D: Digest> Proof<D> {
     }
 }
 
-fn peak_digest_from_range<'a, I, H, E, S>(
-    hasher: &mut H,
+/// Information about the current range of nodes being traversed.
+struct RangeInfo {
     pos: u64,           // current node position in the tree
     two_h: u64,         // 2^height of the current node
     leftmost_pos: u64,  // leftmost leaf in the tree to be traversed
     rightmost_pos: u64, // rightmost leaf in the tree to be traversed
+}
+
+fn peak_digest_from_range<'a, I, H, E, S>(
+    hasher: &mut H,
+    range_info: RangeInfo,
     elements: &mut E,
     sibling_digests: &mut S,
+    mut collected_digests: Option<&mut Vec<(u64, I::Digest)>>,
 ) -> Result<I::Digest, ReconstructionError>
 where
     I: CHasher,
@@ -440,10 +492,10 @@ where
     E: Iterator<Item: AsRef<[u8]>>,
     S: Iterator<Item = &'a I::Digest>,
 {
-    assert_ne!(two_h, 0);
-    if two_h == 1 {
+    assert_ne!(range_info.two_h, 0);
+    if range_info.two_h == 1 {
         match elements.next() {
-            Some(element) => return Ok(hasher.leaf_digest(pos, element.as_ref())),
+            Some(element) => return Ok(hasher.leaf_digest(range_info.pos, element.as_ref())),
             None => return Err(ReconstructionError::MissingDigests),
         }
     }
@@ -451,31 +503,45 @@ where
     let mut left_digest: Option<I::Digest> = None;
     let mut right_digest: Option<I::Digest> = None;
 
-    let left_pos = pos - two_h;
-    let right_pos = left_pos + two_h - 1;
-    if left_pos >= leftmost_pos {
+    let left_pos = range_info.pos - range_info.two_h;
+    let right_pos = left_pos + range_info.two_h - 1;
+    if left_pos >= range_info.leftmost_pos {
         // Descend left
-        left_digest = Some(peak_digest_from_range(
+        let digest = peak_digest_from_range(
             hasher,
-            left_pos,
-            two_h >> 1,
-            leftmost_pos,
-            rightmost_pos,
+            RangeInfo {
+                pos: left_pos,
+                two_h: range_info.two_h >> 1,
+                leftmost_pos: range_info.leftmost_pos,
+                rightmost_pos: range_info.rightmost_pos,
+            },
             elements,
             sibling_digests,
-        )?);
+            collected_digests.as_deref_mut(),
+        )?;
+        if let Some(ref mut collected_digests) = collected_digests {
+            collected_digests.push((left_pos, digest));
+        }
+        left_digest = Some(digest);
     }
-    if left_pos < rightmost_pos {
+    if left_pos < range_info.rightmost_pos {
         // Descend right
-        right_digest = Some(peak_digest_from_range(
+        let digest = peak_digest_from_range(
             hasher,
-            right_pos,
-            two_h >> 1,
-            leftmost_pos,
-            rightmost_pos,
+            RangeInfo {
+                pos: right_pos,
+                two_h: range_info.two_h >> 1,
+                leftmost_pos: range_info.leftmost_pos,
+                rightmost_pos: range_info.rightmost_pos,
+            },
             elements,
             sibling_digests,
-        )?);
+            collected_digests.as_deref_mut(),
+        )?;
+        if let Some(ref mut collected_digests) = collected_digests {
+            collected_digests.push((right_pos, digest));
+        }
+        right_digest = Some(digest);
     }
 
     if left_digest.is_none() {
@@ -491,7 +557,11 @@ where
         }
     }
 
-    Ok(hasher.node_digest(pos, &left_digest.unwrap(), &right_digest.unwrap()))
+    Ok(hasher.node_digest(
+        range_info.pos,
+        &left_digest.unwrap(),
+        &right_digest.unwrap(),
+    ))
 }
 
 #[cfg(test)]
@@ -1217,6 +1287,128 @@ mod tests {
             assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == 0 && start_loc == 1));
             let result = Proof::historical_range_proof(&mmr, mmr_size-1, mmr_size, BATCH_SIZE).await;
             assert!(matches!(result, Err(Error::HistoricalSizeTooSmall(size, start_loc)) if size == mmr_size-1 && start_loc == mmr_size));
+        });
+    }
+
+    #[test_traced]
+    fn test_verification_digests_from_range() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // create a new MMR and add a non-trivial amount (49) of elements
+            let mut mmr = Mmr::default();
+            let mut elements = Vec::new();
+            let mut element_positions = Vec::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
+            for i in 0..49 {
+                elements.push(test_digest(i));
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
+            }
+            let root = mmr.root(&mut hasher);
+
+            // Test 1: compute_digests over the entire range should contain a digest for every node
+            // in the tree, plus one extra for the root.
+            let proof = mmr.range_proof(0, mmr.size() - 1).await.unwrap();
+            let mut node_digests = proof
+                .verify_range_inclusion_and_extract_digests(&mut hasher, &elements, 0, &root)
+                .unwrap();
+            assert_eq!(node_digests.len(), mmr.size() as usize);
+            node_digests.sort_by_key(|(pos, _)| *pos);
+            for (i, (pos, d)) in node_digests.into_iter().enumerate() {
+                assert_eq!(pos, i as u64);
+                assert_eq!(mmr.get_node(pos).unwrap(), d);
+            }
+            // Make sure the wrong root fails.
+            let wrong_root = elements[0]; // any other digest will do
+            assert!(matches!(
+                proof.verify_range_inclusion_and_extract_digests(
+                    &mut hasher,
+                    &elements,
+                    0,
+                    &wrong_root
+                ),
+                Err(Error::RootMismatch)
+            ));
+
+            // Test 2: Single element range (first element)
+            let single_proof = mmr
+                .range_proof(element_positions[0], element_positions[0])
+                .await
+                .unwrap();
+            let single_digests = single_proof
+                .verify_range_inclusion_and_extract_digests(
+                    &mut hasher,
+                    &elements[0..1],
+                    element_positions[0],
+                    &root,
+                )
+                .unwrap();
+            assert!(single_digests.len() > 1);
+
+            // Test 3: Single element range (middle element)
+            let mid_idx = 24;
+            let mid_proof = mmr
+                .range_proof(element_positions[mid_idx], element_positions[mid_idx])
+                .await
+                .unwrap();
+            let mid_digests = mid_proof
+                .verify_range_inclusion_and_extract_digests(
+                    &mut hasher,
+                    &elements[mid_idx..mid_idx + 1],
+                    element_positions[mid_idx],
+                    &root,
+                )
+                .unwrap();
+            assert!(mid_digests.len() > 1);
+
+            // Test 4: Single element range (last element)
+            let last_idx = elements.len() - 1;
+            let last_proof = mmr
+                .range_proof(element_positions[last_idx], element_positions[last_idx])
+                .await
+                .unwrap();
+            let last_digests = last_proof
+                .verify_range_inclusion_and_extract_digests(
+                    &mut hasher,
+                    &elements[last_idx..],
+                    element_positions[last_idx],
+                    &root,
+                )
+                .unwrap();
+            assert!(last_digests.len() > 1);
+
+            // Test 5: Small range at the beginning
+            let small_proof = mmr
+                .range_proof(element_positions[0], element_positions[4])
+                .await
+                .unwrap();
+            let small_digests = small_proof
+                .verify_range_inclusion_and_extract_digests(
+                    &mut hasher,
+                    &elements[0..5],
+                    element_positions[0],
+                    &root,
+                )
+                .unwrap();
+            // Verify that we get digests for the range elements and their ancestors
+            assert!(small_digests.len() > 5);
+
+            // Test 6: Medium range in the middle
+            let mid_start = 10;
+            let mid_end = 30;
+            let mid_range_proof = mmr
+                .range_proof(element_positions[mid_start], element_positions[mid_end])
+                .await
+                .unwrap();
+            let mid_range_digests = mid_range_proof
+                .verify_range_inclusion_and_extract_digests(
+                    &mut hasher,
+                    &elements[mid_start..mid_end + 1],
+                    element_positions[mid_start],
+                    &root,
+                )
+                .unwrap();
+            let num_elements = mid_end - mid_start + 1;
+            assert!(mid_range_digests.len() > num_elements);
         });
     }
 }

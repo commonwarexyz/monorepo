@@ -6,9 +6,9 @@ use super::{
     types::{Ack, Activity, Epoch, Error, Index, Item, TipAck},
     Config,
 };
-use crate::{Automaton, Monitor, Reporter, ThresholdSupervisor};
+use crate::{aggregation::types::Certificate, Automaton, Monitor, Reporter, ThresholdSupervisor};
 use commonware_cryptography::{
-    bls12381::primitives::{group, ops::threshold_signature_recover, poly, variant::Variant},
+    bls12381::primitives::{group, ops::threshold_signature_recover, variant::Variant},
     Digest, PublicKey,
 };
 use commonware_macros::select;
@@ -25,7 +25,7 @@ use commonware_runtime::{
     Clock, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::variable::{Config as JConfig, Journal};
-use commonware_utils::{futures::Pool as FuturesPool, PrioritySet};
+use commonware_utils::{futures::Pool as FuturesPool, quorum_from_slice, PrioritySet};
 use futures::{
     future::{self, Either},
     pin_mut, StreamExt,
@@ -33,7 +33,6 @@ use futures::{
 use std::{
     cmp::max,
     collections::{BTreeMap, HashMap},
-    marker::PhantomData,
     num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
@@ -75,11 +74,9 @@ pub struct Engine<
     TSu: ThresholdSupervisor<
         Index = Epoch,
         PublicKey = P,
+        Polynomial = Vec<V::Public>,
         Share = group::Share,
-        Identity = poly::Public<V>,
     >,
-    NetS: Sender<PublicKey = P>,
-    NetR: Receiver<PublicKey = P>,
 > {
     // ---------- Interfaces ----------
     context: E,
@@ -126,7 +123,7 @@ pub struct Engine<
     pending: BTreeMap<Index, Pending<V, D>>,
 
     /// A map of indices with a threshold signature. Cached in memory if needed to send to other peers.
-    confirmed: BTreeMap<Index, (D, V::Signature)>,
+    confirmed: BTreeMap<Index, Certificate<V, D>>,
 
     // ---------- Rebroadcasting ----------
     /// The frequency at which to rebroadcast pending indices.
@@ -149,9 +146,6 @@ pub struct Engine<
     /// Whether to send acks as priority messages.
     priority_acks: bool,
 
-    /// The network sender and receiver types.
-    _phantom: PhantomData<(NetS, NetR)>,
-
     // ---------- Metrics ----------
     /// Metrics
     metrics: metrics::Metrics<E>,
@@ -169,12 +163,10 @@ impl<
         TSu: ThresholdSupervisor<
             Index = Epoch,
             PublicKey = P,
+            Polynomial = Vec<V::Public>,
             Share = group::Share,
-            Identity = poly::Public<V>,
         >,
-        NetS: Sender<PublicKey = P>,
-        NetR: Receiver<PublicKey = P>,
-    > Engine<E, P, V, D, A, Z, M, B, TSu, NetS, NetR>
+    > Engine<E, P, V, D, A, Z, M, B, TSu>
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<P, V, D, A, Z, M, B, TSu>) -> Self {
@@ -206,7 +198,6 @@ impl<
             journal_compression: cfg.journal_compression,
             journal_buffer_pool: cfg.journal_buffer_pool,
             priority_acks: cfg.priority_acks,
-            _phantom: PhantomData,
             metrics,
         }
     }
@@ -220,13 +211,16 @@ impl<
     ///   - Rebroadcasting Acks
     /// - Messages from the network:
     ///   - Acks from other validators
-    pub fn start(mut self, network: (NetS, NetR)) -> Handle<()> {
+    pub fn start(
+        mut self,
+        network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+    ) -> Handle<()> {
         self.context.spawn_ref()(self.run(network))
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, (net_sender, net_receiver): (NetS, NetR)) {
-        let (mut net_sender, mut net_receiver) = wrap((), net_sender, net_receiver);
+    async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
+        let (mut sender, mut receiver) = wrap((), network.0, network.1);
         let mut shutdown = self.context.stopped();
 
         // Initialize the epoch
@@ -321,7 +315,7 @@ impl<
                             self.metrics.digest.inc(Status::Dropped);
                         }
                         Ok(digest) => {
-                            if let Err(err) = self.handle_digest(index, digest, &mut net_sender).await {
+                            if let Err(err) = self.handle_digest(index, digest, &mut sender).await {
                                 warn!(?err, ?index, "handle_digest failed");
                                 continue;
                             }
@@ -330,7 +324,7 @@ impl<
                 },
 
                 // Handle incoming acks
-                msg = net_receiver.recv() => {
+                msg = receiver.recv() => {
                     // Error handling
                     let (sender, msg) = match msg {
                         Ok(r) => r,
@@ -386,7 +380,7 @@ impl<
                     // Get the next index to rebroadcast
                     let (index, _) = self.rebroadcast_deadlines.pop().expect("no rebroadcast deadline");
                     trace!("rebroadcasting: index {}", index);
-                    if let Err(err) = self.handle_rebroadcast(index, &mut net_sender).await {
+                    if let Err(err) = self.handle_rebroadcast(index, &mut sender).await {
                         warn!(?err, ?index, "rebroadcast failed");
                     };
                 }
@@ -409,7 +403,7 @@ impl<
         &mut self,
         index: Index,
         digest: D,
-        sender: &mut WrappedSender<NetS, TipAck<V, D>>,
+        sender: &mut WrappedSender<impl Sender<PublicKey = P>, TipAck<V, D>>,
     ) -> Result<(), Error> {
         // Entry must be `Pending::Unverified`, or return early
         if !matches!(self.pending.get(&index), Some(Pending::Unverified(_))) {
@@ -456,7 +450,10 @@ impl<
     /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
     async fn handle_ack(&mut self, ack: &Ack<V, D>) -> Result<(), Error> {
         // Get the quorum
-        let quorum = self.validators.identity().required();
+        let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
+            return Err(Error::UnknownEpoch(ack.epoch));
+        };
+        let quorum = quorum_from_slice(polynomial);
 
         // Get the acks
         let acks_by_epoch = match self.pending.get_mut(&ack.item.index) {
@@ -500,13 +497,17 @@ impl<
         }
 
         // Store the threshold
-        self.confirmed.insert(index, (item.digest, threshold));
+        let certificate = Certificate {
+            item,
+            signature: threshold,
+        };
+        self.confirmed.insert(index, certificate.clone());
 
         // Journal and notify the automaton
-        let recovered = Activity::Recovered(item, threshold);
-        self.record(recovered.clone()).await;
+        let certified = Activity::Certified(certificate);
+        self.record(certified.clone()).await;
         self.sync(index).await;
-        self.reporter.report(recovered).await;
+        self.reporter.report(certified).await;
 
         // Increase the tip if needed
         if index == self.tip {
@@ -527,7 +528,7 @@ impl<
     async fn handle_rebroadcast(
         &mut self,
         index: Index,
-        sender: &mut WrappedSender<NetS, TipAck<V, D>>,
+        sender: &mut WrappedSender<impl Sender<PublicKey = P>, TipAck<V, D>>,
     ) -> Result<(), Error> {
         let Some(Pending::Verified(digest, acks)) = self.pending.get(&index) else {
             // The index may already be confirmed; continue silently if so
@@ -604,7 +605,10 @@ impl<
         }
 
         // Validate partial signature
-        if !ack.verify(&self.namespace, self.validators.identity()) {
+        let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
+            return Err(Error::UnknownEpoch(ack.epoch));
+        };
+        if !ack.verify(&self.namespace, polynomial) {
             return Err(Error::InvalidAckSignature);
         }
 
@@ -663,7 +667,7 @@ impl<
     async fn broadcast(
         &mut self,
         ack: Ack<V, D>,
-        sender: &mut WrappedSender<NetS, TipAck<V, D>>,
+        sender: &mut WrappedSender<impl Sender<PublicKey = P>, TipAck<V, D>>,
     ) -> Result<(), Error> {
         sender
             .send(
@@ -731,7 +735,7 @@ impl<
     /// Replays the journal, updating the state of the engine.
     async fn replay(&mut self, journal: &Journal<E, Activity<V, D>>) {
         let mut tip = Index::default();
-        let mut recovered = Vec::new();
+        let mut certified = Vec::new();
         let mut acks = Vec::new();
         let stream = journal
             .replay(self.journal_replay_buffer)
@@ -744,8 +748,8 @@ impl<
                 Activity::Tip(index) => {
                     tip = max(tip, index);
                 }
-                Activity::Recovered(item, signature) => {
-                    recovered.push((item, signature));
+                Activity::Certified(certificate) => {
+                    certified.push(certificate);
                 }
                 Activity::Ack(ack) => {
                     acks.push(ack);
@@ -754,12 +758,13 @@ impl<
         }
         // Update the tip to the highest index in the journal
         self.tip = tip;
-        // Add recovered signatures
-        recovered
+        // Add certified items
+        certified
             .iter()
-            .filter(|(item, _)| item.index >= tip)
-            .for_each(|(item, signature)| {
-                self.confirmed.insert(item.index, (item.digest, *signature));
+            .filter(|certificate| certificate.item.index >= tip)
+            .for_each(|certificate| {
+                self.confirmed
+                    .insert(certificate.item.index, certificate.clone());
             });
         // Add any acks that haven't resulted in a threshold signature
         acks = acks
@@ -788,7 +793,7 @@ impl<
     async fn record(&mut self, activity: Activity<V, D>) {
         let index = match activity {
             Activity::Ack(ref ack) => ack.item.index,
-            Activity::Recovered(ref item, _) => item.index,
+            Activity::Certified(ref certificate) => certificate.item.index,
             Activity::Tip(index) => index,
         };
         let section = self.get_journal_section(index);
