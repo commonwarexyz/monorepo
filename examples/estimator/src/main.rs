@@ -232,6 +232,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
         context.with_label("network"),
         Config {
             max_size: usize::MAX,
+            ignore_blocks: true,
         },
     );
     network.start();

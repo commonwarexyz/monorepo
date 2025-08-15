@@ -1075,7 +1075,6 @@ dependencies = [
  "commonware-coding",
  "commonware-cryptography",
  "libfuzzer-sys",
- "rand 0.8.5",
 ]
 
 [[package]]
@@ -1122,6 +1121,26 @@ dependencies = [
  "thiserror 2.0.12",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "commonware-consensus-fuzz"
+version = "0.0.57"
+dependencies = [
+ "arbitrary",
+ "bytes",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "futures-timer",
+ "governor",
+ "libfuzzer-sys",
+ "rand 0.8.5",
 ]
 
 [[package]]
@@ -1266,6 +1285,7 @@ dependencies = [
 name = "commonware-p2p"
 version = "0.0.58"
 dependencies = [
+ "arbitrary",
  "bytes",
  "commonware-codec",
  "commonware-cryptography",
@@ -1334,6 +1354,17 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "commonware-runtime-fuzz"
+version = "0.0.57"
+dependencies = [
+ "arbitrary",
+ "commonware-runtime",
+ "commonware-utils",
+ "libfuzzer-sys",
+ "rand 0.8.5",
 ]
 
 [[package]]
@@ -1452,7 +1483,9 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-utils",
+ "futures",
  "libfuzzer-sys",
+ "rand 0.8.5",
 ]
 
 [[package]]

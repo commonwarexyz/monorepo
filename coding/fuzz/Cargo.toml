@@ -11,7 +11,6 @@ cargo-fuzz = true
 commonware-cryptography = { workspace = true }
 libfuzzer-sys = { workspace = true }
 arbitrary = { workspace = true, features = ["derive"] }
-rand = { workspace = true }
 
 [dependencies.commonware-coding]
 path = ".."
