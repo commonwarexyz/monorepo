@@ -32,7 +32,6 @@ use std::{
 pub struct Context<D: Digest> {
     /// Current view of consensus.
     pub view: View,
-
     /// Parent the payload is built on.
     ///
     /// If there is a gap between the current view and the parent view, the participant
@@ -61,12 +60,6 @@ pub const SEED_SUFFIX: &[u8] = b"_SEED";
 pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
 pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
 pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
-
-/// Creates a message to be signed containing just the view number
-#[inline]
-pub fn view_message(view: View) -> Vec<u8> {
-    View::encode(&view).into()
-}
 
 /// Creates a namespace for seed messages by appending the SEED_SUFFIX
 /// The seed is used for leader election and randomness generation
@@ -683,7 +676,7 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
         let notarize_message = self.proposal.encode();
         let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
         let seed_namespace = seed_namespace(namespace);
-        let seed_message = view_message(self.proposal.view);
+        let seed_message = self.proposal.round().encode();
         let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
         let Some(evaluated) = polynomial.get(self.signer() as usize) else {
             return false;
@@ -745,7 +738,7 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
 
         // Verify seed signatures
         let seed_namespace = seed_namespace(namespace);
-        let seed_message = view_message(proposal.view);
+        let seed_message = Round::from((proposal.epoch, proposal.view)).encode();
         let seed_signatures = notarizes
             .iter()
             .filter(|n| !invalid.contains(&n.seed_signature.index))
@@ -778,7 +771,7 @@ impl<V: Variant, D: Digest> Notarize<V, D> {
         let proposal_signature =
             partial_sign_message::<V>(share, Some(notarize_namespace.as_ref()), &proposal_message);
         let seed_namespace = seed_namespace(namespace);
-        let seed_message = view_message(proposal.view);
+        let seed_message = Round::from((proposal.epoch, proposal.view)).encode();
         let seed_signature =
             partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), &seed_message);
         Notarize::new(proposal, proposal_signature, seed_signature)
@@ -878,7 +871,7 @@ impl<V: Variant, D: Digest> Notarization<V, D> {
         let notarize_message = self.proposal.encode();
         let notarize_message = (Some(notarize_namespace.as_ref()), notarize_message.as_ref());
         let seed_namespace = seed_namespace(namespace);
-        let seed_message = view_message(self.proposal.view);
+        let seed_message = self.proposal.round().encode();
         let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
         let signature =
             aggregate_signatures::<V, _>(&[self.proposal_signature, self.seed_signature]);
@@ -933,7 +926,7 @@ impl<V: Variant, D: Digest> EncodeSize for Notarization<V, D> {
 
 impl<V: Variant, D: Digest> Seedable<V> for Notarization<V, D> {
     fn seed(&self) -> Seed<V> {
-        Seed::new(self.view(), self.seed_signature)
+        Seed::new(self.proposal.epoch, self.view(), self.seed_signature)
     }
 }
 
@@ -942,6 +935,8 @@ impl<V: Variant, D: Digest> Seedable<V> for Notarization<V, D> {
 /// It contains partial signatures for the view and seed.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Nullify<V: Variant> {
+    /// The epoch containing the view to be nullified (skipped)
+    pub epoch: Epoch,
     /// The view to be nullified (skipped)
     pub view: View,
     /// The validator's partial signature on the view
@@ -953,11 +948,13 @@ pub struct Nullify<V: Variant> {
 impl<V: Variant> Nullify<V> {
     /// Creates a new nullify with the given view and signatures.
     pub fn new(
+        epoch: Epoch,
         view: View,
         view_signature: PartialSignature<V>,
         seed_signature: PartialSignature<V>,
     ) -> Self {
         Nullify {
+            epoch,
             view,
             view_signature,
             seed_signature,
@@ -972,10 +969,10 @@ impl<V: Variant> Nullify<V> {
     /// 3. Both signatures are from the same signer
     pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
-        let view_message = view_message(self.view);
-        let nullify_message = (Some(nullify_namespace.as_ref()), view_message.as_ref());
+        let msg = Round::from((self.epoch, self.view)).encode();
+        let nullify_message = (Some(nullify_namespace.as_ref()), msg.as_ref());
         let seed_namespace = seed_namespace(namespace);
-        let seed_message = (Some(seed_namespace.as_ref()), view_message.as_ref());
+        let seed_message = (Some(seed_namespace.as_ref()), msg.as_ref());
         let Some(evaluated) = polynomial.get(self.signer() as usize) else {
             return false;
         };
@@ -1017,12 +1014,12 @@ impl<V: Variant> Nullify<V> {
 
         // Verify view signature
         let nullify_namespace = nullify_namespace(namespace);
-        let view_message = view_message(selected.view);
+        let msg = Round::from((selected.epoch, selected.view)).encode();
         let view_signatures = nullifies.iter().map(|n| &n.view_signature);
         if let Err(err) = partial_verify_multiple_public_keys_precomputed::<V, _>(
             polynomial,
             Some(&nullify_namespace),
-            &view_message,
+            &msg,
             view_signatures,
         ) {
             for signature in err.iter() {
@@ -1039,7 +1036,7 @@ impl<V: Variant> Nullify<V> {
         if let Err(err) = partial_verify_multiple_public_keys_precomputed::<V, _>(
             polynomial,
             Some(&seed_namespace),
-            &view_message,
+            &msg,
             seed_signatures,
         ) {
             for signature in err.iter() {
@@ -1058,15 +1055,14 @@ impl<V: Variant> Nullify<V> {
     }
 
     /// Creates a [PartialSignature] over this [Nullify].
-    pub fn sign(namespace: &[u8], share: &Share, view: View) -> Self {
+    pub fn sign(namespace: &[u8], share: &Share, epoch: Epoch, view: View) -> Self {
         let nullify_namespace = nullify_namespace(namespace);
-        let view_message = view_message(view);
+        let msg = Round::from((epoch, view)).encode();
         let view_signature =
-            partial_sign_message::<V>(share, Some(nullify_namespace.as_ref()), &view_message);
+            partial_sign_message::<V>(share, Some(nullify_namespace.as_ref()), &msg);
         let seed_namespace = seed_namespace(namespace);
-        let seed_signature =
-            partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), &view_message);
-        Nullify::new(view, view_signature, seed_signature)
+        let seed_signature = partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), &msg);
+        Nullify::new(epoch, view, view_signature, seed_signature)
     }
 }
 
@@ -1086,6 +1082,7 @@ impl<V: Variant> Viewable for Nullify<V> {
 
 impl<V: Variant> Write for Nullify<V> {
     fn write(&self, writer: &mut impl BufMut) {
+        UInt(self.epoch).write(writer);
         UInt(self.view).write(writer);
         self.view_signature.write(writer);
         self.seed_signature.write(writer);
@@ -1096,6 +1093,7 @@ impl<V: Variant> Read for Nullify<V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let epoch = UInt::read(reader)?.into();
         let view = UInt::read(reader)?.into();
         let view_signature = PartialSignature::<V>::read(reader)?;
         let seed_signature = PartialSignature::<V>::read(reader)?;
@@ -1106,6 +1104,7 @@ impl<V: Variant> Read for Nullify<V> {
             ));
         }
         Ok(Nullify {
+            epoch,
             view,
             view_signature,
             seed_signature,
@@ -1115,7 +1114,8 @@ impl<V: Variant> Read for Nullify<V> {
 
 impl<V: Variant> EncodeSize for Nullify<V> {
     fn encode_size(&self) -> usize {
-        UInt(self.view).encode_size()
+        UInt(self.epoch).encode_size()
+            + UInt(self.view).encode_size()
             + self.view_signature.encode_size()
             + self.seed_signature.encode_size()
     }
@@ -1164,10 +1164,10 @@ impl<V: Variant> Nullification<V> {
     /// 2. The seed signature is a valid threshold signature for the view
     pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
-        let view_message = view_message(self.view);
-        let nullify_message = (Some(nullify_namespace.as_ref()), view_message.as_ref());
+        let msg = Round::from((self.epoch, self.view)).encode();
+        let nullify_message = (Some(nullify_namespace.as_ref()), msg.as_ref());
         let seed_namespace = seed_namespace(namespace);
-        let seed_message = (Some(seed_namespace.as_ref()), view_message.as_ref());
+        let seed_message = (Some(seed_namespace.as_ref()), msg.as_ref());
         let signature = aggregate_signatures::<V, _>(&[self.view_signature, self.seed_signature]);
         aggregate_verify_multiple_messages::<V, _>(
             identity,
@@ -1224,7 +1224,7 @@ impl<V: Variant> EncodeSize for Nullification<V> {
 
 impl<V: Variant> Seedable<V> for Nullification<V> {
     fn seed(&self) -> Seed<V> {
-        Seed::new(self.view(), self.seed_signature)
+        Seed::new(self.epoch, self.view(), self.seed_signature)
     }
 }
 
@@ -1408,7 +1408,7 @@ impl<V: Variant, D: Digest> Finalization<V, D> {
         let finalize_message = self.proposal.encode();
         let finalize_message = (Some(finalize_namespace.as_ref()), finalize_message.as_ref());
         let seed_namespace = seed_namespace(namespace);
-        let seed_message = view_message(self.proposal.view);
+        let seed_message = self.proposal.round().encode();
         let seed_message = (Some(seed_namespace.as_ref()), seed_message.as_ref());
         let signature =
             aggregate_signatures::<V, _>(&[self.proposal_signature, self.seed_signature]);
@@ -1463,7 +1463,7 @@ impl<V: Variant, D: Digest> EncodeSize for Finalization<V, D> {
 
 impl<V: Variant, D: Digest> Seedable<V> for Finalization<V, D> {
     fn seed(&self) -> Seed<V> {
-        Seed::new(self.view(), self.seed_signature)
+        Seed::new(self.proposal.epoch, self.view(), self.seed_signature)
     }
 }
 
@@ -1648,7 +1648,7 @@ impl<V: Variant, D: Digest> Response<V, D> {
                     return false;
                 }
             } else {
-                let seed_message = view_message(notarization.proposal.view);
+                let seed_message: Vec<u8> = notarization.proposal.round().encode().to_vec();
                 let seed_message = (Some(seed_namespace.as_slice()), seed_message);
                 messages.push(seed_message);
                 signatures.push(&notarization.seed_signature);
@@ -1660,7 +1660,9 @@ impl<V: Variant, D: Digest> Response<V, D> {
         let nullify_namespace = nullify_namespace(namespace);
         for nullification in self.nullifications.iter() {
             // Prepare nullify message
-            let nullify_message = view_message(nullification.view);
+            let nullify_message: Vec<u8> = Round::from((nullification.epoch, nullification.view))
+                .encode()
+                .to_vec();
             let nullify_message = (Some(nullify_namespace.as_slice()), nullify_message);
             messages.push(nullify_message);
             signatures.push(&nullification.view_signature);
@@ -1671,7 +1673,9 @@ impl<V: Variant, D: Digest> Response<V, D> {
                     return false;
                 }
             } else {
-                let seed_message = view_message(nullification.view);
+                let seed_message: Vec<u8> = Round::from((nullification.epoch, nullification.view))
+                    .encode()
+                    .to_vec();
                 let seed_message = (Some(seed_namespace.as_slice()), seed_message);
                 messages.push(seed_message);
                 signatures.push(&nullification.seed_signature);
@@ -1926,6 +1930,8 @@ impl<V: Variant, D: Digest> Viewable for Activity<V, D> {
 /// Seed represents a threshold signature over the current view.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Seed<V: Variant> {
+    /// The epoch for which this seed is generated
+    pub epoch: Epoch,
     /// The view for which this seed is generated
     pub view: View,
     /// The partial signature on the seed
@@ -1934,14 +1940,18 @@ pub struct Seed<V: Variant> {
 
 impl<V: Variant> Seed<V> {
     /// Creates a new seed with the given view and signature.
-    pub fn new(view: View, signature: V::Signature) -> Self {
-        Seed { view, signature }
+    pub fn new(epoch: Epoch, view: View, signature: V::Signature) -> Self {
+        Seed {
+            epoch,
+            view,
+            signature,
+        }
     }
 
     /// Verifies the threshold signature on this [Seed].
     pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
         let seed_namespace = seed_namespace(namespace);
-        let message = view_message(self.view);
+        let message = Round::from((self.epoch, self.view)).encode();
         verify_message::<V>(identity, Some(&seed_namespace), &message, &self.signature).is_ok()
     }
 }
@@ -1956,6 +1966,7 @@ impl<V: Variant> Viewable for Seed<V> {
 
 impl<V: Variant> Write for Seed<V> {
     fn write(&self, writer: &mut impl BufMut) {
+        UInt(self.epoch).write(writer);
         UInt(self.view).write(writer);
         self.signature.write(writer);
     }
@@ -1965,15 +1976,22 @@ impl<V: Variant> Read for Seed<V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let epoch = UInt::read(reader)?.into();
         let view = UInt::read(reader)?.into();
         let signature = V::Signature::read(reader)?;
-        Ok(Seed { view, signature })
+        Ok(Seed {
+            epoch,
+            view,
+            signature,
+        })
     }
 }
 
 impl<V: Variant> EncodeSize for Seed<V> {
     fn encode_size(&self) -> usize {
-        UInt(self.view).encode_size() + self.signature.encode_size()
+        UInt(self.epoch).encode_size()
+            + UInt(self.view).encode_size()
+            + self.signature.encode_size()
     }
 }
 
@@ -2285,7 +2303,7 @@ impl<V: Variant, D: Digest> NullifyFinalize<V, D> {
     /// Verifies that both the nullify and finalize signatures are valid, proving Byzantine behavior.
     pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
         let nullify_namespace = nullify_namespace(namespace);
-        let nullify_message = view_message(self.proposal.view);
+        let nullify_message = self.proposal.round().encode();
         let nullify_message = (Some(nullify_namespace.as_ref()), nullify_message.as_ref());
         let finalize_namespace = finalize_namespace(namespace);
         let finalize_message = self.proposal.encode();
@@ -2471,7 +2489,7 @@ mod tests {
         let t = quorum(n);
         let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
-        let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], 10);
+        let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], 0, 10);
 
         let encoded = nullify.encode();
         let decoded = Nullify::<MinSig>::decode(encoded).unwrap();
@@ -2489,7 +2507,7 @@ mod tests {
         // Create nullifies
         let nullifies: Vec<_> = shares
             .iter()
-            .map(|s| Nullify::<MinSig>::sign(NAMESPACE, s, 10))
+            .map(|s| Nullify::<MinSig>::sign(NAMESPACE, s, 0, 10))
             .collect();
 
         // Recover threshold signature
@@ -2609,7 +2627,7 @@ mod tests {
         // Create a nullification
         let nullifies: Vec<_> = shares
             .iter()
-            .map(|s| Nullify::<MinSig>::sign(NAMESPACE, s, 11))
+            .map(|s| Nullify::<MinSig>::sign(NAMESPACE, s, 333, 11))
             .collect();
 
         let view_partials = nullifies.iter().map(|n| &n.view_signature);
@@ -2659,7 +2677,7 @@ mod tests {
         // Create a nullification
         let nullifies: Vec<_> = shares
             .iter()
-            .map(|s| Nullify::<MinSig>::sign(NAMESPACE, s, 11))
+            .map(|s| Nullify::<MinSig>::sign(NAMESPACE, s, 333, 11))
             .collect();
 
         let view_partials = nullifies.iter().map(|n| &n.view_signature);
@@ -2734,7 +2752,7 @@ mod tests {
         let (_, polynomial, shares) = generate_test_data(n, t, 0);
 
         let proposal = Proposal::new(0, 10, 5, sample_digest(1));
-        let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], 10);
+        let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], 0, 10);
         let finalize = Finalize::<MinSig, _>::sign(NAMESPACE, &shares[0], proposal);
         let nullify_finalize = NullifyFinalize::new(nullify, finalize);
 
@@ -2918,7 +2936,7 @@ mod tests {
         let view = 10;
 
         // Create a nullify for view 10
-        let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], view);
+        let nullify = Nullify::<MinSig>::sign(NAMESPACE, &shares[0], 0, view);
 
         // Create a finalize for the same view
         let proposal = Proposal::new(0, view, 5, sample_digest(1));
@@ -2934,7 +2952,7 @@ mod tests {
         assert!(!conflict.verify(b"wrong_namespace", &polynomial));
 
         // Now create invalid evidence with different validators
-        let nullify2 = Nullify::<MinSig>::sign(NAMESPACE, &shares[1], view);
+        let nullify2 = Nullify::<MinSig>::sign(NAMESPACE, &shares[1], 0, view);
 
         // Compile but verification should fail because signatures are from different validators
         let invalid_conflict: NullifyFinalize<MinSig, Sha256> = NullifyFinalize {
@@ -2999,7 +3017,7 @@ mod tests {
 
     // Helper to create a Nullify message
     fn create_nullify(share: &Share, view: View) -> Nullify<MinSig> {
-        Nullify::<MinSig>::sign(NAMESPACE, share, view)
+        Nullify::<MinSig>::sign(NAMESPACE, share, 0, view)
     }
 
     // Helper to create a Finalize message
