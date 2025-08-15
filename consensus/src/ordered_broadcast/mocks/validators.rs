@@ -1,4 +1,4 @@
-use crate::{ordered_broadcast::types::Epoch, Supervisor, ThresholdSupervisor};
+use crate::{types::Epoch, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::Share,

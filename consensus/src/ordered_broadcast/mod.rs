@@ -54,7 +54,8 @@ pub mod mocks;
 
 #[cfg(test)]
 mod tests {
-    use super::{mocks, types::Epoch, Config, Engine};
+    use super::{mocks, Config, Engine};
+    use crate::types::Epoch;
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,

@@ -3,7 +3,10 @@ use super::{
     config::Config,
     types::{Activity, Context},
 };
-use crate::{types::View, Automaton, Relay, Reporter, ThresholdSupervisor};
+use crate::{
+    types::{Epoch, View},
+    Automaton, Relay, Reporter, ThresholdSupervisor,
+};
 use commonware_cryptography::{
     bls12381::primitives::{group, variant::Variant},
     Digest, Signer,
@@ -22,7 +25,7 @@ pub struct Engine<
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
-    A: Automaton<Context = Context<D>, Digest = D, Epoch = u64>,
+    A: Automaton<Context = Context<D>, Digest = D, Epoch = Epoch>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
@@ -52,7 +55,7 @@ impl<
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
-        A: Automaton<Context = Context<D>, Digest = D, Epoch = u64>,
+        A: Automaton<Context = Context<D>, Digest = D, Epoch = Epoch>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<

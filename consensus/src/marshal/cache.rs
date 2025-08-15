@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_codec::{Codec, RangeCfg};
 use commonware_cryptography::bls12381::primitives::variant::Variant;
-use commonware_runtime::{Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
     archive::{self, prunable, Archive as _, Identifier},
     metadata::{self, Metadata},
@@ -25,12 +25,12 @@ use tracing::{debug, info};
 const CACHED_EPOCHS_KEY: FixedBytes<1> = FixedBytes::new([0u8]);
 
 /// Configuration parameters for prunable archives.
-pub(crate) struct PrunableCfg {
-    pub(crate) partition_prefix: String,
-    pub(crate) prunable_items_per_section: NonZero<u64>,
-    pub(crate) replay_buffer: NonZeroUsize,
-    pub(crate) write_buffer: NonZeroUsize,
-    pub(crate) freezer_journal_buffer_pool: commonware_runtime::buffer::PoolRef,
+pub(crate) struct Config {
+    pub partition_prefix: String,
+    pub prunable_items_per_section: NonZero<u64>,
+    pub replay_buffer: NonZeroUsize,
+    pub write_buffer: NonZeroUsize,
+    pub freezer_journal_buffer_pool: PoolRef,
 }
 
 /// Prunable archives for a single epoch.
@@ -46,7 +46,7 @@ struct Cache<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V:
 }
 
 impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant> Cache<R, B, V> {
-    /// Prune the archives for the given view.
+    /// Prune the archives to the given view.
     async fn prune(&mut self, min_view: View) {
         match futures::try_join!(
             self.verified_blocks.prune(min_view),
@@ -61,63 +61,57 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
 }
 
 /// Manages prunable caches and their metadata.
-pub(crate) struct CacheManager<
+pub(crate) struct Manager<
     R: Rng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
     V: Variant,
 > {
+    /// Context
     context: R,
-    prunable_config: PrunableCfg,
+
+    /// Configuration for underlying prunable archives
+    cfg: Config,
+
+    /// Codec configuration for block type
     codec_config: B::Cfg,
 
+    /// Metadata store for recording which epochs are cached (i.e. may have data)
     metadata: Metadata<R, FixedBytes<1>, Vec<Epoch>>,
 
+    /// A map from epoch to its cache
     caches: BTreeMap<Epoch, Cache<R, B, V>>,
 }
 
-impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant>
-    CacheManager<R, B, V>
-{
+impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant> Manager<R, B, V> {
     /// Initialize the cache manager and its metadata store.
-    pub(crate) async fn init(
-        context: R,
-        prunable_config: PrunableCfg,
-        codec_config: B::Cfg,
-    ) -> Self {
+    pub(crate) async fn init(context: R, cfg: Config, codec_config: B::Cfg) -> Self {
         // Initialize metadata
         let metadata = Metadata::init(
             context.with_label("metadata"),
             metadata::Config {
-                partition: format!("{}-metadata", prunable_config.partition_prefix),
+                partition: format!("{}-metadata", cfg.partition_prefix),
                 codec_config: (RangeCfg::from(..), ()),
             },
         )
         .await
         .expect("failed to initialize metadata");
 
-        Self {
+        // Load metadata
+        let cached_epochs = metadata.get(&CACHED_EPOCHS_KEY).cloned().unwrap_or(vec![0]);
+
+        // Restore cache from metadata
+        let mut cache = Self {
             context,
-            prunable_config,
+            cfg,
             codec_config,
             metadata,
             caches: BTreeMap::new(),
-        }
-    }
-
-    pub(crate) fn partition_prefix(&self) -> &str {
-        &self.prunable_config.partition_prefix
-    }
-
-    /// Restore caches deterministically from metadata at startup.
-    pub(crate) async fn init_from_metadata(&mut self) {
-        let cached_epochs = self
-            .metadata
-            .get(&CACHED_EPOCHS_KEY)
-            .cloned()
-            .unwrap_or(vec![0]);
+        };
         for epoch in cached_epochs {
-            self.init_epoch(epoch).await;
+            cache.init_epoch(epoch).await;
         }
+
+        cache
     }
 
     /// Persist the currently-open cache epochs to metadata.
@@ -166,17 +160,13 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
         let verified_blocks = self
-            .init_prunable_archive(epoch, "verified_blocks_cache", self.codec_config.clone())
+            .init_archive(epoch, "verified", self.codec_config.clone())
             .await;
         let notarized_blocks = self
-            .init_prunable_archive(epoch, "notarized_blocks_cache", self.codec_config.clone())
+            .init_archive(epoch, "notarized", self.codec_config.clone())
             .await;
-        let notarizations = self
-            .init_prunable_archive(epoch, "notarizations_cache", ())
-            .await;
-        let finalizations = self
-            .init_prunable_archive(epoch, "finalizations_cache", ())
-            .await;
+        let notarizations = self.init_archive(epoch, "notarizations", ()).await;
+        let finalizations = self.init_archive(epoch, "finalizations", ()).await;
         let existing = self.caches.insert(
             epoch,
             Cache {
@@ -190,24 +180,24 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
     }
 
     /// Helper to initialize an archive.
-    async fn init_prunable_archive<T: Codec>(
+    async fn init_archive<T: Codec>(
         &self,
         epoch: Epoch,
         name: &str,
         codec_config: T::Cfg,
     ) -> prunable::Archive<TwoCap, R, B::Commitment, T> {
         let start = Instant::now();
-        let prunable_config = prunable::Config {
-            partition: format!("{}-{name}-{epoch}", self.prunable_config.partition_prefix),
+        let cfg = prunable::Config {
+            partition: format!("{}-cache-{name}-{epoch}", self.cfg.partition_prefix),
             translator: TwoCap,
-            items_per_section: self.prunable_config.prunable_items_per_section,
+            items_per_section: self.cfg.prunable_items_per_section,
             compression: None,
             codec_config,
-            buffer_pool: self.prunable_config.freezer_journal_buffer_pool.clone(),
-            replay_buffer: self.prunable_config.replay_buffer,
-            write_buffer: self.prunable_config.write_buffer,
+            buffer_pool: self.cfg.freezer_journal_buffer_pool.clone(),
+            replay_buffer: self.cfg.replay_buffer,
+            write_buffer: self.cfg.write_buffer,
         };
-        let archive = prunable::Archive::init(self.context.with_label(name), prunable_config)
+        let archive = prunable::Archive::init(self.context.with_label(name), cfg)
             .await
             .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
         info!(elapsed = ?start.elapsed(), "restored {name} archive");
@@ -315,9 +305,11 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
         None
     }
 
-    /// Looks for a block in prunable caches (verified or notarized).
+    /// Looks for a block (verified or notarized).
     pub(crate) async fn find_block(&self, commitment: B::Commitment) -> Option<B> {
+        // Check in reverse order
         for cache in self.caches.values().rev() {
+            // Check verified blocks
             if let Some(block) = cache
                 .verified_blocks
                 .get(Identifier::Key(&commitment))
@@ -326,6 +318,8 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
             {
                 return Some(block);
             }
+
+            // Check notarized blocks
             if let Some(block) = cache
                 .notarized_blocks
                 .get(Identifier::Key(&commitment))
@@ -359,6 +353,8 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant
             nv.close().await.expect("failed to destroy nv");
             fv.close().await.expect("failed to destroy fv");
         }
+
+        // Update metadata if necessary
         if !old_epochs.is_empty() {
             self.persist_epochs(None).await;
         }

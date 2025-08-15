@@ -59,7 +59,8 @@ cfg_if::cfg_if! {
 
 #[cfg(test)]
 mod tests {
-    use super::{mocks, types::Epoch, Config, Engine};
+    use super::{mocks, Config, Engine};
+    use crate::types::Epoch;
     use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::{

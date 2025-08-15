@@ -6,7 +6,10 @@ use std::fmt::Display;
 /// consensus engine (i.e. within a single epoch).
 pub type View = u64;
 
-/// Epoch is the type used to represent a distinct validator configuration.
+/// Epoch is the type used to represent a distinct set of validators.
+///
+/// Represents a contiguous sequence of views in which the set of validators is constant.
+/// When the set of participants changes, the epoch increments.
 pub type Epoch = u64;
 
 /// Round is a tuple of ([Epoch], [View]).

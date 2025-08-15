@@ -3,7 +3,7 @@ mod ingress;
 
 use crate::{
     threshold_simplex::types::{Activity, Context},
-    types::View,
+    types::{Epoch, View},
     Automaton, Relay, Reporter, ThresholdSupervisor,
 };
 pub use actor::Actor;
@@ -35,7 +35,7 @@ pub struct Config<
 
     pub partition: String,
     pub compression: Option<u8>,
-    pub epoch: u64,
+    pub epoch: Epoch,
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,
     pub leader_timeout: Duration,
