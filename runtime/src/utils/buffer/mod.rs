@@ -1,12 +1,14 @@
 //! Buffers for reading and writing to [crate::Blob]s.
 
 mod append;
+mod immutable;
 pub mod pool;
 mod read;
 mod tip;
 mod write;
 
 pub use append::Append;
+pub use immutable::Immutable;
 pub use pool::{Pool, PoolRef};
 pub use read::Read;
 pub use write::Write;
