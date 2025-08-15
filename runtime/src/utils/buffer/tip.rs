@@ -98,7 +98,9 @@ impl Buffer {
     ///
     /// Panics if the end offset of the requested data falls outside the range of the logical blob.
     pub(super) fn extract(&self, buf: &mut [u8], offset: u64) -> usize {
-        let end_offset = offset.checked_add(buf.len() as u64).expect("overflow");
+        let end_offset = offset
+            .checked_add(buf.len() as u64)
+            .expect("end_offset overflow");
         assert!(end_offset <= self.size());
         if end_offset <= self.offset {
             // Range does not overlap with the buffer.
@@ -129,7 +131,9 @@ impl Buffer {
     /// may result are filled with zeros. Returns `true` if the merge was performed, otherwise the
     /// caller is responsible for continuing to manage the data.
     pub(super) fn merge(&mut self, data: &[u8], offset: u64) -> bool {
-        let end_offset = offset.checked_add(data.len() as u64).expect("overflow");
+        let end_offset = offset
+            .checked_add(data.len() as u64)
+            .expect("end_offset overflow");
         let can_merge_into_buffer =
             offset >= self.offset && end_offset <= self.offset + self.capacity as u64;
         if !can_merge_into_buffer {
