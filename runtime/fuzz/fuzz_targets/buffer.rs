@@ -62,6 +62,21 @@ enum FuzzOperation {
         data: Vec<u8>,
         offset: u16,
     },
+    ReadPosition,
+    ReadBufferRemaining,
+    ReadBlobRemaining,
+    ReadBlobSize,
+    WriteSize,
+    WriteReadAt {
+        data_size: u16,
+        offset: u16,
+    },
+    AppendSize,
+    AppendCloneBlob,
+    AppendReadAt {
+        data_size: u16,
+        offset: u16,
+    },
 }
 
 fn fuzz(input: FuzzInput) {
@@ -225,6 +240,64 @@ fn fuzz(input: FuzzInput) {
                                 * pool_page_size.get() as u64;
                             let _ = pool.cache(blob_id as u64, &data, aligned_offset).await;
                         }
+                    }
+                }
+
+                FuzzOperation::ReadPosition => {
+                    if let Some(ref reader) = read_buffer {
+                        let _ = reader.position();
+                    }
+                }
+
+                FuzzOperation::ReadBufferRemaining => {
+                    if let Some(ref reader) = read_buffer {
+                        let _ = reader.buffer_remaining();
+                    }
+                }
+
+                FuzzOperation::ReadBlobRemaining => {
+                    if let Some(ref reader) = read_buffer {
+                        let _ = reader.blob_remaining();
+                    }
+                }
+
+                FuzzOperation::ReadBlobSize => {
+                    if let Some(ref reader) = read_buffer {
+                        let _ = reader.blob_size();
+                    }
+                }
+
+                FuzzOperation::WriteSize => {
+                    if let Some(ref writer) = write_buffer {
+                        let _ = writer.size().await;
+                    }
+                }
+
+                FuzzOperation::WriteReadAt { data_size, offset } => {
+                    if let Some(ref writer) = write_buffer {
+                        let size = (data_size as usize).clamp(0, MAX_SIZE);
+                        let buf = vec![0u8; size];
+                        let _ = writer.read_at(buf, offset as u64).await;
+                    }
+                }
+
+                FuzzOperation::AppendSize => {
+                    if let Some(ref append) = append_buffer {
+                        let _ = append.size().await;
+                    }
+                }
+
+                FuzzOperation::AppendCloneBlob => {
+                    if let Some(ref append) = append_buffer {
+                        let _ = append.clone_blob();
+                    }
+                }
+
+                FuzzOperation::AppendReadAt { data_size, offset } => {
+                    if let Some(ref append) = append_buffer {
+                        let size = (data_size as usize).clamp(0, MAX_SIZE);
+                        let buf = vec![0u8; size];
+                        let _ = append.read_at(buf, offset as u64).await;
                     }
                 }
             }
