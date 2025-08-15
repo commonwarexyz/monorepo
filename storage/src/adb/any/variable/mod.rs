@@ -1212,7 +1212,20 @@ pub(super) mod test {
             }
             db.commit().await.unwrap();
 
+            let root = db.root(&mut hasher);
             assert_eq!(db.op_count(), 2787);
+            assert_eq!(leaf_pos_to_num(db.mmr.size()), Some(2787));
+            assert_eq!(db.locations.size().await.unwrap(), 2787);
+            assert_eq!(db.inactivity_floor_loc, 1480);
+            assert_eq!(db.oldest_retained_loc().unwrap(), 1477);
+            assert_eq!(db.snapshot.items(), 857);
+            db.close().await.unwrap();
+
+            let db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+            assert_eq!(db.op_count(), 2787);
+            assert_eq!(leaf_pos_to_num(db.mmr.size()), Some(2787));
+            assert_eq!(db.locations.size().await.unwrap(), 2787);
             assert_eq!(db.inactivity_floor_loc, 1480);
             assert_eq!(db.oldest_retained_loc().unwrap(), 1477);
             assert_eq!(db.snapshot.items(), 857);
