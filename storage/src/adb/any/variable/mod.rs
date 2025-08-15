@@ -231,11 +231,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             mmr_leaves = locations_size;
         }
 
-        // The size of the log at the last commit point (including the commit operation), or 0 if
-        // none.
-        let mut end_loc = 0;
-        // The offset into the log of the operation following the last-known commit (if any).
-        let mut end_offset: Option<u32> = None;
+        // The location and blob-offset of the first operation to follow the last known commit point.
+        let mut after_last_commit = None;
         // The set of operations that have not yet been committed.
         let mut uncommitted_ops = HashMap::new();
         let mut oldest_retained_loc_found = false;
@@ -256,12 +253,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                             self.oldest_retained_loc = self.log_size;
                             oldest_retained_loc_found = true;
                         }
-                        let loc = self.log_size; // location of the current operation.
-                        self.log_size += 1;
 
-                        if end_offset.is_none() {
-                            end_offset = Some(offset);
+                        let loc = self.log_size; // location of the current operation.
+                        if after_last_commit.is_none() {
+                            after_last_commit = Some((loc, offset));
                         }
+
+                        self.log_size += 1;
 
                         // Consistency check: confirm the provided section matches what we expect from this operation's
                         // index.
@@ -318,8 +316,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                     }
                                 }
                                 uncommitted_ops.clear();
-                                end_loc = self.log_size;
-                                end_offset = None;
+                                after_last_commit = None;
                             }
                             _ => unreachable!(
                                 "unexpected operation type at offset {offset} of section {section}"
@@ -329,27 +326,21 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 }
             }
         }
-        if end_loc < self.log_size {
+
+        // Rewind the operations log if necessary.
+        if let Some((end_loc, end_offset)) = after_last_commit {
+            assert!(!uncommitted_ops.is_empty());
             warn!(
                 op_count = uncommitted_ops.len(),
                 log_size = end_loc,
+                end_offset,
                 "rewinding over uncommitted operations at end of log"
             );
-            if end_loc == 0 {
-                self.log.rewind_to_offset(0, 0).await?;
-            } else {
-                assert!(end_offset.is_some());
-                let end_offset = end_offset.unwrap();
-                let mut prune_to_section = (end_loc - 1) / self.log_items_per_section;
-                if end_offset == 0 {
-                    prune_to_section += 1;
-                }
-                self.log
-                    .rewind_to_offset(prune_to_section, end_offset)
-                    .await?;
-                self.log.sync(prune_to_section).await?;
-            }
-
+            let prune_to_section = end_loc / self.log_items_per_section;
+            self.log
+                .rewind_to_offset(prune_to_section, end_offset)
+                .await?;
+            self.log.sync(prune_to_section).await?;
             self.log_size = end_loc;
         }
 
