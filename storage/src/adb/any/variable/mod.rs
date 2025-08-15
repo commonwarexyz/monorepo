@@ -617,14 +617,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.raise_inactivity_floor(self.uncommitted_ops + 1)
             .await?;
         self.uncommitted_ops = 0;
-        self.sync().await?;
-        debug!(log_size = self.log_size, "commit complete");
 
         // TODO: Make the frequency with which we prune known inactive items configurable in case
         // this turns out to be a significant part of commit overhead, or the user wants to ensure
         // the log is backed up externally before discarding.
         self.prune_inactive().await?;
 
+        self.sync().await?;
+        debug!(log_size = self.log_size, "commit complete");
         Ok(())
     }
 
@@ -797,6 +797,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         sync_mmr: bool,
         sync_locations: bool,
         sync_log: bool,
+        sync_metadata: bool,
     ) -> Result<(), Error> {
         let section = self.current_section();
         if sync_mmr {
@@ -807,6 +808,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
         if sync_locations {
             self.locations.sync().await?;
+        }
+        if sync_metadata {
+            self.metadata.sync().await?;
         }
         Ok(())
     }
@@ -1201,7 +1205,9 @@ pub(super) mod test {
             }
 
             // Simulate a failed commit and test that we rollback to the previous root.
-            db.simulate_failure(false, false, false).await.unwrap();
+            db.simulate_failure(false, false, false, false)
+                .await
+                .unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
 
@@ -1225,7 +1231,9 @@ pub(super) mod test {
             }
 
             // Simulate a failed commit and test that we rollback to the previous root.
-            db.simulate_failure(false, false, false).await.unwrap();
+            db.simulate_failure(false, false, false, false)
+                .await
+                .unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
 
@@ -1251,7 +1259,9 @@ pub(super) mod test {
             }
 
             // Simulate a failed commit and test that we rollback to the previous root.
-            db.simulate_failure(false, false, false).await.unwrap();
+            db.simulate_failure(false, false, false, false)
+                .await
+                .unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(root, db.root(&mut hasher));
 
