@@ -1,4 +1,5 @@
 use super::{
+    cache::{CacheManager, PrunableCfg},
     config::Config,
     finalizer::Finalizer,
     ingress::{
@@ -9,11 +10,11 @@ use super::{
 };
 use crate::{
     threshold_simplex::types::{Finalization, Notarization},
-    types::{Epoch, Round, View},
+    types::Round,
     Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
-use commonware_codec::{Codec, Decode, Encode, RangeCfg};
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
@@ -21,16 +22,9 @@ use commonware_resolver::{
     p2p::{self, Coordinator},
     Resolver,
 };
-use commonware_runtime::{buffer::PoolRef, Clock, Handle, Metrics, Spawner, Storage};
-use commonware_storage::{
-    archive::{self, immutable, prunable, Archive as _, Identifier},
-    metadata::{self, Metadata},
-    translator::TwoCap,
-};
-use commonware_utils::{
-    futures::{AbortablePool, Aborter},
-    sequence::FixedBytes,
-};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
+use commonware_storage::{archive::{immutable, Archive as _, Identifier}};
+use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
     channel::{mpsc, oneshot},
     try_join, StreamExt,
@@ -42,13 +36,9 @@ use std::{
     cmp::max,
     collections::{btree_map::Entry, BTreeMap},
     marker::PhantomData,
-    num::{NonZero, NonZeroUsize},
     time::{Duration, Instant},
 };
 use tracing::{debug, info, warn};
-
-// The key used to store the current epoch in the metadata store.
-const CACHED_EPOCHS_KEY: FixedBytes<1> = FixedBytes::new([0u8]);
 
 /// A struct that holds multiple subscriptions for a block.
 struct BlockSubscription<B: Block> {
@@ -56,43 +46,6 @@ struct BlockSubscription<B: Block> {
     subscribers: Vec<oneshot::Sender<B>>,
     // Aborter that aborts the waiter future when dropped
     _aborter: Aborter,
-}
-
-/// A struct that holds the configuration for the prunable archives.
-struct PrunableCfg {
-    partition_prefix: String,
-    prunable_items_per_section: NonZero<u64>,
-    replay_buffer: NonZeroUsize,
-    write_buffer: NonZeroUsize,
-    freezer_journal_buffer_pool: PoolRef,
-}
-
-/// A struct that holds the prunable archives for a single epoch.
-struct Cache<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant> {
-    /// Verified blocks stored by view
-    verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
-    /// Notarized blocks stored by view. Stored separately from the verified blocks since they may
-    /// be different (e.g. from an equivocation).
-    notarized_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
-    /// Notarizations stored by view
-    notarizations: prunable::Archive<TwoCap, R, B::Commitment, Notarization<V, B::Commitment>>,
-    /// Finalizations stored by view
-    finalizations: prunable::Archive<TwoCap, R, B::Commitment, Finalization<V, B::Commitment>>,
-}
-
-impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, V: Variant> Cache<R, B, V> {
-    /// Prune the archives for the given view.
-    async fn prune(&mut self, min_view: View) {
-        match try_join!(
-            self.verified_blocks.prune(min_view),
-            self.notarized_blocks.prune(min_view),
-            self.notarizations.prune(min_view),
-            self.finalizations.prune(min_view),
-        ) {
-            Ok(_) => debug!(min_view, "pruned archives"),
-            Err(e) => panic!("failed to prune archives: {e}"),
-        }
-    }
 }
 
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
@@ -141,7 +94,7 @@ pub struct Actor<
     // Codec configuration
     codec_config: B::Cfg,
     // Partition configuration
-    prunable_config: PrunableCfg,
+    // moved into cache manager
 
     // ---------- State ----------
     // Last view processed
@@ -150,13 +103,8 @@ pub struct Actor<
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
 
-    // ---------- Metadata ----------
-    // Last indexed height
-    metadata: Metadata<R, FixedBytes<1>, Vec<Epoch>>,
-
-    // ---------- Prunable Storage ----------
-    // Prunable archives by epoch
-    cache: BTreeMap<Epoch, Cache<R, B, V>>,
+    // ---------- Cache Manager (prunable storage + metadata) ----------
+    cache: CacheManager<R, B, V>,
 
     // ---------- Immutable Storage ----------
     // Finalizations stored by height
@@ -184,16 +132,20 @@ impl<
 {
     /// Create a new application actor.
     pub async fn init(context: R, config: Config<V, P, Z, B>) -> (Self, Mailbox<V, B>) {
-        // Initialize metadata
-        let metadata = Metadata::init(
-            context.with_label("metadata"),
-            metadata::Config {
-                partition: format!("{}-metadata", config.partition_prefix),
-                codec_config: (RangeCfg::from(..), ()),
-            },
+        // Initialize prunable cache manager (includes metadata)
+        let prunable_config = PrunableCfg {
+            partition_prefix: config.partition_prefix.clone(),
+            prunable_items_per_section: config.prunable_items_per_section,
+            replay_buffer: config.replay_buffer,
+            write_buffer: config.write_buffer,
+            freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
+        };
+        let cache = CacheManager::init(
+            context.with_label("cache"),
+            prunable_config,
+            config.codec_config.clone(),
         )
-        .await
-        .expect("failed to initialize metadata");
+        .await;
 
         // Initialize finalizations by height
         let start = Instant::now();
@@ -297,23 +249,15 @@ impl<
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
                 codec_config: config.codec_config.clone(),
-                prunable_config: PrunableCfg {
-                    partition_prefix: config.partition_prefix,
-                    prunable_items_per_section: config.prunable_items_per_section,
-                    replay_buffer: config.replay_buffer,
-                    write_buffer: config.write_buffer,
-                    freezer_journal_buffer_pool: config.freezer_journal_buffer_pool,
-                },
+                // prunable configuration moved under cache manager
 
                 last_processed_round: Round::new(0, 0),
                 block_subscriptions: BTreeMap::new(),
 
-                cache: BTreeMap::new(),
+                cache,
 
                 finalizations_by_height,
                 finalized_blocks,
-
-                metadata,
 
                 finalized_height,
                 processed_height,
@@ -341,8 +285,7 @@ impl<
         mut buffer: buffered::Mailbox<P, B>,
         backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        // Initialize caches from metadata
-        self.init_caches_from_metadata().await;
+        self.cache.init_from_metadata().await;
 
         // Initialize resolvers
         let (mut resolver_rx, mut resolver) = self.init_resolver(backfill);
@@ -353,7 +296,7 @@ impl<
         let orchestrator = Orchestrator::new(orchestrator_sender);
         let finalizer = Finalizer::new(
             self.context.with_label("finalizer"),
-            format!("{}-finalizer", self.prunable_config.partition_prefix),
+            format!("{}-finalizer", self.cache.partition_prefix()),
             application,
             orchestrator,
             notifier_rx,
@@ -692,136 +635,6 @@ impl<
 
     // -------------------- Initialization --------------------
 
-    /// Restore caches deterministically from metadata at startup.
-    ///
-    /// Invariant: if metadata lists an epoch, initializing that epoch is idempotent and safe
-    /// to retry after a crash.
-    async fn init_caches_from_metadata(&mut self) {
-        let cached_epochs = self
-            .metadata
-            .get(&CACHED_EPOCHS_KEY)
-            .cloned()
-            .unwrap_or(vec![0]);
-        for epoch in cached_epochs {
-            self.init_cache(epoch).await;
-        }
-    }
-
-    /// Persist the currently-open cache epochs to metadata.
-    ///
-    /// Optionally, add a key to the set of cached epochs if it's about to be initialized.
-    async fn persist_cached_epochs(&mut self, add_key: Option<Epoch>) {
-        let mut keys = self.cache.keys().copied().collect::<Vec<_>>();
-        if let Some(key) = add_key {
-            keys.push(key);
-        }
-        keys.sort();
-        self.metadata
-            .put_sync(CACHED_EPOCHS_KEY, keys)
-            .await
-            .expect("failed to write metadata");
-    }
-
-    /// Get the cache for the given epoch, initializing it if it doesn't exist.
-    ///
-    /// If the epoch is less than the minimum cached epoch, then it has already been pruned,
-    /// and this will return `None`.
-    async fn get_or_init_cache(&mut self, epoch: Epoch) -> Option<&mut Cache<R, B, V>> {
-        // If the cache exists, return it
-        if self.cache.contains_key(&epoch) {
-            return self.cache.get_mut(&epoch);
-        }
-
-        // If the epoch is less than the minimum cached epoch, then it has already been pruned
-        let min_epoch = self
-            .cache
-            .first_key_value()
-            .map(|(epoch, _)| *epoch)
-            .unwrap_or(0);
-        if epoch < min_epoch {
-            return None;
-        };
-
-        // Update the metadata (metadata-first is safe; init is idempotent)
-        self.persist_cached_epochs(Some(epoch)).await;
-
-        // Initialize and return the epoch
-        self.init_cache(epoch).await;
-        self.cache.get_mut(&epoch) // Should always be Some
-    }
-
-    /// Helper to initialize the cache for a given epoch.
-    async fn init_cache(&mut self, epoch: Epoch) {
-        let verified_blocks = Self::init_prunable_archive(
-            &self.context,
-            &self.prunable_config,
-            epoch,
-            "verified_blocks_cache",
-            self.codec_config.clone(),
-        )
-        .await;
-        let notarized_blocks = Self::init_prunable_archive(
-            &self.context,
-            &self.prunable_config,
-            epoch,
-            "notarized_blocks_cache",
-            self.codec_config.clone(),
-        )
-        .await;
-        let notarizations = Self::init_prunable_archive(
-            &self.context,
-            &self.prunable_config,
-            epoch,
-            "notarizations_cache",
-            (),
-        )
-        .await;
-        let finalizations = Self::init_prunable_archive(
-            &self.context,
-            &self.prunable_config,
-            epoch,
-            "finalizations_cache",
-            (),
-        )
-        .await;
-        let existing = self.cache.insert(
-            epoch,
-            Cache {
-                verified_blocks,
-                notarized_blocks,
-                notarizations,
-                finalizations,
-            },
-        );
-        assert!(existing.is_none(), "cache already exists for epoch {epoch}");
-    }
-
-    /// Helper to initialize an archive.
-    async fn init_prunable_archive<T: Codec>(
-        context: &R,
-        config: &PrunableCfg,
-        epoch: Epoch,
-        name: &str,
-        codec_config: T::Cfg,
-    ) -> prunable::Archive<TwoCap, R, B::Commitment, T> {
-        let start = Instant::now();
-        let prunable_config = prunable::Config {
-            partition: format!("{}-{name}-{epoch}", config.partition_prefix),
-            translator: TwoCap,
-            items_per_section: config.prunable_items_per_section,
-            compression: None,
-            codec_config,
-            buffer_pool: config.freezer_journal_buffer_pool.clone(),
-            replay_buffer: config.replay_buffer,
-            write_buffer: config.write_buffer,
-        };
-        let archive = prunable::Archive::init(context.with_label(name), prunable_config)
-            .await
-            .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
-        info!(elapsed = ?start.elapsed(), "restored {name} archive");
-        archive
-    }
-
     /// Helper to initialize a resolver.
     fn init_resolver(
         &self,
@@ -870,31 +683,13 @@ impl<
     /// Add a verified block to the prunable archive.
     async fn cache_verified(&mut self, round: Round, commitment: B::Commitment, block: B) {
         self.notify_subscribers(commitment, &block).await;
-
-        let Some(cache) = self.get_or_init_cache(round.epoch()).await else {
-            return;
-        };
-
-        let result = cache
-            .verified_blocks
-            .put_sync(round.view(), commitment, block)
-            .await;
-        Self::debug_cache(result, round, "verified");
+        self.cache.put_verified(round, commitment, block).await;
     }
 
     /// Add a notarized block to the prunable archive.
     async fn cache_block(&mut self, round: Round, commitment: B::Commitment, block: B) {
         self.notify_subscribers(commitment, &block).await;
-
-        let Some(cache) = self.get_or_init_cache(round.epoch()).await else {
-            return;
-        };
-
-        let result = cache
-            .notarized_blocks
-            .put_sync(round.view(), commitment, block)
-            .await;
-        Self::debug_cache(result, round, "notarized");
+        self.cache.put_block(round, commitment, block).await;
     }
 
     /// Add a notarization to the prunable archive.
@@ -904,15 +699,7 @@ impl<
         commitment: B::Commitment,
         notarization: Notarization<V, B::Commitment>,
     ) {
-        let Some(cache) = self.get_or_init_cache(round.epoch()).await else {
-            return;
-        };
-
-        let result = cache
-            .notarizations
-            .put_sync(round.view(), commitment, notarization)
-            .await;
-        Self::debug_cache(result, round, "notarization");
+        self.cache.put_notarization(round, commitment, notarization).await;
     }
 
     /// Add a finalization to the prunable archive.
@@ -922,40 +709,14 @@ impl<
         commitment: B::Commitment,
         finalization: Finalization<V, B::Commitment>,
     ) {
-        let Some(cache) = self.get_or_init_cache(round.epoch()).await else {
-            return;
-        };
-
-        let result = cache
-            .finalizations
-            .put_sync(round.view(), commitment, finalization)
-            .await;
-        Self::debug_cache(result, round, "finalization");
+        self.cache.put_finalization(round, commitment, finalization).await;
     }
 
-    /// Helper to debug cache results.
-    fn debug_cache(result: Result<(), archive::Error>, round: Round, name: &str) {
-        match result {
-            Ok(_) => {
-                debug!(?round, "{} cached", name);
-            }
-            Err(archive::Error::AlreadyPrunedTo(_)) => {
-                debug!(?round, "{} already pruned", name);
-            }
-            Err(e) => {
-                panic!("failed to insert {name}: {e}");
-            }
-        }
-    }
+    // no-op debug here; moved into cache manager
 
     /// Get a notarization from the prunable archive by round.
     async fn get_notarization(&self, round: Round) -> Option<Notarization<V, B::Commitment>> {
-        let cache = self.cache.get(&round.epoch())?;
-        cache
-            .notarizations
-            .get(Identifier::Index(round.view()))
-            .await
-            .expect("failed to get notarization")
+        self.cache.get_notarization(round).await
     }
 
     /// Get a finalization from the prunable archive by commitment.
@@ -963,46 +724,12 @@ impl<
         &self,
         commitment: B::Commitment,
     ) -> Option<Finalization<V, B::Commitment>> {
-        for cache in self.cache.values().rev() {
-            match cache.finalizations.get(Identifier::Key(&commitment)).await {
-                Ok(Some(finalization)) => return Some(finalization),
-                Ok(None) => continue,
-                Err(e) => panic!("failed to get cached finalization: {e}"),
-            }
-        }
-        None
+        self.cache.get_finalization_for(commitment).await
     }
 
     /// Prune the caches below the given round.
     async fn prune(&mut self, round: Round) {
-        // Remove and close prunable archives from older epochs
-        let old_epochs: Vec<Epoch> = self
-            .cache
-            .keys()
-            .copied()
-            .filter(|epoch| *epoch < round.epoch())
-            .collect();
-        for epoch in old_epochs.iter() {
-            let Cache::<R, B, V> {
-                verified_blocks: vb,
-                notarized_blocks: nb,
-                notarizations: nv,
-                finalizations: fv,
-            } = self.cache.remove(epoch).unwrap();
-            vb.close().await.expect("failed to destroy vb");
-            nb.close().await.expect("failed to destroy nb");
-            nv.close().await.expect("failed to destroy nv");
-            fv.close().await.expect("failed to destroy fv");
-        }
-        if !old_epochs.is_empty() {
-            self.persist_cached_epochs(None).await;
-        }
-
-        // Prune archives for the given epoch
-        let min_view = round.view();
-        if let Some(prunable) = self.cache.get_mut(&round.epoch()) {
-            prunable.prune(min_view).await;
-        }
+        self.cache.prune(round).await;
     }
 
     // -------------------- Immutable Storage --------------------
@@ -1082,25 +809,9 @@ impl<
         if let Some(block) = buffer.get(None, commitment, None).await.into_iter().next() {
             return Some(block);
         }
-        // Check verified / notarized blocks.
-        // Reverse order of epochs to check the most recent blocks first.
-        for cache in self.cache.values().rev() {
-            if let Some(block) = cache
-                .verified_blocks
-                .get(Identifier::Key(&commitment))
-                .await
-                .expect("failed to get verified block")
-            {
-                return Some(block);
-            }
-            if let Some(block) = cache
-                .notarized_blocks
-                .get(Identifier::Key(&commitment))
-                .await
-                .expect("failed to get notarized block")
-            {
-                return Some(block);
-            }
+        // Check verified / notarized blocks via cache manager.
+        if let Some(block) = self.cache.find_block(commitment).await {
+            return Some(block);
         }
         // Check finalized blocks.
         match self
