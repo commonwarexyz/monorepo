@@ -1,4 +1,4 @@
-use commonware_consensus::{simplex::types::Context, Automaton as Au, Relay as Re};
+use commonware_consensus::{simplex::types::Context, types::Epoch, Automaton as Au, Relay as Re};
 use commonware_cryptography::Digest;
 use futures::{
     channel::{mpsc, oneshot},
@@ -7,7 +7,7 @@ use futures::{
 
 pub enum Message<D: Digest> {
     Genesis {
-        epoch: u64,
+        epoch: Epoch,
         response: oneshot::Sender<D>,
     },
     Propose {
@@ -33,7 +33,7 @@ impl<D: Digest> Mailbox<D> {
 impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<Self::Digest>;
-    type Epoch = u64;
+    type Epoch = Epoch;
 
     async fn genesis(&mut self, epoch: Self::Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();

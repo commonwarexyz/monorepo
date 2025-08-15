@@ -1,5 +1,5 @@
 use super::{
-    cache::{CacheManager, PrunableCfg},
+    cache,
     config::Config,
     finalizer::Finalizer,
     ingress::{
@@ -23,7 +23,7 @@ use commonware_resolver::{
     Resolver,
 };
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
-use commonware_storage::{archive::{immutable, Archive as _, Identifier}};
+use commonware_storage::archive::{immutable, Archive as _, Identifier};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
     channel::{mpsc, oneshot},
@@ -35,7 +35,6 @@ use rand::Rng;
 use std::{
     cmp::max,
     collections::{btree_map::Entry, BTreeMap},
-    marker::PhantomData,
     time::{Duration, Instant},
 };
 use tracing::{debug, info, warn};
@@ -93,8 +92,8 @@ pub struct Actor<
     max_repair: u64,
     // Codec configuration
     codec_config: B::Cfg,
-    // Partition configuration
-    // moved into cache manager
+    // Partition prefix
+    partition_prefix: String,
 
     // ---------- State ----------
     // Last view processed
@@ -103,10 +102,9 @@ pub struct Actor<
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
 
-    // ---------- Cache Manager (prunable storage + metadata) ----------
-    cache: CacheManager<R, B, V>,
-
-    // ---------- Immutable Storage ----------
+    // ---------- Storage ----------
+    // Prunable cache
+    cache: cache::Manager<R, B, V>,
     // Finalizations stored by height
     finalizations_by_height: immutable::Archive<R, B::Commitment, Finalization<V, B::Commitment>>,
     // Finalized blocks stored by height
@@ -117,9 +115,6 @@ pub struct Actor<
     finalized_height: Gauge,
     // Latest processed height
     processed_height: Gauge,
-
-    // ---------- Phantom data ----------
-    _variant: PhantomData<V>,
 }
 
 impl<
@@ -132,15 +127,15 @@ impl<
 {
     /// Create a new application actor.
     pub async fn init(context: R, config: Config<V, P, Z, B>) -> (Self, Mailbox<V, B>) {
-        // Initialize prunable cache manager (includes metadata)
-        let prunable_config = PrunableCfg {
+        // Initialize cache
+        let prunable_config = cache::Config {
             partition_prefix: config.partition_prefix.clone(),
             prunable_items_per_section: config.prunable_items_per_section,
             replay_buffer: config.replay_buffer,
             write_buffer: config.write_buffer,
             freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
         };
-        let cache = CacheManager::init(
+        let cache = cache::Manager::init(
             context.with_label("cache"),
             prunable_config,
             config.codec_config.clone(),
@@ -237,10 +232,8 @@ impl<
         (
             Self {
                 context,
-
                 coordinator: config.coordinator,
                 mailbox,
-
                 public_key: config.public_key,
                 identity: config.identity,
                 mailbox_size: config.mailbox_size,
@@ -249,20 +242,14 @@ impl<
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
                 codec_config: config.codec_config.clone(),
-                // prunable configuration moved under cache manager
-
                 last_processed_round: Round::new(0, 0),
                 block_subscriptions: BTreeMap::new(),
-
                 cache,
-
                 finalizations_by_height,
                 finalized_blocks,
-
                 finalized_height,
                 processed_height,
-
-                _variant: PhantomData,
+                partition_prefix: config.partition_prefix,
             },
             Mailbox::new(sender),
         )
@@ -285,8 +272,6 @@ impl<
         mut buffer: buffered::Mailbox<P, B>,
         backfill: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        self.cache.init_from_metadata().await;
-
         // Initialize resolvers
         let (mut resolver_rx, mut resolver) = self.init_resolver(backfill);
 
@@ -296,7 +281,7 @@ impl<
         let orchestrator = Orchestrator::new(orchestrator_sender);
         let finalizer = Finalizer::new(
             self.context.with_label("finalizer"),
-            format!("{}-finalizer", self.cache.partition_prefix()),
+            format!("{}-finalizer", self.partition_prefix.clone()),
             application,
             orchestrator,
             notifier_rx,
@@ -344,7 +329,7 @@ impl<
                             let commitment = notarization.proposal.payload;
 
                             // Store notarization by view
-                            self.cache_notarization(round, commitment, notarization.clone()).await;
+                            self.cache.put_notarization(round, commitment, notarization.clone()).await;
 
                             // Search for block locally, otherwise fetch it remotely
                             if let Some(block) = self.find_block(&mut buffer, commitment).await {
@@ -359,7 +344,7 @@ impl<
                             // Cache finalization by round
                             let round = finalization.round();
                             let commitment = finalization.proposal.payload;
-                            self.cache_finalization(round, commitment, finalization.clone()).await;
+                            self.cache.put_finalization(round, commitment, finalization.clone()).await;
 
                             // Search for block locally, otherwise fetch it remotely
                             if let Some(block) = self.find_block(&mut buffer, commitment).await {
@@ -449,7 +434,7 @@ impl<
                                 let prune_round = Round::new(lpr.epoch(), lpr.view().saturating_sub(self.view_retention_timeout));
 
                                 // Prune archives
-                                self.prune(prune_round).await;
+                                self.cache.prune(prune_round).await;
 
                                 // Update the last processed round
                                 let round = finalization.round();
@@ -477,7 +462,7 @@ impl<
                             while cursor.height() > height {
                                 let commitment = cursor.parent();
                                 if let Some(block) = self.find_block(&mut buffer, commitment).await {
-                                    let finalization = self.get_cached_finalization(commitment).await;
+                                    let finalization = self.cache.get_finalization_for(commitment).await;
                                     self.finalize(block.height(), commitment, block.clone(), finalization, &mut notifier_tx).await;
                                     debug!(height = block.height(), "repaired block");
                                     cursor = block;
@@ -536,7 +521,7 @@ impl<
                                 }
                                 Request::Notarized { round } => {
                                     // Get notarization
-                                    let Some(notarization) = self.get_notarization(round).await else {
+                                    let Some(notarization) = self.cache.get_notarization(round).await else {
                                         debug!(?round, "notarization missing on request");
                                         continue;
                                     };
@@ -568,7 +553,7 @@ impl<
 
                                     // Persist the block, also persisting the finalization if we have it
                                     let height = block.height();
-                                    let finalization = self.get_cached_finalization(commitment).await;
+                                    let finalization = self.cache.get_finalization_for(commitment).await;
                                     self.finalize(height, commitment, block, finalization, &mut notifier_tx).await;
                                     debug!(?commitment, height, "received block");
                                     let _ = response.send(true);
@@ -617,13 +602,13 @@ impl<
 
                                     // If there's a finalization for this view, we should process it
                                     let height = block.height();
-                                    if let Some(finalization) = self.get_cached_finalization(commitment).await {
+                                    if let Some(finalization) = self.cache.get_finalization_for(commitment).await {
                                         self.finalize(height, commitment, block.clone(), Some(finalization), &mut notifier_tx).await;
                                     }
 
                                     // Cache the notarization and block
                                     self.cache_block(round, commitment, block).await;
-                                    self.cache_notarization(round, commitment, notarization).await;
+                                    self.cache.put_notarization(round, commitment, notarization).await;
                                 },
                             }
                         },
@@ -690,46 +675,6 @@ impl<
     async fn cache_block(&mut self, round: Round, commitment: B::Commitment, block: B) {
         self.notify_subscribers(commitment, &block).await;
         self.cache.put_block(round, commitment, block).await;
-    }
-
-    /// Add a notarization to the prunable archive.
-    async fn cache_notarization(
-        &mut self,
-        round: Round,
-        commitment: B::Commitment,
-        notarization: Notarization<V, B::Commitment>,
-    ) {
-        self.cache.put_notarization(round, commitment, notarization).await;
-    }
-
-    /// Add a finalization to the prunable archive.
-    async fn cache_finalization(
-        &mut self,
-        round: Round,
-        commitment: B::Commitment,
-        finalization: Finalization<V, B::Commitment>,
-    ) {
-        self.cache.put_finalization(round, commitment, finalization).await;
-    }
-
-    // no-op debug here; moved into cache manager
-
-    /// Get a notarization from the prunable archive by round.
-    async fn get_notarization(&self, round: Round) -> Option<Notarization<V, B::Commitment>> {
-        self.cache.get_notarization(round).await
-    }
-
-    /// Get a finalization from the prunable archive by commitment.
-    async fn get_cached_finalization(
-        &self,
-        commitment: B::Commitment,
-    ) -> Option<Finalization<V, B::Commitment>> {
-        self.cache.get_finalization_for(commitment).await
-    }
-
-    /// Prune the caches below the given round.
-    async fn prune(&mut self, round: Round) {
-        self.cache.prune(round).await;
     }
 
     // -------------------- Immutable Storage --------------------

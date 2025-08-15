@@ -1,4 +1,5 @@
-use super::types::{Ack, Epoch};
+use super::types::Ack;
+use crate::types::Epoch;
 use commonware_cryptography::{
     bls12381::primitives::{ops, poly::PartialSignature, variant::Variant},
     Digest, PublicKey,
