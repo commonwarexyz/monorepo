@@ -77,8 +77,8 @@ mod tests {
     };
     use crate::{
         threshold_simplex::types::{
-            finalize_namespace, notarize_namespace, seed_namespace, view_message, Activity,
-            Finalization, Notarization, Proposal,
+            finalize_namespace, notarize_namespace, seed_namespace, Activity, Finalization,
+            Notarization, Proposal,
         },
         types::Round,
         Block as _, Reporter,
@@ -197,7 +197,7 @@ mod tests {
             threshold_signature_recover::<V, _>(quorum, &proposal_partials).unwrap();
 
         // Generate seed signature (for the view number)
-        let seed_msg = view_message(proposal.view);
+        let seed_msg = proposal.round().encode();
         let seed_partials: Vec<_> = shares
             .iter()
             .take(quorum as usize)
@@ -227,7 +227,7 @@ mod tests {
             threshold_signature_recover::<V, _>(quorum, &proposal_partials).unwrap();
 
         // Generate seed signature (for the view number)
-        let seed_msg = view_message(proposal.view);
+        let seed_msg = proposal.round().encode();
         let seed_partials: Vec<_> = shares
             .iter()
             .take(quorum as usize)

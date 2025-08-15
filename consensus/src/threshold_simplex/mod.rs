@@ -2722,6 +2722,7 @@ mod tests {
                 if idx_scheme == 0 {
                     let cfg = mocks::nuller::Config {
                         supervisor,
+                        epoch: 333,
                         namespace: namespace.clone(),
                     };
                     let engine: mocks::nuller::Nuller<_, V, Sha256, _> =

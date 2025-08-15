@@ -813,7 +813,7 @@ impl<
 
         // Construct nullify
         let share = self.supervisor.share(self.view).unwrap();
-        let nullify = Nullify::sign(&self.namespace, share, self.view);
+        let nullify = Nullify::sign(&self.namespace, share, self.epoch, self.view);
 
         // Handle the nullify
         if !retry {
