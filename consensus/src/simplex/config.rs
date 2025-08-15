@@ -1,5 +1,8 @@
 use super::types::{Activity, Context};
-use crate::{types::View, Automaton, Relay, Reporter, Supervisor};
+use crate::{
+    types::{Epoch, View},
+    Automaton, Relay, Reporter, Supervisor,
+};
 use commonware_cryptography::{Digest, Signer};
 use commonware_runtime::buffer::PoolRef;
 use governor::Quota;
@@ -37,7 +40,7 @@ pub struct Config<
     pub mailbox_size: usize,
 
     /// Epoch for the consensus engine.
-    pub epoch: u64,
+    pub epoch: Epoch,
 
     /// Prefix for all signed messages to prevent replay attacks.
     pub namespace: Vec<u8>,

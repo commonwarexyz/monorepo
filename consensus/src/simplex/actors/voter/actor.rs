@@ -9,7 +9,7 @@ use crate::{
             NullifyFinalize, Proposal, Voter,
         },
     },
-    types::View,
+    types::{Epoch, View},
     Automaton, Relay, Reporter, Supervisor, Viewable, LATENCY,
 };
 use commonware_cryptography::{Digest, PublicKey, Signer};
@@ -314,7 +314,7 @@ pub struct Actor<
     E: Clock + Rng + Spawner + Storage + Metrics,
     C: Signer,
     D: Digest,
-    A: Automaton<Context = Context<D>, Digest = D, Epoch = u64>,
+    A: Automaton<Context = Context<D>, Digest = D, Epoch = Epoch>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<C::Signature, D>>,
     S: Supervisor<Index = View, PublicKey = C::PublicKey>,
@@ -334,7 +334,7 @@ pub struct Actor<
 
     genesis: Option<D>,
 
-    epoch: u64,
+    epoch: Epoch,
     namespace: Vec<u8>,
 
     leader_timeout: Duration,
@@ -363,7 +363,7 @@ impl<
         E: Clock + Rng + Spawner + Storage + Metrics,
         C: Signer,
         D: Digest,
-        A: Automaton<Context = Context<D>, Digest = D, Epoch = u64>,
+        A: Automaton<Context = Context<D>, Digest = D, Epoch = Epoch>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<C::Signature, D>>,
         S: Supervisor<Index = View, PublicKey = C::PublicKey>,

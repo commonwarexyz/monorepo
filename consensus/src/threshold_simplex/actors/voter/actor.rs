@@ -428,7 +428,7 @@ pub struct Actor<
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     D: Digest,
-    A: Automaton<Digest = D, Context = Context<D>, Epoch = u64>,
+    A: Automaton<Digest = D, Context = Context<D>, Epoch = Epoch>,
     R: Relay,
     F: Reporter<Activity = Activity<V, D>>,
     S: ThresholdSupervisor<
@@ -456,7 +456,7 @@ pub struct Actor<
 
     genesis: Option<D>,
 
-    epoch: u64,
+    epoch: Epoch,
     namespace: Vec<u8>,
 
     leader_timeout: Duration,
@@ -486,7 +486,7 @@ impl<
         B: Blocker<PublicKey = C::PublicKey>,
         V: Variant,
         D: Digest,
-        A: Automaton<Digest = D, Context = Context<D>, Epoch = u64>,
+        A: Automaton<Digest = D, Context = Context<D>, Epoch = Epoch>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<V, D>>,
         S: ThresholdSupervisor<

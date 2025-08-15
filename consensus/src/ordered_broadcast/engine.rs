@@ -9,10 +9,10 @@
 
 use super::{
     metrics,
-    types::{Ack, Activity, Chunk, Context, Epoch, Error, Lock, Node, Parent, Proposal},
+    types::{Ack, Activity, Chunk, Context, Error, Lock, Node, Parent, Proposal},
     AckManager, Config, TipManager,
 };
-use crate::{Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
+use crate::{types::Epoch, Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly, variant::Variant},
     Digest, PublicKey, Signer,

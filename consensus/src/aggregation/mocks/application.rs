@@ -1,4 +1,4 @@
-use crate::{aggregation::types::Index, Automaton as A};
+use crate::{aggregation::types::Index, types::Epoch, Automaton as A};
 use commonware_cryptography::{Hasher, Sha256};
 use futures::channel::oneshot;
 use tracing::trace;
@@ -23,7 +23,7 @@ impl Application {
 impl A for Application {
     type Context = Index;
     type Digest = <Sha256 as Hasher>::Digest;
-    type Epoch = u64;
+    type Epoch = Epoch;
 
     async fn genesis(&mut self, _epoch: Self::Epoch) -> Self::Digest {
         let mut hasher = Sha256::default();

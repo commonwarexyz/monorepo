@@ -1,5 +1,5 @@
 use super::relay::Relay;
-use crate::{simplex::types::Context, Automaton as Au, Relay as Re};
+use crate::{simplex::types::Context, types::Epoch, Automaton as Au, Relay as Re};
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
@@ -19,7 +19,7 @@ use std::{
 
 pub enum Message<D: Digest> {
     Genesis {
-        epoch: u64,
+        epoch: Epoch,
         response: oneshot::Sender<D>,
     },
     Propose {
@@ -50,7 +50,7 @@ impl<D: Digest> Mailbox<D> {
 impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<D>;
-    type Epoch = u64;
+    type Epoch = Epoch;
 
     async fn genesis(&mut self, epoch: Self::Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
@@ -173,7 +173,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         panic!("[{:?}] {}", self.participant, msg);
     }
 
-    fn genesis(&mut self, epoch: u64) -> H::Digest {
+    fn genesis(&mut self, epoch: Epoch) -> H::Digest {
         self.hasher
             .update(&(Bytes::from(GENESIS_BYTES), epoch).encode());
         let digest = self.hasher.finalize();
