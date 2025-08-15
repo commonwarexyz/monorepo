@@ -61,6 +61,7 @@ fn fuzzer(input: FuzzInput) {
             context.with_label("network"),
             NetworkConfig {
                 max_size: 1024 * 1024,
+                ignore_blocks: true, // Ignore block operation
             },
         );
 
