@@ -9,7 +9,7 @@ use std::{
     future::Future,
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
-    sync::{Arc, Once},
+    sync::{Arc, Mutex, Once},
     task::{Context, Poll},
 };
 use tracing::error;
@@ -34,6 +34,7 @@ where
         f: F,
         running: Gauge,
         catch_panic: bool,
+        children: Arc<Mutex<Vec<AbortHandle>>>,
     ) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,
@@ -78,7 +79,12 @@ where
         // Make the future abortable
         let abortable = Abortable::new(wrapped, abort_registration);
         (
-            abortable.map(|_| ()),
+            abortable.map(move |_| {
+                // Abort all children
+                for handle in children.lock().unwrap().drain(..) {
+                    handle.abort();
+                }
+            }),
             Self {
                 aborter: Some(aborter),
                 receiver,
@@ -154,6 +160,10 @@ where
         self.once.call_once(|| {
             self.running.dec();
         });
+    }
+
+    pub(crate) fn abort_handle(&self) -> Option<AbortHandle> {
+        self.aborter.clone()
     }
 }
 
