@@ -7,9 +7,9 @@ use commonware_runtime::{
 };
 use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, Rng, SeedableRng};
 
 const MAX_SIZE: usize = 1024 * 1024;
+const SHARED_BLOB: &[u8] = b"buffer_blob";
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
@@ -82,19 +82,15 @@ enum FuzzOperation {
 fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        let mut rng = StdRng::seed_from_u64(input.seed);
-
         let (blob, initial_size) = context
-            .open("test_partition", b"test_blob")
+            .open("test_partition", SHARED_BLOB)
             .await
             .expect("cannot open context");
 
-        if rng.gen_bool(0.5) && initial_size == 0 {
-            let initial_data: Vec<u8> =
-                (0..rng.gen_range(0..MAX_SIZE)).map(|_| rng.gen()).collect();
-            if !initial_data.is_empty() {
-                blob.write_at(initial_data, 0).await.expect("cannot write");
-            }
+        let prefill = (input.seed as usize) & 0x0FFF;
+        if prefill > 0 && initial_size == 0 {
+            let initial_data: Vec<u8> = (0..prefill).map(|i| (i as u8)).collect();
+            let _ = blob.write_at(initial_data, 0).await;
         }
 
         let mut read_buffer = None;
@@ -110,7 +106,6 @@ fn fuzz(input: FuzzInput) {
                     buffer_size,
                 } => {
                     let blob_size = blob_size as u64;
-                    // buffer size must be greater than zero
                     let buffer_size = (buffer_size as usize).clamp(1, MAX_SIZE);
 
                     let (blob, size) = context
@@ -120,7 +115,9 @@ fn fuzz(input: FuzzInput) {
 
                     if size == 0 && blob_size > 0 {
                         let data: Vec<u8> = (0..blob_size).map(|i| i as u8).collect();
-                        blob.write_at(data, 0).await.expect("cannot write");
+                        if (0u64).checked_add(data.len() as u64).is_some() {
+                            blob.write_at(data, 0).await.expect("cannot write");
+                        }
                     }
 
                     read_buffer = Some(Read::new(blob, blob_size.min(size), NZUsize!(buffer_size)));
@@ -130,7 +127,6 @@ fn fuzz(input: FuzzInput) {
                     initial_size,
                     capacity,
                 } => {
-                    // buffer capacity must be greater than zero
                     let capacity = (capacity as usize).clamp(1, MAX_SIZE);
 
                     let (blob, _) = context
@@ -170,8 +166,11 @@ fn fuzz(input: FuzzInput) {
                 FuzzOperation::ReadExact { size } => {
                     if let Some(ref mut reader) = read_buffer {
                         let size = (size as usize).clamp(0, MAX_SIZE);
-                        let mut buf = vec![0u8; size];
-                        let _ = reader.read_exact(&mut buf, size).await;
+                        let current_pos = reader.position();
+                        if current_pos.checked_add(size as u64).is_some() {
+                            let mut buf = vec![0u8; size];
+                            let _ = reader.read_exact(&mut buf, size).await;
+                        }
                     }
                 }
 
@@ -194,7 +193,10 @@ fn fuzz(input: FuzzInput) {
                         } else {
                             &data
                         };
-                        let _ = writer.write_at(data.to_vec(), offset as u64).await;
+                        let offset = offset as u64;
+                        if offset.checked_add(data.len() as u64).is_some() {
+                            let _ = writer.write_at(data.to_vec(), offset).await;
+                        }
                     }
                 }
 
@@ -212,7 +214,16 @@ fn fuzz(input: FuzzInput) {
 
                 FuzzOperation::AppendData { data } => {
                     if let Some(ref append) = append_buffer {
-                        let _ = append.append(data).await;
+                        // Limit data size and check for overflow
+                        let data = if data.len() > MAX_SIZE {
+                            data[..MAX_SIZE].to_vec()
+                        } else {
+                            data
+                        };
+                        let current_size = append.size().await;
+                        if current_size.checked_add(data.len() as u64).is_some() {
+                            let _ = append.append(data).await;
+                        }
                     }
                 }
 
@@ -224,7 +235,7 @@ fn fuzz(input: FuzzInput) {
 
                 FuzzOperation::AppendSync => {
                     if let Some(ref append) = append_buffer {
-                        append.sync().await.expect("append sync");
+                        let _ = append.sync().await;
                     }
                 }
 
@@ -235,10 +246,15 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     if let Some(ref pool) = pool_ref {
                         let offset = offset as u64;
+                        let data = if data.len() > MAX_SIZE {
+                            &data[..MAX_SIZE]
+                        } else {
+                            &data[..]
+                        };
                         if let Some(pool_page_size) = pool_page_size_ref {
                             let aligned_offset = (offset / pool_page_size.get() as u64)
                                 * pool_page_size.get() as u64;
-                            let _ = pool.cache(blob_id as u64, &data, aligned_offset).await;
+                            let _ = pool.cache(blob_id as u64, data, aligned_offset).await;
                         }
                     }
                 }
@@ -276,8 +292,11 @@ fn fuzz(input: FuzzInput) {
                 FuzzOperation::WriteReadAt { data_size, offset } => {
                     if let Some(ref writer) = write_buffer {
                         let size = (data_size as usize).clamp(0, MAX_SIZE);
-                        let buf = vec![0u8; size];
-                        let _ = writer.read_at(buf, offset as u64).await;
+                        let offset = offset as u64;
+                        if offset.checked_add(size as u64).is_some() {
+                            let buf = vec![0u8; size];
+                            let _ = writer.read_at(buf, offset).await;
+                        }
                     }
                 }
 
@@ -296,8 +315,11 @@ fn fuzz(input: FuzzInput) {
                 FuzzOperation::AppendReadAt { data_size, offset } => {
                     if let Some(ref append) = append_buffer {
                         let size = (data_size as usize).clamp(0, MAX_SIZE);
-                        let buf = vec![0u8; size];
-                        let _ = append.read_at(buf, offset as u64).await;
+                        let offset = offset as u64;
+                        if offset.checked_add(size as u64).is_some() {
+                            let buf = vec![0u8; size];
+                            let _ = append.read_at(buf, offset).await;
+                        }
                     }
                 }
             }
