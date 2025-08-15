@@ -1220,4 +1220,119 @@ pub(super) mod test {
             db.destroy().await.unwrap();
         });
     }
+
+    #[test_traced("WARN")]
+    fn test_any_variable_db_partial_sync_recovery() {
+        const ELEMENTS: u64 = 1000;
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
+
+            // Populate the db with some data
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
+                db.update(k, v).await.unwrap();
+            }
+            db.commit().await.unwrap();
+            let root = db.root(&mut hasher);
+            let expected_mmr_size = db.mmr.size();
+            let expected_log_size = db.log_size;
+            let expected_locations_size = db.locations.size().await.unwrap();
+            let expected_oldest_retained_loc = db.oldest_retained_loc().unwrap();
+            let expected_inactivity_floor_loc = db.inactivity_floor_loc;
+            let expected_snapshot_size = db.snapshot.items();
+            db.close().await.unwrap();
+
+            // Reopen the db and verify the state is the same
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+            assert_eq!(db.mmr.size(), expected_mmr_size);
+            assert_eq!(db.log_size, expected_log_size);
+            assert_eq!(db.locations.size().await.unwrap(), expected_locations_size);
+            assert_eq!(
+                db.oldest_retained_loc().unwrap(),
+                expected_oldest_retained_loc
+            );
+            assert_eq!(db.inactivity_floor_loc, expected_inactivity_floor_loc);
+            assert_eq!(db.snapshot.items(), expected_snapshot_size);
+
+            // Add more elements and commit
+            for i in 0u64..ELEMENTS * 2 {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 8) as usize];
+                db.update(k, v).await.unwrap();
+            }
+            db.commit().await.unwrap();
+            let root = db.root(&mut hasher);
+            let expected_mmr_size = db.mmr.size();
+            let expected_log_size = db.log_size;
+            let expected_locations_size = db.locations.size().await.unwrap();
+            let expected_oldest_retained_loc = db.oldest_retained_loc().unwrap();
+            let expected_inactivity_floor_loc = db.inactivity_floor_loc;
+            let expected_snapshot_size = db.snapshot.items();
+
+            // Add more elements but crash after writing only the MMR
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 8) as usize];
+                db.update(k, v).await.unwrap();
+            }
+            db.simulate_failure(true, false, false).await.unwrap();
+
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+            assert_eq!(db.mmr.size(), expected_mmr_size);
+            assert_eq!(db.log_size, expected_log_size);
+            assert_eq!(db.locations.size().await.unwrap(), expected_locations_size);
+            assert_eq!(
+                db.oldest_retained_loc().unwrap(),
+                expected_oldest_retained_loc
+            );
+            assert_eq!(db.inactivity_floor_loc, expected_inactivity_floor_loc);
+            assert_eq!(db.snapshot.items(), expected_snapshot_size);
+
+            // Add more elements and commit
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 9) as usize];
+                db.update(k, v).await.unwrap();
+            }
+            db.commit().await.unwrap();
+
+            // Add more elements but crash after writing only the locations
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 9) as usize];
+                db.update(k, v).await.unwrap();
+            }
+            db.simulate_failure(false, false, true).await.unwrap();
+
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+
+            // Add more elements and commit
+            for i in 0u64..ELEMENTS * 2 {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 10) as usize];
+                db.update(k, v).await.unwrap();
+            }
+            db.commit().await.unwrap();
+
+            // Add more elements but crash after writing only the oldest_retained_loc
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 10) as usize];
+                db.update(k, v).await.unwrap();
+            }
+            db.simulate_failure(false, false, false).await.unwrap();
+
+            let db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+
+            // commit only the log
+            db.destroy().await.unwrap();
+        });
+    }
 }
