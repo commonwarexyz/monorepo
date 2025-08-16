@@ -19,7 +19,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use futures::future::try_join_all;
-use std::{collections::HashMap, future::Future};
+use std::collections::HashMap;
 use tracing::debug;
 
 /// Errors that can occur when reconstructing a digest from a proof due to invalid input.
@@ -37,32 +37,26 @@ pub(crate) enum ReconstructionError {
     MissingElements,
 }
 
-pub struct SimpleStore<D> {
+/// A store derived from the result of [Proof::verify_range_inclusion_and_extract_digests] that can
+/// be used to generate proofs over any sub-range of the original.
+pub struct ProofStore<D> {
     digests: HashMap<u64, D>,
     size: u64,
 }
 
-impl<D: Digest> SimpleStore<D> {
-    /// Create a new SimpleStore from the result of
+impl<D: Digest> ProofStore<D> {
+    /// Create a new ProofStore from the result of
     /// [Proof::verify_range_inclusion_and_extract_digests]. The resulting store can be used to
     /// generate proofs over any sub-range of the original range.
-    pub fn new(digests: Vec<(u64, D)>) -> Self {
-        let mut max = 0;
-        let mut digest_map = HashMap::new();
-        for (pos, digest) in digests {
-            if pos > max {
-                max = pos;
-            }
-            digest_map.insert(pos, digest);
-        }
+    pub fn new(digests: Vec<(u64, D)>, size: u64) -> Self {
         Self {
-            digests: digest_map,
-            size: max + 1,
+            digests: digests.into_iter().collect(),
+            size,
         }
     }
 }
 
-impl<D: Digest> Storage<D> for SimpleStore<D> {
+impl<D: Digest> Storage<D> for ProofStore<D> {
     async fn get_node(&self, pos: u64) -> Result<Option<D>, Error> {
         Ok(self.digests.get(&pos).cloned())
     }
@@ -307,12 +301,10 @@ impl<D: Digest> Proof<D> {
         if elements_iter.next().is_some() {
             return Err(ReconstructionError::ExtraDigests);
         }
-        let next_sibling = siblings_iter.next();
-        if (proof_digests_used == 0 && next_sibling.is_some())
-            || (next_sibling.is_some()
-                && *next_sibling.unwrap() != self.digests[proof_digests_used - 1])
-        {
-            return Err(ReconstructionError::ExtraDigests);
+        if let Some(next_sibling) = siblings_iter.next() {
+            if proof_digests_used == 0 || *next_sibling != self.digests[proof_digests_used - 1] {
+                return Err(ReconstructionError::ExtraDigests);
+            }
         }
 
         Ok(peak_digests)
@@ -584,11 +576,17 @@ where
             Some(hash) => left_digest = Some(*hash),
             None => return Err(ReconstructionError::MissingDigests),
         }
+        if let Some(ref mut collected_digests) = collected_digests {
+            collected_digests.push((left_pos, left_digest.unwrap()));
+        }
     }
     if right_digest.is_none() {
         match sibling_digests.next() {
             Some(hash) => right_digest = Some(*hash),
             None => return Err(ReconstructionError::MissingDigests),
+        }
+        if let Some(ref mut collected_digests) = collected_digests {
+            collected_digests.push((right_pos, right_digest.unwrap()));
         }
     }
 
@@ -1444,6 +1442,70 @@ mod tests {
                 .unwrap();
             let num_elements = mid_end - mid_start + 1;
             assert!(mid_range_digests.len() > num_elements);
+        });
+    }
+
+    #[test_traced]
+    fn test_verification_proof_store() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // create a new MMR and add a non-trivial amount (49) of elements
+            let mut mmr = Mmr::default();
+            let mut elements = Vec::new();
+            let mut element_positions = Vec::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
+            for i in 0..49 {
+                elements.push(test_digest(i));
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
+            }
+            let root = mmr.root(&mut hasher);
+
+            // Extract a ProofStore from a proof over a variety of ranges, starting with the full
+            // range and shrinking each endpoint with each iteration.
+            let mut range_start = 0;
+            let mut range_end = 48;
+            while range_start <= range_end {
+                let range_proof = mmr
+                    .range_proof(element_positions[range_start], element_positions[range_end])
+                    .await
+                    .unwrap();
+                let range_digests = range_proof
+                    .verify_range_inclusion_and_extract_digests(
+                        &mut hasher,
+                        &elements[range_start..range_end + 1],
+                        element_positions[range_start],
+                        &root,
+                    )
+                    .unwrap();
+                let num_elements = range_end - range_start + 1;
+                assert!(range_digests.len() > num_elements);
+                let proof_store = ProofStore::new(range_digests, mmr.size());
+
+                // Verify that the ProofStore can be used to generate proofs over a host of sub-ranges
+                // starting with the full range down to a range containing a single element.
+                let mut subrange_start = range_start;
+                let mut subrange_end = range_end;
+                while subrange_start <= subrange_end {
+                    // Verify a proof over a sub-range of the original range.
+                    let sub_range_proof = Proof::<Digest>::range_proof(
+                        &proof_store,
+                        element_positions[subrange_start],
+                        element_positions[subrange_end],
+                    )
+                    .await
+                    .unwrap();
+                    assert!(sub_range_proof.verify_range_inclusion(
+                        &mut hasher,
+                        &elements[subrange_start..subrange_end + 1],
+                        element_positions[subrange_start],
+                        &root
+                    ));
+                    subrange_start += 1;
+                    subrange_end -= 1;
+                }
+                range_start += 1;
+                range_end -= 1;
+            }
         });
     }
 }
