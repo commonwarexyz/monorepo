@@ -231,11 +231,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             mmr_leaves = locations_size;
         }
 
-        // The size of the log at the last commit point (including the commit operation), or 0 if
-        // none.
-        let mut end_loc = 0;
-        // The offset into the log at the end_loc.
-        let mut end_offset = 0;
+        // The location and blob-offset of the first operation to follow the last known commit point.
+        let mut after_last_commit = None;
         // The set of operations that have not yet been committed.
         let mut uncommitted_ops = HashMap::new();
         let mut oldest_retained_loc_found = false;
@@ -250,13 +247,18 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     Err(e) => {
                         return Err(Error::Journal(e));
                     }
-                    Ok((section, offset, size, op)) => {
+                    Ok((section, offset, _, op)) => {
                         if !oldest_retained_loc_found {
                             self.log_size = section * self.log_items_per_section;
                             self.oldest_retained_loc = self.log_size;
                             oldest_retained_loc_found = true;
                         }
+
                         let loc = self.log_size; // location of the current operation.
+                        if after_last_commit.is_none() {
+                            after_last_commit = Some((loc, offset));
+                        }
+
                         self.log_size += 1;
 
                         // Consistency check: confirm the provided section matches what we expect from this operation's
@@ -314,8 +316,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                     }
                                 }
                                 uncommitted_ops.clear();
-                                end_loc = self.log_size;
-                                end_offset = offset + size;
+                                after_last_commit = None;
                             }
                             _ => unreachable!(
                                 "unexpected operation type at offset {offset} of section {section}"
@@ -325,15 +326,17 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 }
             }
         }
-        if end_loc < self.log_size {
+
+        // Rewind the operations log if necessary.
+        if let Some((end_loc, end_offset)) = after_last_commit {
+            assert!(!uncommitted_ops.is_empty());
             warn!(
                 op_count = uncommitted_ops.len(),
                 log_size = end_loc,
+                end_offset,
                 "rewinding over uncommitted operations at end of log"
             );
-            // We use saturating_sub below for the case where end_loc == 0, which happens when there
-            // are no committed operations at all remaining.
-            let prune_to_section = end_loc.saturating_sub(1) / self.log_items_per_section;
+            let prune_to_section = end_loc / self.log_items_per_section;
             self.log
                 .rewind_to_offset(prune_to_section, end_offset)
                 .await?;
@@ -1212,11 +1215,141 @@ pub(super) mod test {
             }
             db.commit().await.unwrap();
 
+            let root = db.root(&mut hasher);
             assert_eq!(db.op_count(), 2787);
+            assert_eq!(leaf_pos_to_num(db.mmr.size()), Some(2787));
+            assert_eq!(db.locations.size().await.unwrap(), 2787);
+            assert_eq!(db.inactivity_floor_loc, 1480);
+            assert_eq!(db.oldest_retained_loc().unwrap(), 1477);
+            assert_eq!(db.snapshot.items(), 857);
+            db.close().await.unwrap();
+
+            let db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+            assert_eq!(db.op_count(), 2787);
+            assert_eq!(leaf_pos_to_num(db.mmr.size()), Some(2787));
+            assert_eq!(db.locations.size().await.unwrap(), 2787);
             assert_eq!(db.inactivity_floor_loc, 1480);
             assert_eq!(db.oldest_retained_loc().unwrap(), 1477);
             assert_eq!(db.snapshot.items(), 857);
 
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_any_variable_db_partial_sync_recovery() {
+        const ELEMENTS: u64 = 1000;
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
+
+            // Populate the db with some data
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
+                db.update(k, v).await.unwrap();
+            }
+            db.commit().await.unwrap();
+            let root = db.root(&mut hasher);
+            let expected_mmr_size = db.mmr.size();
+            let expected_log_size = db.log_size;
+            let expected_locations_size = db.locations.size().await.unwrap();
+            let expected_oldest_retained_loc = db.oldest_retained_loc().unwrap();
+            let expected_inactivity_floor_loc = db.inactivity_floor_loc;
+            let expected_snapshot_size = db.snapshot.items();
+            db.close().await.unwrap();
+
+            // Reopen the db and verify the state is the same
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+            assert_eq!(db.mmr.size(), expected_mmr_size);
+            assert_eq!(db.log_size, expected_log_size);
+            assert_eq!(db.locations.size().await.unwrap(), expected_locations_size);
+            assert_eq!(
+                db.oldest_retained_loc().unwrap(),
+                expected_oldest_retained_loc
+            );
+            assert_eq!(db.inactivity_floor_loc, expected_inactivity_floor_loc);
+            assert_eq!(db.snapshot.items(), expected_snapshot_size);
+
+            // Add more elements and commit
+            for i in 0u64..ELEMENTS * 2 {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 8) as usize];
+                db.update(k, v).await.unwrap();
+            }
+            db.commit().await.unwrap();
+            let root = db.root(&mut hasher);
+            let expected_mmr_size = db.mmr.size();
+            let expected_log_size = db.log_size;
+            let expected_locations_size = db.locations.size().await.unwrap();
+            let expected_oldest_retained_loc = db.oldest_retained_loc().unwrap();
+            let expected_inactivity_floor_loc = db.inactivity_floor_loc;
+            let expected_snapshot_size = db.snapshot.items();
+
+            // Add more elements but crash after writing only the MMR
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 8) as usize];
+                db.update(k, v).await.unwrap();
+            }
+            db.simulate_failure(true, false, false).await.unwrap();
+
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+            assert_eq!(db.mmr.size(), expected_mmr_size);
+            assert_eq!(db.log_size, expected_log_size);
+            assert_eq!(db.locations.size().await.unwrap(), expected_locations_size);
+            assert_eq!(
+                db.oldest_retained_loc().unwrap(),
+                expected_oldest_retained_loc
+            );
+            assert_eq!(db.inactivity_floor_loc, expected_inactivity_floor_loc);
+            assert_eq!(db.snapshot.items(), expected_snapshot_size);
+
+            // Add more elements and commit
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 9) as usize];
+                db.update(k, v).await.unwrap();
+            }
+            db.commit().await.unwrap();
+            let root = db.root(&mut hasher);
+
+            // Add more elements but crash after writing only the locations
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 9) as usize];
+                db.update(k, v).await.unwrap();
+            }
+            db.simulate_failure(false, false, true).await.unwrap();
+
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+
+            // Add more elements and commit
+            for i in 0u64..ELEMENTS * 2 {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 10) as usize];
+                db.update(k, v).await.unwrap();
+            }
+            db.commit().await.unwrap();
+            let root = db.root(&mut hasher);
+
+            // Add more elements but crash after writing only the oldest_retained_loc
+            for i in 0u64..ELEMENTS {
+                let k = hash(&i.to_be_bytes());
+                let v = vec![(i % 255) as u8; ((i % 13) + 10) as usize];
+                db.update(k, v).await.unwrap();
+            }
+            db.simulate_failure(false, false, false).await.unwrap();
+
+            let db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+
+            // commit only the log
             db.destroy().await.unwrap();
         });
     }
