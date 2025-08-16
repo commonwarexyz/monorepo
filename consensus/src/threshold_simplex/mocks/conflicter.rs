@@ -2,7 +2,7 @@
 
 use crate::{
     threshold_simplex::types::{Finalize, Notarize, Proposal, Voter},
-    types::{Epoch, View},
+    types::{Epoch, Round, View},
     ThresholdSupervisor, Viewable,
 };
 use commonware_codec::{DecodeExt, Encode};
@@ -77,8 +77,11 @@ impl<
                     let view = notarize.view();
                     let share = self.supervisor.share(view).unwrap();
                     let payload = H::Digest::random(&mut self.context);
-                    let proposal =
-                        Proposal::new(self.epoch, view, notarize.proposal.parent, payload);
+                    let proposal = Proposal::new(
+                        Round::new(self.epoch, view),
+                        notarize.proposal.parent,
+                        payload,
+                    );
                     let n = Notarize::<V, _>::sign(&self.namespace, share, proposal);
                     let msg = Voter::Notarize(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
@@ -93,8 +96,11 @@ impl<
                     let view = finalize.view();
                     let share = self.supervisor.share(view).unwrap();
                     let payload = H::Digest::random(&mut self.context);
-                    let proposal =
-                        Proposal::new(self.epoch, view, finalize.proposal.parent, payload);
+                    let proposal = Proposal::new(
+                        Round::new(self.epoch, view),
+                        finalize.proposal.parent,
+                        payload,
+                    );
                     let f = Finalize::<V, _>::sign(&self.namespace, share, proposal);
                     let msg = Voter::Finalize(f).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
