@@ -19,7 +19,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use futures::future::try_join_all;
-use std::collections::HashMap;
+use std::{collections::HashMap, future::Future};
 use tracing::debug;
 
 /// Errors that can occur when reconstructing a digest from a proof due to invalid input.
@@ -35,6 +35,41 @@ pub(crate) enum ReconstructionError {
     InvalidEndPos,
     #[error("missing elements")]
     MissingElements,
+}
+
+pub struct SimpleStore<D> {
+    digests: HashMap<u64, D>,
+    size: u64,
+}
+
+impl<D: Digest> SimpleStore<D> {
+    /// Create a new SimpleStore from the result of
+    /// [Proof::verify_range_inclusion_and_extract_digests]. The resulting store can be used to
+    /// generate proofs over any sub-range of the original range.
+    pub fn new(digests: Vec<(u64, D)>) -> Self {
+        let mut max = 0;
+        let mut digest_map = HashMap::new();
+        for (pos, digest) in digests {
+            if pos > max {
+                max = pos;
+            }
+            digest_map.insert(pos, digest);
+        }
+        Self {
+            digests: digest_map,
+            size: max + 1,
+        }
+    }
+}
+
+impl<D: Digest> Storage<D> for SimpleStore<D> {
+    async fn get_node(&self, pos: u64) -> Result<Option<D>, Error> {
+        Ok(self.digests.get(&pos).cloned())
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
 }
 
 /// Contains the information necessary for proving the inclusion of an element, or some range of
