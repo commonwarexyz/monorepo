@@ -37,18 +37,43 @@ pub(crate) enum ReconstructionError {
     MissingElements,
 }
 
-/// A store derived from the result of [Proof::verify_range_inclusion_and_extract_digests] that can
-/// be used to generate proofs over any sub-range of the original.
+/// A store derived from a [Proof] that can be used to generate proofs over any sub-range of the
+/// original range.
 pub struct ProofStore<D> {
     digests: HashMap<u64, D>,
     size: u64,
 }
 
 impl<D: Digest> ProofStore<D> {
-    /// Create a new ProofStore from the result of
+    /// Create a new [ProofStore] from a valid [Proof] over the given range of elements. The
+    /// resulting store can be used to generate proofs over any sub-range of the original range.
+    /// Returns an error if the proof is invalid or could not be verified against the given root.
+    pub fn new<I, H, E>(
+        hasher: &mut H,
+        proof: &Proof<D>,
+        elements: &[E],
+        start_element_pos: u64,
+        root: &D,
+    ) -> Result<Self, Error>
+    where
+        I: CHasher<Digest = D>,
+        H: Hasher<I>,
+        E: AsRef<[u8]>,
+    {
+        let digests = proof.verify_range_inclusion_and_extract_digests(
+            hasher,
+            elements,
+            start_element_pos,
+            root,
+        )?;
+
+        Ok(ProofStore::new_from_digests(digests, proof.size))
+    }
+
+    /// Create a new [ProofStore] from the result of calling
     /// [Proof::verify_range_inclusion_and_extract_digests]. The resulting store can be used to
     /// generate proofs over any sub-range of the original range.
-    pub fn new(digests: Vec<(u64, D)>, size: u64) -> Self {
+    pub fn new_from_digests(digests: Vec<(u64, D)>, size: u64) -> Self {
         Self {
             digests: digests.into_iter().collect(),
             size,
@@ -1469,17 +1494,14 @@ mod tests {
                     .range_proof(element_positions[range_start], element_positions[range_end])
                     .await
                     .unwrap();
-                let range_digests = range_proof
-                    .verify_range_inclusion_and_extract_digests(
-                        &mut hasher,
-                        &elements[range_start..range_end + 1],
-                        element_positions[range_start],
-                        &root,
-                    )
-                    .unwrap();
-                let num_elements = range_end - range_start + 1;
-                assert!(range_digests.len() > num_elements);
-                let proof_store = ProofStore::new(range_digests, mmr.size());
+                let proof_store = ProofStore::new(
+                    &mut hasher,
+                    &range_proof,
+                    &elements[range_start..range_end + 1],
+                    element_positions[range_start],
+                    &root,
+                )
+                .unwrap();
 
                 // Verify that the ProofStore can be used to generate proofs over a host of sub-ranges
                 // starting with the full range down to a range containing a single element.
