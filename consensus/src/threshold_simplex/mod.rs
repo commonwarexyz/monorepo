@@ -209,7 +209,8 @@ pub(crate) fn interesting(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{threshold_simplex::types::seed_namespace, Monitor};
+    use crate::{threshold_simplex::types::seed_namespace, types::Round, Monitor};
+    use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
@@ -3278,8 +3279,7 @@ mod tests {
             }
 
             // Prepare TLE test data
-            let target = 10u64; // Encrypt for view 10
-            let target_bytes = target.to_be_bytes();
+            let target = Round::new(333, 10); // Encrypt for view 10
             let message_content = b"Secret message for future view10"; // 32 bytes
             let message = Block::new(*message_content);
 
@@ -3288,7 +3288,7 @@ mod tests {
             let ciphertext = encrypt::<_, V>(
                 &mut context,
                 public_key,
-                (Some(&seed_namespace), &target_bytes),
+                (Some(&seed_namespace), &target.encode()),
                 &message,
             );
 
@@ -3298,7 +3298,7 @@ mod tests {
                 // Wait for notarization
                 context.sleep(Duration::from_millis(100)).await;
                 let notarizations = supervisor.notarizations.lock().unwrap();
-                let Some(notarization) = notarizations.get(&target) else {
+                let Some(notarization) = notarizations.get(&target.view()) else {
                     continue;
                 };
 

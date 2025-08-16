@@ -404,7 +404,7 @@ impl<
                         }
                         Message::Nullified { nullification } => {
                             // Update current view
-                            let view = nullification.view;
+                            let view = nullification.view();
                             if view > current_view {
                                 current_view = view;
                             } else {
@@ -538,7 +538,7 @@ impl<
                             }
                             let mut nullifications_found = BTreeSet::new();
                             for nullification in response.nullifications {
-                                let view = nullification.view;
+                                let view = nullification.view();
                                 let entry = Entry { task: Task::Nullification, view };
                                 if !self.required.remove(&entry) {
                                     debug!(view, sender = ?s, "unnecessary nullification");

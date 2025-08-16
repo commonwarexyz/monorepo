@@ -233,7 +233,6 @@ fn main() {
                 reporter: mailbox.clone(),
                 supervisor,
                 partition: String::from("log"),
-                namespace: consensus_namespace,
                 mailbox_size: 1024,
                 epoch: 0,
                 namespace: consensus_namespace,

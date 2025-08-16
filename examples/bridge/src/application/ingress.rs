@@ -1,6 +1,6 @@
 use commonware_consensus::{
     threshold_simplex::types::{Activity, Context},
-    types::{Epoch, View},
+    types::{Epoch, Round},
     Automaton as Au, Relay as Re, Reporter,
 };
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, Digest};
@@ -16,7 +16,7 @@ pub enum Message<D: Digest> {
         response: oneshot::Sender<D>,
     },
     Propose {
-        index: View,
+        round: Round,
         response: oneshot::Sender<D>,
     },
     Verify {
@@ -60,7 +60,7 @@ impl<D: Digest> Au for Mailbox<D> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Propose {
-                index: context.view,
+                round: context.round,
                 response,
             })
             .await
