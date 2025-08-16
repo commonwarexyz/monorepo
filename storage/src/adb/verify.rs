@@ -49,3 +49,15 @@ where
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
     proof.verify_range_inclusion_and_extract_digests(hasher, &elements, start_pos, target_root)
 }
+
+pub fn digests_required_for_proof<D: Digest>(size: u64, start_loc: u64, end_loc: u64) -> Vec<u64> {
+    let size = leaf_num_to_pos(size);
+    let start_pos = leaf_num_to_pos(start_loc);
+    let end_pos = leaf_num_to_pos(end_loc);
+    Proof::<D>::nodes_required_for_range_proof(size, start_pos, end_pos)
+}
+
+pub fn construct_proof<D: Digest>(size: u64, digests: Vec<D>) -> Proof<D> {
+    let size = leaf_num_to_pos(size);
+    Proof::<D> { size, digests }
+}
