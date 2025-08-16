@@ -1091,6 +1091,11 @@ mod test {
 
             // Simulate a failed commit and test that we rollback to the previous root.
             db.simulate_failure(false, false).await.unwrap();
+            let db = create_test_store(context.with_label("store")).await;
+            assert_eq!(db.op_count(), op_count);
+
+            // Close and reopen the store to ensure the final commit is preserved.
+            db.close().await.unwrap();
             let mut db = create_test_store(context.with_label("store")).await;
             assert_eq!(db.op_count(), op_count);
 
