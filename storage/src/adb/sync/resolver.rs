@@ -4,9 +4,10 @@ use crate::{
     store::operation::{Fixed, Variable},
     translator::Translator,
 };
+use commonware_codec::CodecFixed;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, RwLock, Storage};
-use commonware_utils::{Array, SpanFixed};
+use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
@@ -57,7 +58,7 @@ impl<E, K, V, H, T> Resolver for Arc<Any<E, K, V, H, T>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: SpanFixed,
+    V: CodecFixed,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
@@ -89,7 +90,7 @@ impl<E, K, V, H, T> Resolver for Arc<RwLock<Any<E, K, V, H, T>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: SpanFixed,
+    V: CodecFixed,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
@@ -181,8 +182,6 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use commonware_utils::SpanFixed;
-
     use super::*;
     use std::marker::PhantomData;
 
@@ -197,7 +196,7 @@ pub(crate) mod tests {
     where
         D: Digest,
         K: Array,
-        V: SpanFixed,
+        V: CodecFixed,
     {
         type Digest = D;
         type Op = Fixed<K, V>;

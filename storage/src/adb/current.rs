@@ -20,10 +20,10 @@ use crate::{
     store::operation::Fixed,
     translator::Translator,
 };
-use commonware_codec::{Encode as _, FixedSize};
+use commonware_codec::{CodecFixed, Encode as _, FixedSize};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
-use commonware_utils::{Array, SpanFixed};
+use commonware_utils::Array;
 use futures::future::try_join_all;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
@@ -77,7 +77,7 @@ pub struct Config<T: Translator> {
 pub struct Current<
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: SpanFixed,
+    V: CodecFixed,
     H: CHasher,
     T: Translator,
     const N: usize,
@@ -114,7 +114,7 @@ pub struct KeyValueProofInfo<K, V, const N: usize> {
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: SpanFixed,
+        V: CodecFixed,
         H: CHasher,
         T: Translator,
         const N: usize,

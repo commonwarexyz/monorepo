@@ -46,12 +46,9 @@ pub trait Span:
 {
 }
 
-/// Types that can be read from a fixed-size byte sequence.
-pub trait SpanFixed: Span + EncodeFixed {}
-
 /// Types that can be fallibly read from a fixed-size byte sequence.
 ///
 /// `Array` is typically used to parse things like `PublicKeys` and `Signatures`
 /// from an untrusted network connection. Once parsed, these types are assumed
 /// to be well-formed (which prevents duplicate validation).
-pub trait Array: SpanFixed + AsRef<[u8]> + Deref<Target = [u8]> {}
+pub trait Array: Span + EncodeFixed + AsRef<[u8]> + Deref<Target = [u8]> {}

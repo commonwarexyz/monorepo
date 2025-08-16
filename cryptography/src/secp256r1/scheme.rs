@@ -1,7 +1,7 @@
 use crate::{Array, PrivateKeyExt};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_utils::{hex, union_unique, Span, SpanFixed};
+use commonware_utils::{hex, union_unique, Span};
 use p256::{
     ecdsa::{
         signature::{Signer, Verifier},
@@ -92,8 +92,6 @@ impl FixedSize for PrivateKey {
 }
 
 impl Span for PrivateKey {}
-
-impl SpanFixed for PrivateKey {}
 
 impl Array for PrivateKey {}
 
@@ -202,8 +200,6 @@ impl FixedSize for PublicKey {
 
 impl Span for PublicKey {}
 
-impl SpanFixed for PublicKey {}
-
 impl Array for PublicKey {}
 
 impl Hash for PublicKey {
@@ -280,8 +276,6 @@ impl FixedSize for Signature {
 }
 
 impl Span for Signature {}
-
-impl SpanFixed for Signature {}
 
 impl Array for Signature {}
 

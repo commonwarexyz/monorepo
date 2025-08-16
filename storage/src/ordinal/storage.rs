@@ -1,12 +1,12 @@
 use super::{Config, Error};
 use crate::rmap::RMap;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
 };
-use commonware_utils::{hex, BitVec, SpanFixed};
+use commonware_utils::{hex, BitVec};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::{
@@ -18,12 +18,12 @@ use tracing::{debug, warn};
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
-struct Record<V: SpanFixed> {
+struct Record<V: CodecFixed> {
     value: V,
     crc: u32,
 }
 
-impl<V: SpanFixed> Record<V> {
+impl<V: CodecFixed> Record<V> {
     fn new(value: V) -> Self {
         let crc = crc32fast::hash(&value.encode());
         Self { value, crc }
@@ -34,18 +34,18 @@ impl<V: SpanFixed> Record<V> {
     }
 }
 
-impl<V: SpanFixed> FixedSize for Record<V> {
+impl<V: CodecFixed> FixedSize for Record<V> {
     const SIZE: usize = V::SIZE + u32::SIZE;
 }
 
-impl<V: SpanFixed> CodecWrite for Record<V> {
+impl<V: CodecFixed> CodecWrite for Record<V> {
     fn write(&self, buf: &mut impl BufMut) {
         self.value.write(buf);
         self.crc.write(buf);
     }
 }
 
-impl<V: SpanFixed> Read for Record<V> {
+impl<V: CodecFixed> Read for Record<V> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -57,7 +57,7 @@ impl<V: SpanFixed> Read for Record<V> {
 }
 
 /// Implementation of [Ordinal].
-pub struct Ordinal<E: Storage + Metrics + Clock, V: SpanFixed> {
+pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed> {
     // Configuration and context
     context: E,
     config: Config,
@@ -81,7 +81,7 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: SpanFixed> {
     _phantom: PhantomData<V>,
 }
 
-impl<E: Storage + Metrics + Clock, V: SpanFixed> Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixed> Ordinal<E, V> {
     /// Initialize a new [Ordinal] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         Self::init_with_bits(context, config, None).await
