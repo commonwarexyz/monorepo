@@ -77,7 +77,9 @@ pub struct SyncConfig<D: Digest> {
 
 /// A MMR backed by a fixed-item-length journal.
 pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher> {
-    /// A memory resident MMR used to build the MMR structure and cache updates.
+    /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
+    /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
+    /// the journaled MMR's pruning boundary.
     mem_mmr: MemMmr<H>,
 
     /// Stores all unpruned MMR nodes.
@@ -208,16 +210,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             pinned_nodes,
             pool: cfg.thread_pool,
         });
-
-        // Compute the additional pinned nodes needed to prove all journal elements at the current
-        // pruning boundary.
-        let mut pinned_nodes = HashMap::new();
-        for pos in Proof::<H::Digest>::nodes_to_pin(metadata_prune_pos) {
-            let digest =
-                Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
-            pinned_nodes.insert(pos, digest);
-        }
-        mem_mmr.add_pinned_nodes(pinned_nodes);
+        Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, metadata_prune_pos).await?;
 
         let mut s = Self {
             mem_mmr,
@@ -238,6 +231,23 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         }
 
         Ok(s)
+    }
+
+    /// Adds the pinned nodes based on `prune_pos` to `mem_mmr`.
+    async fn add_extra_pinned_nodes(
+        mem_mmr: &mut MemMmr<H>,
+        metadata: &Metadata<E, U64, Vec<u8>>,
+        journal: &Journal<E, H::Digest>,
+        prune_pos: u64,
+    ) -> Result<(), Error> {
+        let mut pinned_nodes = HashMap::new();
+        for pos in Proof::<H::Digest>::nodes_to_pin(prune_pos) {
+            let digest = Mmr::<E, H>::get_from_metadata_or_journal(metadata, journal, pos).await?;
+            pinned_nodes.insert(pos, digest);
+        }
+        mem_mmr.add_pinned_nodes(pinned_nodes);
+
+        Ok(())
     }
 
     /// Initialize an MMR for synchronization, reusing existing data if possible.
@@ -308,13 +318,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
         if cfg.lower_bound < journal_size {
-            let mut pinned_nodes_pruning_boundary = HashMap::new();
-            for pos in Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound) {
-                let digest =
-                    Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
-                pinned_nodes_pruning_boundary.insert(pos, digest);
-            }
-            mem_mmr.add_pinned_nodes(pinned_nodes_pruning_boundary);
+            Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.lower_bound)
+                .await?;
         }
 
         Ok(Self {
@@ -461,6 +466,13 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             pinned_nodes,
             pool: self.mem_mmr.thread_pool.take(),
         });
+        Self::add_extra_pinned_nodes(
+            &mut self.mem_mmr,
+            &self.metadata,
+            &self.journal,
+            self.pruned_to_pos,
+        )
+        .await?;
 
         Ok(())
     }
@@ -825,13 +837,22 @@ mod tests {
                 c_hasher.update(&i.to_be_bytes());
                 let element = c_hasher.finalize();
                 mmr.add(&mut hasher, &element).await.unwrap();
+                if i == 101 {
+                    mmr.sync(&mut hasher).await.unwrap();
+                }
             }
             let leaf_pos = leaf_num_to_pos(50);
             mmr.prune_to_pos(&mut hasher, leaf_pos).await.unwrap();
+            // Pop enough nodes to cause the mem-mmr to be completely emptied, and then some.
+            mmr.pop(80).await.unwrap();
+            // Make sure the pinned node boundary is valid by generating a proof for the oldest item.
+            mmr.proof(leaf_pos).await.unwrap();
+            // prune all remaining leaves 1 at a time.
             while mmr.size() > leaf_pos {
                 assert!(mmr.pop(1).await.is_ok());
             }
             assert!(matches!(mmr.pop(1).await, Err(Error::ElementPruned(_))));
+
             mmr.destroy().await.unwrap();
         });
     }

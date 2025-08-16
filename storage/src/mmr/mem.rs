@@ -169,7 +169,10 @@ impl<H: CHasher> Mmr<H> {
     /// pinned_nodes map.
     pub fn get_node_unchecked(&self, pos: u64) -> &H::Digest {
         if pos < self.pruned_to_pos {
-            return self.pinned_nodes.get(&pos).unwrap();
+            return self
+                .pinned_nodes
+                .get(&pos)
+                .expect("requested node is pruned and not pinned");
         }
 
         &self.nodes[self.pos_to_index(pos)]
