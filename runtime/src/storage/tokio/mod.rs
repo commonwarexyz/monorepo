@@ -74,7 +74,11 @@ impl crate::Storage for Storage {
         file.set_max_buf_size(self.cfg.maximum_buffer_size);
 
         // Get the file length
-        let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
+        let len = file
+            .metadata()
+            .await
+            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?
+            .len();
 
         #[cfg(unix)]
         {
@@ -120,8 +124,15 @@ impl crate::Storage for Storage {
             .await
             .map_err(|_| Error::PartitionMissing(partition.into()))?;
         let mut blobs = Vec::new();
-        while let Some(entry) = entries.next_entry().await.map_err(|_| Error::ReadFailed)? {
-            let file_type = entry.file_type().await.map_err(|_| Error::ReadFailed)?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|_| Error::PartitionCorrupt(partition.into()))?
+        {
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|_| Error::PartitionCorrupt(partition.into()))?;
             if !file_type.is_file() {
                 return Err(Error::PartitionCorrupt(partition.into()));
             }
