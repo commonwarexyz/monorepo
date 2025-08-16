@@ -1,7 +1,11 @@
 use super::relay::Relay;
-use crate::{threshold_simplex::types::Context, types::Epoch, Automaton as Au, Relay as Re};
-use bytes::{BufMut, Bytes};
-use commonware_codec::{DecodeExt, Encode, FixedSize};
+use crate::{
+    threshold_simplex::types::Context,
+    types::{Epoch, Round},
+    Automaton as Au, Relay as Re,
+};
+use bytes::Bytes;
+use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Spawner};
@@ -191,11 +195,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             .await;
 
         // Generate the payload
-        let payload_len = u64::SIZE + H::Digest::SIZE + u64::SIZE;
-        let mut payload = Vec::with_capacity(payload_len);
-        payload.put_u64(context.view);
-        payload.extend_from_slice(&context.parent.1);
-        payload.put_u64(self.context.gen::<u64>()); // Ensures we always have a unique payload
+        let rand = self.context.gen::<u64>();
+        let payload = (context.round, context.parent.1, rand).encode();
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();
 
@@ -220,12 +221,12 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             .await;
 
         // Verify contents
-        let (parsed_view, parent, _) =
-            <(u64, H::Digest, u64)>::decode(&mut contents).expect("invalid payload");
-        if parsed_view != context.view {
+        let (parsed_round, parent, _) =
+            <(Round, H::Digest, u64)>::decode(&mut contents).expect("invalid payload");
+        if parsed_round != context.round {
             self.panic(&format!(
-                "invalid view (in payload): {} != {}",
-                parsed_view, context.view
+                "invalid round (in payload): {} != {}",
+                parsed_round, context.round
             ));
         }
         if parent != context.parent.1 {

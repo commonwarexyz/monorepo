@@ -56,6 +56,7 @@ mod tests {
             mocks,
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
         },
+        types::Round,
         Viewable,
     };
     use commonware_codec::Encode;
@@ -152,7 +153,7 @@ mod tests {
                 supervisor,
                 partition: "test".to_string(),
                 compression: Some(3),
-                epoch: 0,
+                epoch: 333,
                 namespace: namespace.clone(),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),
@@ -244,7 +245,7 @@ mod tests {
 
             // Send finalization over network (view 100)
             let payload = hash(b"test");
-            let proposal = Proposal::new(333, 100, 50, payload);
+            let proposal = Proposal::new(Round::new(333, 100), 50, payload);
             let partials: Vec<_> = shares
                 .iter()
                 .map(|share| {
@@ -304,7 +305,7 @@ mod tests {
 
             // Send old notarization from resolver that should be ignored (view 50)
             let payload = hash(b"test2");
-            let proposal = Proposal::new(333, 50, 49, payload);
+            let proposal = Proposal::new(Round::new(333, 50), 49, payload);
             let partials: Vec<_> = shares
                 .iter()
                 .map(|share| {
@@ -328,7 +329,7 @@ mod tests {
 
             // Send new finalization (view 300)
             let payload = hash(b"test3");
-            let proposal = Proposal::new(333, 300, 100, payload);
+            let proposal = Proposal::new(Round::new(333, 300), 100, payload);
             let partials: Vec<_> = shares
                 .iter()
                 .map(|share| {
@@ -462,7 +463,7 @@ mod tests {
                 supervisor: supervisor.clone(),
                 partition: format!("voter_actor_test_{validator}"),
                 compression: None,
-                epoch: 0,
+                epoch: 333,
                 namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
@@ -560,7 +561,8 @@ mod tests {
             let journal_floor_target: View = lf_target - activity_timeout + 5;
 
             // Send Finalization to advance last_finalized
-            let proposal_lf = Proposal::new(333, lf_target, lf_target - 1, hash(b"test"));
+            let proposal_lf =
+                Proposal::new(Round::new(333, lf_target), lf_target - 1, hash(b"test"));
             let finalization_lf_sigs = shares
                 .iter()
                 .take(threshold as usize)
@@ -627,8 +629,7 @@ mod tests {
 
             // Send a Notarization for `journal_floor_target` to ensure it's in `actor.views`
             let proposal_jft = Proposal::new(
-                333,
-                journal_floor_target,
+                Round::new(333, journal_floor_target),
                 journal_floor_target - 1,
                 hash(b"test2"),
             );
@@ -672,8 +673,11 @@ mod tests {
             // problematic_view (42) < journal_floor_target (45)
             // interesting(42, false) -> 42 + AT(10) >= LF(50) -> 52 >= 50
             let problematic_view: View = journal_floor_target - 3;
-            let proposal_bft =
-                Proposal::new(333, problematic_view, problematic_view - 1, hash(b"test3"));
+            let proposal_bft = Proposal::new(
+                Round::new(333, problematic_view),
+                problematic_view - 1,
+                hash(b"test3"),
+            );
             let notarization_bft_sigs = shares
                 .iter()
                 .take(threshold as usize)
@@ -710,7 +714,7 @@ mod tests {
             }
 
             // Send Finalization to new view (100)
-            let proposal_lf = Proposal::new(333, 100, 99, hash(b"test4"));
+            let proposal_lf = Proposal::new(Round::new(333, 100), 99, hash(b"test4"));
             let finalization_lf_sigs = shares
                 .iter()
                 .take(threshold as usize)

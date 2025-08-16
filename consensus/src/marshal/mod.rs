@@ -197,7 +197,7 @@ mod tests {
             threshold_signature_recover::<V, _>(quorum, &proposal_partials).unwrap();
 
         // Generate seed signature (for the view number)
-        let seed_msg = proposal.round().encode();
+        let seed_msg = proposal.round.encode();
         let seed_partials: Vec<_> = shares
             .iter()
             .take(quorum as usize)
@@ -227,7 +227,7 @@ mod tests {
             threshold_signature_recover::<V, _>(quorum, &proposal_partials).unwrap();
 
         // Generate seed signature (for the view number)
-        let seed_msg = proposal.round().encode();
+        let seed_msg = proposal.round.encode();
         let seed_partials: Vec<_> = shares
             .iter()
             .take(quorum as usize)
@@ -377,8 +377,7 @@ mod tests {
 
                 // Notarize block by the validator that broadcasted it
                 let proposal = Proposal {
-                    epoch: 0,
-                    view: height,
+                    round: Round::new(0, height),
                     parent: height.checked_sub(1).unwrap(),
                     payload: block.digest(),
                 };
@@ -459,8 +458,7 @@ mod tests {
             actor.verified(Round::from((0, 1)), block.clone()).await;
 
             let proposal = Proposal {
-                epoch: 0,
-                view: 1,
+                round: Round::new(0, 1),
                 parent: 0,
                 payload: commitment,
             };
@@ -526,8 +524,7 @@ mod tests {
 
             for (view, block) in [(1, block1.clone()), (2, block2.clone())] {
                 let proposal = Proposal {
-                    epoch: 0,
-                    view,
+                    round: Round::new(0, view),
                     parent: view.checked_sub(1).unwrap(),
                     payload: block.digest(),
                 };
@@ -600,8 +597,7 @@ mod tests {
 
             for (view, block) in [(1, block1.clone()), (2, block2.clone())] {
                 let proposal = Proposal {
-                    epoch: 0,
-                    view,
+                    round: Round::new(0, view),
                     parent: view.checked_sub(1).unwrap(),
                     payload: block.digest(),
                 };
@@ -679,8 +675,7 @@ mod tests {
 
             // Block3: Notarized by the actor
             let proposal3 = Proposal {
-                epoch: 0,
-                view: 3,
+                round: Round::new(0, 3),
                 parent: 2,
                 payload: block3.digest(),
             };
@@ -696,8 +691,7 @@ mod tests {
             // Block4: Finalized by the actor
             let finalization4 = make_finalization(
                 Proposal {
-                    epoch: 0,
-                    view: 4,
+                    round: Round::new(0, 4),
                     parent: 3,
                     payload: block4.digest(),
                 },
