@@ -837,13 +837,22 @@ mod tests {
                 c_hasher.update(&i.to_be_bytes());
                 let element = c_hasher.finalize();
                 mmr.add(&mut hasher, &element).await.unwrap();
+                if i == 101 {
+                    mmr.sync(&mut hasher).await.unwrap();
+                }
             }
             let leaf_pos = leaf_num_to_pos(50);
             mmr.prune_to_pos(&mut hasher, leaf_pos).await.unwrap();
+            // Pop enough nodes to cause the mem-mmr to be completely emptied, and then some.
+            mmr.pop(80).await.unwrap();
+            // Make sure the pinned node boundary is valid by generating a proof for the oldest item.
+            mmr.proof(leaf_pos).await.unwrap();
+            // prune all remaining leaves 1 at a time.
             while mmr.size() > leaf_pos {
                 assert!(mmr.pop(1).await.is_ok());
             }
             assert!(matches!(mmr.pop(1).await, Err(Error::ElementPruned(_))));
+
             mmr.destroy().await.unwrap();
         });
     }
