@@ -1,15 +1,12 @@
 //! Types used in [crate::simplex].
 
-use crate::Viewable;
+use crate::{types::View, Viewable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_cryptography::{Digest, Signature as CSignature, Signer, Verifier};
 use commonware_utils::{quorum, union};
-
-/// View is a monotonically increasing counter that represents the current focus of consensus.
-pub type View = u64;
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current view and the parent payload that new proposals are built on.

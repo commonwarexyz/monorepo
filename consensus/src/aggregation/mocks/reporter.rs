@@ -1,5 +1,6 @@
 use crate::{
-    aggregation::types::{Ack, Activity, Certificate, Epoch, Index},
+    aggregation::types::{Ack, Activity, Certificate, Index},
+    types::Epoch,
     Reporter as Z,
 };
 use commonware_codec::{DecodeExt, Encode};

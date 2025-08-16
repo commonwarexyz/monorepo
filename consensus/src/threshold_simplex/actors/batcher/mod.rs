@@ -1,7 +1,7 @@
 mod actor;
 mod ingress;
 
-use crate::{threshold_simplex::types::View, Reporter, ThresholdSupervisor};
+use crate::{types::View, Reporter, ThresholdSupervisor};
 pub use actor::Actor;
 use commonware_p2p::Blocker;
 pub use ingress::{Mailbox, Message};
