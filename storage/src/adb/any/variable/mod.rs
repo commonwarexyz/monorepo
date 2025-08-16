@@ -1316,6 +1316,7 @@ pub(super) mod test {
                 db.update(k, v).await.unwrap();
             }
             db.commit().await.unwrap();
+            let root = db.root(&mut hasher);
 
             // Add more elements but crash after writing only the locations
             for i in 0u64..ELEMENTS {
@@ -1335,6 +1336,7 @@ pub(super) mod test {
                 db.update(k, v).await.unwrap();
             }
             db.commit().await.unwrap();
+            let root = db.root(&mut hasher);
 
             // Add more elements but crash after writing only the oldest_retained_loc
             for i in 0u64..ELEMENTS {
