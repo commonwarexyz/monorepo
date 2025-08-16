@@ -3,7 +3,7 @@ use crate::journal::variable::{Config as JournalConfig, Journal};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, Encode, EncodeSize, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
-use commonware_utils::{Array, Span};
+use commonware_utils::{Array, Span, SpanFixed};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
 use std::{
@@ -62,6 +62,8 @@ impl FixedSize for Cursor {
 }
 
 impl Span for Cursor {}
+
+impl SpanFixed for Cursor {}
 
 impl Array for Cursor {}
 

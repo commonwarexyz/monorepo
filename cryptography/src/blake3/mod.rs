@@ -24,7 +24,7 @@ use crate::Hasher;
 use blake3::Hash;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_utils::{hex, Array, Span};
+use commonware_utils::{hex, Array, Span, SpanFixed};
 use rand::{CryptoRng, Rng};
 use std::{
     fmt::{Debug, Display},
@@ -129,6 +129,8 @@ impl FixedSize for Digest {
 }
 
 impl Span for Digest {}
+
+impl SpanFixed for Digest {}
 
 impl Array for Digest {}
 
