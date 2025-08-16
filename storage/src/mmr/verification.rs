@@ -571,9 +571,6 @@ where
             sibling_digests,
             collected_digests.as_deref_mut(),
         )?;
-        if let Some(ref mut collected_digests) = collected_digests {
-            collected_digests.push((left_pos, digest));
-        }
         left_digest = Some(digest);
     }
     if left_pos < range_info.rightmost_pos {
@@ -590,9 +587,6 @@ where
             sibling_digests,
             collected_digests.as_deref_mut(),
         )?;
-        if let Some(ref mut collected_digests) = collected_digests {
-            collected_digests.push((right_pos, digest));
-        }
         right_digest = Some(digest);
     }
 
@@ -601,18 +595,17 @@ where
             Some(hash) => left_digest = Some(*hash),
             None => return Err(ReconstructionError::MissingDigests),
         }
-        if let Some(ref mut collected_digests) = collected_digests {
-            collected_digests.push((left_pos, left_digest.unwrap()));
-        }
     }
     if right_digest.is_none() {
         match sibling_digests.next() {
             Some(hash) => right_digest = Some(*hash),
             None => return Err(ReconstructionError::MissingDigests),
         }
-        if let Some(ref mut collected_digests) = collected_digests {
-            collected_digests.push((right_pos, right_digest.unwrap()));
-        }
+    }
+
+    if let Some(ref mut collected_digests) = collected_digests {
+        collected_digests.push((left_pos, left_digest.unwrap()));
+        collected_digests.push((right_pos, right_digest.unwrap()));
     }
 
     Ok(hasher.node_digest(
