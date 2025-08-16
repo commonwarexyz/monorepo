@@ -24,7 +24,7 @@ use crate::{
 use commonware_codec::Encode as _;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
-use commonware_utils::{Array, NZUsize};
+use commonware_utils::{Array, NZUsize, SpanFixed};
 use futures::{
     future::{try_join_all, TryFutureExt},
     pin_mut, try_join, StreamExt,
@@ -84,7 +84,7 @@ pub struct Config<T: Translator> {
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator> {
+pub struct Any<E: Storage + Clock + Metrics, K: Array, V: SpanFixed, H: CHasher, T: Translator> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
@@ -129,7 +129,7 @@ pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: 
     pub(crate) pruning_delay: u64,
 }
 
-impl<E: Storage + Clock + Metrics, K: Array, V: Array, H: CHasher, T: Translator>
+impl<E: Storage + Clock + Metrics, K: Array, V: SpanFixed, H: CHasher, T: Translator>
     Any<E, K, V, H, T>
 {
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be

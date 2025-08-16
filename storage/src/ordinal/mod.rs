@@ -1,4 +1,4 @@
-//! A persistent index that maps sparse indices to [commonware_utils::Array]s.
+//! A persistent, ordered collection of fixed-size values.
 //!
 //! [Ordinal] is a collection of [commonware_runtime::Blob]s containing ordered records of fixed size.
 //! Because records are fixed size, file position corresponds directly to index. Unlike
@@ -7,7 +7,7 @@
 //! # Design
 //!
 //! [Ordinal] is a collection of [commonware_runtime::Blob]s where:
-//! - Each record: `[V][crc32(V)]` where V is an [commonware_utils::Array]
+//! - Each record: `[V][crc32(V)]` where V is an [commonware_utils::SpanFixed]
 //! - Index N is at file offset: `N * RECORD_SIZE`
 //! - A [crate::rmap::RMap] tracks which indices have been written (and which are missing)
 //!

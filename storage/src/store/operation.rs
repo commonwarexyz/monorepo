@@ -7,7 +7,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     util::at_least, Codec, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
-use commonware_utils::Array;
+use commonware_utils::{Array, SpanFixed};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
@@ -41,7 +41,7 @@ pub enum Error {
 
 /// An operation applied to an authenticated database with a fixed size value.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Fixed<K: Array, V: Array> {
+pub enum Fixed<K: Array, V: SpanFixed> {
     /// Indicates the key no longer has a value.
     Delete(K),
 
@@ -65,7 +65,7 @@ pub enum Variable<K: Array, V: Codec> {
     CommitFloor(u64),
 }
 
-impl<K: Array, V: Array> FixedSize for Fixed<K, V> {
+impl<K: Array, V: SpanFixed> FixedSize for Fixed<K, V> {
     const SIZE: usize = u8::SIZE + K::SIZE + V::SIZE;
 }
 
@@ -81,7 +81,7 @@ impl<K: Array, V: Codec> EncodeSize for Variable<K, V> {
     }
 }
 
-impl<K: Array, V: Array> Fixed<K, V> {
+impl<K: Array, V: SpanFixed> Fixed<K, V> {
     // A compile-time assertion that operation's array size is large enough to handle the commit
     // operation, which requires 9 bytes.
     const _MIN_OPERATION_LEN: usize = 9;
@@ -135,7 +135,7 @@ impl<K: Array, V: Codec> Variable<K, V> {
     }
 }
 
-impl<K: Array, V: Array> Write for Fixed<K, V> {
+impl<K: Array, V: SpanFixed> Write for Fixed<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Fixed::Delete(k) => {
@@ -187,7 +187,7 @@ impl<K: Array, V: Codec> Write for Variable<K, V> {
     }
 }
 
-impl<K: Array, V: Array> Read for Fixed<K, V> {
+impl<K: Array, V: SpanFixed> Read for Fixed<K, V> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -258,7 +258,7 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
     }
 }
 
-impl<K: Array, V: Array> Display for Fixed<K, V> {
+impl<K: Array, V: SpanFixed> Display for Fixed<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Fixed::Delete(key) => write!(f, "[key:{key} <deleted>]"),
@@ -268,7 +268,7 @@ impl<K: Array, V: Array> Display for Fixed<K, V> {
     }
 }
 
-impl<K: Array, V: Array> Display for Variable<K, V> {
+impl<K: Array, V: Codec + Display> Display for Variable<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Variable::Set(key, value) => write!(f, "[key:{key} value:{value}]"),

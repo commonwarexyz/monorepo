@@ -6,7 +6,7 @@ use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
 };
-use commonware_utils::{hex, Array, BitVec};
+use commonware_utils::{hex, BitVec, SpanFixed};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::{
@@ -18,34 +18,34 @@ use tracing::{debug, warn};
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
-struct Record<V: Array> {
+struct Record<V: SpanFixed> {
     value: V,
     crc: u32,
 }
 
-impl<V: Array> Record<V> {
+impl<V: SpanFixed> Record<V> {
     fn new(value: V) -> Self {
-        let crc = crc32fast::hash(value.as_ref());
+        let crc = crc32fast::hash(&value.encode());
         Self { value, crc }
     }
 
     fn is_valid(&self) -> bool {
-        self.crc == crc32fast::hash(self.value.as_ref())
+        self.crc == crc32fast::hash(&self.value.encode())
     }
 }
 
-impl<V: Array> FixedSize for Record<V> {
+impl<V: SpanFixed> FixedSize for Record<V> {
     const SIZE: usize = V::SIZE + u32::SIZE;
 }
 
-impl<V: Array> CodecWrite for Record<V> {
+impl<V: SpanFixed> CodecWrite for Record<V> {
     fn write(&self, buf: &mut impl BufMut) {
         self.value.write(buf);
         self.crc.write(buf);
     }
 }
 
-impl<V: Array> Read for Record<V> {
+impl<V: SpanFixed> Read for Record<V> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -57,7 +57,7 @@ impl<V: Array> Read for Record<V> {
 }
 
 /// Implementation of [Ordinal].
-pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
+pub struct Ordinal<E: Storage + Metrics + Clock, V: SpanFixed> {
     // Configuration and context
     context: E,
     config: Config,
@@ -81,7 +81,7 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
     _phantom: PhantomData<V>,
 }
 
-impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: SpanFixed> Ordinal<E, V> {
     /// Initialize a new [Ordinal] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         Self::init_with_bits(context, config, None).await

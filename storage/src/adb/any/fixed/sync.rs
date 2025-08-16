@@ -12,7 +12,7 @@ use crate::{
 use commonware_codec::{Codec, Encode as _, FixedSize};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{buffer::Append, Blob, Clock, Metrics, Storage};
-use commonware_utils::Array;
+use commonware_utils::{Array, SpanFixed};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, marker::PhantomData};
 use tracing::debug;
@@ -21,7 +21,7 @@ impl<E, K, V, H, T> adb::sync::Database for any::fixed::Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Array,
+    V: SpanFixed,
     H: Hasher,
     T: Translator,
 {

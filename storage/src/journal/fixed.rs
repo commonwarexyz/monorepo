@@ -428,7 +428,7 @@ impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
         Self::verify_integrity(read.as_ref())
     }
 
-    /// Verify the integrity of the Array + checksum in `buf`, returning:
+    /// Verify the integrity of the SpanFixed + checksum in `buf`, returning:
     /// - The array if it is valid,
     /// - Error::ChecksumMismatch if the checksum is invalid, or
     /// - Error::Codec if the array could not be decoded after passing the checksum check.
