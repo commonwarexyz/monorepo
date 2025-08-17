@@ -316,10 +316,13 @@ impl BitVec {
     #[inline(always)]
     fn mask_over_first_n_bits(num_bits: usize) -> Block {
         assert!(num_bits <= BITS_PER_BLOCK, "num_bits exceeds block size");
-        // Special-case for `BITS_PER_BLOCK` bits to avoid shl overflow
-        match num_bits {
-            BITS_PER_BLOCK => FULL_BLOCK,
-            _ => (1 << num_bits) - 1,
+        // Use a safer approach that avoids potential overflow
+        if num_bits == 0 {
+            0
+        } else if num_bits == BITS_PER_BLOCK {
+            FULL_BLOCK
+        } else {
+            ((1u32 << num_bits) - 1) as Block
         }
     }
 
