@@ -2,7 +2,7 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+    varint::UInt, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
     bls12381::primitives::{group::Share, ops, poly::PartialSignature, variant::Variant},
@@ -101,7 +101,7 @@ pub struct Item<D: Digest> {
 
 impl<D: Digest> Write for Item<D> {
     fn write(&self, writer: &mut impl BufMut) {
-        UInt(self.index).write(writer);
+        self.index.write(writer);
         self.digest.write(writer);
     }
 }
@@ -110,16 +110,14 @@ impl<D: Digest> Read for Item<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let index = UInt::read(reader)?.into();
+        let index = Index::read(reader)?;
         let digest = D::read(reader)?;
         Ok(Self { index, digest })
     }
 }
 
-impl<D: Digest> EncodeSize for Item<D> {
-    fn encode_size(&self) -> usize {
-        UInt(self.index).encode_size() + self.digest.encode_size()
-    }
+impl<D: Digest> FixedSize for Item<D> {
+    const SIZE: usize = Index::SIZE + D::SIZE;
 }
 
 /// Acknowledgment (ack) represents a validator's partial signature on an item.
@@ -263,10 +261,8 @@ impl<V: Variant, D: Digest> Read for Certificate<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Certificate<V, D> {
-    fn encode_size(&self) -> usize {
-        self.item.encode_size() + self.signature.encode_size()
-    }
+impl<V: Variant, D: Digest> FixedSize for Certificate<V, D> {
+    const SIZE: usize = Item::<D>::SIZE + V::Signature::SIZE;
 }
 
 impl<V: Variant, D: Digest> Certificate<V, D> {
