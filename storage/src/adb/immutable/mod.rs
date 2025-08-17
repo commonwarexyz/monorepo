@@ -297,10 +297,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // The number of operations in the log.
         let mut log_size = 0;
-        // The size of the log at the last commit point (or 0 if none).
-        let mut end_loc = 0;
-        // The offset into the log at the end_loc.
-        let mut end_offset = 0;
+        // The location and blob-offset of the first operation to follow the last known commit point.
+        let mut after_last_commit = None;
         // A list of uncommitted operations that must be rolled back, in order of their locations.
         let mut uncommitted_ops = Vec::new();
         let mut oldest_retained_loc = None;
@@ -321,7 +319,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                             log_size = section * log_items_per_section.get();
                             oldest_retained_loc = Some(log_size);
                         }
+
                         let loc = log_size; // location of the current operation.
+                        if after_last_commit.is_none() {
+                            after_last_commit = Some((loc, offset));
+                        }
+
                         log_size += 1;
 
                         // Consistency check: confirm the provided section matches what we expect from this operation's
@@ -349,8 +352,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                         .await?;
                                 }
                                 uncommitted_ops.clear();
-                                end_loc = log_size;
-                                end_offset = offset;
+                                after_last_commit = None;
                             }
                             _ => {
                                 unreachable!(
@@ -362,14 +364,19 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 }
             }
         }
-        if !uncommitted_ops.is_empty() {
+
+        // Rewind the operations log if necessary.
+        if let Some((end_loc, end_offset)) = after_last_commit {
+            assert!(!uncommitted_ops.is_empty());
             warn!(
                 op_count = uncommitted_ops.len(),
+                log_size = end_loc,
+                end_offset,
                 "rewinding over uncommitted operations at end of log"
             );
-            let new_last_section = end_loc / log_items_per_section.get();
-            log.rewind_to_offset(new_last_section, end_offset).await?;
-            log.sync(new_last_section).await?;
+            let prune_to_section = end_loc / log_items_per_section.get();
+            log.rewind_to_offset(prune_to_section, end_offset).await?;
+            log.sync(prune_to_section).await?;
             log_size = end_loc;
         }
 
@@ -897,6 +904,12 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 2001);
             let root = db.root(&mut hasher);
             assert_ne!(root, halfway_root);
+
+            // Close & reopen could preserve the final commit.
+            db.close().await.unwrap();
+            let db = open_db(context.clone()).await;
+            assert_eq!(db.op_count(), 2001);
+            assert_eq!(db.root(&mut hasher), root);
 
             db.destroy().await.unwrap();
         });
