@@ -186,10 +186,12 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed> Ordinal<E, V> {
                 replay_blob
                     .read_exact(&mut record_buf, Record::<V>::SIZE)
                     .await?;
-                let record = Record::<V>::read(&mut record_buf.as_slice())?;
                 offset += Record::<V>::SIZE as u64;
 
                 // If record is valid, add to intervals
+                let Ok(record) = Record::<V>::read(&mut record_buf.as_slice()) else {
+                    continue;
+                };
                 if record.is_valid() {
                     items += 1;
                     intervals.insert(index);
