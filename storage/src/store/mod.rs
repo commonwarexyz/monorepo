@@ -388,11 +388,8 @@ where
     async fn build_snapshot_from_log(mut self) -> Result<Self, Error> {
         let mut locations_size = self.locations.size().await?;
 
-        // The size of the log at the last commit point (including the commit operation), or 0 if
-        // none.
-        let mut end_loc = 0;
-        // The offset into the log at the end_loc.
-        let mut end_offset = 0;
+        // The location and blob-offset of the first operation to follow the last known commit point.
+        let mut after_last_commit = None;
         // The set of operations that have not yet been committed.
         let mut uncommitted_ops = HashMap::new();
         let mut oldest_retained_loc_found = false;
@@ -404,13 +401,18 @@ where
                     Err(e) => {
                         return Err(Error::Journal(e));
                     }
-                    Ok((section, offset, size, op)) => {
+                    Ok((section, offset, _, op)) => {
                         if !oldest_retained_loc_found {
                             self.log_size = section * self.log_items_per_section;
                             self.oldest_retained_loc = self.log_size;
                             oldest_retained_loc_found = true;
                         }
+
                         let loc = self.log_size; // location of the current operation.
+                        if after_last_commit.is_none() {
+                            after_last_commit = Some((loc, offset));
+                        }
+
                         self.log_size += 1;
 
                         // Consistency check: confirm the provided section matches what we expect from this operation's
@@ -464,8 +466,7 @@ where
                                     }
                                 }
                                 uncommitted_ops.clear();
-                                end_loc = self.log_size;
-                                end_offset = offset + size;
+                                after_last_commit = None;
                             }
                             _ => unreachable!(
                                 "unexpected operation type at offset {offset} of section {section}"
@@ -475,13 +476,17 @@ where
                 }
             }
         }
-        if end_loc < self.log_size {
+
+        // Rewind the operations log if necessary.
+        if let Some((end_loc, end_offset)) = after_last_commit {
+            assert!(!uncommitted_ops.is_empty());
             warn!(
                 op_count = uncommitted_ops.len(),
                 log_size = end_loc,
+                end_offset,
                 "rewinding over uncommitted operations at end of log"
             );
-            let prune_to_section = end_loc.saturating_sub(1) / self.log_items_per_section;
+            let prune_to_section = end_loc / self.log_items_per_section;
             self.log
                 .rewind_to_offset(prune_to_section, end_offset)
                 .await?;
@@ -1086,6 +1091,11 @@ mod test {
 
             // Simulate a failed commit and test that we rollback to the previous root.
             db.simulate_failure(false, false).await.unwrap();
+            let db = create_test_store(context.with_label("store")).await;
+            assert_eq!(db.op_count(), op_count);
+
+            // Close and reopen the store to ensure the final commit is preserved.
+            db.close().await.unwrap();
             let mut db = create_test_store(context.with_label("store")).await;
             assert_eq!(db.op_count(), op_count);
 
