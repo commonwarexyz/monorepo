@@ -133,6 +133,8 @@ pub struct Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::{Buf, BufMut};
+    use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::{sequence::FixedBytes, BitVec, NZUsize, NZU64};
@@ -1979,6 +1981,97 @@ mod tests {
                 )
                 .await
                 .expect("Failed to initialize store with bits");
+            }
+        });
+    }
+
+    /// A dummy value that will fail parsing if the value is 0.
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct DummyValue {
+        pub value: u64,
+    }
+
+    impl Write for DummyValue {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.value.write(buf);
+        }
+    }
+
+    impl Read for DummyValue {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+            let value = u64::read(buf)?;
+            if value == 0 {
+                return Err(commonware_codec::Error::Invalid(
+                    "DummyValue",
+                    "value must be non-zero",
+                ));
+            }
+            Ok(Self { value })
+        }
+    }
+
+    impl FixedSize for DummyValue {
+        const SIZE: usize = u64::SIZE;
+    }
+
+    #[test_traced]
+    fn test_init_skip_unparseable_record() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: NZU64!(1),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+
+            // Create store with valid records
+            {
+                let mut store = Ordinal::<_, DummyValue>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Add records at indices 1, 2, 4
+                store.put(1, DummyValue { value: 1 }).await.unwrap();
+                store.put(2, DummyValue { value: 0 }).await.unwrap(); // will fail parsing
+                store.put(4, DummyValue { value: 4 }).await.unwrap();
+
+                store.close().await.unwrap();
+            }
+
+            // Reinitialize - should skip the unparseable record but continue processing
+            {
+                let store = Ordinal::<_, DummyValue>::init(context.clone(), cfg.clone())
+                    .await
+                    .expect("Failed to initialize store");
+
+                // Record 0 should be available
+                assert!(store.has(1), "Record 1 should be available");
+                assert_eq!(
+                    store.get(1).await.unwrap().unwrap(),
+                    DummyValue { value: 1 },
+                    "Record 0 should have correct value"
+                );
+
+                // Record 2 should NOT be available (unparseable)
+                assert!(
+                    !store.has(2),
+                    "Record 2 should not be available (unparseable)"
+                );
+
+                // This tests that we didn't exit early when encountering the unparseable record
+                assert!(
+                    store.has(4),
+                    "Record 4 should be available - we should not exit early on unparseable record"
+                );
+                assert_eq!(
+                    store.get(4).await.unwrap().unwrap(),
+                    DummyValue { value: 4 },
+                    "Record 4 should have correct value"
+                );
             }
         });
     }
