@@ -1,12 +1,12 @@
 use super::{Config, Error};
 use crate::rmap::RMap;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
 };
-use commonware_utils::{hex, Array, BitVec};
+use commonware_utils::{hex, BitVec};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::{
@@ -18,34 +18,34 @@ use tracing::{debug, warn};
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
-struct Record<V: Array> {
+struct Record<V: CodecFixed<Cfg = ()>> {
     value: V,
     crc: u32,
 }
 
-impl<V: Array> Record<V> {
+impl<V: CodecFixed<Cfg = ()>> Record<V> {
     fn new(value: V) -> Self {
-        let crc = crc32fast::hash(value.as_ref());
+        let crc = crc32fast::hash(&value.encode());
         Self { value, crc }
     }
 
     fn is_valid(&self) -> bool {
-        self.crc == crc32fast::hash(self.value.as_ref())
+        self.crc == crc32fast::hash(&self.value.encode())
     }
 }
 
-impl<V: Array> FixedSize for Record<V> {
+impl<V: CodecFixed<Cfg = ()>> FixedSize for Record<V> {
     const SIZE: usize = V::SIZE + u32::SIZE;
 }
 
-impl<V: Array> CodecWrite for Record<V> {
+impl<V: CodecFixed<Cfg = ()>> CodecWrite for Record<V> {
     fn write(&self, buf: &mut impl BufMut) {
         self.value.write(buf);
         self.crc.write(buf);
     }
 }
 
-impl<V: Array> Read for Record<V> {
+impl<V: CodecFixed<Cfg = ()>> Read for Record<V> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -57,7 +57,7 @@ impl<V: Array> Read for Record<V> {
 }
 
 /// Implementation of [Ordinal].
-pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
+pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
     // Configuration and context
     context: E,
     config: Config,
@@ -81,7 +81,7 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: Array> {
     _phantom: PhantomData<V>,
 }
 
-impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// Initialize a new [Ordinal] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         Self::init_with_bits(context, config, None).await
@@ -186,15 +186,16 @@ impl<E: Storage + Metrics + Clock, V: Array> Ordinal<E, V> {
                 replay_blob
                     .read_exact(&mut record_buf, Record::<V>::SIZE)
                     .await?;
-                let record = Record::<V>::read(&mut record_buf.as_slice())?;
                 offset += Record::<V>::SIZE as u64;
 
                 // If record is valid, add to intervals
-                if record.is_valid() {
-                    items += 1;
-                    intervals.insert(index);
-                    continue;
-                }
+                if let Ok(record) = Record::<V>::read(&mut record_buf.as_slice()) {
+                    if record.is_valid() {
+                        items += 1;
+                        intervals.insert(index);
+                        continue;
+                    }
+                };
 
                 // If record is invalid, it may either be empty or corrupted. We only care
                 // which is which if the provided bits indicate that the record must exist.

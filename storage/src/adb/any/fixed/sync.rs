@@ -9,7 +9,7 @@ use crate::{
     store::operation::Fixed,
     translator::Translator,
 };
-use commonware_codec::{Codec, Encode as _, FixedSize};
+use commonware_codec::{CodecFixed, Encode as _};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{buffer::Append, Blob, Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -21,7 +21,7 @@ impl<E, K, V, H, T> adb::sync::Database for any::fixed::Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Array,
+    V: CodecFixed<Cfg = ()> + Send + Sync + 'static,
     H: Hasher,
     T: Translator,
 {
@@ -174,7 +174,7 @@ where
 /// # Invariants
 ///
 /// The returned [fixed::Journal] has size in [`lower_bound`, `upper_bound + 1`].
-pub(crate) async fn init_journal<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize>(
+pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
     context: E,
     cfg: fixed::Config,
     lower_bound: u64,
@@ -245,7 +245,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: Codec<Cfg = ()> + Fixe
 /// - Reading from positions 0-19 will return `ItemPruned` since those blobs don't exist
 /// - This represents a journal that had operations 0-24, with operations 0-19 pruned,
 ///   leaving operations 20-24 in tail blob 2.
-async fn init_journal_at_size<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize>(
+async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
     context: E,
     cfg: fixed::Config,
     size: u64,
