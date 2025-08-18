@@ -290,35 +290,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // Replay the log from inception to build the snapshot, keeping track of any uncommitted
         // operations, and any log operations that need to be re-added to the MMR & locations.
-        println!("DEBUG: build_snapshot_from_log starting - oldest_retained_loc: {}, log_size: {}, mmr_leaves: {}, inactivity_floor_loc: {}", 
-                 self.oldest_retained_loc, self.log_size, mmr_leaves, self.inactivity_floor_loc);
         {
             let stream = self.log.replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE)).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 let (section, offset, _size, op) = result.map_err(Error::Journal)?;
-                println!(
-                    "DEBUG: REPLAY FOUND - section: {}, offset: {}, operation: {}",
-                    section,
-                    offset,
-                    match &op {
-                        Operation::Set(k, _) => format!("Set(key: {:?})", k),
-                        Operation::Commit() => format!("Commit"),
-                        Operation::Update(k, _) => format!("Update(key: {:?})", k),
-                        Operation::Delete(k) => format!("Delete(key: {:?})", k),
-                        Operation::CommitFloor(loc) => format!("CommitFloor({})", loc),
-                    }
-                );
-                println!(
-                    "DEBUG: ASSIGNING LOGICAL INDEX {} to operation at physical offset {}",
-                    current_index, offset
-                );
 
                 if current_index < self.inactivity_floor_loc {
-                    println!(
-                        "DEBUG: Skipping operation at index {} because it's below inactivity floor {}",
-                        current_index, self.inactivity_floor_loc
-                    );
                     current_index += 1;
                     continue;
                 }
@@ -379,11 +357,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                         "unexpected operation type at offset {offset} of section {section}"
                     ),
                 }
-                println!(
-                    "DEBUG: INCREMENTING current_index from {} to {} (THIS IS THE BUG!)",
-                    current_index,
-                    current_index + 1
-                );
                 current_index += 1;
             }
         }

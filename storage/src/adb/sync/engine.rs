@@ -206,10 +206,6 @@ where
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
     async fn schedule_requests(&mut self) -> Result<(), EngineError<DB, R>> {
         let target_size = self.target.upper_bound_ops + 1;
-        println!(
-            "DEBUG: schedule_requests - target_size: {}, lower_bound: {}, upper_bound: {}",
-            target_size, self.target.lower_bound_ops, self.target.upper_bound_ops
-        );
 
         // Special case: If we don't have pinned nodes, we need to extract them from a proof
         // for the lower sync bound.
@@ -278,18 +274,6 @@ where
         self,
         new_target: Target<DB::Digest>,
     ) -> Result<Self, EngineError<DB, R>> {
-        println!(
-            "DEBUG: reset_for_target_update - old target: lower={}, upper={}",
-            self.target.lower_bound_ops, self.target.upper_bound_ops
-        );
-        println!(
-            "DEBUG: reset_for_target_update - new target: lower={}, upper={}",
-            new_target.lower_bound_ops, new_target.upper_bound_ops
-        );
-        println!(
-            "DEBUG: reset_for_target_update - clearing {} fetched operation batches",
-            self.fetched_operations.len()
-        );
         let journal = DB::resize_journal(
             self.journal,
             self.context.clone(),
@@ -375,21 +359,11 @@ where
     where
         I: IntoIterator<Item = DB::Op>,
     {
-        let mut count = 0;
         for op in operations {
-            count += 1;
-            println!(
-                "DEBUG: sync engine apply_operations_batch - applying operation #{}",
-                count
-            );
             self.journal.append(op).await.map_err(Error::database)?;
             // No need to sync here -- the journal will periodically sync its storage
             // and we will also sync when we're done applying all operations.
         }
-        println!(
-            "DEBUG: sync engine apply_operations_batch - applied {} operations total",
-            count
-        );
         Ok(())
     }
 
@@ -466,11 +440,6 @@ where
             }
 
             // Store operations for later application
-            println!(
-                "DEBUG: sync engine handle_fetch_result - storing {} operations starting at loc {}",
-                operations.len(),
-                start_loc
-            );
             self.store_operations(start_loc, operations);
         }
 

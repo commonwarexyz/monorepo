@@ -183,10 +183,14 @@ where
         lower_bound: u64,
         upper_bound: u64,
     ) -> Result<Self::Journal, Self::Error> {
-        journal.into_inner().destroy().await.map_err(adb::Error::from)?;
+        journal
+            .into_inner()
+            .destroy()
+            .await
+            .map_err(adb::Error::from)?;
         return Self::create_journal(context, config, lower_bound, upper_bound)
             .await
-            .map_err(adb::Error::from)
+            .map_err(adb::Error::from);
 
         /*
         let size = journal.size().await.map_err(adb::Error::from)?;
@@ -438,7 +442,10 @@ mod tests {
         adb::{
             any::fixed::test::{PAGE_CACHE_SIZE, PAGE_SIZE},
             sync::{
-                self, engine::{Config, NextStep}, resolver::tests::FailResolver, Engine, Journal as _, Target
+                self,
+                engine::{Config, NextStep},
+                resolver::tests::FailResolver,
+                Engine, Journal as _, Target,
             },
         },
         journal::variable::ITEM_ALIGNMENT,
@@ -446,7 +453,6 @@ mod tests {
         store::operation::Variable,
         translator::TwoCap,
     };
-    use crate::store::operation::Variable as Operation;
     use commonware_cryptography::{sha256, Digest as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, RwLock};
@@ -2191,24 +2197,6 @@ mod tests {
             let initial_lower_bound = target_db.inactivity_floor_loc();
             let initial_upper_bound = target_db.op_count() - 1;
             let initial_root = target_db.root(&mut hasher);
-            println!("DEBUG: Initial target - ops: {}, lower: {}, upper: {}, root: {:?}", 
-                     initial_ops, initial_lower_bound, initial_upper_bound, initial_root);
-
-            // DEBUG: Print initial target database operations
-            println!("DEBUG: === INITIAL TARGET DATABASE OPERATIONS ===");
-            for i in target_db.inactivity_floor_loc()..target_db.op_count() {
-                match target_db.get_op(i).await {
-                    Ok(Some(op)) => println!("DEBUG: Initial Target[{}]: {}", i, match &op {
-                        Operation::Set(k, _) => format!("Set(key: {:?})", k),
-                        Operation::Commit() => format!("Commit"),
-                        Operation::Update(k, _) => format!("Update(key: {:?})", k),
-                        Operation::Delete(k) => format!("Delete(key: {:?})", k),
-                        Operation::CommitFloor(loc) => format!("CommitFloor({})", loc),
-                    }),
-                    Ok(None) => println!("DEBUG: Initial Target[{}]: None", i),
-                    Err(e) => println!("DEBUG: Initial Target[{}]: Error: {:?}", i, e),
-                }
-            }
 
             // Wrap target database for shared mutable access
             let target_db = Arc::new(RwLock::new(target_db));
@@ -2257,28 +2245,8 @@ mod tests {
                 let new_lower_bound = db.inactivity_floor_loc;
                 let new_upper_bound = db.op_count() - 1;
                 let new_root = db.root(&mut hasher);
-                println!("DEBUG: After adding {} ops - total ops: {}, lower: {}, upper: {}, new_root: {:?}", 
-                         additional_ops.len(), db.op_count(), new_lower_bound, new_upper_bound, new_root);
-
-                // DEBUG: Print updated target database operations
-                println!("DEBUG: === UPDATED TARGET DATABASE OPERATIONS ===");
-                for i in db.inactivity_floor_loc..db.op_count() {
-                    match db.get_op(i).await {
-                        Ok(Some(op)) => println!("DEBUG: Updated Target[{}]: {}", i, match &op {
-                            Operation::Set(k, _) => format!("Set(key: {:?})", k),
-                            Operation::Commit() => format!("Commit"),
-                            Operation::Update(k, _) => format!("Update(key: {:?})", k),
-                            Operation::Delete(k) => format!("Delete(key: {:?})", k),
-                            Operation::CommitFloor(loc) => format!("CommitFloor({})", loc),
-                        }),
-                        Ok(None) => println!("DEBUG: Updated Target[{}]: None", i),
-                        Err(e) => println!("DEBUG: Updated Target[{}]: Error: {:?}", i, e),
-                    }
-                }
 
                 // Send target update with new target
-                println!("DEBUG: Sending target update - root: {:?}, lower: {}, upper: {}", 
-                         new_root, new_lower_bound, new_upper_bound);
                 update_sender
                     .send(Target {
                         root: new_root,
@@ -2292,69 +2260,26 @@ mod tests {
             };
 
             // Complete the sync
-            println!("DEBUG: About to complete sync...");
             let synced_db = match client.sync().await {
-                Ok(db) => {
-                    println!("DEBUG: Sync completed successfully");
-                    db
-                },
+                Ok(db) => db,
                 Err(e) => {
-                    println!("DEBUG: Sync failed with error: {:?}", e);
-                    panic!("Sync failed: {:?}", e);
+                    panic!("Sync failed: {e:?}");
                 }
             };
 
             // Verify the synced database has the expected final state
             let mut hasher = test_hasher();
             let synced_root = synced_db.root(&mut hasher);
-            println!("DEBUG: Final verification - synced_root: {:?}, expected new_root: {:?}, initial_root: {:?}", 
-                     synced_root, new_root, initial_root);
-            println!("DEBUG: Synced db - ops: {}, lower: {}", synced_db.op_count(), synced_db.inactivity_floor_loc);
 
             // Verify the target database matches the synced database
             let target_db = match Arc::try_unwrap(target_db) {
                 Ok(rw_lock) => rw_lock.into_inner(),
                 Err(_) => panic!("Failed to unwrap Arc - still has references"),
             };
-            
-            // DEBUG: Print all operations in sync range for both databases
-            println!("DEBUG: === TARGET DATABASE OPERATIONS ===");
-            println!("DEBUG: Target - ops: {}, lower: {}, upper: {}", 
-                     target_db.op_count(), target_db.inactivity_floor_loc, target_db.op_count() - 1);
-            for i in target_db.inactivity_floor_loc..target_db.op_count() {
-                match target_db.get_op(i).await {
-                    Ok(Some(op)) => println!("DEBUG: Target[{}]: {}", i, match &op {
-                        Operation::Set(k, _) => format!("Set(key: {:?})", k),
-                        Operation::Commit() => format!("Commit"),
-                        Operation::Update(k, _) => format!("Update(key: {:?})", k),
-                        Operation::Delete(k) => format!("Delete(key: {:?})", k),
-                        Operation::CommitFloor(loc) => format!("CommitFloor({})", loc),
-                    }),
-                    Ok(None) => println!("DEBUG: Target[{}]: None", i),
-                    Err(e) => println!("DEBUG: Target[{}]: Error: {:?}", i, e),
-                }
-            }
-            
-            println!("DEBUG: === SYNCED DATABASE OPERATIONS ===");
-            println!("DEBUG: Synced - ops: {}, lower: {}, upper: {}", 
-                     synced_db.op_count(), synced_db.inactivity_floor_loc, synced_db.op_count() - 1);
-            for i in synced_db.inactivity_floor_loc..synced_db.op_count() {
-                match synced_db.get_op(i).await {
-                    Ok(Some(op)) => println!("DEBUG: Synced[{}]: {}", i, match &op {
-                        Operation::Set(k, _) => format!("Set(key: {:?})", k),
-                        Operation::Commit() => format!("Commit"),
-                        Operation::Update(k, _) => format!("Update(key: {:?})", k),
-                        Operation::Delete(k) => format!("Delete(key: {:?})", k),
-                        Operation::CommitFloor(loc) => format!("CommitFloor({})", loc),
-                    }),
-                    Ok(None) => println!("DEBUG: Synced[{}]: None", i),
-                    Err(e) => println!("DEBUG: Synced[{}]: Error: {:?}", i, e),
-                }
-            }
-            
+
             // Now do the assertions after seeing the debug output
             assert_eq!(synced_root, new_root);
-            
+
             {
                 assert_eq!(synced_db.op_count(), target_db.op_count());
                 assert_eq!(
@@ -2575,10 +2500,12 @@ mod tests {
     fn test_sync_resolver_fails() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let resolver = FailResolver::<sha256::Digest, Variable<sha256::Digest, sha256::Digest>>::new();
+            let resolver =
+                FailResolver::<sha256::Digest, Variable<sha256::Digest, sha256::Digest>>::new();
             let target_root = sha256::Digest::from([0; 32]);
 
-            let db_config = create_sync_config(&format!("test_fail_resolver_{}", context.next_u64()));
+            let db_config =
+                create_sync_config(&format!("test_fail_resolver_{}", context.next_u64()));
             let engine_config = Config {
                 context,
                 target: Target {
