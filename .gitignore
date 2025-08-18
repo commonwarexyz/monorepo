@@ -10,3 +10,4 @@ examples/flood/assets
 */fuzz/target
 **/quint/_apalache-out/
 **/quint/out*/
+CLAUDE.md

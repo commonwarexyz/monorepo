@@ -15,6 +15,7 @@ use thiserror::Error;
 pub mod any;
 pub mod current;
 pub mod immutable;
+pub mod keyless;
 pub mod sync;
 pub mod verify;
 pub use verify::{extract_pinned_nodes, verify_proof};
