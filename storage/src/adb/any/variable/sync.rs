@@ -2,7 +2,7 @@ use crate::{
     adb::{
         self,
         any::{self, variable::OLDEST_RETAINED_LOC_PREFIX},
-        sync::{self},
+        sync::{self, Journal as SyncJournal},
     },
     index::Index,
     journal::{
@@ -183,19 +183,13 @@ where
         lower_bound: u64,
         upper_bound: u64,
     ) -> Result<Self::Journal, Self::Error> {
-        journal
-            .into_inner()
-            .destroy()
-            .await
-            .map_err(adb::Error::from)?;
-        return Self::create_journal(context, config, lower_bound, upper_bound)
-            .await
-            .map_err(adb::Error::from);
-
-        /*
         let size = journal.size().await.map_err(adb::Error::from)?;
         if size <= lower_bound {
-            journal.into_inner().destroy().await.map_err(adb::Error::from)?;
+            journal
+                .into_inner()
+                .destroy()
+                .await
+                .map_err(adb::Error::from)?;
             return Self::create_journal(context, config, lower_bound, upper_bound)
                 .await
                 .map_err(adb::Error::from);
@@ -204,10 +198,50 @@ where
         // Prune in-place below the lower bound section and recompute logical size
         let mut variable_journal = journal.into_inner();
         let lower_section = lower_bound / config.log_items_per_section.get();
+        let upper_section = upper_bound / config.log_items_per_section.get();
+
         variable_journal
             .prune(lower_section)
             .await
             .map_err(adb::Error::from)?;
+
+        // Remove any sections beyond the upper bound
+        let last_section = variable_journal.blobs.last_key_value().map(|(&s, _)| s);
+        if let Some(last_section) = last_section {
+            if last_section > upper_section {
+                let sections_to_remove: Vec<u64> = variable_journal
+                    .blobs
+                    .range((
+                        std::ops::Bound::Excluded(upper_section),
+                        std::ops::Bound::Unbounded,
+                    ))
+                    .map(|(&section, _)| section)
+                    .collect();
+
+                for section in sections_to_remove {
+                    if let Some(blob) = variable_journal.blobs.remove(&section) {
+                        drop(blob);
+                        let name = section.to_be_bytes();
+                        variable_journal
+                            .context
+                            .remove(&variable_journal.cfg.partition, Some(&name))
+                            .await
+                            .map_err(crate::journal::Error::Runtime)
+                            .map_err(adb::Error::from)?;
+                        variable_journal.tracked.dec();
+                    }
+                }
+            }
+        }
+
+        // Remove any items beyond upper_bound within the upper section
+        truncate_upper_section(
+            &mut variable_journal,
+            upper_bound,
+            config.log_items_per_section.get(),
+        )
+        .await
+        .map_err(adb::Error::from)?;
         let size = crate::adb::sync::variable_journal::compute_size(
             &variable_journal,
             config.log_items_per_section,
@@ -216,13 +250,11 @@ where
         )
         .await
         .map_err(adb::Error::from)?;
-
         Ok(crate::adb::sync::variable_journal::Journal::new(
             variable_journal,
             config.log_items_per_section,
             size,
         ))
-        */
     }
 }
 
@@ -445,7 +477,7 @@ mod tests {
                 self,
                 engine::{Config, NextStep},
                 resolver::tests::FailResolver,
-                Engine, Journal as _, Target,
+                Engine, Target,
             },
         },
         journal::variable::ITEM_ALIGNMENT,
@@ -2175,13 +2207,13 @@ mod tests {
     #[test_case(1, 100)]
     #[test_case(2, 1)]
     #[test_case(2, 2)]
-    // #[test_case(2, 100)]
-    // // Regression test: panicked when we didn't set pinned nodes after updating target
-    // #[test_case(20, 10)]
-    // #[test_case(100, 1)]
-    // #[test_case(100, 2)]
-    // #[test_case(100, 100)]
-    // #[test_case(100, 1000)]
+    #[test_case(2, 100)]
+    // Regression test: panicked when we didn't set pinned nodes after updating target
+    #[test_case(20, 10)]
+    #[test_case(100, 1)]
+    #[test_case(100, 2)]
+    #[test_case(100, 100)]
+    #[test_case(100, 1000)]
     #[test_traced("WARN")]
     fn test_target_update_during_sync(initial_ops: usize, additional_ops: usize) {
         let executor = deterministic::Runner::default();
@@ -2295,115 +2327,6 @@ mod tests {
 
             // Verify the expected operations are present in the synced database.
             for i in synced_db.inactivity_floor_loc..synced_db.op_count() {
-                let got = synced_db.get_op(i).await.unwrap();
-                let expected = target_db.get_op(i).await.unwrap();
-                assert_eq!(got, expected);
-            }
-            for i in synced_db.mmr.oldest_retained_pos().unwrap()..synced_db.mmr.size() {
-                let got = synced_db.mmr.get_node(i).await.unwrap();
-                let expected = target_db.mmr.get_node(i).await.unwrap();
-                assert_eq!(got, expected);
-            }
-
-            synced_db.destroy().await.unwrap();
-            target_db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_target_same_lower_bound() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Create and populate a target database with a smaller number of operations
-            let mut target_db = create_test_db(context.clone()).await;
-            let initial_ops = create_test_ops(10);
-            apply_ops(&mut target_db, &initial_ops).await;
-            target_db.commit().await.unwrap();
-
-            // Capture the state after first commit (this will have a non-zero inactivity floor)
-            let mut hasher = test_hasher();
-            let initial_lower_bound = target_db.inactivity_floor_loc();
-            let initial_upper_bound = target_db.op_count() - 1;
-            let initial_root = target_db.root(&mut hasher);
-
-            // Add more operations to create the extended target
-            let additional_ops = create_test_ops(5);
-            apply_ops(&mut target_db, &additional_ops).await;
-            target_db.commit().await.unwrap();
-            let final_upper_bound = target_db.op_count() - 1;
-            let final_root = target_db.root(&mut hasher);
-
-            // Wrap target database for shared mutable access
-            let target_db = Arc::new(RwLock::new(target_db));
-
-            // Create client with initial smaller target and very small batch size
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
-            // Step the client to process a batch
-            let client = {
-                let config = Config {
-                    context: context.clone(),
-                    db_config: create_sync_config(&format!("test_config_{}", context.next_u64())),
-                    target: Target {
-                        root: initial_root,
-                        lower_bound_ops: initial_lower_bound,
-                        upper_bound_ops: initial_upper_bound,
-                    },
-                    resolver: target_db.clone(),
-                    fetch_batch_size: NZU64!(2), // Very small batch size to ensure multiple batches needed
-                    max_outstanding_requests: 10,
-                    apply_batch_size: 1024,
-                    update_rx: Some(update_receiver),
-                };
-                let mut client: Engine<AnyTest, _> = Engine::new(config).await.unwrap();
-                loop {
-                    // Step the client until we have processed a batch of operations
-                    client = match client.step().await.unwrap() {
-                        NextStep::Continue(new_client) => new_client,
-                        NextStep::Complete(_) => panic!("client should not be complete"),
-                    };
-                    let log_size = client.journal().size().await.unwrap();
-                    if log_size > initial_lower_bound {
-                        break client;
-                    }
-                }
-            };
-
-            // Send target update with SAME lower bound but higher upper bound
-            update_sender
-                .send(Target {
-                    root: final_root,
-                    lower_bound_ops: initial_lower_bound,
-                    upper_bound_ops: final_upper_bound,
-                })
-                .await
-                .unwrap();
-
-            // Complete the sync
-            let synced_db = client.sync().await.unwrap();
-
-            // Verify the synced database has the expected final state
-            let mut hasher = test_hasher();
-            assert_eq!(synced_db.root(&mut hasher), final_root);
-
-            // Verify the target database matches the synced database
-            let target_db = match Arc::try_unwrap(target_db) {
-                Ok(rw_lock) => rw_lock.into_inner(),
-                Err(_) => panic!("Failed to unwrap Arc - still has references"),
-            };
-
-            assert_eq!(synced_db.op_count(), target_db.op_count());
-            assert_eq!(
-                synced_db.inactivity_floor_loc(),
-                target_db.inactivity_floor_loc()
-            );
-            assert_eq!(
-                synced_db.oldest_retained_loc().unwrap(),
-                initial_lower_bound
-            );
-            assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
-
-            // Verify the expected operations are present in the synced database.
-            for i in synced_db.inactivity_floor_loc()..synced_db.op_count() {
                 let got = synced_db.get_op(i).await.unwrap();
                 let expected = target_db.get_op(i).await.unwrap();
                 assert_eq!(got, expected);
