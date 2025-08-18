@@ -506,7 +506,6 @@ mod tests {
 
                     // Random shutdown timing to simulate unclean shutdown
                     let shutdown_wait = context.gen_range(shutdown_range_min..shutdown_range_max);
-
                     select! {
                         _ = context.sleep(shutdown_wait) => {
                             debug!(shutdown_wait = ?shutdown_wait, "Simulating unclean shutdown");

@@ -316,7 +316,7 @@ impl<
                         }
                         Ok(digest) => {
                             if let Err(err) = self.handle_digest(index, digest, &mut sender).await {
-                                warn!(?err, ?index, "handle_digest failed");
+                                debug!(?err, ?index, "handle_digest failed");
                                 continue;
                             }
                         }
@@ -365,7 +365,7 @@ impl<
 
                     // Handle the ack
                     if let Err(err) = self.handle_ack(&ack).await {
-                        warn!(?err, ?sender, "ack handle failed");
+                        debug!(?err, ?sender, "ack handle failed");
                         guard.set(Status::Failure);
                         continue;
                     }
