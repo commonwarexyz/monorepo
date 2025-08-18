@@ -32,3 +32,10 @@ path = "fuzz_targets/simplex_messages.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "threshold_simplex_messages"
+path = "fuzz_targets/threshold_simplex_messages.rs"
+test = false
+doc = false
+bench = false

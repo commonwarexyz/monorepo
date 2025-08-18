@@ -1,5 +1,6 @@
-//! Byzantine participant that sends random messages.
+#![allow(dead_code)]
 
+use crate::mocks::{FuzzInput, Message, Mutation, DEFAULT_TIMEOUT};
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_codec::{Decode, Encode};
@@ -16,35 +17,10 @@ use commonware_cryptography::{
     Digest, Signer as _,
 };
 use commonware_macros::select;
-use commonware_p2p::{simulated::helpers::PartitionStrategy, Receiver, Recipients, Sender};
+use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Spawner};
 use futures_timer::Delay;
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
-use std::time::Duration;
-
-const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
-
-#[derive(Debug, Clone, Arbitrary)]
-pub enum Mutation {
-    Payload,
-    View,
-    Parent,
-    All,
-}
-
-#[derive(Debug, Clone, Arbitrary)]
-pub enum Message {
-    Notarize,
-    Nullify,
-    Finalize,
-    Random,
-}
-
-#[derive(Debug, Arbitrary)]
-pub struct FuzzInput {
-    pub seed: u64, // Seed for rng
-    pub partition: PartitionStrategy,
-}
 
 pub struct Fuzzer<E: Clock + Spawner> {
     context: E,

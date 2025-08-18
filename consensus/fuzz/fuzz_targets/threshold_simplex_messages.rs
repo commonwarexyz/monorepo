@@ -2,7 +2,7 @@
 
 mod mocks;
 use commonware_consensus::{
-    simplex::{
+    threshold_simplex::{
         config::Config,
         mocks::{
             application, relay,
@@ -13,12 +13,13 @@ use commonware_consensus::{
     Monitor,
 };
 use commonware_cryptography::{
+    bls12381::{dkg::ops, primitives::variant::MinPk},
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest as Sha256Digest,
     PrivateKeyExt as _, Sha256, Signer as _,
 };
 use commonware_p2p::simulated::{
-    helpers::{link_peers, register_peers, Action, PartitionStrategy},
+    helpers::{link_peers, register_peers, register_validators, Action, PartitionStrategy},
     Config as NetworkConfig, Link, Network,
 };
 use commonware_runtime::{
@@ -26,13 +27,13 @@ use commonware_runtime::{
     deterministic::{self},
     Clock, Metrics, Runner, Spawner,
 };
-use commonware_utils::{NZUsize, NZU32};
+use commonware_utils::{quorum, NZUsize, NZU32};
 use futures::{future::join_all, StreamExt};
 use governor::Quota;
 use libfuzzer_sys::fuzz_target;
-use mocks::{simplex_fuzzer::Fuzzer, FuzzInput, PAGE_CACHE_SIZE, PAGE_SIZE};
+use mocks::{threshold_simplex_fuzzer::ThresholdFuzzer, FuzzInput, PAGE_CACHE_SIZE, PAGE_SIZE};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     panic,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -40,6 +41,7 @@ use std::{
     },
     time::Duration,
 };
+
 const VALID_PANICS: [&str; 2] = ["invalid view (in payload):", "invalid parent (in payload):"];
 
 static SHOULD_IGNORE_PANIC: AtomicBool = AtomicBool::new(false);
@@ -47,11 +49,12 @@ static SHOULD_IGNORE_PANIC: AtomicBool = AtomicBool::new(false);
 fn fuzzer(input: FuzzInput) {
     // Create context
     let n = 4;
+    let threshold = quorum(n);
     let required_containers = 10;
     let namespace = b"consensus_fuzz".to_vec();
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
-    executor.start(|context| async move {
+    executor.start(|mut context| async move {
         // Create simulated network
         let (network, mut oracle) = Network::new(
             context.with_label("network"),
@@ -75,8 +78,8 @@ fn fuzzer(input: FuzzInput) {
         }
         validators.sort();
         schemes.sort_by_key(|s| s.public_key());
-        let participants = BTreeMap::from_iter(vec![(0, validators.clone())]);
-        let mut registrations = register_peers(&mut oracle, &validators).await;
+        let mut registrations = register_validators(&mut oracle, &validators).await;
+
         let partition = input.partition.clone();
 
         // Link all validators
@@ -94,6 +97,10 @@ fn fuzzer(input: FuzzInput) {
         )
         .await;
 
+        // Derive threshold
+        let (polynomial, shares) =
+            ops::generate_shares::<_, MinPk>(&mut context, None, n, threshold);
+
         // Create engines
         let relay = Arc::new(relay::Relay::new());
         let mut supervisors = Vec::new();
@@ -102,34 +109,51 @@ fn fuzzer(input: FuzzInput) {
         let scheme = schemes.remove(0);
         let validator = scheme.public_key();
         let context = context.with_label(&format!("validator-{validator}"));
-        let supervisor_config = supervisor::Config {
+        let mut participants = BTreeMap::new();
+        participants.insert(
+            0,
+            (polynomial.clone(), validators.clone(), shares[0].clone()),
+        );
+        let supervisor_config = supervisor::Config::<_, MinPk> {
             namespace: namespace.clone(),
-            participants: participants.clone(),
+            participants,
         };
-        let supervisor = Supervisor::<PublicKey, Sha256Digest>::new(supervisor_config);
-
-        let (voter, _) = registrations
+        let supervisor = Supervisor::<PublicKey, MinPk, Sha256Digest>::new(supervisor_config);
+        let (pending, recovered, resolver) = registrations
             .remove(&validator)
             .expect("validator should be registered");
-        let actor = Fuzzer::new(
+        let engine = ThresholdFuzzer::new(
             context.with_label("fuzzing_actor"),
             scheme,
+            shares[0].clone(),
             supervisor,
             namespace.clone(),
             input,
         );
-        actor.start(voter);
+        engine.start(pending);
 
         // Start regular consensus engines for the remaining validators.
-        for scheme in schemes.into_iter() {
+        for (idx, scheme) in schemes.into_iter().enumerate() {
             let validator = scheme.public_key();
             let context = context.with_label(&format!("validator-{validator}"));
-            let supervisor_config = supervisor::Config {
+            let mut participants = BTreeMap::new();
+            participants.insert(
+                0,
+                (
+                    polynomial.clone(),
+                    validators.clone(),
+                    shares[idx + 1].clone(),
+                ),
+            );
+            let supervisor_config = supervisor::Config::<_, MinPk> {
                 namespace: namespace.clone(),
-                participants: participants.clone(),
+                participants,
             };
-            let supervisor = Supervisor::<PublicKey, Sha256Digest>::new(supervisor_config);
+            let supervisor = Supervisor::<PublicKey, MinPk, Sha256Digest>::new(supervisor_config);
             supervisors.push(supervisor.clone());
+            let (pending, recovered, resolver) = registrations
+                .remove(&validator)
+                .expect("validator should be registered");
 
             let application_cfg = application::Config {
                 hasher: Sha256::default(),
@@ -141,9 +165,10 @@ fn fuzzer(input: FuzzInput) {
             let (actor, application) =
                 application::Application::new(context.with_label("application"), application_cfg);
             actor.start();
-
+            let blocker = oracle.control(scheme.public_key());
             let cfg = Config {
                 crypto: scheme,
+                blocker,
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: supervisor.clone(),
@@ -159,18 +184,17 @@ fn fuzzer(input: FuzzInput) {
                 activity_timeout: 5,
                 skip_timeout: 3,
                 max_fetch_count: 1,
-                max_participants: n as usize,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, resolver) = registrations
+            let (pending, recovered, resolver) = registrations
                 .remove(&validator)
                 .expect("validator should be registered");
             let engine = Engine::new(context.with_label("engine"), cfg);
-            engine.start(voter, resolver);
+            engine.start(pending, recovered, resolver);
         }
 
         match partition {
