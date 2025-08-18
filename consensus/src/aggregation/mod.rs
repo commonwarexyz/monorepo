@@ -473,6 +473,7 @@ mod tests {
                                     {
                                         if tip_index >= target_index {
                                             // Verify that validator has signed messages at all indices
+                                            let mut success = true;
                                             for check_index in 0..=target_index {
                                                 if let Some((digest, epoch)) =
                                                     reporter_mailbox.get(check_index).await
@@ -487,13 +488,21 @@ mod tests {
                                                         ?digest,
                                                         "Verified validator signed message"
                                                     );
+                                                } else {
+                                                    success = false;
+                                                    break;
                                                 }
                                             }
-                                            completed_ref.lock().unwrap().insert(validator.clone());
-                                            debug!(
-                                                ?validator,
-                                                tip_index, "Validator completed signing target"
-                                            );
+                                            if success {
+                                                completed_ref
+                                                    .lock()
+                                                    .unwrap()
+                                                    .insert(validator.clone());
+                                                debug!(
+                                                    ?validator,
+                                                    tip_index, "Validator completed signing target"
+                                                );
+                                            }
                                             break;
                                         }
                                     }

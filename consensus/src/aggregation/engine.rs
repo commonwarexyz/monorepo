@@ -747,15 +747,15 @@ impl<
             match activity {
                 Activity::Tip(index) => {
                     tip = max(tip, index);
-                    self.reporter.report(Activity::Tip(index)).await;
+                    // self.reporter.report(Activity::Tip(index)).await;
                 }
                 Activity::Certified(certificate) => {
                     certified.push(certificate.clone());
-                    self.reporter.report(Activity::Certified(certificate)).await;
+                    // self.reporter.report(Activity::Certified(certificate)).await;
                 }
                 Activity::Ack(ack) => {
                     acks.push(ack.clone());
-                    self.reporter.report(Activity::Ack(ack)).await;
+                    //self.reporter.report(Activity::Ack(ack)).await;
                 }
             }
         }
