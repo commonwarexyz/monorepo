@@ -2,7 +2,7 @@ use crate::{
     adb::{
         self,
         any::{self, variable::OLDEST_RETAINED_LOC_PREFIX},
-        sync::{self, Journal as SyncJournal},
+        sync::{self, variable_journal, Journal as SyncJournal},
     },
     index::Index,
     journal::{
@@ -29,7 +29,7 @@ where
     T: Translator,
 {
     type Op = Variable<K, V>;
-    type Journal = crate::adb::sync::variable_journal::Journal<E, K, V>;
+    type Journal = variable_journal::Journal<E, K, V>;
     type Hasher = H;
     type Error = adb::Error;
     type Config = any::variable::Config<T, V::Cfg>;
@@ -57,7 +57,7 @@ where
         )
         .await?;
 
-        let size = crate::adb::sync::variable_journal::compute_size(
+        let size = variable_journal::compute_size(
             &journal,
             config.log_items_per_section,
             lower_bound,
@@ -65,7 +65,7 @@ where
         )
         .await?;
 
-        Ok(crate::adb::sync::variable_journal::Journal::new(
+        Ok(variable_journal::Journal::new(
             journal,
             config.log_items_per_section,
             size,
@@ -242,7 +242,7 @@ where
         )
         .await
         .map_err(adb::Error::from)?;
-        let size = crate::adb::sync::variable_journal::compute_size(
+        let size = variable_journal::compute_size(
             &variable_journal,
             config.log_items_per_section,
             lower_bound,
@@ -250,7 +250,7 @@ where
         )
         .await
         .map_err(adb::Error::from)?;
-        Ok(crate::adb::sync::variable_journal::Journal::new(
+        Ok(variable_journal::Journal::new(
             variable_journal,
             config.log_items_per_section,
             size,
