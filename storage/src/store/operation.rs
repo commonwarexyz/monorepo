@@ -8,7 +8,7 @@ use commonware_codec::{
     util::at_least, Codec, CodecFixed, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt,
     Write,
 };
-use commonware_utils::Array;
+use commonware_utils::{hex, Array};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
@@ -259,23 +259,23 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
     }
 }
 
-impl<K: Array, V: CodecFixed + Display> Display for Fixed<K, V> {
+impl<K: Array, V: CodecFixed> Display for Fixed<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Fixed::Delete(key) => write!(f, "[key:{key} <deleted>]"),
-            Fixed::Update(key, value) => write!(f, "[key:{key} value:{value}]"),
+            Fixed::Update(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
             Fixed::CommitFloor(loc) => write!(f, "[commit with inactivity floor: {loc}]"),
         }
     }
 }
 
-impl<K: Array, V: Codec + Display> Display for Variable<K, V> {
+impl<K: Array, V: Codec> Display for Variable<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Variable::Set(key, value) => write!(f, "[key:{key} value:{value}]"),
+            Variable::Set(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
             Variable::Commit() => write!(f, "[commit]"),
             Variable::Delete(key) => write!(f, "[key:{key} <deleted>]"),
-            Variable::Update(key, value) => write!(f, "[key:{key} value:{value}]"),
+            Variable::Update(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
             Variable::CommitFloor(loc) => write!(f, "[commit with inactivity floor: {loc}]"),
         }
     }
