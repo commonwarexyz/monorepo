@@ -132,7 +132,7 @@ impl<E: Clock + Spawner, V: Variant> ThresholdFuzzer<E, V> {
 
     async fn handle_received_message(
         &mut self,
-        sender: &mut impl Sender<PublicKey = PublicKey>,
+        sender: &mut impl Sender,
         _sender_id: impl std::fmt::Debug,
         msg: Vec<u8>,
     ) {
@@ -214,7 +214,7 @@ impl<E: Clock + Spawner, V: Variant> ThresholdFuzzer<E, V> {
         }
     }
 
-    async fn send_random_message(&mut self, sender: &mut impl Sender<PublicKey = PublicKey>) {
+    async fn send_random_message(&mut self, sender: &mut impl Sender) {
         let proposal = Proposal::new(
             self.random_view(self.view),
             self.random_parent(),

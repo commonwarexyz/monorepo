@@ -19,7 +19,7 @@ use commonware_cryptography::{
     PrivateKeyExt as _, Sha256, Signer as _,
 };
 use commonware_p2p::simulated::{
-    helpers::{link_peers, register_peers, register_validators, Action, PartitionStrategy},
+    helpers::{link_peers, register_validators, Action, PartitionStrategy},
     Config as NetworkConfig, Link, Network,
 };
 use commonware_runtime::{
@@ -33,7 +33,7 @@ use governor::Quota;
 use libfuzzer_sys::fuzz_target;
 use mocks::{threshold_simplex_fuzzer::ThresholdFuzzer, FuzzInput, PAGE_CACHE_SIZE, PAGE_SIZE};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     panic,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -190,9 +190,6 @@ fn fuzzer(input: FuzzInput) {
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (pending, recovered, resolver) = registrations
-                .remove(&validator)
-                .expect("validator should be registered");
             let engine = Engine::new(context.with_label("engine"), cfg);
             engine.start(pending, recovered, resolver);
         }
