@@ -87,7 +87,7 @@ where
         apply_batch_size: usize,
     ) -> Result<Self, Self::Error> {
         // Initialize MMR for sync with proper bounds and pinned nodes
-        let mut mmr = crate::mmr::journaled::Mmr::init_sync(
+        let mmr = crate::mmr::journaled::Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
                 config: crate::mmr::journaled::Config {
@@ -107,7 +107,7 @@ where
         .map_err(adb::Error::Mmr)?;
 
         // Initialize locations journal for sync with proper bounds and pruning
-        let mut locations = crate::adb::any::fixed::sync::init_journal(
+        let locations = crate::adb::any::fixed::sync::init_journal(
             context.with_label("locations"),
             fixed::Config {
                 partition: db_config.locations_journal_partition.clone(),
@@ -124,62 +124,7 @@ where
         // Extract the inner variable journal
         let inner_log = journal.into_inner();
 
-        // Process the variable journal in a single pass to populate MMR, locations, and snapshot
-        let mut hasher = Standard::<H>::new();
-        let mut snapshot =
-            Index::init(context.with_label("snapshot"), db_config.translator.clone());
-
-        {
-            let stream = inner_log
-                .replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE))
-                .await
-                .map_err(adb::Error::Journal)?;
-            pin_mut!(stream);
-
-            let mut operation_index = lower_bound;
-
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok((_section, offset, _size, op)) => {
-                        // Apply operations to MMR
-                        mmr.add_batched(&mut hasher, &op.encode())
-                            .await
-                            .map_err(adb::Error::Mmr)?;
-                        if operation_index % apply_batch_size as u64 == 0 {
-                            mmr.sync(&mut hasher).await.map_err(adb::Error::Mmr)?;
-                        }
-
-                        // Populate locations journal
-                        locations
-                            .append(offset.into())
-                            .await
-                            .map_err(adb::Error::Journal)?;
-
-                        // Build snapshot
-                        match &op {
-                            Operation::Set(key, _) | Operation::Update(key, _) => {
-                                snapshot.insert(key, operation_index);
-                            }
-                            Operation::Delete(key) => {
-                                let cursor = snapshot.get_mut(key);
-                                if let Some(mut cursor) = cursor {
-                                    while cursor.next().is_some() {
-                                        cursor.delete();
-                                    }
-                                }
-                            }
-                            Operation::Commit() | Operation::CommitFloor(_) => {}
-                        }
-                        operation_index += 1;
-                    }
-                    Err(e) => {
-                        return Err(adb::Error::Journal(e));
-                    }
-                }
-            }
-        } // stream is dropped here, releasing the borrow on inner_log
-
-        // Initialize metadata
+        let snapshot = Index::init(context.with_label("snapshot"), db_config.translator.clone());
         let mut metadata = crate::metadata::Metadata::init(
             context.with_label("metadata"),
             crate::metadata::Config {
@@ -193,10 +138,10 @@ where
         metadata.put(oldest_retained_loc_key, lower_bound.to_be_bytes().to_vec());
 
         // Create the database instance
-        let mut db = any::variable::Any {
+        let db = any::variable::Any {
             mmr,
             log: inner_log,
-            log_size: upper_bound + 1,
+            log_size: lower_bound,
             inactivity_floor_loc: lower_bound,
             oldest_retained_loc: lower_bound,
             metadata,
@@ -204,9 +149,11 @@ where
             log_items_per_section: db_config.log_items_per_section.get(),
             uncommitted_ops: 0,
             snapshot,
-            hasher,
+            hasher: Standard::<H>::new(),
             pruning_delay: db_config.pruning_delay,
         };
+
+        let mut db = db.build_snapshot_from_log().await?;
 
         // Persist state
         db.sync().await?;
@@ -1684,180 +1631,188 @@ mod tests {
         });
     }
 
-    // /// Test sync when there's existing database on disk with partial match
-    // #[test_traced("WARN")]
-    // fn test_sync_use_existing_db_partial_match() {
-    //     const NUM_OPS: usize = 50;
-    //     const NUM_ADDITIONAL_OPS: usize = 25;
-    //     let executor = deterministic::Runner::default();
-    //     executor.start(|mut context| async move {
-    //         // Create and populate two databases
-    //         let mut target_db = create_test_db(context.clone()).await;
-    //         let sync_db_config =
-    //             create_sync_config(&format!("partial_match_{}", context.next_u64()));
-    //         let mut sync_db: VarAnySyncTest =
-    //             VarAnySyncTest::init(context.clone(), sync_db_config.clone())
-    //                 .await
-    //                 .unwrap();
-    //         let original_ops = create_test_ops(NUM_OPS);
-    //         apply_ops(&mut target_db, &original_ops).await;
-    //         target_db.commit().await.unwrap();
-    //         apply_ops(&mut sync_db, &original_ops).await;
-    //         sync_db.commit().await.unwrap();
-    //         let _sync_db_original_op_count = sync_db.op_count();
+    /*
+    // Test syncing where the sync client has some but not all of the operations in the target
+    // database.
+    #[test]
+    fn test_sync_use_existing_db_partial_match() {
+        const ORIGINAL_DB_OPS: usize = 1_000;
 
-    //         // Close the sync db
-    //         sync_db.close().await.unwrap();
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let original_ops = create_test_ops(ORIGINAL_DB_OPS);
 
-    //         // Add more operations to the target db
-    //         let more_ops = create_test_ops(NUM_ADDITIONAL_OPS);
-    //         apply_ops(&mut target_db, &more_ops).await;
-    //         target_db.commit().await.unwrap();
+            // Create two databases
+            let mut target_db = create_test_db(context.clone()).await;
+            let sync_db_config =
+                create_sync_config(&format!("partial_match_{}", context.next_u64()));
+            let mut sync_db = AnyTest::init(context.clone(), sync_db_config.clone())
+                .await
+                .unwrap();
 
-    //         // Capture target db state for comparison
-    //         let target_db_op_count = target_db.op_count();
-    //         let target_db_oldest_retained_loc = target_db.oldest_retained_loc().unwrap_or(0);
-    //         let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
-    //         let target_root = target_db.root(&mut hasher);
+            // Apply the same operations to both databases
+            apply_ops(&mut target_db, &original_ops).await;
+            apply_ops(&mut sync_db, &original_ops).await;
+            target_db.commit().await.unwrap();
+            sync_db.commit().await.unwrap();
 
-    //         let sync_lower_bound = target_db_oldest_retained_loc;
-    //         let sync_upper_bound = target_db_op_count - 1;
+            let original_db_op_count = target_db.op_count();
 
-    //         // Sync to bring the partial database up to the target state
-    //         let target_db = Arc::new(RwLock::new(target_db));
-    //         let config = sync::engine::Config {
-    //             db_config: sync_db_config,
-    //             fetch_batch_size: NZU64!(10),
-    //             target: Target {
-    //                 root: target_root,
-    //                 lower_bound_ops: sync_lower_bound,
-    //                 upper_bound_ops: sync_upper_bound,
-    //             },
-    //             context,
-    //             resolver: target_db.clone(),
-    //             apply_batch_size: 1024,
-    //             max_outstanding_requests: 1,
-    //             update_rx: None,
-    //         };
-    //         let sync_db: VarAnySyncTest = sync::sync(config).await.unwrap();
+            // Close sync_db
+            sync_db.close().await.unwrap();
 
-    //         // Verify database state
-    //         let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
-    //         assert_eq!(sync_db.op_count(), target_db_op_count);
-    //         assert_eq!(
-    //             sync_db.oldest_retained_loc().unwrap_or(0),
-    //             target_db_oldest_retained_loc
-    //         );
-    //         assert_eq!(sync_db.root(&mut hasher), target_root);
+            // Add one more operation and commit the target database
+            let last_op = create_test_ops(1);
+            apply_ops(&mut target_db, &last_op).await;
+            target_db.commit().await.unwrap();
+            let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
+            let root = target_db.root(&mut hasher);
+            let lower_bound_ops = target_db.inactivity_floor_loc;
+            let upper_bound_ops = target_db.op_count() - 1; // Up to the last operation
 
-    //         // Verify that the synced database matches the target state
-    //         let mut all_expected_kvs = std::collections::HashMap::new();
-    //         for ops in [&original_ops, &more_ops] {
-    //             for op in ops {
-    //                 if let Variable::Set(key, value) = op {
-    //                     all_expected_kvs.insert(*key, *value);
-    //                 }
-    //             }
-    //         }
+            // Reopen the sync database and sync it to the target database
+            let target_db = Arc::new(RwLock::new(target_db));
+            let config = sync::engine::Config {
+                db_config: sync_db_config, // Use same config as before
+                fetch_batch_size: NZU64!(10),
+                target: Target {
+                    root,
+                    lower_bound_ops,
+                    upper_bound_ops,
+                },
+                context: context.clone(),
+                resolver: target_db.clone(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 1,
+                update_rx: None,
+            };
+            let sync_db: AnyTest = sync::sync(config).await.unwrap();
 
-    //         for (key, expected_value) in &all_expected_kvs {
-    //             let target_value = target_db.read().await.get(key).await.unwrap().unwrap();
-    //             let synced_value = sync_db.get(key).await.unwrap().unwrap();
-    //             assert_eq!(synced_value, target_value);
-    //             assert_eq!(synced_value, *expected_value);
-    //         }
+            // Verify database state
+            assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
+            assert_eq!(
+                sync_db.inactivity_floor_loc,
+                target_db.read().await.inactivity_floor_loc
+            );
+            assert_eq!(sync_db.oldest_retained_loc().unwrap(), lower_bound_ops);
+            assert_eq!(
+                sync_db.mmr.pruned_to_pos(),
+                leaf_num_to_pos(lower_bound_ops)
+            );
+            // Verify the root digest matches the target
+            assert_eq!(sync_db.root(&mut hasher), root);
 
-    //         sync_db.destroy().await.unwrap();
-    //         let target_db = match Arc::try_unwrap(target_db) {
-    //             Ok(rw_lock) => rw_lock.into_inner(),
-    //             Err(_) => panic!("Failed to unwrap Arc - still has references"),
-    //         };
-    //         target_db.destroy().await.unwrap();
-    //     });
-    // }
+            // Verify that the operations in the overlapping range are present and correct
+            // for i in lower_bound_ops..original_db_op_count {
+            //     let expected_op = target_db.read().await.log.read(i).await.unwrap();
+            //     let synced_op = sync_db.log.read(i).await.unwrap();
+            //     assert_eq!(expected_op, synced_op);
+            // }
 
-    // /// Test case where existing database on disk exactly matches the sync target
-    // #[test_traced("WARN")]
-    // fn test_sync_use_existing_db_exact_match() {
-    //     const NUM_OPS: usize = 50;
-    //     let executor = deterministic::Runner::default();
-    //     executor.start(|mut context| async move {
-    //         // Create and populate target database
-    //         let mut target_db = create_test_db(context.clone()).await;
-    //         let target_ops = create_test_ops(NUM_OPS);
-    //         apply_ops(&mut target_db, &target_ops).await;
-    //         target_db.commit().await.unwrap();
+            for target_op in &original_ops {
+                if let Some(key) = target_op.to_key() {
+                    let target_value = target_db.read().await.get(key).await.unwrap();
+                    let synced_value = sync_db.get(key).await.unwrap();
+                    assert_eq!(target_value, synced_value);
+                }
+            }
+            // Verify the last operation is present
+            let last_key = last_op[0].to_key().unwrap();
+            let last_value = *last_op[0].to_value().unwrap();
+            assert_eq!(sync_db.get(last_key).await.unwrap(), Some(last_value));
 
-    //         // Capture target state
-    //         let target_db_op_count = target_db.op_count();
-    //         let target_db_oldest_retained_loc = target_db.oldest_retained_loc().unwrap_or(0);
-    //         let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
-    //         let target_root = target_db.root(&mut hasher);
+            sync_db.destroy().await.unwrap();
+            Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+                .into_inner()
+                .destroy()
+                .await
+                .unwrap();
+        });
+    }
+    */
 
-    //         // Create sync database with exactly the same operations
-    //         let sync_db_config = create_sync_config(&format!("exact_match_{}", context.next_u64()));
-    //         let mut sync_db: VarAnySyncTest =
-    //             VarAnySyncTest::init(context.clone(), sync_db_config.clone())
-    //                 .await
-    //                 .unwrap();
-    //         apply_ops(&mut sync_db, &target_ops).await;
-    //         sync_db.commit().await.unwrap();
+    /// Test case where existing database on disk exactly matches the sync target
+    #[test_traced("WARN")]
+    fn test_sync_use_existing_db_exact_match() {
+        const NUM_OPS: usize = 50;
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // Create and populate target database
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(NUM_OPS);
+            apply_ops(&mut target_db, &target_ops).await;
+            target_db.commit().await.unwrap();
 
-    //         // Verify they have the same state before sync
-    //         assert_eq!(sync_db.op_count(), target_db_op_count);
-    //         assert_eq!(sync_db.root(&mut hasher), target_root);
+            // Capture target state
+            let target_db_op_count = target_db.op_count();
+            let target_db_oldest_retained_loc = target_db.oldest_retained_loc().unwrap_or(0);
+            let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
+            let target_root = target_db.root(&mut hasher);
 
-    //         // Close the sync database
-    //         sync_db.close().await.unwrap();
+            // Create sync database with exactly the same operations
+            let sync_db_config = create_sync_config(&format!("exact_match_{}", context.next_u64()));
+            let mut sync_db: AnyTest = AnyTest::init(context.clone(), sync_db_config.clone())
+                .await
+                .unwrap();
+            apply_ops(&mut sync_db, &target_ops).await;
+            sync_db.commit().await.unwrap();
 
-    //         // Sync should recognize the exact match and reuse existing data
-    //         let target_db = Arc::new(RwLock::new(target_db));
-    //         let config = sync::engine::Config {
-    //             db_config: sync_db_config,
-    //             fetch_batch_size: NZU64!(10),
-    //             target: Target {
-    //                 root: target_root,
-    //                 lower_bound_ops: target_db_oldest_retained_loc,
-    //                 upper_bound_ops: target_db_op_count - 1,
-    //             },
-    //             context,
-    //             resolver: target_db.clone(),
-    //             apply_batch_size: 1024,
-    //             max_outstanding_requests: 1,
-    //             update_rx: None,
-    //         };
-    //         let sync_db: VarAnySyncTest = sync::sync(config).await.unwrap();
+            // Verify they have the same state before sync
+            assert_eq!(sync_db.op_count(), target_db_op_count);
+            assert_eq!(sync_db.root(&mut hasher), target_root);
 
-    //         // Verify database state matches exactly
-    //         let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
-    //         assert_eq!(sync_db.op_count(), target_db_op_count);
-    //         assert_eq!(
-    //             sync_db.oldest_retained_loc().unwrap_or(0),
-    //             target_db_oldest_retained_loc
-    //         );
-    //         assert_eq!(sync_db.root(&mut hasher), target_root);
+            // Close the sync database
+            sync_db.close().await.unwrap();
 
-    //         // Verify data integrity
-    //         let mut expected_kvs = std::collections::HashMap::new();
-    //         for op in &target_ops {
-    //             if let Variable::Set(key, value) = op {
-    //                 expected_kvs.insert(*key, *value);
-    //             }
-    //         }
+            // Sync should recognize the exact match and reuse existing data
+            let target_db = Arc::new(RwLock::new(target_db));
+            let config = sync::engine::Config {
+                db_config: sync_db_config,
+                fetch_batch_size: NZU64!(10),
+                target: Target {
+                    root: target_root,
+                    lower_bound_ops: target_db_oldest_retained_loc,
+                    upper_bound_ops: target_db_op_count - 1,
+                },
+                context,
+                resolver: target_db.clone(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 1,
+                update_rx: None,
+            };
+            let sync_db: AnyTest = sync::sync(config).await.unwrap();
 
-    //         for (key, expected_value) in &expected_kvs {
-    //             let target_value = target_db.read().await.get(key).await.unwrap().unwrap();
-    //             let synced_value = sync_db.get(key).await.unwrap().unwrap();
-    //             assert_eq!(synced_value, target_value);
-    //             assert_eq!(synced_value, *expected_value);
-    //         }
+            // Verify database state matches exactly
+            let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
+            assert_eq!(sync_db.op_count(), target_db_op_count);
+            assert_eq!(
+                sync_db.oldest_retained_loc().unwrap_or(0),
+                target_db_oldest_retained_loc
+            );
+            assert_eq!(sync_db.root(&mut hasher), target_root);
 
-    //         sync_db.destroy().await.unwrap();
-    //         let target_db = match Arc::try_unwrap(target_db) {
-    //             Ok(rw_lock) => rw_lock.into_inner(),
-    //             Err(_) => panic!("Failed to unwrap Arc - still has references"),
-    //         };
-    //         target_db.destroy().await.unwrap();
-    //     });
-    // }
+            // Verify data integrity
+            let mut expected_kvs = std::collections::HashMap::new();
+            for op in &target_ops {
+                if let Variable::Set(key, value) = op {
+                    expected_kvs.insert(*key, *value);
+                }
+            }
+
+            for (key, expected_value) in &expected_kvs {
+                let target_value = target_db.read().await.get(key).await.unwrap().unwrap();
+                let synced_value = sync_db.get(key).await.unwrap().unwrap();
+                assert_eq!(synced_value, target_value);
+                assert_eq!(synced_value, *expected_value);
+            }
+
+            sync_db.destroy().await.unwrap();
+            let target_db = match Arc::try_unwrap(target_db) {
+                Ok(rw_lock) => rw_lock.into_inner(),
+                Err(_) => panic!("Failed to unwrap Arc - still has references"),
+            };
+            target_db.destroy().await.unwrap();
+        });
+    }
 }

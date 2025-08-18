@@ -1467,6 +1467,7 @@ pub(super) mod test {
             let oldest_retained = db.oldest_retained_loc().unwrap();
             let inactivity_floor = db.inactivity_floor_loc;
             let target_prune_loc = inactivity_floor.saturating_sub(db_config.pruning_delay);
+            // Note we prune to section boundaries.
             let expected_oldest_retained =
                 (target_prune_loc / db.log_items_per_section) * db.log_items_per_section;
             assert_eq!(oldest_retained, expected_oldest_retained);
