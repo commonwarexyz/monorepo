@@ -502,8 +502,8 @@ mod tests {
                                                     ?validator,
                                                     tip_index, "Validator completed signing target"
                                                 );
+                                                break;
                                             }
-                                            break;
                                         }
                                     }
                                     context.sleep(Duration::from_millis(50)).await;

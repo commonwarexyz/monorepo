@@ -15,7 +15,6 @@ use futures::{
     SinkExt, StreamExt,
 };
 use std::collections::{btree_map::Entry, BTreeMap, HashSet};
-use tracing::warn;
 
 #[allow(clippy::large_enum_variant)]
 enum Message<V: Variant, D: Digest> {
