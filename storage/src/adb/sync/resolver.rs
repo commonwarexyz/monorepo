@@ -248,20 +248,18 @@ pub(crate) mod tests {
     use std::marker::PhantomData;
 
     #[derive(Clone)]
-    pub struct FailResolver<D, K, V> {
+    pub struct FailResolver<D, Op> {
         _digest: PhantomData<D>,
-        _key: PhantomData<K>,
-        _value: PhantomData<V>,
+        _op: PhantomData<Op>,
     }
 
-    impl<D, K, V> Resolver for FailResolver<D, K, V>
+    impl<D, Op> Resolver for FailResolver<D, Op>
     where
         D: Digest,
-        K: Array,
-        V: Array,
+        Op: Send + Sync + Clone + 'static,
     {
         type Digest = D;
-        type Op = Fixed<K, V>;
+        type Op = Op;
         type Error = adb::Error;
 
         async fn get_operations(
@@ -274,12 +272,11 @@ pub(crate) mod tests {
         }
     }
 
-    impl<D, K, V> FailResolver<D, K, V> {
+    impl<D, Op> FailResolver<D, Op> {
         pub fn new() -> Self {
             Self {
                 _digest: PhantomData,
-                _key: PhantomData,
-                _value: PhantomData,
+                _op: PhantomData,
             }
         }
     }

@@ -760,7 +760,8 @@ mod tests {
             // sync_db should never ask the resolver for operations
             // because it is already complete. Use a resolver that always fails
             // to ensure that it's not being used.
-            let resolver = FailResolver::<sha256::Digest, sha256::Digest, sha256::Digest>::new();
+            let resolver =
+                FailResolver::<sha256::Digest, Fixed<sha256::Digest, sha256::Digest>>::new();
             let config = Config {
                 db_config: sync_config, // Use same config to access same partitions
                 fetch_batch_size: NZU64!(10),
@@ -1455,7 +1456,8 @@ mod tests {
     fn test_sync_resolver_fails() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let resolver = FailResolver::<sha256::Digest, sha256::Digest, sha256::Digest>::new();
+            let resolver =
+                FailResolver::<sha256::Digest, Fixed<sha256::Digest, sha256::Digest>>::new();
             let target_root = sha256::Digest::from([0; 32]);
 
             let db_config = create_test_config(context.next_u64());

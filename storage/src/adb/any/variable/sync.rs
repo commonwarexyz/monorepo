@@ -438,7 +438,7 @@ mod tests {
         adb::{
             any::fixed::test::{PAGE_CACHE_SIZE, PAGE_SIZE},
             sync::{
-                self, engine::{Config, NextStep}, Engine, Journal as _, Target
+                self, engine::{Config, NextStep}, resolver::tests::FailResolver, Engine, Journal as _, Target
             },
         },
         journal::variable::ITEM_ALIGNMENT,
@@ -2491,6 +2491,112 @@ mod tests {
 
             synced_db.destroy().await.unwrap();
             target_db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_sync_database_persistence() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create and populate a simple target database
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(10);
+            apply_ops(&mut target_db, &target_ops).await;
+            target_db.commit().await.unwrap();
+
+            // Capture target state
+            let mut hasher = test_hasher();
+            let target_root = target_db.root(&mut hasher);
+            let lower_bound = target_db.inactivity_floor_loc();
+            let upper_bound = target_db.op_count() - 1;
+
+            // Perform sync
+            let db_config = create_sync_config("test_persistence_42");
+            let context_clone = context.clone();
+            let target_db = Arc::new(RwLock::new(target_db));
+            let config = Config {
+                db_config: db_config.clone(),
+                fetch_batch_size: NZU64!(5),
+                target: Target {
+                    root: target_root,
+                    lower_bound_ops: lower_bound,
+                    upper_bound_ops: upper_bound,
+                },
+                context,
+                resolver: target_db.clone(),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 1,
+                update_rx: None,
+            };
+            let synced_db: AnyTest = sync::sync(config).await.unwrap();
+
+            // Verify initial sync worked
+            let mut hasher = test_hasher();
+            assert_eq!(synced_db.root(&mut hasher), target_root);
+
+            // Save state before closing
+            let expected_root = synced_db.root(&mut hasher);
+            let expected_op_count = synced_db.op_count();
+            let expected_inactivity_floor_loc = synced_db.inactivity_floor_loc();
+            let expected_oldest_retained_loc = synced_db.oldest_retained_loc();
+            let expected_pruned_to_pos = synced_db.mmr.pruned_to_pos();
+
+            // Close the database
+            synced_db.close().await.unwrap();
+
+            // Re-open the database
+            let reopened_db = AnyTest::init(context_clone, db_config).await.unwrap();
+
+            // Verify the state is unchanged
+            assert_eq!(reopened_db.root(&mut hasher), expected_root);
+            assert_eq!(reopened_db.op_count(), expected_op_count);
+            assert_eq!(
+                reopened_db.inactivity_floor_loc(),
+                expected_inactivity_floor_loc
+            );
+            assert_eq!(
+                reopened_db.oldest_retained_loc(),
+                expected_oldest_retained_loc
+            );
+            assert_eq!(reopened_db.mmr.pruned_to_pos(), expected_pruned_to_pos);
+
+            // Cleanup
+            Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+                .into_inner()
+                .destroy()
+                .await
+                .unwrap();
+            reopened_db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_sync_resolver_fails() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let resolver = FailResolver::<sha256::Digest, Variable<sha256::Digest, sha256::Digest>>::new();
+            let target_root = sha256::Digest::from([0; 32]);
+
+            let db_config = create_sync_config(&format!("test_fail_resolver_{}", context.next_u64()));
+            let engine_config = Config {
+                context,
+                target: Target {
+                    root: target_root,
+                    lower_bound_ops: 0,
+                    upper_bound_ops: 4,
+                },
+                resolver,
+                apply_batch_size: 2,
+                max_outstanding_requests: 2,
+                fetch_batch_size: NZU64!(2),
+                db_config,
+                update_rx: None,
+            };
+
+            // Attempt to sync - should fail due to resolver error
+            let result: Result<AnyTest, _> = sync::sync(engine_config).await;
+            assert!(result.is_err());
         });
     }
 }
