@@ -1,6 +1,6 @@
 use super::{Link, Oracle, Receiver, Sender};
 use arbitrary::Arbitrary;
-use commonware_cryptography::{PublicKey as CPublicKey, PublicKey};
+use commonware_cryptography::{PublicKey};
 use std::collections::HashMap;
 
 #[derive(Clone)]
@@ -62,7 +62,7 @@ fn linear(n: usize, i: usize, j: usize) -> bool {
     i + 1 % n == j % n || i == j
 }
 
-pub async fn register_peers<P: CPublicKey>(
+pub async fn simplex_register_peers<P: PublicKey>(
     oracle: &mut Oracle<P>,
     validators: &[P],
 ) -> HashMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))> {
@@ -82,7 +82,7 @@ pub async fn register_peers<P: CPublicKey>(
     registrations
 }
 
-pub async fn register_validators<P: PublicKey>(
+pub async fn threshold_simplex_register_peers<P: PublicKey>(
     oracle: &mut Oracle<P>,
     validators: &[P],
 ) -> HashMap<
@@ -113,7 +113,7 @@ pub async fn register_validators<P: PublicKey>(
     registrations
 }
 
-pub async fn link_peers<P: CPublicKey>(
+pub async fn link_peers<P: PublicKey>(
     oracle: &mut Oracle<P>,
     validators: &[P],
     action: Action,

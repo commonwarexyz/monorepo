@@ -1,11 +1,10 @@
-pub mod simplex_fuzzer;
-pub mod threshold_simplex_fuzzer;
-
-use std::num::NonZeroUsize;
 use arbitrary::Arbitrary;
 use commonware_p2p::simulated::helpers::PartitionStrategy;
-use std::time::Duration;
 use commonware_utils::NZUsize;
+use std::{num::NonZeroUsize, time::Duration};
+
+pub mod simplex_fuzzer;
+pub mod threshold_simplex_fuzzer;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
 pub const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);

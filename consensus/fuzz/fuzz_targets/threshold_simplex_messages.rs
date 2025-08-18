@@ -19,7 +19,7 @@ use commonware_cryptography::{
     PrivateKeyExt as _, Sha256, Signer as _,
 };
 use commonware_p2p::simulated::{
-    helpers::{link_peers, register_validators, Action, PartitionStrategy},
+    helpers::{link_peers, threshold_simplex_register_peers, Action, PartitionStrategy},
     Config as NetworkConfig, Link, Network,
 };
 use commonware_runtime::{
@@ -78,7 +78,7 @@ fn fuzzer(input: FuzzInput) {
         }
         validators.sort();
         schemes.sort_by_key(|s| s.public_key());
-        let mut registrations = register_validators(&mut oracle, &validators).await;
+        let mut registrations = threshold_simplex_register_peers(&mut oracle, &validators).await;
 
         let partition = input.partition.clone();
 
@@ -119,7 +119,7 @@ fn fuzzer(input: FuzzInput) {
             participants,
         };
         let supervisor = Supervisor::<PublicKey, MinPk, Sha256Digest>::new(supervisor_config);
-        let (pending, recovered, resolver) = registrations
+        let (pending, _, _) = registrations
             .remove(&validator)
             .expect("validator should be registered");
         let engine = ThresholdFuzzer::new(

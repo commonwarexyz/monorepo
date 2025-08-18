@@ -18,7 +18,7 @@ use commonware_cryptography::{
     PrivateKeyExt as _, Sha256, Signer as _,
 };
 use commonware_p2p::simulated::{
-    helpers::{link_peers, register_peers, Action, PartitionStrategy},
+    helpers::{link_peers, simplex_register_peers, Action, PartitionStrategy},
     Config as NetworkConfig, Link, Network,
 };
 use commonware_runtime::{
@@ -76,7 +76,7 @@ fn fuzzer(input: FuzzInput) {
         validators.sort();
         schemes.sort_by_key(|s| s.public_key());
         let participants = BTreeMap::from_iter(vec![(0, validators.clone())]);
-        let mut registrations = register_peers(&mut oracle, &validators).await;
+        let mut registrations = simplex_register_peers(&mut oracle, &validators).await;
         let partition = input.partition.clone();
 
         // Link all validators

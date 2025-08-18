@@ -9,7 +9,7 @@ use commonware_consensus::{
         mocks::supervisor::Supervisor,
         types::{Finalize, Notarize, Nullify, Proposal, Voter},
     },
-    Supervisor as SupervisorTrait, Viewable,
+    Viewable,
 };
 use commonware_cryptography::{
     bls12381::primitives::{group::Share, variant::Variant},
