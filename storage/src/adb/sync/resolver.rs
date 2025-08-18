@@ -196,7 +196,7 @@ pub(crate) mod tests {
     where
         D: Digest,
         K: Array,
-        V: Array,
+        V: CodecFixed<Cfg = ()> + Clone + Send + Sync + 'static,
     {
         type Digest = D;
         type Op = Fixed<K, V>;
