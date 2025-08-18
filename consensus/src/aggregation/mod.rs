@@ -489,6 +489,11 @@ mod tests {
                                                         "Verified validator signed message"
                                                     );
                                                 } else {
+                                                    debug!(
+                                                        ?validator,
+                                                        check_index,
+                                                        "Validator did not sign message"
+                                                    );
                                                     success = false;
                                                     break;
                                                 }
