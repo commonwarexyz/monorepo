@@ -313,6 +313,11 @@ impl BitVec {
     }
 
     /// Creates a mask with the first `num_bits` bits set to 1.
+    ///
+    /// # Arguments
+    ///
+    /// * `num_bits` - The number of bits to set to 1. Must be <= BITS_PER_BLOCK.
+    ///                Can be 0, in which case returns 0.
     #[inline(always)]
     fn mask_over_first_n_bits(num_bits: usize) -> Block {
         assert!(num_bits <= BITS_PER_BLOCK, "num_bits exceeds block size");
