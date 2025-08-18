@@ -473,7 +473,7 @@ mod tests {
                                     {
                                         if tip_index >= target_index {
                                             // Verify that validator has signed messages at all indices
-                                            for check_index in 0..=tip_index {
+                                            for check_index in 0..=target_index {
                                                 if let Some((digest, epoch)) =
                                                     reporter_mailbox.get(check_index).await
                                                 {
