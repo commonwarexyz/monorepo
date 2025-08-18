@@ -717,4 +717,98 @@ mod tests {
             assert_eq!(received5.height(), 5);
         })
     }
+
+    #[test_traced("WARN")]
+    fn test_epoch_boundary_reproposal_subscription() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone());
+            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
+            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
+
+            let mut actors = Vec::new();
+            for (i, secret) in schemes.iter().enumerate() {
+                let (_application, actor) = setup_validator(
+                    context.with_label(&format!("validator-{i}")),
+                    &mut oracle,
+                    coordinator.clone(),
+                    secret.clone(),
+                    identity,
+                )
+                .await;
+                actors.push(actor);
+            }
+            let mut actor = actors[0].clone();
+
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            setup_network_links(&mut oracle, &peers, link).await;
+
+            // Build blocks around two epoch boundaries (100->101 and 200->201)
+            let mut parent = sha256::hash(b"");
+            // Build up to 100
+            for h in 1..100 {
+                let b = B::new::<sha256::Sha256>(parent, h, h);
+                parent = b.digest();
+            }
+            let b100 = B::new::<sha256::Sha256>(parent, 100, 100);
+            let b101 = B::new::<sha256::Sha256>(b100.digest(), 101, 101);
+            let b200 = {
+                let mut p = b101.digest();
+                for h in 102..200 {
+                    let b = B::new::<sha256::Sha256>(p, h, h);
+                    p = b.digest();
+                }
+                B::new::<sha256::Sha256>(p, 200, 200)
+            };
+            let b201 = B::new::<sha256::Sha256>(b200.digest(), 201, 201);
+
+            // Make blocks available locally
+            actor.broadcast(b100.clone()).await;
+            actor.verified(Round::new(0, 100), b100.clone()).await;
+            actor.broadcast(b101.clone()).await;
+            actor.verified(Round::new(0, 101), b101.clone()).await; // verified in prev epoch cache ok
+            actor.broadcast(b200.clone()).await;
+            actor.verified(Round::new(1, 200), b200.clone()).await;
+            actor.broadcast(b201.clone()).await;
+            actor.verified(Round::new(1, 201), b201.clone()).await;
+
+            // Epoch boundary at 100->101: repropose previous digest when proposing 101 in epoch 1
+            let proposal_101 = Proposal {
+                round: Round::new(1, 101),
+                parent: 100,
+                payload: b100.digest(), // repropose previous digest
+            };
+            let notarization_101 = make_notarization(proposal_101.clone(), &shares, QUORUM);
+            actor.report(Activity::Notarization(notarization_101)).await;
+
+            // Epoch boundary at 200->201: repropose previous digest when proposing 201 in epoch 2
+            let proposal_201 = Proposal {
+                round: Round::new(2, 201),
+                parent: 200,
+                payload: b200.digest(), // repropose previous digest
+            };
+            let notarization_201 = make_notarization(proposal_201.clone(), &shares, QUORUM);
+            actor.report(Activity::Notarization(notarization_201)).await;
+
+            // Subscriptions for boundary proposals should yield the previous blocks
+            let sub101 = actor
+                .subscribe(Some(Round::new(1, 101)), b100.digest())
+                .await;
+            let sub201 = actor
+                .subscribe(Some(Round::new(2, 201)), b200.digest())
+                .await;
+
+            let r101 = sub101.await.unwrap();
+            assert_eq!(r101.digest(), b100.digest());
+            assert_eq!(r101.height(), 100);
+
+            let r201 = sub201.await.unwrap();
+            assert_eq!(r201.digest(), b200.digest());
+            assert_eq!(r201.height(), 200);
+        })
+    }
 }
