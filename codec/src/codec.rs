@@ -150,10 +150,10 @@ impl<T: Write + FixedSize> EncodeFixed for T {}
 /// Convenience trait combining `EncodeFixed` and `Decode`.
 ///
 /// Represents types that can be both fully encoded and decoded from a fixed-size byte sequence.
-pub trait CodecFixed: EncodeFixed + Decode {}
+pub trait CodecFixed: Codec + EncodeFixed {}
 
-// Automatically implement `CodecFixed` for types that implement `EncodeFixed` and `Decode`.
-impl<T: EncodeFixed + Decode> CodecFixed for T {}
+// Automatically implement `CodecFixed` for types that implement `Codec` and `EncodeFixed`.
+impl<T: Codec + EncodeFixed> CodecFixed for T {}
 
 #[cfg(test)]
 mod tests {

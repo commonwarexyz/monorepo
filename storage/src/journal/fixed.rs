@@ -57,7 +57,7 @@
 
 use super::Error;
 use bytes::BufMut;
-use commonware_codec::{Codec, DecodeExt, FixedSize};
+use commonware_codec::{CodecFixed, DecodeExt, FixedSize};
 use commonware_runtime::{
     buffer::{Append, PoolRef, Read},
     Blob, Error as RError, Metrics, Storage,
@@ -96,7 +96,7 @@ pub struct Config {
 }
 
 /// Implementation of `Journal` storage.
-pub struct Journal<E: Storage + Metrics, A> {
+pub struct Journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> {
     pub(crate) context: E,
     pub(crate) cfg: Config,
 
@@ -126,7 +126,7 @@ pub struct Journal<E: Storage + Metrics, A> {
     pub(crate) _array: PhantomData<A>,
 }
 
-impl<E: Storage + Metrics, A: Codec<Cfg = ()> + FixedSize> Journal<E, A> {
+impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     pub(crate) const CHUNK_SIZE: usize = u32::SIZE + A::SIZE;
     pub(crate) const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
