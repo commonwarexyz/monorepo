@@ -371,7 +371,10 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
         let update_op = Fixed::Update(key.clone(), value.clone());
-        assert_eq!(format!("{update_op}"), format!("[key:{key} value:{value}]"));
+        assert_eq!(
+            format!("{update_op}"),
+            format!("[key:{key} value:{}]", hex(&value.encode()))
+        );
 
         let key2 = U64::new(42);
         let delete_op = Fixed::<U64, U64>::Delete(key2.clone());
