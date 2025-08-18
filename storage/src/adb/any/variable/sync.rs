@@ -187,7 +187,7 @@ where
         if size <= lower_bound {
             journal
                 .into_inner()
-                .destroy()
+                .close()
                 .await
                 .map_err(adb::Error::from)?;
             return Self::create_journal(context, config, lower_bound, upper_bound)
@@ -195,44 +195,13 @@ where
                 .map_err(adb::Error::from);
         }
 
-        // Prune in-place below the lower bound section and recompute logical size
         let mut variable_journal = journal.into_inner();
         let lower_section = lower_bound / config.log_items_per_section.get();
-        let upper_section = upper_bound / config.log_items_per_section.get();
 
         variable_journal
             .prune(lower_section)
             .await
             .map_err(adb::Error::from)?;
-
-        // Remove any sections beyond the upper bound
-        let last_section = variable_journal.blobs.last_key_value().map(|(&s, _)| s);
-        if let Some(last_section) = last_section {
-            if last_section > upper_section {
-                let sections_to_remove: Vec<u64> = variable_journal
-                    .blobs
-                    .range((
-                        std::ops::Bound::Excluded(upper_section),
-                        std::ops::Bound::Unbounded,
-                    ))
-                    .map(|(&section, _)| section)
-                    .collect();
-
-                for section in sections_to_remove {
-                    if let Some(blob) = variable_journal.blobs.remove(&section) {
-                        drop(blob);
-                        let name = section.to_be_bytes();
-                        variable_journal
-                            .context
-                            .remove(&variable_journal.cfg.partition, Some(&name))
-                            .await
-                            .map_err(crate::journal::Error::Runtime)
-                            .map_err(adb::Error::from)?;
-                        variable_journal.tracked.dec();
-                    }
-                }
-            }
-        }
 
         // Remove any items beyond upper_bound within the upper section
         truncate_upper_section(
