@@ -116,11 +116,8 @@ where
         .await
         .map_err(adb::Error::Journal)?;
 
-        // Extract the inner variable journal
-        let inner_log = journal.into_inner();
-
         let snapshot = Index::init(context.with_label("snapshot"), db_config.translator.clone());
-        let mut metadata = crate::metadata::Metadata::init(
+        let metadata = crate::metadata::Metadata::<E, U64, Vec<u8>>::init(
             context.with_label("metadata"),
             crate::metadata::Config {
                 partition: db_config.metadata_partition,
@@ -129,16 +126,35 @@ where
         )
         .await
         .map_err(adb::Error::Metadata)?;
+
+        let log = journal.into_inner();
         let oldest_retained_loc_key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
-        metadata.put(oldest_retained_loc_key, lower_bound.to_be_bytes().to_vec());
+        let oldest_retained_loc = match metadata.get(&oldest_retained_loc_key) {
+            Some(bytes) => {
+                let metadata_oldest_retained_loc = u64::from_be_bytes(
+                    bytes
+                        .as_slice()
+                        .try_into()
+                        .expect("oldest_retained_loc bytes could not be converted to u64"),
+                );
+                let persisted_oldest_retained_loc = log
+                    .blobs
+                    .first_key_value()
+                    .map(|(&s, _)| s)
+                    .map(|s| s * db_config.log_items_per_section.get())
+                    .unwrap_or(0);
+                persisted_oldest_retained_loc.max(metadata_oldest_retained_loc)
+            }
+            None => lower_bound,
+        };
 
         // Create the database instance
         let db = any::variable::Any {
             mmr,
-            log: inner_log,
-            log_size: lower_bound,
+            log,
+            log_size: upper_bound + 1,
             inactivity_floor_loc: lower_bound,
-            oldest_retained_loc: lower_bound,
+            oldest_retained_loc,
             metadata,
             locations,
             log_items_per_section: db_config.log_items_per_section.get(),
@@ -1626,7 +1642,6 @@ mod tests {
         });
     }
 
-    /*
     // Test syncing where the sync client has some but not all of the operations in the target
     // database.
     #[test]
@@ -1650,8 +1665,6 @@ mod tests {
             apply_ops(&mut sync_db, &original_ops).await;
             target_db.commit().await.unwrap();
             sync_db.commit().await.unwrap();
-
-            let original_db_op_count = target_db.op_count();
 
             // Close sync_db
             sync_db.close().await.unwrap();
@@ -1689,7 +1702,7 @@ mod tests {
                 sync_db.inactivity_floor_loc,
                 target_db.read().await.inactivity_floor_loc
             );
-            assert_eq!(sync_db.oldest_retained_loc().unwrap(), lower_bound_ops);
+            assert!(sync_db.oldest_retained_loc().unwrap() <= lower_bound_ops);
             assert_eq!(
                 sync_db.mmr.pruned_to_pos(),
                 leaf_num_to_pos(lower_bound_ops)
@@ -1725,7 +1738,6 @@ mod tests {
                 .unwrap();
         });
     }
-    */
 
     /// Test case where existing database on disk exactly matches the sync target
     #[test_traced("WARN")]

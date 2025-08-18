@@ -296,6 +296,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             while let Some(result) = stream.next().await {
                 let (section, offset, _size, op) = result.map_err(Error::Journal)?;
 
+                if current_index < self.inactivity_floor_loc {
+                    current_index += 1;
+                    continue;
+                }
+
                 if current_index >= mmr_leaves {
                     warn!(
                         section,
