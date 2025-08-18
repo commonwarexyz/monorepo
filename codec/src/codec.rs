@@ -147,6 +147,14 @@ pub trait EncodeFixed: Write + FixedSize {
 // Automatically implement `EncodeFixed` for types that implement `Write` and `FixedSize`.
 impl<T: Write + FixedSize> EncodeFixed for T {}
 
+/// Convenience trait combining `Encode + FixedSize` and `Decode`.
+///
+/// Represents types that can be both fully encoded and decoded from a fixed-size byte sequence.
+pub trait CodecFixed: Encode + FixedSize + Decode {}
+
+// Automatically implement `CodecFixed` for types that implement `Encode + FixedSize` and `Decode`.
+impl<T: Encode + FixedSize + Decode> CodecFixed for T {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
