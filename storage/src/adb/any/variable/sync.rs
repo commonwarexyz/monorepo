@@ -10,20 +10,15 @@ use crate::{
         variable::{Config as VConfig, Journal as VJournal},
     },
     mmr::{hasher::Standard, iterator::leaf_num_to_pos},
-    store::operation::{Variable, Variable as Operation},
+    store::operation::Variable,
     translator::Translator,
 };
-use commonware_codec::{Codec, Encode as _};
+use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage, Storage};
-use commonware_utils::{sequence::prefixed_u64::U64, Array, NZUsize};
-use futures::{pin_mut, StreamExt as _};
+use commonware_utils::{sequence::prefixed_u64::U64, Array};
 use std::{num::NonZeroU64, ops::Bound};
 use tracing::debug;
-
-/// The size of the read buffer to use for replaying the operations log when rebuilding the
-/// snapshot.
-const SNAPSHOT_READ_BUFFER_SIZE: usize = 1024;
 
 impl<E, K, V, H, T> sync::Database for any::variable::Any<E, K, V, H, T>
 where
@@ -84,7 +79,7 @@ where
         pinned_nodes: Option<Vec<Self::Digest>>,
         lower_bound: u64,
         upper_bound: u64,
-        apply_batch_size: usize,
+        _apply_batch_size: usize,
     ) -> Result<Self, Self::Error> {
         // Initialize MMR for sync with proper bounds and pinned nodes
         let mmr = crate::mmr::journaled::Mmr::init_sync(

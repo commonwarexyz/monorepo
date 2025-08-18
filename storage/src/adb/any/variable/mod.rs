@@ -293,9 +293,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             let stream = self.log.replay(NZUsize!(SNAPSHOT_READ_BUFFER_SIZE)).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
-                let (section, offset, _size, op) = result
-                    .map_err(|e| Error::Journal(e))
-                    .and_then(|(section, offset, size, op)| Ok((section, offset, size, op)))?;
+                let (section, offset, _size, op) = result.map_err(Error::Journal)?;
 
                 if self.log_size >= mmr_leaves {
                     warn!(
