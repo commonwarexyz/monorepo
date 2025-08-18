@@ -15,6 +15,7 @@ pub mod immutable;
 #[derive(Debug, Clone, Copy)]
 pub enum DatabaseType {
     Any,
+    AnyVariable,
     Immutable,
 }
 
@@ -24,9 +25,10 @@ impl std::str::FromStr for DatabaseType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "any" => Ok(DatabaseType::Any),
+            "any_variable" | "any-variable" | "variable" => Ok(DatabaseType::AnyVariable),
             "immutable" => Ok(DatabaseType::Immutable),
             _ => Err(format!(
-                "Invalid database type: '{s}'. Must be 'any' or 'immutable'",
+                "Invalid database type: '{s}'. Must be 'any', 'any_variable', or 'immutable'",
             )),
         }
     }
@@ -36,6 +38,7 @@ impl DatabaseType {
     pub fn as_str(&self) -> &'static str {
         match self {
             DatabaseType::Any => "any",
+            DatabaseType::AnyVariable => "any_variable",
             DatabaseType::Immutable => "immutable",
         }
     }

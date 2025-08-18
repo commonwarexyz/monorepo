@@ -12,7 +12,7 @@ use commonware_storage::{adb::sync::Target, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any::{self},
-    crate_version,
+    any_variable, crate_version,
     databases::{DatabaseType, Syncable},
     immutable::{self},
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
@@ -476,6 +476,18 @@ where
     run_helper(context, config, database).await
 }
 
+/// Run the Variable Any database server.
+async fn run_any_variable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+{
+    // Create and initialize database
+    let db_config = any_variable::create_config();
+    let database = any_variable::Database::init(context.with_label("database"), db_config).await?;
+
+    run_helper(context, config, database).await
+}
+
 /// Parse command line arguments and return configuration.
 fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
     // Parse command line arguments
@@ -485,8 +497,8 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .arg(
             Arg::new("db")
                 .long("db")
-                .value_name("any|immutable")
-                .help("Database type to use. Must be `any` or `immutable`.")
+                .value_name("any|any_variable|immutable")
+                .help("Database type to use. Must be `any`, `any_variable`, or `immutable`.")
                 .default_value("any"),
         )
         .arg(
@@ -617,6 +629,7 @@ fn main() {
         // Run the appropriate server based on database type
         let result = match config.database_type {
             DatabaseType::Any => run_any(context, config).await,
+            DatabaseType::AnyVariable => run_any_variable(context, config).await,
             DatabaseType::Immutable => run_immutable(context, config).await,
         };
 

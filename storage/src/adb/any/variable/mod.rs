@@ -302,7 +302,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 }
 
                 if current_index >= mmr_leaves {
-                    warn!(
+                    debug!(
                         section,
                         offset, "operation was missing from MMR/location map"
                     );
