@@ -414,17 +414,38 @@ impl<
         let Some(Pending::Unverified(acks)) = self.pending.remove(&index) else {
             panic!("Pending::Unverified entry not found");
         };
-        self.pending
-            .insert(index, Pending::Verified(digest, HashMap::new()));
 
-        // Handle each `ack` as if it was received over the network. This inserts the values into
-        // the new map, and may form a threshold signature if enough acks are present.
-        for epoch_acks in acks.values() {
-            for epoch_ack in epoch_acks.values() {
-                let _ = self.handle_ack(epoch_ack).await; // Ignore any errors (e.g. invalid signature)
+        // Filter acks to only keep those matching the verified digest
+        let mut verified_acks = HashMap::new();
+        for (epoch, epoch_acks) in acks {
+            let mut matching_acks = HashMap::new();
+            for (sig_index, ack) in epoch_acks {
+                if ack.item.digest == digest {
+                    matching_acks.insert(sig_index, ack);
+                }
             }
-            // Break early if a threshold signature was formed
-            if self.confirmed.contains_key(&index) {
+            if !matching_acks.is_empty() {
+                verified_acks.insert(epoch, matching_acks);
+            }
+        }
+
+        self.pending
+            .insert(index, Pending::Verified(digest, verified_acks.clone()));
+
+        // Check if we already have enough acks to form a threshold
+        for (epoch, epoch_acks) in &verified_acks {
+            let Some(polynomial) = self.validators.polynomial(*epoch) else {
+                continue;
+            };
+            let quorum = quorum_from_slice(polynomial);
+
+            if epoch_acks.len() >= (quorum as usize) {
+                let item = Item { index, digest };
+                let partials = epoch_acks.values().map(|ack| &ack.signature);
+                let threshold = threshold_signature_recover::<V, _>(quorum, partials)
+                    .expect("Failed to recover threshold signature");
+                self.metrics.threshold.inc();
+                self.handle_threshold(item, threshold).await;
                 break;
             }
         }
@@ -463,7 +484,13 @@ impl<
                 return Err(Error::AckIndex(ack.item.index));
             }
             Some(Pending::Unverified(acks)) => acks,
-            Some(Pending::Verified(_, acks)) => acks,
+            Some(Pending::Verified(digest, acks)) => {
+                // Verify the ack matches the verified digest
+                if ack.item.digest != *digest {
+                    return Err(Error::AckIndex(ack.item.index));
+                }
+                acks
+            }
         };
 
         // We already checked that we don't have the ack
@@ -477,12 +504,25 @@ impl<
 
         // If a new threshold is formed, handle it
         if acks.len() >= (quorum as usize) {
-            let item = ack.item.clone();
-            let partials = acks.values().map(|ack| &ack.signature);
-            let threshold = threshold_signature_recover::<V, _>(quorum, partials)
-                .expect("Failed to recover threshold signature");
-            self.metrics.threshold.inc();
-            self.handle_threshold(item, threshold).await;
+            // For Pending::Unverified, we need to check if all acks have the same digest
+            // For Pending::Verified, this is already guaranteed
+            let digest = ack.item.digest;
+
+            // Collect only acks with matching digest
+            let matching_acks: Vec<_> = acks.values().filter(|a| a.item.digest == digest).collect();
+
+            // Only proceed if we have enough matching acks
+            if matching_acks.len() >= (quorum as usize) {
+                let item = Item {
+                    index: ack.item.index,
+                    digest,
+                };
+                let partials = matching_acks.iter().map(|ack| &ack.signature);
+                let threshold = threshold_signature_recover::<V, _>(quorum, partials)
+                    .expect("Failed to recover threshold signature");
+                self.metrics.threshold.inc();
+                self.handle_threshold(item, threshold).await;
+            }
         }
 
         Ok(())
@@ -771,22 +811,37 @@ impl<
             .into_iter()
             .filter(|ack| ack.item.index >= tip && !self.confirmed.contains_key(&ack.item.index))
             .collect::<Vec<_>>();
-        acks.iter().for_each(|ack| {
+
+        // Group acks by index to properly reconstruct the pending state
+        let mut acks_by_index: BTreeMap<Index, (D, HashMap<Epoch, HashMap<u32, Ack<V, D>>>)> =
+            BTreeMap::new();
+        for ack in acks {
+            let entry = acks_by_index
+                .entry(ack.item.index)
+                .or_insert_with(|| (ack.item.digest, HashMap::new()));
+
+            // Verify digest consistency
+            assert_eq!(
+                entry.0, ack.item.digest,
+                "Inconsistent digest for index {}",
+                ack.item.index
+            );
+
+            // Add the ack to the appropriate epoch
+            entry
+                .1
+                .entry(ack.epoch)
+                .or_insert_with(HashMap::new)
+                .insert(ack.signature.index, ack);
+        }
+        // Now insert all grouped acks into pending
+        for (index, (digest, epoch_acks)) in acks_by_index {
             assert!(self
                 .pending
-                .insert(
-                    ack.item.index,
-                    Pending::Verified(
-                        ack.item.digest,
-                        HashMap::from([(
-                            ack.epoch,
-                            HashMap::from([(ack.signature.index, ack.clone())]),
-                        )]),
-                    ),
-                )
+                .insert(index, Pending::Verified(digest, epoch_acks))
                 .is_none());
-            self.set_rebroadcast_deadline(ack.item.index);
-        });
+            self.set_rebroadcast_deadline(index);
+        }
     }
 
     /// Appends an activity to the journal.
