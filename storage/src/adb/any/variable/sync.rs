@@ -1733,13 +1733,6 @@ mod tests {
             // Verify the root digest matches the target
             assert_eq!(sync_db.root(&mut hasher), root);
 
-            // Verify that the operations in the overlapping range are present and correct
-            // for i in lower_bound_ops..original_db_op_count {
-            //     let expected_op = target_db.read().await.log.read(i).await.unwrap();
-            //     let synced_op = sync_db.log.read(i).await.unwrap();
-            //     assert_eq!(expected_op, synced_op);
-            // }
-
             for target_op in &original_ops {
                 if let Some(key) = target_op.to_key() {
                     let target_value = target_db.read().await.get(key).await.unwrap();
