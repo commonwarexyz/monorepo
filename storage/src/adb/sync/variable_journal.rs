@@ -71,8 +71,28 @@ where
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
         let section = self.size / self.items_per_section;
-        self.inner.append(section, op).await?;
+        println!(
+            "DEBUG: SYNC WRITE - logical_index: {}, section: {}, op: {}",
+            self.size,
+            section,
+            match &op {
+                Variable::Set(k, _) => format!("Set(key: {:?})", k),
+                Variable::Commit() => format!("Commit"),
+                Variable::Update(k, _) => format!("Update(key: {:?})", k),
+                Variable::Delete(k) => format!("Delete(key: {:?})", k),
+                Variable::CommitFloor(loc) => format!("CommitFloor({})", loc),
+            }
+        );
+        let result = self.inner.append(section, op).await?;
+        println!(
+            "DEBUG: SYNC WRITE - operation stored at physical offset: {}, logical_index was: {}",
+            result.0, self.size
+        );
         self.size += 1;
+        println!(
+            "DEBUG: SYNC WRITE - logical size incremented to: {}",
+            self.size
+        );
         Ok(())
     }
 
