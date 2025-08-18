@@ -286,6 +286,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let mut after_last_commit = None;
         // The set of operations that have not yet been committed.
         let mut uncommitted_ops = HashMap::new();
+        let mut current_index = self.oldest_retained_loc().unwrap_or(0);
 
         // Replay the log from inception to build the snapshot, keeping track of any uncommitted
         // operations, and any log operations that need to be re-added to the MMR & locations.
@@ -295,7 +296,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             while let Some(result) = stream.next().await {
                 let (section, offset, _size, op) = result.map_err(Error::Journal)?;
 
-                if self.log_size >= mmr_leaves {
+                if current_index >= mmr_leaves {
                     warn!(
                         section,
                         offset, "operation was missing from MMR/location map"
@@ -305,9 +306,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     mmr_leaves += 1;
                 }
 
-                let loc = self.log_size; // location of the current operation.
                 if after_last_commit.is_none() {
-                    after_last_commit = Some((loc, offset));
+                    after_last_commit = Some((current_index, offset));
                 }
 
                 match op {
@@ -322,9 +322,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     Operation::Update(key, _) => {
                         let result = self.get_loc(&key).await?;
                         if let Some(old_loc) = result {
-                            uncommitted_ops.insert(key, (Some(old_loc), Some(self.log_size)));
+                            uncommitted_ops.insert(key, (Some(old_loc), Some(current_index)));
                         } else {
-                            uncommitted_ops.insert(key, (None, Some(self.log_size)));
+                            uncommitted_ops.insert(key, (None, Some(current_index)));
                         }
                     }
                     Operation::CommitFloor(loc) => {
@@ -346,12 +346,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
                         // Track the position and offset after this commit
                         after_last_commit = None;
+                        self.log_size = current_index + 1;
                     }
                     _ => unreachable!(
                         "unexpected operation type at offset {offset} of section {section}"
                     ),
                 }
-                self.log_size += 1;
+                current_index += 1;
             }
         }
 
