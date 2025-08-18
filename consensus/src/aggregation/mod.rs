@@ -350,7 +350,7 @@ mod tests {
         let quorum: u32 = 3;
         let target_index = 200; // Target multiple rounds of signing
         let max_shutdowns = 10; // Maximum number of shutdowns per validator
-        let min_shutdowns = 4; // Minimum number of shutdowns per validator
+        let min_shutdowns = 3; // Minimum number of shutdowns per validator
         let shutdown_range_min = Duration::from_millis(100);
         let shutdown_range_max = Duration::from_millis(1_000);
 

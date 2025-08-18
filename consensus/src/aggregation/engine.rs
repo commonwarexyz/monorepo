@@ -726,17 +726,32 @@ impl<
     /// Returns the next index that we should process. This is the minimum index for
     /// which we do not have a digest or an outstanding request to the automaton for the digest.
     fn next(&self) -> Index {
+        // Start from self.tip and find the first gap
+        let mut index = self.tip;
+        
+        // Skip confirmed indices
+        while self.confirmed.contains_key(&index) && index < Index::MAX {
+            index = index.saturating_add(1);
+        }
+        
+        // If we found a gap that's not pending, return it
+        if !self.pending.contains_key(&index) {
+            return index;
+        }
+        
+        // Otherwise, find the first index after all pending/confirmed
         let max_pending = self
             .pending
             .last_key_value()
             .map(|(k, _)| k.saturating_add(1))
-            .unwrap_or_default();
+            .unwrap_or(index);
         let max_confirmed = self
             .confirmed
             .last_key_value()
             .map(|(k, _)| k.saturating_add(1))
-            .unwrap_or_default();
-        max(self.tip, max(max_pending, max_confirmed))
+            .unwrap_or(index);
+        
+        max(index, max(max_pending, max_confirmed))
     }
 
     /// Increases the tip to the given value, pruning stale entries.
@@ -831,16 +846,38 @@ impl<
             entry
                 .1
                 .entry(ack.epoch)
-                .or_insert_with(HashMap::new)
+                .or_default()
                 .insert(ack.signature.index, ack);
         }
-        // Now insert all grouped acks into pending
-        for (index, (digest, epoch_acks)) in acks_by_index {
+        // Now insert all grouped acks into pending and trigger re-verification
+        for (index, (_digest, epoch_acks)) in acks_by_index {
+            // After restart, we need to re-engage the automaton for pending indices
+            // Insert as Unverified first to allow the automaton to re-verify
             assert!(self
                 .pending
-                .insert(index, Pending::Verified(digest, epoch_acks))
+                .insert(index, Pending::Unverified(epoch_acks.clone()))
                 .is_none());
+            
+            // Request the digest from the automaton to re-verify
+            // This ensures we re-engage the consensus process for these indices
+            let mut automaton = self.automaton.clone();
+            let timer = self.metrics.digest_duration.timer();
+            self.digest_requests.push(async move {
+                let receiver = automaton.propose(index).await;
+                let result = receiver.await.map_err(Error::AppProposeCanceled);
+                DigestRequest {
+                    index,
+                    result,
+                    timer,
+                }
+            });
+            
             self.set_rebroadcast_deadline(index);
+        }
+
+        // Send a report for all certified items we have
+        for certificate in certified {
+            self.reporter.report(Activity::Certified(certificate)).await;
         }
     }
 
