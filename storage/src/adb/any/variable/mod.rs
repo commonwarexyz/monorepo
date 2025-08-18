@@ -91,6 +91,12 @@ pub struct Config<T: Translator, C> {
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
+
+    /// The number of operations to keep below the inactivity floor before pruning.
+    /// This creates a gap between the inactivity floor and the pruning boundary,
+    /// which is useful for serving state sync clients, who may request operations
+    /// below the inactivity floor.
+    pub pruning_delay: u64,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
@@ -149,6 +155,12 @@ pub struct Any<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T:
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
     pub(super) hasher: Standard<H>,
+
+    /// The number of operations to keep below the inactivity floor before pruning.
+    /// This creates a gap between the inactivity floor and the pruning boundary,
+    /// which is useful for serving state sync clients, who may request operations
+    /// below the inactivity floor.
+    pruning_delay: u64,
 }
 
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
@@ -237,6 +249,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             uncommitted_ops: 0,
             snapshot,
             hasher,
+            pruning_delay: cfg.pruning_delay,
         };
 
         db.build_snapshot_from_log().await
@@ -709,15 +722,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Prune historical operations that are behind the inactivity floor. This does not affect the
-    /// db's root or current snapshot.
+    /// Prune historical operations that are > `pruning_delay` steps behind the inactivity floor.
+    /// This does not affect the db's root or current snapshot.
     pub(super) async fn prune_inactive(&mut self) -> Result<(), Error> {
         let Some(oldest_retained_loc) = self.oldest_retained_loc() else {
             return Ok(());
         };
 
-        // Calculate the target pruning position: inactivity_floor_loc.
-        let target_prune_loc = self.inactivity_floor_loc;
+        // Calculate the target pruning position
+        let target_prune_loc = self.inactivity_floor_loc.saturating_sub(self.pruning_delay);
         let ops_to_prune = target_prune_loc.saturating_sub(oldest_retained_loc);
         if ops_to_prune == 0 {
             return Ok(());
@@ -847,6 +860,7 @@ pub(super) mod test {
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            pruning_delay: 0,
         }
     }
 
@@ -1414,6 +1428,146 @@ pub(super) mod test {
 
             // commit only the log
             db.destroy().await.unwrap();
+        });
+    }
+
+    // Test that the `pruning_delay` works as expected.
+    #[test_traced("WARN")]
+    fn test_any_variable_db_pruning_delay() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create database with enough operations to trigger pruning
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db_config = db_config("pruning_boundary_test");
+            db_config.pruning_delay = 50;
+
+            let mut db = AnyTest::init(context.clone(), db_config.clone())
+                .await
+                .unwrap();
+
+            const NUM_OPERATIONS: u64 = 500;
+            for i in 0..NUM_OPERATIONS {
+                let key = hash(&i.to_be_bytes());
+                let value = vec![(i % 255) as u8; (i % 255) as usize];
+                db.update(key, value).await.unwrap();
+
+                // Commit periodically to advance the inactivity floor
+                if i % 10 == 9 {
+                    db.commit().await.unwrap();
+                }
+            }
+
+            // Final commit to establish the inactivity floor
+            db.commit().await.unwrap();
+
+            // Get the root digest
+            let original_root = db.root(&mut hasher);
+
+            // Verify the pruning boundary is correct
+            let oldest_retained = db.oldest_retained_loc().unwrap();
+            let inactivity_floor = db.inactivity_floor_loc;
+            let target_prune_loc = inactivity_floor.saturating_sub(db_config.pruning_delay);
+            let expected_oldest_retained =
+                (target_prune_loc / db.log_items_per_section) * db.log_items_per_section;
+            assert_eq!(oldest_retained, expected_oldest_retained);
+
+            // Get proof of items below inactivity floor but after pruning boundary
+            let proof_start = oldest_retained;
+            let proof_end = std::cmp::min(inactivity_floor, oldest_retained + 10);
+            let max_ops = proof_end - proof_start;
+
+            let (original_proof, original_ops) = db.proof(proof_start, max_ops).await.unwrap();
+
+            // Verify the proof works
+            assert!(verify_proof(
+                &mut hasher,
+                &original_proof,
+                proof_start,
+                &original_ops,
+                &original_root
+            ));
+
+            // Close and reopen to verify persistence
+            db.close().await.unwrap();
+            let db = AnyTest::init(context, db_config).await.unwrap();
+
+            // Verify the pruning boundary is still correct after reopening
+            let oldest_retained_reopened = db.oldest_retained_loc().unwrap();
+            let inactivity_floor_reopened = db.inactivity_floor_loc;
+            assert_eq!(oldest_retained, oldest_retained_reopened);
+            assert_eq!(inactivity_floor, inactivity_floor_reopened);
+
+            // Verify the same proof still works
+            let (reopened_proof, reopened_ops) = db.proof(proof_start, max_ops).await.unwrap();
+            assert_eq!(original_proof, reopened_proof);
+            assert_eq!(original_ops, reopened_ops);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_any_variable_db_different_pruning_delays_same_root() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Create two databases with different pruning delays
+            let mut db_config_no_delay = db_config("no_delay_test");
+            db_config_no_delay.pruning_delay = 0;
+
+            let mut db_config_max_delay = db_config("max_delay_test");
+            db_config_max_delay.pruning_delay = u64::MAX;
+
+            let mut db_no_delay = AnyTest::init(context.clone(), db_config_no_delay.clone())
+                .await
+                .unwrap();
+            let mut db_max_delay = AnyTest::init(context.clone(), db_config_max_delay.clone())
+                .await
+                .unwrap();
+
+            // Apply identical operations to both databases
+            const NUM_OPERATIONS: u64 = 200;
+            for i in 0..NUM_OPERATIONS {
+                let key = hash(&i.to_be_bytes());
+                let value = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
+
+                db_no_delay.update(key, value.clone()).await.unwrap();
+                db_max_delay.update(key, value).await.unwrap();
+
+                // Commit periodically
+                if i % 50 == 49 {
+                    db_no_delay.commit().await.unwrap();
+                    db_max_delay.commit().await.unwrap();
+                }
+            }
+
+            // Final commit
+            db_no_delay.commit().await.unwrap();
+            db_max_delay.commit().await.unwrap();
+            let inactivity_floor = db_no_delay.inactivity_floor_loc;
+
+            // Get roots from both databases
+            let root_no_delay = db_no_delay.root(&mut hasher);
+            let root_max_delay = db_max_delay.root(&mut hasher);
+
+            // Verify they generate the same roots
+            assert_eq!(root_no_delay, root_max_delay);
+
+            // Verify different pruning behaviors
+            let oldest_no_delay = db_no_delay.oldest_retained_loc().unwrap();
+            let oldest_max_delay = db_max_delay.oldest_retained_loc().unwrap();
+
+            // No delay database should prune up to the inactivity floor (section-aligned)
+            let expected_no_delay = (inactivity_floor / db_no_delay.log_items_per_section)
+                * db_no_delay.log_items_per_section;
+            assert_eq!(oldest_no_delay, expected_no_delay);
+
+            // Max delay database should retain everything from the beginning
+            assert_eq!(oldest_max_delay, 0);
+
+            db_no_delay.destroy().await.unwrap();
+            db_max_delay.destroy().await.unwrap();
         });
     }
 }

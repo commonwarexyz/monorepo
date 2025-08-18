@@ -205,6 +205,7 @@ where
             uncommitted_ops: 0,
             snapshot,
             hasher,
+            pruning_delay: db_config.pruning_delay,
         };
 
         // Persist state
@@ -1259,7 +1260,7 @@ mod tests {
         });
     }
 
-    type VarAnySyncTest = crate::adb::any::variable::Any<
+    type AnyTest = crate::adb::any::variable::Any<
         deterministic::Context,
         sha256::Digest,
         sha256::Digest,
@@ -1286,12 +1287,13 @@ mod tests {
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            pruning_delay: 10,
         }
     }
 
-    async fn create_test_db(mut context: deterministic::Context) -> VarAnySyncTest {
+    async fn create_test_db(mut context: deterministic::Context) -> AnyTest {
         let cfg = create_sync_config(&format!("var_any_sync_{}", context.next_u64()));
-        VarAnySyncTest::init(context, cfg).await.unwrap()
+        AnyTest::init(context, cfg).await.unwrap()
     }
 
     fn create_updates(count: usize) -> Vec<(sha256::Digest, sha256::Digest)> {
@@ -1306,7 +1308,7 @@ mod tests {
             .collect()
     }
 
-    async fn apply_updates(db: &mut VarAnySyncTest, updates: &[(sha256::Digest, sha256::Digest)]) {
+    async fn apply_updates(db: &mut AnyTest, updates: &[(sha256::Digest, sha256::Digest)]) {
         for (k, v) in updates.iter().copied() {
             db.update(k, v).await.unwrap();
         }
@@ -1347,7 +1349,7 @@ mod tests {
             };
 
             // Run sync
-            let synced_db: VarAnySyncTest = sync::sync(engine_cfg).await.unwrap();
+            let synced_db: AnyTest = sync::sync(engine_cfg).await.unwrap();
 
             // Validate state
             let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
@@ -1363,7 +1365,7 @@ mod tests {
 
             // Close and reopen to verify persistence
             synced_db.close().await.unwrap();
-            let reopened = VarAnySyncTest::init(context, db_config).await.unwrap();
+            let reopened = AnyTest::init(context, db_config).await.unwrap();
             let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
             assert_eq!(reopened.root(&mut hasher), root);
         });
@@ -1383,7 +1385,7 @@ mod tests {
     }
 
     // Helper function to apply operations to database
-    async fn apply_ops(db: &mut VarAnySyncTest, ops: &[Variable<sha256::Digest, sha256::Digest>]) {
+    async fn apply_ops(db: &mut AnyTest, ops: &[Variable<sha256::Digest, sha256::Digest>]) {
         for op in ops {
             match op {
                 Variable::Set(key, value) => {
@@ -1475,7 +1477,7 @@ mod tests {
                 max_outstanding_requests: 1,
                 update_rx: None,
             };
-            let mut got_db: VarAnySyncTest = sync::sync(config).await.unwrap();
+            let mut got_db: AnyTest = sync::sync(config).await.unwrap();
 
             // Verify database state
             let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
@@ -1551,7 +1553,7 @@ mod tests {
             got_db.close().await.unwrap();
 
             // Reopen the database using the same configuration and verify the state is unchanged
-            let reopened_db = VarAnySyncTest::init(context, db_config).await.unwrap();
+            let reopened_db = AnyTest::init(context, db_config).await.unwrap();
 
             // Compare state against the database state before closing
             assert_eq!(reopened_db.op_count(), final_synced_op_count);
@@ -1609,7 +1611,7 @@ mod tests {
                 update_rx: None,
             };
 
-            let result: Result<VarAnySyncTest, _> = sync::sync(config).await;
+            let result: Result<AnyTest, _> = sync::sync(config).await;
             assert!(matches!(
                 result,
                 Err(sync::Error::InvalidTarget {
@@ -1620,72 +1622,67 @@ mod tests {
         });
     }
 
-    // /// Test that sync works when target database has operations beyond the requested range
-    // #[test_traced("WARN")]
-    // fn test_sync_subset_of_target_database() {
-    //     const TARGET_DB_OPS: usize = 100;
-    //     let executor = deterministic::Runner::default();
-    //     executor.start(|mut context| async move {
-    //         let mut target_db = create_test_db(context.clone()).await;
-    //         let target_ops = create_test_ops(TARGET_DB_OPS);
-    //         apply_ops(&mut target_db, &target_ops).await;
-    //         target_db.commit().await.unwrap();
+    /// Test that sync works when target database has operations beyond the requested range
+    /// of operations to sync.
+    #[test]
+    fn test_sync_subset_of_target_database() {
+        const TARGET_DB_OPS: usize = 1000;
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let mut target_db = create_test_db(context.clone()).await;
+            let target_ops = create_test_ops(TARGET_DB_OPS);
+            // Apply all but the last operation
+            apply_ops(&mut target_db, &target_ops[0..TARGET_DB_OPS - 1]).await;
+            target_db.commit().await.unwrap();
 
-    //         // Sync only a subset of the target database (operations 20-79)
-    //         let lower_bound_ops = 20;
-    //         let upper_bound_ops = 79;
-    //         let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
-    //         let root = target_db.root(&mut hasher);
+            let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
+            let root = target_db.root(&mut hasher);
+            let lower_bound_ops = target_db.inactivity_floor_loc;
+            let upper_bound_ops = target_db.op_count() - 1;
 
-    //         let db_config = create_sync_config(&format!("subset_{}", context.next_u64()));
-    //         let target_db = Arc::new(RwLock::new(target_db));
-    //         let config = sync::engine::Config {
-    //             db_config,
-    //             fetch_batch_size: NZU64!(10),
-    //             target: Target {
-    //                 root,
-    //                 lower_bound_ops,
-    //                 upper_bound_ops,
-    //             },
-    //             context,
-    //             resolver: target_db.clone(),
-    //             apply_batch_size: 1024,
-    //             max_outstanding_requests: 1,
-    //             update_rx: None,
-    //         };
-    //         let sync_db: VarAnySyncTest = sync::sync(config).await.unwrap();
+            // Add another operation after the sync range
+            let final_op = &target_ops[TARGET_DB_OPS - 1];
+            apply_ops(&mut target_db, &[final_op.clone()]).await;
+            target_db.commit().await.unwrap();
 
-    //         // Verify database state
-    //         let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
-    //         assert_eq!(sync_db.op_count(), upper_bound_ops + 1);
-    //         assert_eq!(sync_db.oldest_retained_loc().unwrap_or(0), lower_bound_ops);
-    //         assert_eq!(sync_db.root(&mut hasher), root);
+            // Sync to the "old" range (not including the final op)
+            let config = sync::engine::Config {
+                db_config: create_sync_config(&format!("subset_{}", context.next_u64())),
+                fetch_batch_size: NZU64!(10),
+                target: Target {
+                    root,
+                    lower_bound_ops,
+                    upper_bound_ops,
+                },
+                context,
+                resolver: Arc::new(RwLock::new(target_db)),
+                apply_batch_size: 1024,
+                max_outstanding_requests: 1,
+                update_rx: None,
+            };
+            let synced_db: AnyTest = sync::sync(config).await.unwrap();
 
-    //         // Verify state matches the target for the subset of operations
-    //         let mut expected_kvs = std::collections::HashMap::new();
-    //         for op in &target_ops {
-    //             if let Variable::Set(key, value) = op {
-    //                 expected_kvs.insert(*key, *value);
-    //             }
-    //         }
+            // Verify the synced database has the correct range of operations
+            assert_eq!(synced_db.inactivity_floor_loc, lower_bound_ops);
+            assert_eq!(synced_db.oldest_retained_loc(), Some(lower_bound_ops));
+            assert_eq!(
+                synced_db.mmr.pruned_to_pos(),
+                leaf_num_to_pos(lower_bound_ops)
+            );
+            assert_eq!(synced_db.op_count(), upper_bound_ops + 1);
 
-    //         for (key, expected_value) in &expected_kvs {
-    //             let target_value = target_db.read().await.get(key).await.unwrap();
-    //             let synced_value = sync_db.get(key).await.unwrap();
-    //             assert_eq!(target_value, synced_value);
-    //             if let Some(value) = synced_value {
-    //                 assert_eq!(value, *expected_value);
-    //             }
-    //         }
+            // Verify the final root digest matches our target
+            assert_eq!(synced_db.root(&mut hasher), root);
 
-    //         sync_db.destroy().await.unwrap();
-    //         let target_db = match Arc::try_unwrap(target_db) {
-    //             Ok(rw_lock) => rw_lock.into_inner(),
-    //             Err(_) => panic!("Failed to unwrap Arc - still has references"),
-    //         };
-    //         target_db.destroy().await.unwrap();
-    //     });
-    // }
+            // Verify the synced database doesn't have any operations beyond the sync range.
+            assert_eq!(
+                synced_db.get(final_op.to_key().unwrap()).await.unwrap(),
+                None
+            );
+
+            synced_db.destroy().await.unwrap();
+        });
+    }
 
     // /// Test sync when there's existing database on disk with partial match
     // #[test_traced("WARN")]
