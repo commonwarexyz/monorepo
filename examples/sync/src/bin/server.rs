@@ -1,5 +1,5 @@
-//! Server that serves operations and proofs to clients attempting to sync a
-//! [commonware_storage::adb::any::fixed::Any] database.
+//! Server that serves operations and proofs to clients attempting to sync
+//! authenticated databases (fixed, variable, or immutable).
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
@@ -11,12 +11,12 @@ use commonware_runtime::{
 use commonware_storage::{adb::sync::Target, mmr::hasher::Standard};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
-    any::{self},
-    any_variable, crate_version,
+    crate_version,
     databases::{DatabaseType, Syncable},
+    fixed::{self},
     immutable::{self},
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
-    Error, Key,
+    variable, Error, Key,
 };
 use commonware_utils::parse_duration;
 use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -452,14 +452,14 @@ where
     }
 }
 
-/// Run the Any database server.
-async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+/// Run the Fixed database server.
+async fn run_fixed<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     // Create and initialize database
-    let db_config = any::create_config();
-    let database = any::Database::init(context.with_label("database"), db_config).await?;
+    let db_config = fixed::create_config();
+    let database = fixed::Database::init(context.with_label("database"), db_config).await?;
 
     run_helper(context, config, database).await
 }
@@ -476,14 +476,14 @@ where
     run_helper(context, config, database).await
 }
 
-/// Run the Variable Any database server.
-async fn run_any_variable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+/// Run the Variable database server.
+async fn run_variable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     // Create and initialize database
-    let db_config = any_variable::create_config();
-    let database = any_variable::Database::init(context.with_label("database"), db_config).await?;
+    let db_config = variable::create_config();
+    let database = variable::Database::init(context.with_label("database"), db_config).await?;
 
     run_helper(context, config, database).await
 }
@@ -497,9 +497,9 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .arg(
             Arg::new("db")
                 .long("db")
-                .value_name("any|any_variable|immutable")
-                .help("Database type to use. Must be `any`, `any_variable`, or `immutable`.")
-                .default_value("any"),
+                .value_name("fixed|variable|immutable")
+                .help("Database type to use. Must be `fixed`, `variable`, or `immutable`.")
+                .default_value("fixed"),
         )
         .arg(
             Arg::new("port")
@@ -628,8 +628,8 @@ fn main() {
 
         // Run the appropriate server based on database type
         let result = match config.database_type {
-            DatabaseType::Any => run_any(context, config).await,
-            DatabaseType::AnyVariable => run_any_variable(context, config).await,
+            DatabaseType::Fixed => run_fixed(context, config).await,
+            DatabaseType::Variable => run_variable(context, config).await,
             DatabaseType::Immutable => run_immutable(context, config).await,
         };
 

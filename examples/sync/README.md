@@ -2,7 +2,7 @@
 
  [![Crates.io](https://img.shields.io/crates/v/commonware-sync.svg)](https://crates.io/crates/commonware-sync)
 
-Continuously synchronize state between a server and client with [adb::any::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/struct.Any.html) and [adb::immutable::Immutable](https://docs.rs/commonware-storage/latest/commonware_storage/adb/immutable/struct.Immutable.html)
+Continuously synchronize state between a server and client with [adb::any::fixed::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/fixed/struct.Any.html), [adb::any::variable::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/variable/struct.Any.html), and [adb::immutable::Immutable](https://docs.rs/commonware-storage/latest/commonware_storage/adb/immutable/struct.Immutable.html)
 
 ## Components
 
@@ -36,7 +36,7 @@ cargo run --bin server -- --port 8080 --initial-ops 50 --storage-dir /tmp/my_ser
 ```
 
 Server options:
-- `--db <any|immutable>`: Database type to use. Must be 'any' or 'immutable' (default: any)
+- `--db <fixed|variable|immutable>`: Database type to use. Must be 'fixed', 'variable', or 'immutable' (default: fixed)
 - `-p, --port <PORT>`: Port to listen on (default: 8080)
 - `-i, --initial-ops <COUNT>`: Number of initial operations to create (default: 100)
 - `-d, --storage-dir <PATH>`: Storage directory for database (default: /tmp/commonware-sync/server-{RANDOM_SUFFIX})
@@ -55,7 +55,7 @@ cargo run --bin client -- --server 127.0.0.1:8080 --batch-size 25 --storage-dir 
 ```
 
 Client options:
-- `--db <any|immutable>`: Database type to use. Must be 'any' or 'immutable' (default: any)
+- `--db <fixed|variable|immutable>`: Database type to use. Must be 'fixed', 'variable', or 'immutable' (default: fixed)
 - `-s, --server <ADDRESS>`: Server address to connect to (default: 127.0.0.1:8080)
 - `-b, --batch-size <SIZE>`: Batch size for fetching operations (default: 50)
 - `-d, --storage-dir <PATH>`: Storage directory for local database (default: /tmp/commonware-sync/client-{RANDOM_SUFFIX})
@@ -64,6 +64,30 @@ Client options:
 - `-i, --sync-interval <DURATION>`: Interval between sync operations ('ms', 's', 'm', 'h') (default: 10s)
 
 _The client must use the same `--db` as the server it syncs from._
+
+## Database Types
+
+The sync example supports three database types:
+
+- **`fixed`**: Fixed-size Any database ([adb::any::fixed::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/fixed/struct.Any.html)) - optimized for values of uniform size
+- **`variable`**: Variable-size Any database ([adb::any::variable::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/variable/struct.Any.html)) - supports values of varying sizes
+- **`immutable`**: Immutable database ([adb::immutable::Immutable](https://docs.rs/commonware-storage/latest/commonware_storage/adb/immutable/struct.Immutable.html)) - append-only database with historical proofs
+
+### Examples with Different Database Types
+
+```bash
+# Run server with fixed database (default)
+cargo run --bin server
+
+# Run server with variable database
+cargo run --bin server -- --db variable
+
+# Run server with immutable database
+cargo run --bin server -- --db immutable
+
+# Run client with matching database type
+cargo run --bin client -- --db variable
+```
 
 ## Example Session
 

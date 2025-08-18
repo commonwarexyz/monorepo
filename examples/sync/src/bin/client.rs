@@ -10,7 +10,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{adb::sync, mmr::hasher};
 use commonware_sync::{
-    any, any_variable, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest,
+    crate_version, databases::DatabaseType, fixed, immutable, net::Resolver, variable, Digest,
     Error, Key,
 };
 use commonware_utils::parse_duration;
@@ -104,20 +104,20 @@ where
     }
 }
 
-/// Repeatedly sync an Any database to the server's state.
-async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+/// Repeatedly sync a Fixed database to the server's state.
+async fn run_fixed<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: Storage + Clock + Metrics + Network + Spawner,
 {
-    info!("starting Any database sync process");
+    info!("starting Fixed database sync process");
     let mut iteration = 0u32;
     loop {
         let resolver =
-            Resolver::<any::Operation, Digest>::connect(context.clone(), config.server).await?;
+            Resolver::<fixed::Operation, Digest>::connect(context.clone(), config.server).await?;
 
         let initial_target = resolver.get_sync_target().await?;
 
-        let db_config = any::create_config();
+        let db_config = fixed::create_config();
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {
@@ -136,7 +136,7 @@ where
         };
 
         let sync_config =
-            sync::engine::Config::<any::Database<_>, Resolver<any::Operation, Digest>> {
+            sync::engine::Config::<fixed::Database<_>, Resolver<fixed::Operation, Digest>> {
                 context: context.clone(),
                 db_config,
                 fetch_batch_size: config.batch_size,
@@ -147,13 +147,13 @@ where
                 update_rx: Some(update_receiver),
             };
 
-        let database: any::Database<_> = sync::sync(sync_config).await?;
+        let database: fixed::Database<_> = sync::sync(sync_config).await?;
         let got_root = database.root(&mut hasher::Standard::new());
         info!(
             sync_iteration = iteration,
             root = %got_root,
             sync_interval = ?config.sync_interval,
-            "✅ Any sync completed successfully"
+            "✅ Fixed sync completed successfully"
         );
         database.close().await?;
         target_update_handle.abort();
@@ -220,21 +220,20 @@ where
     }
 }
 
-/// Repeatedly sync a Variable Any database to the server's state.
-async fn run_any_variable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+/// Repeatedly sync a Variable database to the server's state.
+async fn run_variable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: Storage + Clock + Metrics + Network + Spawner,
 {
-    info!("starting Variable Any database sync process");
+    info!("starting Variable database sync process");
     let mut iteration = 0u32;
     loop {
         let resolver =
-            Resolver::<any_variable::Operation, Key>::connect(context.clone(), config.server)
-                .await?;
+            Resolver::<variable::Operation, Key>::connect(context.clone(), config.server).await?;
 
         let initial_target = resolver.get_sync_target().await?;
 
-        let db_config = any_variable::create_config();
+        let db_config = variable::create_config();
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {
@@ -252,27 +251,25 @@ where
             })
         };
 
-        let sync_config = sync::engine::Config::<
-            any_variable::Database<_>,
-            Resolver<any_variable::Operation, Key>,
-        > {
-            context: context.clone(),
-            db_config,
-            fetch_batch_size: config.batch_size,
-            target: initial_target,
-            resolver,
-            apply_batch_size: 1024,
-            max_outstanding_requests: config.max_outstanding_requests,
-            update_rx: Some(update_receiver),
-        };
+        let sync_config =
+            sync::engine::Config::<variable::Database<_>, Resolver<variable::Operation, Key>> {
+                context: context.clone(),
+                db_config,
+                fetch_batch_size: config.batch_size,
+                target: initial_target,
+                resolver,
+                apply_batch_size: 1024,
+                max_outstanding_requests: config.max_outstanding_requests,
+                update_rx: Some(update_receiver),
+            };
 
-        let database: any_variable::Database<_> = sync::sync(sync_config).await?;
+        let database: variable::Database<_> = sync::sync(sync_config).await?;
         let got_root = database.root(&mut hasher::Standard::new());
         info!(
             sync_iteration = iteration,
             root = %got_root,
             sync_interval = ?config.sync_interval,
-            "✅ Variable Any sync completed successfully"
+            "✅ Variable sync completed successfully"
         );
         database.close().await?;
         target_update_handle.abort();
@@ -290,9 +287,9 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
         .arg(
             Arg::new("db")
                 .long("db")
-                .value_name("any|any_variable|immutable")
-                .help("Database type to use. Must be `any`, `any_variable`, or `immutable`.")
-                .default_value("any"),
+                .value_name("fixed|variable|immutable")
+                .help("Database type to use. Must be `fixed`, `variable`, or `immutable`.")
+                .default_value("fixed"),
         )
         .arg(
             Arg::new("server")
@@ -448,8 +445,8 @@ fn main() {
 
         // Dispatch based on database type
         let result = match config.database_type {
-            DatabaseType::Any => run_any(context.with_label("sync"), config).await,
-            DatabaseType::AnyVariable => run_any_variable(context.with_label("sync"), config).await,
+            DatabaseType::Fixed => run_fixed(context.with_label("sync"), config).await,
+            DatabaseType::Variable => run_variable(context.with_label("sync"), config).await,
             DatabaseType::Immutable => run_immutable(context.with_label("sync"), config).await,
         };
 

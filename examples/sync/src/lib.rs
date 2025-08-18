@@ -9,15 +9,7 @@ pub mod error;
 pub use error::Error;
 pub mod databases;
 pub mod net;
-pub use databases::{any, immutable};
-
-/// Variable Any database support.
-pub mod any_variable {
-    pub use crate::databases::any::{
-        create_variable_config as create_config, VariableDatabase as Database,
-        VariableOperation as Operation,
-    };
-}
+pub use databases::{fixed, variable, immutable};
 
 /// Returns the version of the crate.
 pub fn crate_version() -> &'static str {
