@@ -7,7 +7,7 @@
 //! - Drive [Muxer::run] in a background task to demux incoming messages into per-subchannel queues.
 use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
-use commonware_codec::{varint::UInt, ReadExt, Write};
+use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Handle, Spawner};
 use futures::{channel::mpsc, StreamExt};
@@ -49,9 +49,20 @@ impl<S: Sender, R: Receiver> Muxer<S, R> {
     ///
     /// The caller must be driving [Muxer::run], or have started it using [Muxer::start], for the
     /// receiver to yield messages.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the subchannel is already registered.
     pub fn register(&self, subchannel: Channel) -> (SubSender<S>, SubReceiver<R::PublicKey>) {
+        // Create a new channel to forward messages to the subchannel.
         let (tx, rx) = mpsc::channel(self.mailbox_size);
-        self.routes.lock().unwrap().insert(subchannel, tx);
+
+        // Insert the subchannel into the routes map, panicking if it already exists.
+        if self.routes.lock().unwrap().insert(subchannel, tx).is_some() {
+            panic!("duplicate subchannel registration: {subchannel}");
+        }
+
+        // Return the subchannel sender and receiver.
         (
             SubSender {
                 subchannel,
@@ -115,8 +126,9 @@ impl<S: Sender> Sender for SubSender<S> {
         payload: Bytes,
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, S::Error> {
-        let mut buf = BytesMut::new();
-        UInt(self.subchannel).write(&mut buf);
+        let subchannel = UInt(self.subchannel);
+        let mut buf = BytesMut::with_capacity(subchannel.encode_size() + payload.len());
+        subchannel.write(&mut buf);
         buf.put_slice(&payload);
         self.inner.send(recipients, buf.freeze(), priority).await
     }
