@@ -53,7 +53,7 @@ cargo bench -p commonware-cryptography
 
 ## Architecture
 
-## Core Primitives
+### Core Primitives
 - **broadcast**: Disseminate data over a wide-area network.
 - **codec**: Serialize structured data.
 - **coding**: Encode data to enable recovery from a subset of fragments.
@@ -69,7 +69,7 @@ cargo bench -p commonware-cryptography
 
 _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything with a `commonware-` prefix)._
 
-## Examples
+### Examples
 - **alto** (https://github.com/commonwarexyz/alto): A minimal (and wicked fast) blockchain built with the Commonware Library.
 - **bridge** (`examples/bridge`): Send succinct consensus certificates between two networks.
 - **chat** (`examples/chat`): Send encrypted messages to a group of friends.
@@ -80,17 +80,12 @@ _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything wit
 - **vrf** (`examples/vrf`): Generate bias-resistant randomness with untrusted contributors.
 
 ### Key Design Principles
-1. **Performance First**: All primitives optimized for high throughput/low latency
-2. **Adversarial Safety**: Designed for Byzantine environments with malicious actors
-3. **Zero-Copy Operations**: Extensive use of `Bytes` for efficient data handling
-4. **Platform Abstraction**: Clean separation between platform-specific code (deployer) and portable logic
-
-### Critical Implementation Notes
-- Overflow checks enabled in all profiles (including release) for safety
-- All cryptographic operations use constant-time implementations where applicable
-- P2P layer provides abstract `Sender`/`Receiver`/`Blocker` traits, transport-agnostic
-- Storage provides abstract data structures (ADB, MMR, journals) over runtime storage backends
-- All code outside `runtime` is runtime-agnostic (never import tokio, use `futures` or runtime capabilities)
+1. **The Simpler The Better**: Code should look obviously correct and contain the minimum features necessary to achieve a goal.
+2. **Test Everything**: All code should be designed for deterministic and comprehensive testing. We employ an abstract runtime (`runtime/src/deterministic`) commonly in the repository to drive tests.
+3. **Performance Sensitive**: All primitives are optimized for high throughput/low latency.
+4. **Adversarial Safety**: All primitives are designed to operate robustly in adversarial environments.
+5. **Abstract Runtime**: All code outside the `runtime` primitive must be runtime-agnostic (never import `tokio` directly outside of `runtime/`). When requiring some `runtime`, use the provided traits in `runtime/src/lib.rs`.
+6. **Always Commit Complete Code**: When implementing code and writing tests, always implement complete functionality. If there is a large task, implement the simplest possible solution that works and then incrementally improve it.
 
 ## Testing Strategy
 - Unit tests: Core logic validation
