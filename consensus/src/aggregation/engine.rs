@@ -103,6 +103,9 @@ pub struct Engine<
     /// The concurrent number of chunks to process.
     window: u64,
 
+    /// Number of indices to retain below the tip when pruning.
+    prune_buffer: u64,
+
     // Messaging
     /// Pool of pending futures to request a digest from the automaton.
     digest_requests: FuturesPool<DigestRequest<D, E>>,
@@ -182,6 +185,7 @@ impl<
             namespace: cfg.namespace,
             epoch_bounds: cfg.epoch_bounds,
             window: cfg.window.into(),
+            prune_buffer: cfg.prune_buffer,
             epoch: 0,
             tip: 0,
             safe_tip: SafeTip::default(),
@@ -707,17 +711,18 @@ impl<
     async fn fast_forward_tip(&mut self, tip: Index) {
         assert!(tip > self.tip);
 
-        // Prune data structures
-        self.pending.retain(|index, _| *index >= tip);
-        self.confirmed.retain(|index, _| *index >= tip);
+        // Prune data structures with buffer to prevent losing certificates
+        let prune_threshold = tip.saturating_sub(self.prune_buffer);
+        self.pending.retain(|index, _| *index >= prune_threshold);
+        self.confirmed.retain(|index, _| *index >= prune_threshold);
 
         // Add tip to journal
         self.record(Activity::Tip(tip)).await;
         self.sync(tip).await;
         self.reporter.report(Activity::Tip(tip)).await;
 
-        // Prune journal, ignoring errors
-        let section = self.get_journal_section(tip);
+        // Prune journal with buffer, ignoring errors
+        let section = self.get_journal_section(prune_threshold);
         let journal = self.journal.as_mut().expect("journal must be initialized");
         let _ = journal.prune(section).await;
 
@@ -759,13 +764,14 @@ impl<
                 }
             }
         }
-        
+
         // Update the tip to the highest index in the journal
         self.tip = tip;
-        // Add certified items
+        // Add certified items - keep certificates within the prune buffer
+        let prune_threshold = tip.saturating_sub(self.prune_buffer);
         certified
             .iter()
-            .filter(|certificate| certificate.item.index >= tip)
+            .filter(|certificate| certificate.item.index >= prune_threshold)
             .for_each(|certificate| {
                 self.confirmed
                     .insert(certificate.item.index, certificate.clone());
@@ -773,7 +779,9 @@ impl<
         // Add any acks that haven't resulted in a threshold signature
         acks = acks
             .into_iter()
-            .filter(|ack| ack.item.index >= tip && !self.confirmed.contains_key(&ack.item.index))
+            .filter(|ack| {
+                ack.item.index >= prune_threshold && !self.confirmed.contains_key(&ack.item.index)
+            })
             .collect::<Vec<_>>();
         acks.iter().for_each(|ack| {
             assert!(self
