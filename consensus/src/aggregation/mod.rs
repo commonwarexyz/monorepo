@@ -93,7 +93,7 @@ mod tests {
     use futures::{channel::oneshot, future::join_all};
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
-        collections::{BTreeMap, HashMap, HashSet},
+        collections::{BTreeMap, HashMap},
         num::NonZeroUsize,
         sync::{Arc, Mutex},
         time::Duration,
@@ -195,12 +195,12 @@ mod tests {
         reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>,
         oracle: &mut Oracle<PublicKey>,
         rebroadcast_timeout: Duration,
-        incorrect: HashSet<PublicKey>,
+        incorrect: Vec<usize>,
     ) -> HashMap<PublicKey, mocks::Monitor> {
         let mut monitors = HashMap::new();
         let namespace = b"my testing namespace";
 
-        for (validator, _, share) in validators {
+        for (i, (validator, _, share)) in validators.iter().enumerate() {
             let context = context.with_label(&validator.to_string());
             let monitor = mocks::Monitor::new(111);
             monitors.insert(validator.clone(), monitor.clone());
@@ -218,7 +218,7 @@ mod tests {
 
             let blocker = oracle.control(validator.clone());
 
-            let automaton = mocks::Application::new(if incorrect.contains(validator) {
+            let automaton = mocks::Application::new(if incorrect.contains(&i) {
                 Strategy::Incorrect
             } else {
                 Strategy::Correct
@@ -344,7 +344,7 @@ mod tests {
                 &mut reporters,
                 &mut oracle,
                 Duration::from_secs(5),
-                HashSet::new(),
+                vec![],
             );
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
         });
@@ -378,9 +378,6 @@ mod tests {
             let mut reporters =
                 BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
 
-            let mut incorrect = HashSet::new();
-            incorrect.insert(pks[0].clone());
-
             spawn_validator_engines::<V>(
                 context.with_label("validator"),
                 polynomial.clone(),
@@ -391,7 +388,7 @@ mod tests {
                 &mut reporters,
                 &mut oracle,
                 Duration::from_secs(5),
-                incorrect,
+                vec![0],
             );
 
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
@@ -610,7 +607,7 @@ mod tests {
                 &mut reporters,
                 &mut oracle,
                 Duration::from_secs(2),
-                HashSet::new(),
+                vec![],
             );
 
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
@@ -678,7 +675,7 @@ mod tests {
                 &mut reporters,
                 &mut oracle,
                 Duration::from_secs(5),
-                HashSet::new(),
+                vec![],
             );
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
         });
@@ -722,7 +719,7 @@ mod tests {
                 &mut reporters,
                 &mut oracle,
                 Duration::from_secs(5),
-                HashSet::new(),
+                vec![],
             );
 
             for v1 in pks.iter() {
