@@ -20,7 +20,7 @@ use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use futures::{future::TryFutureExt, try_join};
 use std::num::{NonZeroU64, NonZeroUsize};
-use tracing::{info, warn};
+use tracing::warn;
 
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
@@ -590,6 +590,90 @@ mod test {
             let db = open_db(context.clone()).await;
             assert_eq!(db.size(), 2 * ELEMENTS + 2);
             assert_eq!(db.root(&mut hasher), root);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    pub fn test_keyless_db_proof_generation_and_verification() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
+
+            // Build a db with some values
+            const ELEMENTS: u64 = 100;
+            let mut values = Vec::new();
+            for i in 0u64..ELEMENTS {
+                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
+                values.push(v.clone());
+                db.append(v).await.unwrap();
+            }
+            db.commit().await.unwrap();
+            let root = db.root(&mut hasher);
+
+            // Test proof generation for various ranges
+            let test_cases = vec![
+                (0, 10),   // First 10 operations
+                (10, 5),   // Middle range
+                (50, 20),  // Larger range
+                (90, 15),  // Range that extends beyond end (should be limited)
+                (0, 1),    // Single operation
+                (ELEMENTS - 1, 1), // Last append operation
+                (ELEMENTS, 1),     // The commit operation
+            ];
+
+            for (start_loc, max_ops) in test_cases {
+                let (proof, ops) = db.proof(start_loc, max_ops).await.unwrap();
+                
+                // Verify the proof
+                assert!(
+                    verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
+                    "Failed to verify proof for range starting at {} with max {} ops", 
+                    start_loc, max_ops
+                );
+
+                // Check that we got the expected number of operations
+                let expected_ops = std::cmp::min(max_ops, db.size() - start_loc);
+                assert_eq!(
+                    ops.len() as u64, expected_ops,
+                    "Expected {} operations, got {}", expected_ops, ops.len()
+                );
+
+                // Verify operation types
+                for (i, op) in ops.iter().enumerate() {
+                    let loc = start_loc + i as u64;
+                    if loc < ELEMENTS {
+                        // Should be an Append operation
+                        assert!(
+                            matches!(op, Operation::Append(_)),
+                            "Expected Append operation at location {}, got {:?}", loc, op
+                        );
+                    } else if loc == ELEMENTS {
+                        // Should be a Commit operation
+                        assert!(
+                            matches!(op, Operation::Commit),
+                            "Expected Commit operation at location {}, got {:?}", loc, op
+                        );
+                    }
+                }
+
+                // Verify that proof fails with wrong root
+                let wrong_root = hash(&[0xFF; 32]);
+                assert!(
+                    !verify_proof(&mut hasher, &proof, start_loc, &ops, &wrong_root),
+                    "Proof should fail with wrong root"
+                );
+
+                // Verify that proof fails with wrong start location
+                if start_loc > 0 {
+                    assert!(
+                        !verify_proof(&mut hasher, &proof, start_loc - 1, &ops, &root),
+                        "Proof should fail with wrong start location"
+                    );
+                }
+            }
 
             db.destroy().await.unwrap();
         });
