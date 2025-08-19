@@ -1696,7 +1696,8 @@ impl<
                             [public_key_index as usize]
                             == self.crypto.public_key();
                         let proposal = notarize.proposal.clone();
-                        self.handle_notarize(notarize).await;
+                        self.handle_notarize(notarize.clone()).await;
+                        self.reporter.report(Activity::Notarize(notarize)).await;
 
                         // Update round info
                         if me {
@@ -1710,7 +1711,10 @@ impl<
                     }
                     Voter::Notarization(notarization) => {
                         // Handle notarization
-                        self.handle_notarization(notarization).await;
+                        self.handle_notarization(notarization.clone()).await;
+                        self.reporter
+                            .report(Activity::Notarization(notarization))
+                            .await;
 
                         // Update round info
                         let round = self.views.get_mut(&view).expect("missing round");
@@ -1722,7 +1726,8 @@ impl<
                         let me = self.supervisor.participants(view).unwrap()
                             [public_key_index as usize]
                             == self.crypto.public_key();
-                        self.handle_nullify(nullify).await;
+                        self.handle_nullify(nullify.clone()).await;
+                        self.reporter.report(Activity::Nullify(nullify)).await;
 
                         // Update round info
                         if me {
@@ -1732,7 +1737,10 @@ impl<
                     }
                     Voter::Nullification(nullification) => {
                         // Handle nullification
-                        self.handle_nullification(nullification).await;
+                        self.handle_nullification(nullification.clone()).await;
+                        self.reporter
+                            .report(Activity::Nullification(nullification))
+                            .await;
 
                         // Update round info
                         let round = self.views.get_mut(&view).expect("missing round");
@@ -1744,7 +1752,8 @@ impl<
                         let me = self.supervisor.participants(view).unwrap()
                             [public_key_index as usize]
                             == self.crypto.public_key();
-                        self.handle_finalize(finalize).await;
+                        self.handle_finalize(finalize.clone()).await;
+                        self.reporter.report(Activity::Finalize(finalize)).await;
 
                         // Update round info
                         //
@@ -1756,7 +1765,10 @@ impl<
                     }
                     Voter::Finalization(finalization) => {
                         // Handle finalization
-                        self.handle_finalization(finalization).await;
+                        self.handle_finalization(finalization.clone()).await;
+                        self.reporter
+                            .report(Activity::Finalization(finalization))
+                            .await;
 
                         // Update round info
                         let round = self.views.get_mut(&view).expect("missing round");
