@@ -50,10 +50,6 @@ pub struct Config<C> {
     pub values_codec_config: C,
 
     /// The max number of values to put in each section of the values journal.
-    ///
-    /// Unlike the other variable-type stores, the actual number of values could be less than this
-    /// amount even if the section is "full", since we don't explicitly insert anything into the
-    /// section for commits.
     pub values_items_per_section: NonZeroU64,
 
     /// The name of the [Storage] partition used for the location map.
@@ -79,7 +75,7 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
     /// # Invariant
     ///
     /// The number of leaves in this MMR always equals the number of operations in the unpruned
-    /// `log`.
+    /// `locations` journal.
     mmr: Mmr<E, H>,
 
     /// A (pruned) journal of all values ever appended to the db.
@@ -90,6 +86,10 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
     size: u64,
 
     /// The number of values to put in each section of the values journal.
+    ///
+    /// Unlike the other variable-type stores, the actual number of values could be less than this
+    /// amount even if the section is "full", since we don't explicitly insert anything into the
+    /// section for commits.
     values_per_section: u64,
 
     /// A fixed-length journal that maps an appended value's location to its offset within its
@@ -104,8 +104,8 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
 }
 
 impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
-    /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted log operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
+    /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
+    /// and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let mut hasher = Standard::<H>::new();
 
@@ -123,25 +123,13 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )
         .await?;
 
-        let mut values = VJournal::<E, V>::init(
-            context.with_label("values"),
-            VConfig {
-                partition: cfg.values_journal_partition,
-                compression: cfg.values_compression,
-                codec_config: cfg.values_codec_config,
-                buffer_pool: cfg.buffer_pool.clone(),
-                write_buffer: cfg.values_write_buffer,
-            },
-        )
-        .await?;
-
         let mut locations = FJournal::init(
             context.with_label("locations"),
             FConfig {
                 partition: cfg.locations_journal_partition,
                 items_per_blob: cfg.locations_items_per_blob,
                 write_buffer: cfg.locations_write_buffer,
-                buffer_pool: cfg.buffer_pool,
+                buffer_pool: cfg.buffer_pool.clone(),
             },
         )
         .await?;
@@ -160,6 +148,18 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             warn!(mmr_leaves, locations_size, "rewinding misaligned mmr");
             mmr.pop((mmr_leaves - locations_size) as usize).await?;
         }
+
+        let mut values = VJournal::<E, V>::init(
+            context.with_label("values"),
+            VConfig {
+                partition: cfg.values_journal_partition,
+                compression: cfg.values_compression,
+                codec_config: cfg.values_codec_config,
+                buffer_pool: cfg.buffer_pool,
+                write_buffer: cfg.values_write_buffer,
+            },
+        )
+        .await?;
 
         // Rewind to the last commit point if necessary.
         let mut op_index = locations_size;
