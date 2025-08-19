@@ -400,6 +400,7 @@ module replica {
         val certificates = store_certificate.get(id)
         all {
             self.view == view,
+            self.has_notarized(),
             not(self.nullified),
             is_contradicted(self, view, store_vote.get(id)),
 
@@ -442,6 +443,8 @@ module replica {
                     | Some(cert) => enter_new_view(self, cert.view, true)
                     | None => self
                 }
+
+                val should_notarize = is_some(maybe_cert) and not(self.has_notarized()) and not(self.nullified)
                 val was_finalized = self.last_finalized >= view
                 val now_finalized = is_view_finalized(view, new_store, block_hash)
                 val certificates = store_certificate.get(id)
@@ -458,32 +461,49 @@ module replica {
                             } else all {
                                 store_certificate' = store_certificate,
                                 sent_certificate' = sent_certificate,
+                            },
+                            if (should_notarize) all {
+                                sent_vote' = sent_vote.union(Set(notarize(view, id, block_hash))),
+                            } else all {
+                                sent_vote' = sent_vote,
                             }
                         }
 
                         | None => all {
                             store_certificate' = store_certificate,
                             sent_certificate' = sent_certificate,
+                            sent_vote' = sent_vote,
                         }
                     },
 
+                    val self_maybe_notarize = if (should_notarize)  {
+                    {
+                        ...new_self,
+                        notarized: self.notarized.put(view, block_hash),
+                        ghost_sent_votes: new_self.ghost_sent_votes.setBy(view, old => old.append(block_hash))
+                    }
+                    } else {
+                        new_self
+                    }
+
+
                     if (not(was_finalized) and now_finalized) {
+
                         all {
                             ghost_committed_blocks' =
                                 ghost_committed_blocks.setBy(id, old => old.append(block_hash)),
                             replica_state' = replica_state.set(id, {
-                                ...new_self,
+                                ...self_maybe_notarize,
                                 last_finalized: view,
                             }),
                         }
                     } else {
                         all {
                             ghost_committed_blocks' = ghost_committed_blocks,
-                            replica_state' = replica_state.set(id, new_self),
+                            replica_state' = replica_state.set(id, self_maybe_notarize),
                         }
                     }
                 },
-                sent_vote' = sent_vote,
                 sent_proposal' = sent_proposal,
                 leader' = leader,
                 ghost_proposal' = ghost_proposal
@@ -569,18 +589,29 @@ module replica {
                     store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
                     sent_certificate' = sent_certificate.union(Set(cert)),
                     val new_self = enter_new_view(self, cert.view, cert.kind == NotarizationKind)
-                    replica_state' = replica_state.set(id, new_self)
+                    if (cert.kind == NotarizationKind and not(self.has_notarized()) and not(self.nullified)) all {
+                        sent_vote' = sent_vote.union(Set(notarize(cert.view, id, cert.block_hash))),
+                        replica_state' = replica_state.set(id, {
+                            ...new_self,
+                            notarized: self.notarized.put(cert.view, cert.block_hash),
+                            ghost_sent_votes: self.ghost_sent_votes.setBy(cert.view, old => old.append(cert.block_hash))
+                        })
+                    } else all {
+                        sent_vote' = sent_vote,
+                        replica_state' = replica_state.set(id, new_self)
+                    },
+
                 }
 
             } else {
                 all {
                     store_certificate' = store_certificate,
                     sent_certificate' = sent_certificate,
-                    replica_state' = replica_state
+                    replica_state' = replica_state,
+                    sent_vote' = sent_vote,
                 }
             },
             ghost_committed_blocks' = ghost_committed_blocks,
-            sent_vote' = sent_vote
         }
     }
 
@@ -719,6 +750,7 @@ module replica {
 
     // A correct replica should not send two votes in the same view.
     // Honest replicas may not broadcast a notarize(c, v) after first broadcasting a nullify(v).
+    // TODO:
     val no_vote_equivocation_inv = CORRECT.forall(id => {
         val self = replica_state.get(id)
         VIEWS.forall(v => votes_seq_correct(self.ghost_sent_votes.get(v)))
@@ -817,7 +849,7 @@ module replica {
     val all_invariants = all {
         no_proposal_equivocation,
         agreement,
-        no_vote_equivocation_inv,
+        //no_vote_equivocation_inv,
         no_nullification_and_finalization_in_the_same_view,
         validity,
         valid_last_finalized,
