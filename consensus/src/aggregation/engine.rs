@@ -32,7 +32,7 @@ use futures::{
 };
 use std::{
     cmp::max,
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
@@ -42,10 +42,10 @@ use tracing::{debug, error, trace, warn};
 enum Pending<V: Variant, D: Digest> {
     /// The automaton has not yet provided the digest for this index.
     /// The signatures may have arbitrary digests.
-    Unverified(HashMap<Epoch, HashMap<u32, Ack<V, D>>>),
+    Unverified(BTreeMap<Epoch, BTreeMap<u32, Ack<V, D>>>),
 
     /// Verified by the automaton. Now stores the digest.
-    Verified(D, HashMap<Epoch, HashMap<u32, Ack<V, D>>>),
+    Verified(D, BTreeMap<Epoch, BTreeMap<u32, Ack<V, D>>>),
 }
 
 /// The type returned by the `pending` pool, used by the application to return which digest is
@@ -419,13 +419,20 @@ impl<
             panic!("Pending::Unverified entry not found");
         };
         self.pending
-            .insert(index, Pending::Verified(digest, HashMap::new()));
+            .insert(index, Pending::Verified(digest, BTreeMap::new()));
 
         // Handle each `ack` as if it was received over the network. This inserts the values into
         // the new map, and may form a threshold signature if enough acks are present.
+        // Only process acks that match the verified digest.
         for epoch_acks in acks.values() {
             for epoch_ack in epoch_acks.values() {
-                let _ = self.handle_ack(epoch_ack).await; // Ignore any errors (e.g. invalid signature)
+                // Drop acks that don't match the verified digest
+                if epoch_ack.item.digest != digest {
+                    continue;
+                }
+
+                // Handle the ack
+                let _ = self.handle_ack(epoch_ack).await;
             }
             // Break early if a threshold signature was formed
             if self.confirmed.contains_key(&index) {
@@ -440,7 +447,7 @@ impl<
         self.set_rebroadcast_deadline(index);
 
         // Handle ack as if it was received over the network
-        let _ = self.handle_ack(&ack).await; // Ignore any errors (e.g. threshold already exists)
+        let _ = self.handle_ack(&ack).await;
 
         // Send ack over the network.
         self.broadcast(ack, sender).await?;
@@ -459,7 +466,7 @@ impl<
         };
         let quorum = quorum_from_slice(polynomial);
 
-        // Get the acks
+        // Get the acks and check digest consistency
         let acks_by_epoch = match self.pending.get_mut(&ack.item.index) {
             None => {
                 // If the index is not in the pending pool, it may be confirmed
@@ -467,7 +474,13 @@ impl<
                 return Err(Error::AckIndex(ack.item.index));
             }
             Some(Pending::Unverified(acks)) => acks,
-            Some(Pending::Verified(_, acks)) => acks,
+            Some(Pending::Verified(digest, acks)) => {
+                // If we have a verified digest, ensure the ack matches it
+                if ack.item.digest != *digest {
+                    return Err(Error::AckDigest(ack.item.index));
+                }
+                acks
+            }
         };
 
         // Add the partial signature (if not already present)
@@ -477,10 +490,14 @@ impl<
         }
         acks.insert(ack.signature.index, ack.clone());
 
-        // If a new threshold is formed, handle it
-        if acks.len() >= (quorum as usize) {
+        // If there exists a quorum of acks with the same digest, form a threshold signature
+        let filtered_acks = acks
+            .values()
+            .filter(|a| a.item.digest == ack.item.digest) // matches the verified digest (if it exists)
+            .collect::<Vec<_>>();
+        if filtered_acks.len() >= (quorum as usize) {
             let item = ack.item.clone();
-            let partials = acks.values().map(|ack| &ack.signature);
+            let partials = filtered_acks.iter().map(|ack| &ack.signature);
             let threshold = threshold_signature_recover::<V, _>(quorum, partials)
                 .expect("Failed to recover threshold signature");
             self.metrics.threshold.inc();
@@ -623,7 +640,7 @@ impl<
     fn get_digest(&mut self, index: Index) {
         assert!(self
             .pending
-            .insert(index, Pending::Unverified(HashMap::new()))
+            .insert(index, Pending::Unverified(BTreeMap::new()))
             .is_none());
 
         let mut automaton = self.automaton.clone();
@@ -776,29 +793,54 @@ impl<
                     .insert(certificate.item.index, certificate.clone());
             });
 
-        // Add any acks that haven't resulted in a threshold signature
-        acks = acks
-            .into_iter()
-            .filter(|ack| {
-                ack.item.index >= prune_threshold && !self.confirmed.contains_key(&ack.item.index)
-            })
-            .collect::<Vec<_>>();
-        acks.iter().for_each(|ack| {
-            assert!(self
-                .pending
-                .insert(
-                    ack.item.index,
-                    Pending::Verified(
-                        ack.item.digest,
-                        HashMap::from([(
-                            ack.epoch,
-                            HashMap::from([(ack.signature.index, ack.clone())]),
-                        )]),
-                    ),
-                )
-                .is_none());
-            self.set_rebroadcast_deadline(ack.item.index);
-        });
+        // Group acks by index
+        let mut acks_by_index: BTreeMap<Index, Vec<Ack<V, D>>> = BTreeMap::new();
+        for ack in acks {
+            if ack.item.index >= prune_threshold && !self.confirmed.contains_key(&ack.item.index) {
+                acks_by_index.entry(ack.item.index).or_default().push(ack);
+            }
+        }
+
+        // Process each index's acks
+        for (index, mut acks_group) in acks_by_index {
+            // Check if we have our own ack (which means we've verified the digest)
+            let our_share = self.validators.share(self.epoch);
+            let our_digest = if let Some(share) = our_share {
+                acks_group
+                    .iter()
+                    .find(|ack| ack.epoch == self.epoch && ack.signature.index == share.index)
+                    .map(|ack| ack.item.digest)
+            } else {
+                None
+            };
+
+            // If our_digest exists, delete everything from acks_group that doesn't match it
+            if let Some(digest) = our_digest {
+                acks_group.retain(|ack| ack.item.digest == digest);
+            }
+
+            // Create a new epoch map
+            let mut epoch_map = BTreeMap::new();
+            for ack in acks_group {
+                epoch_map
+                    .entry(ack.epoch)
+                    .or_insert_with(BTreeMap::new)
+                    .insert(ack.signature.index, ack);
+            }
+
+            // Insert as Verified if we have our own ack (meaning we verified the digest),
+            // otherwise as Unverified
+            match our_digest {
+                Some(digest) => {
+                    self.pending
+                        .insert(index, Pending::Verified(digest, epoch_map));
+                }
+                None => {
+                    self.pending.insert(index, Pending::Unverified(epoch_map));
+                }
+            }
+            self.set_rebroadcast_deadline(index);
+        }
     }
 
     /// Appends an activity to the journal.
