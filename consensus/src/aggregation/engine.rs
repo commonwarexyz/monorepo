@@ -846,12 +846,14 @@ impl<
                 Some(digest) => {
                     self.pending
                         .insert(index, Pending::Verified(digest, epoch_map));
+
+                    // If the digest is verified but not yet confirmed, set a rebroadcast deadline
+                    self.set_rebroadcast_deadline(index);
                 }
                 None => {
                     self.pending.insert(index, Pending::Unverified(epoch_map));
                 }
             }
-            self.set_rebroadcast_deadline(index);
         }
     }
 
