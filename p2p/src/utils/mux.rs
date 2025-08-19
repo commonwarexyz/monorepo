@@ -17,6 +17,9 @@ use std::{
 };
 use thiserror::Error;
 
+/// An asynchronous map of [Channel]s to [mpsc::Sender]s.
+type Routes<P> = Arc<Mutex<HashMap<Channel, mpsc::Sender<Message<P>>>>>;
+
 /// Errors that can occur when interacting with a [Muxer].
 #[derive(Error, Debug)]
 pub enum Error {
@@ -29,7 +32,7 @@ pub struct Muxer<S: Sender, R: Receiver> {
     sender: S,
     receiver: R,
     #[allow(clippy::type_complexity)]
-    routes: Arc<Mutex<HashMap<Channel, mpsc::Sender<Message<R::PublicKey>>>>>,
+    routes: Routes<R::PublicKey>,
     mailbox_size: usize,
 }
 
@@ -139,7 +142,7 @@ impl<S: Sender> Sender for SubSender<S> {
 pub struct SubReceiver<P: PublicKey> {
     receiver: mpsc::Receiver<Message<P>>,
     subchannel: Channel,
-    routes: Arc<Mutex<HashMap<Channel, mpsc::Sender<Message<P>>>>>,
+    routes: Routes<P>,
 }
 
 impl<P: PublicKey> Receiver for SubReceiver<P> {
