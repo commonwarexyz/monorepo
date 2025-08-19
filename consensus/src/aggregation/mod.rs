@@ -192,21 +192,6 @@ mod tests {
         let mut monitors = HashMap::new();
         let namespace = b"my testing namespace";
 
-        // Create a single shared reporter for all validators
-        let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
-            namespace,
-            validator_pks.len() as u32,
-            polynomial.clone(),
-        );
-        context
-            .with_label("shared_reporter")
-            .spawn(|_| reporter.run());
-
-        // Use the same reporter mailbox for all validators
-        for (validator, _scheme, _share) in validators.iter() {
-            reporters.insert(validator.clone(), reporter_mailbox.clone());
-        }
-
         for (validator, _scheme, share) in validators.iter() {
             let context = context.with_label(&validator.to_string());
             let monitor = mocks::Monitor::new(111);
@@ -227,6 +212,14 @@ mod tests {
 
             let automaton = mocks::Application::new(invalid_when);
             automatons.insert(validator.clone(), automaton.clone());
+
+            let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
+                namespace,
+                validator_pks.len() as u32,
+                polynomial.clone(),
+            );
+            context.with_label("reporter").spawn(|_| reporter.run());
+            reporters.insert(validator.clone(), reporter_mailbox);
 
             let engine = Engine::new(
                 context.with_label("engine"),
