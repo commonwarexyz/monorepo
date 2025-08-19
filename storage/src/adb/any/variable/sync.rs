@@ -473,9 +473,6 @@ async fn rebuild_lower_section<E: Storage + Metrics, V: Codec>(
         "rebuilding section to remove items before lower_bound"
     );
 
-    println!("rebuild_lower_section: rebuilding section {} for lower_bound {} (section_start={}, section_end={})", 
-        lower_section, lower_bound, section_start, section_end);
-
     // Read all operations from the current section
     let mut operations_to_keep = Vec::new();
     {
