@@ -470,9 +470,7 @@ impl<
             Some(Pending::Verified(_, acks)) => acks,
         };
 
-        // We already checked that we don't have the ack
-
-        // Add the partial signature
+        // Add the partial signature (if not already present)
         let acks = acks_by_epoch.entry(ack.epoch).or_default();
         if acks.contains_key(&ack.signature.index) {
             return Ok(());

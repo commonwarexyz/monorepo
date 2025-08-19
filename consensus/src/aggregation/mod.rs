@@ -44,7 +44,10 @@
 //!
 //! In aggregation, participants never gossip recovered threshold signatures. Rather, they gossip [types::TipAck]s
 //! with partial signatures over some index and their latest tip. This approach reduces the overhead of running aggregation
-//! concurrently with a consensus mechanism and consistently results in local recovery on stable networks.
+//! concurrently with a consensus mechanism and consistently results in local recovery on stable networks. To increase
+//! the likelihood of local recovery, participants should tune the [Config::prune_buffer] to a value larger than the expected
+//! drift of online participants (even if all participants are synchronous the tip advancement logic will advance to the `f+1`th highest
+//! reported tip and drop all work below that tip minus the [Config::prune_buffer]).
 
 pub mod types;
 
