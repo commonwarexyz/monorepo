@@ -217,6 +217,7 @@ mod tests {
 
             let blocker = oracle.control(validator.clone());
 
+            // TODO: this allows all nodes to act as byzantine validators (this is broken?)
             let automaton =
                 mocks::Application::byzantine(invalid_when, mocks::ByzantineStrategy::DoubleHash);
             automatons.insert(validator.clone(), automaton.clone());
