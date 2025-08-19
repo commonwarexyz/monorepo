@@ -94,6 +94,9 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
 
     /// A fixed-length journal that maps an appended value's location to its offset within its
     /// respective section of the values journal. (The section number is derived from location.)
+    ///
+    /// The locations structure provides the "source of truth" for the db's pruning boundaries and
+    /// overall size, should there be any discrepancies.
     locations: FJournal<E, Operation>,
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
@@ -238,6 +241,33 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             .oldest_retained_pos()
             .await
             .map_err(Error::Journal)
+    }
+
+    /// Prunes the db of up to all operations that have location less than `loc`. The actual number
+    /// pruned may be fewer than requested due to blob boundaries in the underlying journals.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `loc` is greater than the current size of the database.
+    pub async fn prune(&mut self, loc: u64) -> Result<(), Error> {
+        assert!(loc <= self.size);
+
+        // Prune the locations journal first, then the MMR. This ensures that if pruning fails,
+        // we never have location entries pointing to non-existent values in the values journal.
+        self.locations.prune(loc).await?;
+
+        // Prune the MMR to the corresponding position
+        self.mmr
+            .prune_to_pos(&mut self.hasher, leaf_num_to_pos(loc))
+            .await
+            .map_err(Error::Mmr)?;
+
+        // Prune the values journal up to the section boundary We can safely prune values last since
+        // the locations/MMR no longer reference them
+        let prune_to_section = loc / self.values_per_section;
+        self.values.prune(prune_to_section).await?;
+
+        Ok(())
     }
 
     /// Append a value to the db, returning its location which can be used to retrieve it.
@@ -400,11 +430,12 @@ mod test {
         adb::verify_proof,
         mmr::{hasher::Standard, mem::Mmr as MemMmr},
     };
-    use commonware_cryptography::{hash, sha256::Digest, Sha256};
+    use commonware_cryptography::{hash, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU64};
 
+    // Use some weird values here to test boundary conditions.
     const PAGE_SIZE: usize = 101;
     const PAGE_CACHE_SIZE: usize = 11;
 
@@ -615,30 +646,34 @@ mod test {
 
             // Test proof generation for various ranges
             let test_cases = vec![
-                (0, 10),   // First 10 operations
-                (10, 5),   // Middle range
-                (50, 20),  // Larger range
-                (90, 15),  // Range that extends beyond end (should be limited)
-                (0, 1),    // Single operation
+                (0, 10),           // First 10 operations
+                (10, 5),           // Middle range
+                (50, 20),          // Larger range
+                (90, 15),          // Range that extends beyond end (should be limited)
+                (0, 1),            // Single operation
                 (ELEMENTS - 1, 1), // Last append operation
                 (ELEMENTS, 1),     // The commit operation
             ];
 
             for (start_loc, max_ops) in test_cases {
                 let (proof, ops) = db.proof(start_loc, max_ops).await.unwrap();
-                
+
                 // Verify the proof
                 assert!(
                     verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
-                    "Failed to verify proof for range starting at {} with max {} ops", 
-                    start_loc, max_ops
+                    "Failed to verify proof for range starting at {} with max {} ops",
+                    start_loc,
+                    max_ops
                 );
 
                 // Check that we got the expected number of operations
                 let expected_ops = std::cmp::min(max_ops, db.size() - start_loc);
                 assert_eq!(
-                    ops.len() as u64, expected_ops,
-                    "Expected {} operations, got {}", expected_ops, ops.len()
+                    ops.len() as u64,
+                    expected_ops,
+                    "Expected {} operations, got {}",
+                    expected_ops,
+                    ops.len()
                 );
 
                 // Verify operation types
@@ -648,13 +683,17 @@ mod test {
                         // Should be an Append operation
                         assert!(
                             matches!(op, Operation::Append(_)),
-                            "Expected Append operation at location {}, got {:?}", loc, op
+                            "Expected Append operation at location {}, got {:?}",
+                            loc,
+                            op
                         );
                     } else if loc == ELEMENTS {
                         // Should be a Commit operation
                         assert!(
                             matches!(op, Operation::Commit),
-                            "Expected Commit operation at location {}, got {:?}", loc, op
+                            "Expected Commit operation at location {}, got {:?}",
+                            loc,
+                            op
                         );
                     }
                 }
@@ -673,6 +712,137 @@ mod test {
                         "Proof should fail with wrong start location"
                     );
                 }
+            }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    pub fn test_keyless_db_proof_with_pruning() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
+
+            // Build a db with some values
+            const ELEMENTS: u64 = 100;
+            let mut values = Vec::new();
+            for i in 0u64..ELEMENTS {
+                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
+                values.push(v.clone());
+                db.append(v).await.unwrap();
+            }
+            db.commit().await.unwrap();
+
+            // Add more elements and commit again
+            for i in ELEMENTS..ELEMENTS * 2 {
+                let v = vec![(i % 255) as u8; ((i % 17) + 5) as usize];
+                values.push(v.clone());
+                db.append(v).await.unwrap();
+            }
+            db.commit().await.unwrap();
+            let root = db.root(&mut hasher);
+
+            // Prune the first 30 operations
+            const PRUNE_LOC: u64 = 30;
+            db.prune(PRUNE_LOC).await.unwrap();
+
+            // Verify pruning worked
+            let oldest_retained = db.oldest_retained_loc().await.unwrap();
+            assert!(
+                oldest_retained.is_some(),
+                "Should have oldest retained location after pruning"
+            );
+
+            // Root should remain the same after pruning
+            assert_eq!(
+                db.root(&mut hasher),
+                root,
+                "Root should not change after pruning"
+            );
+
+            db.close().await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.size(), 2 * ELEMENTS + 2);
+            assert!(db.oldest_retained_loc().await.unwrap().unwrap() <= PRUNE_LOC);
+
+            // Test that we can't get pruned values
+            for i in 0..oldest_retained.unwrap() {
+                let result = db.get(i).await;
+                // Should either return None (for commit ops) or encounter pruned data
+                match result {
+                    Ok(None) => {} // Commit operation or pruned
+                    Ok(Some(_)) => {
+                        panic!("Should not be able to get pruned value at location {}", i)
+                    }
+                    Err(_) => {} // Expected error for pruned data
+                }
+            }
+
+            // Test proof generation after pruning - should work for non-pruned ranges
+            let test_cases = vec![
+                (oldest_retained.unwrap(), 10), // Starting from oldest retained
+                (50, 20),                       // Middle range (if not pruned)
+                (150, 10),                      // Later range
+                (190, 15),                      // Near the end
+            ];
+
+            for (start_loc, max_ops) in test_cases {
+                // Skip if start_loc is before oldest retained
+                if start_loc < oldest_retained.unwrap() {
+                    continue;
+                }
+
+                let (proof, ops) = db.proof(start_loc, max_ops).await.unwrap();
+
+                // Verify the proof still works
+                assert!(
+                    verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
+                    "Failed to verify proof for range starting at {} with max {} ops after pruning",
+                    start_loc,
+                    max_ops
+                );
+
+                // Check that we got operations
+                let expected_ops = std::cmp::min(max_ops, db.size() - start_loc);
+                assert_eq!(
+                    ops.len() as u64,
+                    expected_ops,
+                    "Expected {} operations, got {}",
+                    expected_ops,
+                    ops.len()
+                );
+            }
+
+            // Test pruning more aggressively
+            const AGGRESSIVE_PRUNE: u64 = 150;
+            db.prune(AGGRESSIVE_PRUNE).await.unwrap();
+
+            let new_oldest = db.oldest_retained_loc().await.unwrap().unwrap();
+            assert!(new_oldest <= AGGRESSIVE_PRUNE);
+
+            // Can still generate proofs for the remaining data
+            let (proof, ops) = db.proof(new_oldest, 20).await.unwrap();
+            assert!(
+                verify_proof(&mut hasher, &proof, new_oldest, &ops, &root),
+                "Proof should still verify after aggressive pruning"
+            );
+
+            // Test edge case: prune everything except the last few operations
+            let almost_all = db.size() - 5;
+            db.prune(almost_all).await.unwrap();
+
+            let final_oldest = db.oldest_retained_loc().await.unwrap().unwrap();
+
+            // Should still be able to prove the remaining operations
+            if final_oldest < db.size() {
+                let (final_proof, final_ops) = db.proof(final_oldest, 10).await.unwrap();
+                assert!(
+                    verify_proof(&mut hasher, &final_proof, final_oldest, &final_ops, &root),
+                    "Should be able to prove remaining operations after extensive pruning"
+                );
             }
 
             db.destroy().await.unwrap();
