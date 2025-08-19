@@ -1,10 +1,10 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to agents when working with code in this repository.
 
 ## Repository Overview
 
-Commonware is a Rust library providing high-performance, production-ready distributed systems primitives for adversarial environments. It's organized as a Cargo workspace with 12 core primitives and supporting infrastructure.
+Commonware is a Rust library providing high-performance, production-ready distributed systems primitives for adversarial environments. It's organized as a Cargo workspace with many primitives that build on each other (sharing testing infrastructure, types, traits, etc.).
 
 ## Essential Commands
 
@@ -29,14 +29,14 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo +nightly fmt --all
 
 # Check for unsafe code issues
-cargo +nightly miri test -p commonware-utils
+MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --lib commonware-storage::index::
 ```
 
 ### Fuzzing
 ```bash
 # Run fuzzer for specific primitive (requires nightly)
-cd primitives/cryptography
-cargo +nightly fuzz run fuzz_ed25519 -- -max_total_time=60
+cd cryptography
+cargo +nightly fuzz run ed25519_decode -- -max_total_time=60
 ```
 
 ### Benchmarking
