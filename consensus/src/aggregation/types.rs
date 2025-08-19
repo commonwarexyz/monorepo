@@ -331,9 +331,9 @@ impl<V: Variant, D: Digest> Read for Activity<V, D> {
 impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Activity::Ack(ack) => ack.encode_size(),
-            Activity::Certified(certificate) => certificate.encode_size(),
-            Activity::Tip(index) => index.encode_size(),
+            Activity::Ack(_) => Ack::<V, D>::SIZE,
+            Activity::Certified(_) => Certificate::<V, D>::SIZE,
+            Activity::Tip(_) => Index::SIZE,
         }
     }
 }
