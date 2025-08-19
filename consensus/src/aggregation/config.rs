@@ -59,7 +59,6 @@ pub struct Config<
     pub window: NonZeroU64,
 
     /// Number of indices to retain below the tip when pruning.
-    /// This prevents losing certificates during restart that haven't been reported yet.
     pub prune_buffer: u64,
 
     /// Partition for the [commonware_storage::journal::variable::Journal].
