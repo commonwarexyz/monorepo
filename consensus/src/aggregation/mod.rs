@@ -417,7 +417,7 @@ mod tests {
                     context.with_label("reporter").spawn(|_| reporter.run());
 
                     // Start validator engines
-                    for (validator, _scheme, share) in validators.iter() {
+                    for (i, (validator, _, share)) in validators.iter().enumerate() {
                         let validator_context = context.with_label(&validator.to_string());
                         let monitor = mocks::Monitor::new(111);
                         engine_monitors.insert(validator.clone(), monitor.clone());
@@ -428,7 +428,11 @@ mod tests {
                         };
 
                         let blocker = oracle.control(validator.clone());
-                        let automaton = mocks::Application::new(Strategy::Correct);
+                        let automaton = mocks::Application::new(if i == 0 {
+                            Strategy::Incorrect
+                        } else {
+                            Strategy::Correct
+                        });
                         automatons
                             .lock()
                             .unwrap()
