@@ -39,7 +39,7 @@ pub mod sync;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.
-const SNAPSHOT_READ_BUFFER_SIZE: usize = 1024;
+const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 
 /// Prefix used for the oldest_retained_loc key in metadata.
 const OLDEST_RETAINED_LOC_PREFIX: u8 = 0;
