@@ -1,6 +1,6 @@
 use super::{Link, Oracle, Receiver, Sender};
 use arbitrary::Arbitrary;
-use commonware_cryptography::{PublicKey};
+use commonware_cryptography::PublicKey;
 use std::collections::HashMap;
 
 #[derive(Clone)]
