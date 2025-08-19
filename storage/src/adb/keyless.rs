@@ -9,7 +9,7 @@ use crate::{
     },
     mmr::{
         hasher::Standard,
-        iterator::leaf_num_to_pos,
+        iterator::{leaf_num_to_pos, leaf_pos_to_num},
         journaled::{Config as MmrConfig, Mmr},
         verification::Proof,
     },
@@ -20,7 +20,7 @@ use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use futures::{future::TryFutureExt, try_join};
 use std::num::{NonZeroU64, NonZeroUsize};
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
@@ -145,7 +145,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
         // Align the size of the locations journal with the MMR.
         let mut locations_size = locations.size().await?;
-        let mmr_leaves = leaf_num_to_pos(mmr.size());
+        let mmr_leaves = leaf_pos_to_num(mmr.size()).expect("invalid mmr size");
         if locations_size > mmr_leaves {
             warn!(
                 mmr_leaves,
@@ -160,24 +160,37 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
         // Rewind to the last commit point if necessary.
         let mut op_index = locations_size;
+        let mut last_commit_loc = None;
         while op_index > 0 {
             op_index -= 1;
             let op = locations.read(op_index).await?;
             if let Operation::Commit = op {
-                if op_index != locations_size - 1 {
-                    warn!(
-                        old_size = locations_size,
-                        new_size = op_index + 1,
-                        "rewinding to last commit point"
-                    );
-                    locations.rewind(op_index + 1).await?;
-                    mmr.pop((locations_size - op_index - 1) as usize).await?;
-                    locations_size = op_index + 1;
-                    // Note that we don't touch any data in the values journal during recovery. Instead, we'll
-                    // overwrite any rolled-back data as new items get appended.
-                }
+                last_commit_loc = Some(op_index);
                 break;
             }
+        }
+        if let Some(last_commit_loc) = last_commit_loc {
+            if last_commit_loc != locations_size - 1 {
+                warn!(
+                    old_size = locations_size,
+                    new_size = last_commit_loc + 1,
+                    "rewinding to last commit point"
+                );
+                locations.rewind(last_commit_loc + 1).await?;
+                mmr.pop((locations_size - last_commit_loc - 1) as usize)
+                    .await?;
+                locations_size = last_commit_loc + 1;
+                // Note that we don't touch any data in the values journal during recovery. Instead, we'll
+                // overwrite any rolled-back data as new items get appended.
+            }
+        } else if locations_size > 0 {
+            warn!(
+                old_size = locations_size,
+                "no commit point found, rewinding to start"
+            );
+            locations.rewind(0).await?;
+            mmr.pop(locations_size as usize).await?;
+            locations_size = 0;
         }
 
         Ok(Self {
@@ -351,5 +364,119 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::{
+        adb::verify_proof,
+        mmr::{hasher::Standard, mem::Mmr as MemMmr},
+    };
+    use commonware_cryptography::{hash, sha256::Digest, Sha256};
+    use commonware_macros::test_traced;
+    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_utils::{NZUsize, NZU64};
+
+    const PAGE_SIZE: usize = 101;
+    const PAGE_CACHE_SIZE: usize = 11;
+
+    fn db_config(suffix: &str) -> Config<(commonware_codec::RangeCfg, ())> {
+        Config {
+            mmr_journal_partition: format!("journal_{suffix}"),
+            mmr_metadata_partition: format!("metadata_{suffix}"),
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
+            values_journal_partition: format!("values_journal_{suffix}"),
+            values_write_buffer: NZUsize!(1024),
+            values_compression: None,
+            values_codec_config: ((0..=10000).into(), ()),
+            values_items_per_section: NZU64!(7),
+            locations_journal_partition: format!("locations_journal_{suffix}"),
+            locations_items_per_blob: NZU64!(7),
+            locations_write_buffer: NZUsize!(1024),
+            thread_pool: None,
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+        }
+    }
+
+    /// A type alias for the concrete [Any] type used in these unit tests.
+    type Db = Keyless<deterministic::Context, Vec<u8>, Sha256>;
+
+    /// Return a [Keyless] database initialized with a fixed config.
+    async fn open_db(context: deterministic::Context) -> Db {
+        Db::init(context, db_config("partition")).await.unwrap()
+    }
+
+    #[test_traced("INFO")]
+    pub fn test_keyless_db_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+            let mut hasher = Standard::<Sha256>::new();
+            assert_eq!(db.size(), 0);
+            assert_eq!(db.oldest_retained_loc().await.unwrap(), None);
+            assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
+
+            // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
+            let v1 = vec![1u8; 8];
+            let root = db.root(&mut hasher);
+            db.append(v1).await.unwrap();
+            db.close().await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.size(), 0);
+
+            // Test calling commit on an empty db which should make it (durably) non-empty.
+            db.commit().await.unwrap();
+            assert_eq!(db.size(), 1); // floor op added
+            let root = db.root(&mut hasher);
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.root(&mut hasher), root);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    pub fn test_keyless_db_build_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Build a db with 2 values and make sure we can get them back.
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
+
+            let v1 = vec![1u8; 8];
+            let v2 = vec![2u8; 20];
+
+            let loc1 = db.append(v1.clone()).await.unwrap();
+            assert_eq!(db.get(loc1).await.unwrap().unwrap(), v1);
+
+            let loc2 = db.append(v2.clone()).await.unwrap();
+            assert_eq!(db.get(loc2).await.unwrap().unwrap(), v2);
+
+            // Make sure closing/reopening gets us back to the same state.
+            db.commit().await.unwrap();
+            assert_eq!(db.size(), 3); // 2 appends, 1 commit
+            let root = db.root(&mut hasher);
+            db.close().await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(db.size(), 3);
+            assert_eq!(db.root(&mut hasher), root);
+
+            assert_eq!(db.get(loc1).await.unwrap().unwrap(), v1);
+            assert_eq!(db.get(loc2).await.unwrap().unwrap(), v2);
+
+            db.append(v2).await.unwrap();
+            db.append(v1).await.unwrap();
+
+            // Make sure uncommitted items get rolled back.
+            db.close().await.unwrap();
+            let db = open_db(context.clone()).await;
+            assert_eq!(db.root(&mut hasher), root);
+
+            db.destroy().await.unwrap();
+        });
     }
 }
