@@ -20,6 +20,7 @@ use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use futures::{future::TryFutureExt, try_join};
 use std::num::{NonZeroU64, NonZeroUsize};
+use tracing::warn;
 
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
@@ -105,7 +106,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let mut hasher = Standard::<H>::new();
 
-        let mmr = Mmr::init(
+        let mut mmr = Mmr::init(
             context.with_label("mmr"),
             &mut hasher,
             MmrConfig {
@@ -131,7 +132,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )
         .await?;
 
-        let locations = FJournal::init(
+        let mut locations = FJournal::init(
             context.with_label("locations"),
             FConfig {
                 partition: cfg.locations_journal_partition,
@@ -142,10 +143,47 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )
         .await?;
 
+        // Align the size of the locations journal with the MMR.
+        let mut locations_size = locations.size().await?;
+        let mmr_leaves = leaf_num_to_pos(mmr.size());
+        if locations_size > mmr_leaves {
+            warn!(
+                mmr_leaves,
+                locations_size, "rewinding misaligned locations map"
+            );
+            locations.rewind(mmr_leaves).await?;
+            locations_size = mmr_leaves;
+        } else if mmr_leaves > locations_size {
+            warn!(mmr_leaves, locations_size, "rewinding misaligned mmr");
+            mmr.pop((mmr_leaves - locations_size) as usize).await?;
+        }
+
+        // Rewind to the last commit point if necessary.
+        let mut op_index = locations_size;
+        while op_index > 0 {
+            op_index -= 1;
+            let op = locations.read(op_index).await?;
+            if let Operation::Commit = op {
+                if op_index != locations_size - 1 {
+                    warn!(
+                        old_size = locations_size,
+                        new_size = op_index + 1,
+                        "rewinding to last commit point"
+                    );
+                    locations.rewind(op_index + 1).await?;
+                    mmr.pop((locations_size - op_index - 1) as usize).await?;
+                    locations_size = op_index + 1;
+                    // Note that we don't touch any data in the values journal during recovery. Instead, we'll
+                    // overwrite any rolled-back data as new items get appended.
+                }
+                break;
+            }
+        }
+
         Ok(Self {
             mmr,
             values,
-            size: 0,
+            size: locations_size,
             locations,
             values_per_section: cfg.values_items_per_section.get(),
             hasher,
@@ -162,7 +200,6 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                     let Some(v) = self.values.get(section, offset).await? else {
                         panic!("didn't find value at location {loc} and offset {offset}");
                     };
-
                     Ok(Some(v))
                 } else {
                     Ok(None)
@@ -276,10 +313,15 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
     /// parallelized if a thread pool is provided.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
+        // Always sync the values journal first, to ensure that the locations journal is always in a
+        // state where it's referencing a valid offset to simplify recovery. In the event of a crash
+        // and rollback is required, we do not need to roll back any data in the values journal,
+        // instead we'll just overwrite it as appropriate.
         let section = self.current_section();
+        self.values.sync(section).await?;
+
         try_join!(
             self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
-            self.values.sync(section).map_err(Error::Journal),
             self.locations.sync().map_err(Error::Journal),
         )?;
 
@@ -288,10 +330,13 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     /// Close the db. Operations that have not been committed will be lost.
     pub async fn close(mut self) -> Result<(), Error> {
+        // Close the locations journal first to make sure it's synced first (see `sync` for why this
+        // is important).
+        self.locations.close().await?;
+
         try_join!(
             self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
             self.values.close().map_err(Error::Journal),
-            self.locations.close().map_err(Error::Journal),
         )?;
 
         Ok(())
