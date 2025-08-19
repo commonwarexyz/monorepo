@@ -356,7 +356,55 @@ mod tests {
         all_online::<MinSig>();
     }
 
-    fn unclean_shutdown<V: Variant>() {
+    /// Test consensus resilience to Byzantine behavior.
+    fn byzantine_proposer<V: Variant>() {
+        let num_validators: u32 = 4;
+        let quorum: u32 = 3;
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+
+        runner.start(|mut context| async move {
+            let (polynomial, mut shares_vec) =
+                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+
+            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
+                context.with_label("simulation"),
+                num_validators,
+                &mut shares_vec,
+                RELIABLE_LINK,
+            )
+            .await;
+            let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
+            let mut reporters =
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
+
+            let mut incorrect = HashSet::new();
+            incorrect.insert(pks[0].clone());
+
+            spawn_validator_engines::<V>(
+                context.with_label("validator"),
+                polynomial.clone(),
+                &pks,
+                &validators,
+                &mut registrations,
+                &mut automatons.lock().unwrap(),
+                &mut reporters,
+                &mut oracle,
+                Duration::from_secs(5),
+                incorrect,
+            );
+
+            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_byzantine_proposer() {
+        byzantine_proposer::<MinPk>();
+        byzantine_proposer::<MinSig>();
+    }
+
+    fn unclean_byzantine_shutdown<V: Variant>() {
         // Test parameters
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
@@ -516,9 +564,9 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_unclean_shutdown() {
-        unclean_shutdown::<MinPk>();
-        unclean_shutdown::<MinSig>();
+    fn test_unclean_byzantine_shutdown() {
+        unclean_byzantine_shutdown::<MinPk>();
+        unclean_byzantine_shutdown::<MinSig>();
     }
 
     fn slow_and_lossy_links<V: Variant>(seed: u64) -> String {
@@ -712,54 +760,6 @@ mod tests {
     fn test_network_partition() {
         network_partition::<MinPk>();
         network_partition::<MinSig>();
-    }
-
-    /// Test consensus resilience to Byzantine behavior.
-    fn byzantine_proposer<V: Variant>() {
-        let num_validators: u32 = 4;
-        let quorum: u32 = 3;
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-
-        runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
-            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
-
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
-                context.with_label("simulation"),
-                num_validators,
-                &mut shares_vec,
-                RELIABLE_LINK,
-            )
-            .await;
-            let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
-
-            let mut incorrect = HashSet::new();
-            incorrect.insert(pks[0].clone());
-
-            spawn_validator_engines::<V>(
-                context.with_label("validator"),
-                polynomial.clone(),
-                &pks,
-                &validators,
-                &mut registrations,
-                &mut automatons.lock().unwrap(),
-                &mut reporters,
-                &mut oracle,
-                Duration::from_secs(5),
-                incorrect,
-            );
-
-            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_byzantine_proposer() {
-        byzantine_proposer::<MinPk>();
-        byzantine_proposer::<MinSig>();
     }
 
     /// Test insufficient validator participation (below quorum).
