@@ -444,7 +444,8 @@ impl<
         let ack = self.sign_ack(index, digest).await?;
 
         // Set the rebroadcast deadline for this index
-        self.set_rebroadcast_deadline(index);
+        self.rebroadcast_deadlines
+            .put(index, self.context.current() + self.rebroadcast_timeout);
 
         // Handle ack as if it was received over the network
         let _ = self.handle_ack(&ack).await;
@@ -567,7 +568,8 @@ impl<
         };
 
         // Reinsert the index with a new deadline
-        self.set_rebroadcast_deadline(index);
+        self.rebroadcast_deadlines
+            .put(index, self.context.current() + self.rebroadcast_timeout);
 
         // Broadcast the ack to all peers
         self.broadcast(ack, sender).await
@@ -664,12 +666,6 @@ impl<
                 timer,
             }
         });
-    }
-
-    // Sets the rebroadcast deadline for the given `index`.
-    fn set_rebroadcast_deadline(&mut self, index: Index) {
-        self.rebroadcast_deadlines
-            .put(index, self.context.current() + self.rebroadcast_timeout);
     }
 
     /// Signs an ack for the given index, and digest. Stores the ack in the journal and returns it.
