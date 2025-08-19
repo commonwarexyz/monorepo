@@ -172,33 +172,9 @@ pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
 }
 
 /// Returns the position of the leaf with number `leaf_num` in an MMR.
-///
-/// This computation is O(log2(n)) in `leaf_num`.
 pub(crate) const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
-    if leaf_num == 0 {
-        return 0;
-    }
-
-    // The following won't underflow because any sane leaf number would have several leading zeros.
-    let mut pos = u64::MAX >> (leaf_num.leading_zeros() - 1);
-    let mut two_h = (pos >> 2) + 1;
-    pos -= 1;
-
-    // `pos` is the position of the peak of the lowest mountain that includes both the very first
-    // leaf and the given leaf. We descend from this peak to the leaf level by descending left or
-    // right depending on the relevant bit of `leaf_num`. The position we arrive at is the position
-    // of the leaf.
-    while two_h != 0 {
-        if leaf_num & two_h != 0 {
-            // descend right
-            pos -= 1;
-        } else {
-            pos -= two_h << 1;
-        }
-        two_h >>= 1;
-    }
-
-    pos
+    // This will never underflow since 2*n >= count_ones(n).
+    leaf_num.checked_mul(2).expect("leaf_num overflow") - leaf_num.count_ones() as u64
 }
 
 /// Returns the height of the node at position `pos` in an MMR.
