@@ -491,13 +491,13 @@ impl<
         acks.insert(ack.signature.index, ack.clone());
 
         // If there exists a quorum of acks with the same digest, form a threshold signature
-        let filtered_acks = acks
+        let partials = acks
             .values()
             .filter(|a| a.item.digest == ack.item.digest) // matches the verified digest (if it exists)
+            .map(|ack| &ack.signature)
             .collect::<Vec<_>>();
-        if filtered_acks.len() >= (quorum as usize) {
+        if partials.len() >= (quorum as usize) {
             let item = ack.item.clone();
-            let partials = filtered_acks.iter().map(|ack| &ack.signature);
             let threshold = threshold_signature_recover::<V, _>(quorum, partials)
                 .expect("Failed to recover threshold signature");
             self.metrics.threshold.inc();
