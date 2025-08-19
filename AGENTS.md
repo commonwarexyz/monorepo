@@ -86,6 +86,7 @@ _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything wit
 4. **Adversarial Safety**: All primitives are designed to operate robustly in adversarial environments.
 5. **Abstract Runtime**: All code outside the `runtime` primitive must be runtime-agnostic (never import `tokio` directly outside of `runtime/`). When requiring some `runtime`, use the provided traits in `runtime/src/lib.rs`.
 6. **Always Commit Complete Code**: When implementing code and writing tests, always implement complete functionality. If there is a large task, implement the simplest possible solution that works and then incrementally improve it.
+7. **Own Core Mechanisms**: If a primitive relies heavily on some core mechanism/algorithm, we should implement it rather than relying on external crates.
 
 ## Testing Strategy
 - Unit tests: Core logic validation
