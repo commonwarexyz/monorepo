@@ -58,19 +58,13 @@ where
         )
         .await?;
 
-        let size = compute_size(
-            &journal,
+        VariableJournal::new(
+            journal,
             config.log_items_per_section,
             lower_bound,
             upper_bound,
         )
-        .await?;
-
-        Ok(VariableJournal::new(
-            journal,
-            config.log_items_per_section,
-            size,
-        ))
+        .await
     }
 
     async fn from_sync_result(
@@ -245,19 +239,15 @@ where
         truncate_upper_section(&mut variable_journal, upper_bound, log_items_per_section)
             .await
             .map_err(adb::Error::from)?;
-        let size = compute_size(
-            &variable_journal,
+
+        VariableJournal::new(
+            variable_journal,
             config.log_items_per_section,
             lower_bound,
             upper_bound,
         )
         .await
-        .map_err(adb::Error::from)?;
-        Ok(VariableJournal::new(
-            variable_journal,
-            config.log_items_per_section,
-            size,
-        ))
+        .map_err(adb::Error::from)
     }
 }
 
@@ -503,16 +493,18 @@ where
     /// - `inner`: The wrapped [VJournal], whose logical last operation location is `size - 1`.
     /// - `items_per_section`: Operations per section.
     /// - `size`: Logical next append location to report.
-    pub fn new(
+    pub async fn new(
         inner: VJournal<E, Variable<K, V>>,
         items_per_section: NonZeroU64,
-        size: u64,
-    ) -> Self {
-        Self {
+        lower_bound: u64,
+        upper_bound: u64,
+    ) -> Result<Self, crate::journal::Error> {
+        let size = compute_size(&inner, items_per_section, lower_bound, upper_bound).await?;
+        Ok(Self {
             inner,
             items_per_section,
             size,
-        }
+        })
     }
 
     /// Return the inner [VJournal].
@@ -665,7 +657,7 @@ where
 
 /// Compute the next append location (size) by scanning the variable journal and
 /// counting only items whose logical location is within [lower_bound, upper_bound].
-pub async fn compute_size<E, K, V>(
+async fn compute_size<E, K, V>(
     journal: &VJournal<E, Variable<K, V>>,
     items_per_section: NonZeroU64,
     lower_bound: u64,
