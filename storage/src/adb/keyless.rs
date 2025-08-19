@@ -123,7 +123,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )
         .await?;
 
-        let values = VJournal::<E, V>::init(
+        let mut values = VJournal::<E, V>::init(
             context.with_label("values"),
             VConfig {
                 partition: cfg.values_journal_partition,
@@ -152,7 +152,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         if locations_size > mmr_leaves {
             warn!(
                 mmr_leaves,
-                locations_size, "rewinding misaligned locations map"
+                locations_size, "rewinding misaligned locations journal"
             );
             locations.rewind(mmr_leaves).await?;
             locations_size = mmr_leaves;
@@ -163,17 +163,26 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
         // Rewind to the last commit point if necessary.
         let mut op_index = locations_size;
+        // The most recent commit point (if any).
         let mut last_commit_loc = None;
+        // The location of the first append operation to follow the last known commit, and the
+        // offset it wraps.
+        let mut rewind_point = None;
         while op_index > 0 {
             op_index -= 1;
-            let op = locations.read(op_index).await?;
-            if let Operation::Commit = op {
-                last_commit_loc = Some(op_index);
-                break;
+            match locations.read(op_index).await? {
+                Operation::Commit => {
+                    last_commit_loc = Some(op_index);
+                    break;
+                }
+                Operation::Append(offset) => {
+                    rewind_point = Some((op_index, offset));
+                }
             }
         }
         if let Some(last_commit_loc) = last_commit_loc {
             if last_commit_loc != locations_size - 1 {
+                // There's at least one append operation to rewind.
                 warn!(
                     old_size = locations_size,
                     new_size = last_commit_loc + 1,
@@ -183,8 +192,11 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 mmr.pop((locations_size - last_commit_loc - 1) as usize)
                     .await?;
                 locations_size = last_commit_loc + 1;
-                // Note that we don't touch any data in the values journal during recovery. Instead, we'll
-                // overwrite any rolled-back data as new items get appended.
+                // Rewind the values journal last to ensure the locations journal always references
+                // valid data in the event of failures.
+                let rewind_point = rewind_point.expect("no rewind point found");
+                let section = rewind_point.0 / cfg.values_items_per_section.get();
+                values.rewind_to_offset(section, rewind_point.1).await?;
             }
         } else if locations_size > 0 {
             warn!(
@@ -194,6 +206,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             locations.rewind(0).await?;
             mmr.pop(locations_size as usize).await?;
             locations_size = 0;
+            values.rewind_section(0, 0).await?;
         }
 
         Ok(Self {
@@ -252,20 +265,18 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     pub async fn prune(&mut self, loc: u64) -> Result<(), Error> {
         assert!(loc <= self.size);
 
-        // Prune the locations journal first, then the MMR. This ensures that if pruning fails,
-        // we never have location entries pointing to non-existent values in the values journal.
+        // Prune the locations journal first. This ensures that if pruning fails, we never have
+        // location entries without corresponding data in the other structures.
         self.locations.prune(loc).await?;
 
-        // Prune the MMR to the corresponding position
-        self.mmr
-            .prune_to_pos(&mut self.hasher, leaf_num_to_pos(loc))
-            .await
-            .map_err(Error::Mmr)?;
-
-        // Prune the values journal up to the section boundary We can safely prune values last since
-        // the locations/MMR no longer reference them
+        // Prune the MMR and values journals to the corresponding positions.
         let prune_to_section = loc / self.values_per_section;
-        self.values.prune(prune_to_section).await?;
+        try_join!(
+            self.mmr
+                .prune_to_pos(&mut self.hasher, leaf_num_to_pos(loc))
+                .map_err(Error::Mmr),
+            self.values.prune(prune_to_section).map_err(Error::Journal),
+        )?;
 
         Ok(())
     }
@@ -289,9 +300,6 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     }
 
     /// Commit the current state of the db.
-    ///
-    /// TODO: Does commit really need to be an operation (and part of the authenticated structure)
-    /// or can we just store the last-committed operation in metadata for recovery purposes only?
     pub async fn commit(&mut self) -> Result<(), Error> {
         self.mmr
             .add_batched(&mut self.hasher, &Operation::Commit.encode())
@@ -356,10 +364,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
     /// parallelized if a thread pool is provided.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
-        // Always sync the values journal first, to ensure that the locations journal is always in a
-        // state where it's referencing a valid offset to simplify recovery. In the event of a crash
-        // and rollback is required, we do not need to roll back any data in the values journal,
-        // instead we'll just overwrite it as appropriate.
+        // Always sync the values journal first to ensure that the locations journal is always in a
+        // state where it's referencing a valid offset in the event of a crash.
         let section = self.current_section();
         self.values.sync(section).await?;
 
