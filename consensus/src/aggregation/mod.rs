@@ -362,6 +362,13 @@ mod tests {
         let completed_validators = Arc::new(Mutex::new(std::collections::HashSet::new()));
         let all_validators = Arc::new(Mutex::new(Vec::new()));
 
+        // Persistent storage for reporter state across restarts
+        // Maps validator -> (index -> (digest, epoch))
+        let persistent_digests = Arc::new(Mutex::new(HashMap::<
+            PublicKey,
+            BTreeMap<u64, (Sha256Digest, Epoch)>,
+        >::new()));
+
         // Generate shares once
         let mut rng = StdRng::seed_from_u64(0);
         let (polynomial, mut shares_vec) =
@@ -378,6 +385,7 @@ mod tests {
             let all_validators_clone = all_validators.clone();
             let shares_vec_clone = shares_vec.clone();
             let polynomial_clone = polynomial.clone();
+            let persistent_digests_clone = persistent_digests.clone();
 
             let f = move |mut context: Context| {
                 let completed = completed_clone;
@@ -385,6 +393,7 @@ mod tests {
                 let all_validators = all_validators_clone;
                 let mut shares_vec = shares_vec_clone;
                 let polynomial = polynomial_clone;
+                let persistent_digests = persistent_digests_clone;
                 async move {
                     let (oracle, validators, pks, mut registrations) = initialize_simulation(
                         context.with_label("simulation"),
@@ -423,11 +432,31 @@ mod tests {
                             .unwrap()
                             .insert(validator.clone(), automaton.clone());
 
-                        let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
-                            namespace,
-                            num_validators,
-                            polynomial.clone(),
-                        );
+                        // Create reporter with persistent state if available
+                        let initial_digests = persistent_digests
+                            .lock()
+                            .unwrap()
+                            .get(validator)
+                            .cloned()
+                            .unwrap_or_default();
+
+                        if !initial_digests.is_empty() {
+                            debug!(
+                                ?validator,
+                                num_digests = initial_digests.len(),
+                                min_index = initial_digests.keys().min().copied(),
+                                max_index = initial_digests.keys().max().copied(),
+                                "Restoring reporter with saved digests"
+                            );
+                        }
+
+                        let (reporter, reporter_mailbox) =
+                            mocks::Reporter::<V, Sha256Digest>::new_with_state(
+                                namespace,
+                                num_validators,
+                                polynomial.clone(),
+                                initial_digests,
+                            );
                         validator_context
                             .with_label("reporter")
                             .spawn(|_| reporter.run());
@@ -523,6 +552,21 @@ mod tests {
                     select! {
                         _ = context.sleep(shutdown_wait) => {
                             debug!(shutdown_wait = ?shutdown_wait, "Simulating unclean shutdown");
+
+                            // Save reporter state before shutdown
+                            let saved_digests = persistent_digests.lock().unwrap();
+                            for (pk, mut reporter_mailbox) in reporters.clone() {
+                                let digests = reporter_mailbox.get_all_digests().await;
+                                debug!(
+                                    ?pk,
+                                    num_digests = digests.len(),
+                                    min_index = digests.keys().min().copied(),
+                                    max_index = digests.keys().max().copied(),
+                                    "Saving reporter digests before shutdown"
+                                );
+                                saved_digests.insert(pk.clone(), digests);
+                            }
+
                             // Track which validators were running when shutdown occurred
                             let mut counts = shutdown_counts.lock().unwrap();
                             for (pk, _) in reporters {

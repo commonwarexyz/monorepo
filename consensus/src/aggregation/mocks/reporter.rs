@@ -24,6 +24,7 @@ enum Message<V: Variant, D: Digest> {
     GetTip(oneshot::Sender<Option<(Index, Epoch)>>),
     GetContiguousTip(oneshot::Sender<Option<Index>>),
     Get(Index, oneshot::Sender<Option<(D, Epoch)>>),
+    GetAllDigests(oneshot::Sender<BTreeMap<Index, (D, Epoch)>>),
 }
 
 pub struct Reporter<V: Variant, D: Digest> {
@@ -60,9 +61,35 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
         participants: u32,
         polynomial: poly::Public<V>,
     ) -> (Self, Mailbox<V, D>) {
+        Self::new_with_state(namespace, participants, polynomial, BTreeMap::new())
+    }
+
+    pub fn new_with_state(
+        namespace: &[u8],
+        participants: u32,
+        polynomial: poly::Public<V>,
+        initial_digests: BTreeMap<Index, (D, Epoch)>,
+    ) -> (Self, Mailbox<V, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         let identity = *poly::public::<V>(&polynomial);
         let polynomial = evaluate_all::<V>(&polynomial, participants);
+
+        // Calculate highest and contiguous from initial digests
+        let highest = initial_digests
+            .iter()
+            .max_by_key(|(index, _)| *index)
+            .map(|(index, (_, epoch))| (*index, *epoch));
+
+        let mut contiguous = None;
+        for i in 0.. {
+            if !initial_digests.contains_key(&i) {
+                if i > 0 {
+                    contiguous = Some(i - 1);
+                }
+                break;
+            }
+        }
+
         (
             Reporter {
                 mailbox: receiver,
@@ -70,9 +97,9 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                 identity,
                 polynomial,
                 acks: HashSet::new(),
-                digests: BTreeMap::new(),
-                contiguous: None,
-                highest: None,
+                digests: initial_digests,
+                contiguous,
+                highest,
                 current_epoch: 111, // Initialize with the expected epoch
             },
             Mailbox { sender },
@@ -145,6 +172,8 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                     // Update the contiguous tip if necessary;
                     // An individual validator may have missed constructing a signature, but a
                     // majority of the rest of the network has constructed a signature.
+                    //
+                    // TODO: Why update contiguous here? It seems like we would just update highest
                     if self.contiguous.is_none_or(|c| index > c) {
                         self.contiguous = Some(index);
                     }
@@ -158,6 +187,9 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                 Message::Get(index, sender) => {
                     let digest = self.digests.get(&index).cloned();
                     sender.send(digest).unwrap();
+                }
+                Message::GetAllDigests(sender) => {
+                    sender.send(self.digests.clone()).unwrap();
                 }
             }
         }
@@ -215,6 +247,15 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
     pub async fn get(&mut self, index: Index) -> Option<(D, Epoch)> {
         let (sender, receiver) = oneshot::channel();
         self.sender.send(Message::Get(index, sender)).await.unwrap();
+        receiver.await.unwrap()
+    }
+
+    pub async fn get_all_digests(&mut self) -> BTreeMap<Index, (D, Epoch)> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::GetAllDigests(sender))
+            .await
+            .unwrap();
         receiver.await.unwrap()
     }
 }

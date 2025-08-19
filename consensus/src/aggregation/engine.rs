@@ -759,6 +759,7 @@ impl<
                 }
             }
         }
+        
         // Update the tip to the highest index in the journal
         self.tip = tip;
         // Add certified items
