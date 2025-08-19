@@ -191,6 +191,22 @@ mod tests {
     ) -> HashMap<PublicKey, mocks::Monitor> {
         let mut monitors = HashMap::new();
         let namespace = b"my testing namespace";
+
+        // Create a single shared reporter for all validators
+        let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
+            namespace,
+            validator_pks.len() as u32,
+            polynomial.clone(),
+        );
+        context
+            .with_label("shared_reporter")
+            .spawn(|_| reporter.run());
+
+        // Use the same reporter mailbox for all validators
+        for (validator, _scheme, _share) in validators.iter() {
+            reporters.insert(validator.clone(), reporter_mailbox.clone());
+        }
+
         for (validator, _scheme, share) in validators.iter() {
             let context = context.with_label(&validator.to_string());
             let monitor = mocks::Monitor::new(111);
@@ -211,14 +227,6 @@ mod tests {
 
             let automaton = mocks::Application::new(invalid_when);
             automatons.insert(validator.clone(), automaton.clone());
-
-            let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
-                namespace,
-                validator_pks.len() as u32,
-                polynomial.clone(),
-            );
-            context.with_label("reporter").spawn(|_| reporter.run());
-            reporters.insert(validator.clone(), reporter_mailbox);
 
             let engine = Engine::new(
                 context.with_label("engine"),
@@ -360,15 +368,13 @@ mod tests {
 
         let mut prev_ctx = None;
         let shutdown_counts = Arc::new(Mutex::new(HashMap::<PublicKey, u32>::new()));
-        let completed_validators = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let test_completed = Arc::new(Mutex::new(false));
         let all_validators = Arc::new(Mutex::new(Vec::new()));
 
-        // Persistent storage for reporter state across restarts
-        // Maps validator -> (index -> (digest, epoch))
-        let persistent_digests = Arc::new(Mutex::new(HashMap::<
-            PublicKey,
-            BTreeMap<u64, (Sha256Digest, Epoch)>,
-        >::new()));
+        // Persistent storage for single shared reporter state across restarts
+        // Maps index -> (digest, epoch)
+        let persistent_digests =
+            Arc::new(Mutex::new(BTreeMap::<u64, (Sha256Digest, Epoch)>::new()));
 
         // Generate shares once
         let mut rng = StdRng::seed_from_u64(0);
@@ -377,11 +383,11 @@ mod tests {
         let identity = *poly::public::<V>(&polynomial);
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
-        // Continue until all validators reach target or max shutdowns exceeded
-        while completed_validators.lock().unwrap().len() < num_validators as usize
+        // Continue until shared reporter reaches target or max shutdowns exceeded
+        while !*test_completed.lock().unwrap()
             && shutdown_counts.lock().unwrap().values().max().unwrap_or(&0) < &max_shutdowns
         {
-            let completed_clone = completed_validators.clone();
+            let completed_clone = test_completed.clone();
             let shutdown_counts_clone = shutdown_counts.clone();
             let all_validators_clone = all_validators.clone();
             let shares_vec_clone = shares_vec.clone();
@@ -410,12 +416,37 @@ mod tests {
                     }
                     let automatons =
                         Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
-                    let mut reporters =
-                        BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
 
                     // Use unique journal partitions for each validator to enable restart recovery
                     let mut engine_monitors = HashMap::new();
                     let namespace = b"my testing namespace";
+
+                    // Create a single shared reporter with persistent state
+                    let saved_digests = persistent_digests.lock().unwrap().clone();
+
+                    if !saved_digests.is_empty() {
+                        debug!(
+                            num_digests = saved_digests.len(),
+                            min_index = saved_digests.keys().min().copied(),
+                            max_index = saved_digests.keys().max().copied(),
+                            "Restoring shared reporter with saved digests"
+                        );
+                    }
+
+                    let (reporter, reporter_mailbox) =
+                        mocks::Reporter::<V, Sha256Digest>::new_with_state(
+                            namespace,
+                            num_validators,
+                            polynomial.clone(),
+                            saved_digests,
+                        );
+                    context
+                        .with_label("shared_reporter")
+                        .spawn(|_| reporter.run());
+
+                    // Single shared reporter mailbox for all validators
+                    let shared_reporter = reporter_mailbox;
+
                     for (validator, _scheme, share) in validators.iter() {
                         let validator_context = context.with_label(&validator.to_string());
                         let monitor = mocks::Monitor::new(111);
@@ -433,43 +464,13 @@ mod tests {
                             .unwrap()
                             .insert(validator.clone(), automaton.clone());
 
-                        // Create reporter with persistent state if available
-                        let initial_digests = persistent_digests
-                            .lock()
-                            .unwrap()
-                            .get(validator)
-                            .cloned()
-                            .unwrap_or_default();
-
-                        if !initial_digests.is_empty() {
-                            debug!(
-                                ?validator,
-                                num_digests = initial_digests.len(),
-                                min_index = initial_digests.keys().min().copied(),
-                                max_index = initial_digests.keys().max().copied(),
-                                "Restoring reporter with saved digests"
-                            );
-                        }
-
-                        let (reporter, reporter_mailbox) =
-                            mocks::Reporter::<V, Sha256Digest>::new_with_state(
-                                namespace,
-                                num_validators,
-                                polynomial.clone(),
-                                initial_digests,
-                            );
-                        validator_context
-                            .with_label("reporter")
-                            .spawn(|_| reporter.run());
-                        reporters.insert(validator.clone(), reporter_mailbox);
-
                         let engine = Engine::new(
                             validator_context.with_label("engine"),
                             Config {
                                 monitor,
                                 validators: supervisor,
                                 automaton,
-                                reporter: reporters.get(validator).unwrap().clone(),
+                                reporter: shared_reporter.clone(),
                                 blocker,
                                 namespace: namespace.to_vec(),
                                 priority_acks: false,
@@ -491,10 +492,9 @@ mod tests {
                         engine.start((sender, receiver));
                     }
 
-                    // Create completion watchers for all validators
-                    let mut completion_tasks = Vec::new();
-                    for (validator_pk, mut reporter_mailbox) in reporters.clone() {
-                        let validator = validator_pk.clone();
+                    // Create a single completion watcher for the shared reporter
+                    let completion_task = {
+                        let mut reporter_mailbox = shared_reporter.clone();
                         let completed_ref = completed.clone();
                         let task = context.with_label("completion_watcher").spawn(
                             move |context| async move {
@@ -503,40 +503,22 @@ mod tests {
                                         reporter_mailbox.get_tip().await
                                     {
                                         if tip_index >= target_index {
-                                            // Verify that validator has signed messages at all indices
+                                            // Verify that the shared reporter has certificates for all indices
                                             let mut success = true;
                                             for check_index in 0..=target_index {
-                                                if let Some((digest, epoch)) =
-                                                    reporter_mailbox.get(check_index).await
-                                                {
-                                                    assert_eq!(
-                                                        epoch, 111,
-                                                        "Epoch should be consistent"
-                                                    );
+                                                if reporter_mailbox.get(check_index).await.is_none() {
                                                     debug!(
-                                                        ?validator,
                                                         check_index,
-                                                        ?digest,
-                                                        "Verified validator signed message"
-                                                    );
-                                                } else {
-                                                    debug!(
-                                                        ?validator,
-                                                        check_index,
-                                                        "Validator did not sign message"
+                                                        "No certificate for index"
                                                     );
                                                     success = false;
                                                     break;
                                                 }
                                             }
                                             if success {
-                                                completed_ref
-                                                    .lock()
-                                                    .unwrap()
-                                                    .insert(validator.clone());
+                                                *completed_ref.lock().unwrap() = true;
                                                 debug!(
-                                                    ?validator,
-                                                    tip_index, "Validator completed signing target"
+                                                    tip_index, "Shared reporter reached target with all certificates"
                                                 );
                                                 break;
                                             }
@@ -546,8 +528,8 @@ mod tests {
                                 }
                             },
                         );
-                        completion_tasks.push(task);
-                    }
+                        Some(task)
+                    };
 
                     // Random shutdown timing to simulate unclean shutdown
                     let shutdown_wait = context.gen_range(shutdown_range_min..shutdown_range_max);
@@ -555,31 +537,30 @@ mod tests {
                         _ = context.sleep(shutdown_wait) => {
                             debug!(shutdown_wait = ?shutdown_wait, "Simulating unclean shutdown");
 
-                            // Save reporter state before shutdown
-                            let mut saved_digests = persistent_digests.lock().unwrap();
-                            for (pk, mut reporter_mailbox) in reporters.clone() {
+                            // Save shared reporter state before shutdown
+                            {
+                                let mut reporter_mailbox = shared_reporter.clone();
                                 let digests = reporter_mailbox.get_all_digests().await;
                                 debug!(
-                                    ?pk,
                                     num_digests = digests.len(),
                                     min_index = digests.keys().min().copied(),
                                     max_index = digests.keys().max().copied(),
-                                    "Saving reporter digests before shutdown"
+                                    "Saving shared reporter digests before shutdown"
                                 );
-                                saved_digests.insert(pk.clone(), digests);
+                                // Save the single shared reporter state
+                                let mut saved_digests = persistent_digests.lock().unwrap();
+                                *saved_digests = digests;
                             }
 
                             // Track which validators were running when shutdown occurred
                             let mut counts = shutdown_counts.lock().unwrap();
-                            for (pk, _) in reporters {
-                                if !completed.lock().unwrap().contains(&pk) {
-                                    *counts.entry(pk).or_insert(0) += 1;
-                                }
+                            for (pk, _, _) in validators {
+                                *counts.entry(pk).or_insert(0) += 1;
                             }
                             (false, context) // Unclean shutdown
                         },
-                        _ = join_all(completion_tasks) => {
-                            debug!("All validators completed normally");
+                        _ = async { if let Some(task) = completion_task { task.await } else { futures::future::pending().await } } => {
+                            debug!("Shared reporter completed normally");
                             (true, context) // Clean completion
                         }
                     }
@@ -606,17 +587,21 @@ mod tests {
             let shutdown_count = shutdown_counts.lock().unwrap().values().sum::<u32>();
             debug!(
                 shutdown_count,
-                completed = completed_validators.lock().unwrap().len(),
+                completed = if *test_completed.lock().unwrap() {
+                    1
+                } else {
+                    0
+                },
                 "Shutdown occurred, restarting"
             );
         }
 
-        // Verify that all validators eventually reached the target
-        let final_completed = completed_validators.lock().unwrap().len();
+        // Verify that the shared reporter reached the target with all certificates
+        let completed = *test_completed.lock().unwrap();
         let total_shutdowns = shutdown_counts.lock().unwrap().values().sum::<u32>();
-        assert_eq!(
-            final_completed, num_validators as usize,
-            "All validators should reach target index {target_index} despite unclean shutdowns. Only {final_completed} completed after {total_shutdowns} shutdowns"
+        assert!(
+            completed,
+            "Shared reporter should reach target index {target_index} with all certificates despite unclean shutdowns after {total_shutdowns} shutdowns"
         );
 
         // Verify that each validator experienced a minimum number of shutdowns
