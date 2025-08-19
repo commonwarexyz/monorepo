@@ -13,14 +13,14 @@ module tests {
     ).* from "../replica"
 
     run asuumptionsValidTest = all {
-        Q == 6,
-        L == 3,
+        L == 6,
+        M == 3,
         assumptions_valid
     }
 
 
-    // This test reproduces the conditions for the following attack in the case of N = 7, F = 1, L = N-3*F=4, Q = N - F=6. 
-    // Note, that we use L = 2*F + 1 = 3. So this attack should not be possible, and this test checks exactly that.
+    // This test reproduces the conditions for the following attack in the case of N = 7, F = 1, M = N-3*F=4, L = N - F=6. 
+    // Note, that we use M = 2*F + 1 = 3. So this attack should not be possible, and this test checks exactly that.
     
     // Byzantine leader proposes block B to 3 honest replicas n0-n2,
     // and a conflicting block B' to the other 3 honest replicas n3-n6.
@@ -32,19 +32,19 @@ module tests {
     // split 3 vs 3.
     //
     // For any honest replica in the 3-group:
-    // - Sees 3 votes for its own block (still < L = 4, so no notarization).
-    // - Sees 3 conflicting votes (still < L = 4, so no “nullify by contradiction”).
+    // - Sees 3 votes for its own block (still < M = 4, so no notarization).
+    // - Sees 3 conflicting votes (still < M = 4, so no “nullify by contradiction”).
     //
     //
     // The single Byzantine node stays silent.
     //
     // The result:
-    // - No group reaches L=4 votes for any block.
-    // - No one sees L=4 conflicting votes.
+    // - No group reaches M=4 votes for any block.
+    // - No one sees M=4 conflicting votes.
     // - Anyone who notarized is forbidden to nullify by timeout.
     //
     // ⇒ No proof(v) can be produced → progress stalls indefinitely.
-    // ⇒ So L = 4 can break liveness.
+    // ⇒ So M = 4 can break liveness.
 
     run livenessTest = {
         pure val proposal_from_n6_1 = { 

@@ -19,8 +19,8 @@ module replica {
     pure val Replicas = CORRECT.union(FAULTY)
     
     // Quorums:
-    pure val Q = N - F;
-    pure val L = 2*F + 1;
+    pure val L = N - F;
+    pure val M = 2*F + 1;
 
     // Produce replica's signature
     pure def sig_of(id: str): str = id
@@ -81,7 +81,7 @@ module replica {
         select_votes(view, NotarizeKind, votes)
             .filter(v => v.block_hash == block_hash)
             .map(v => v.sig)
-            .size() >= Q
+            .size() >= L
     }
 
     // Does a set of certificates contain nullification certificates for this view?
@@ -111,7 +111,7 @@ module replica {
         })
         val votes_count = similar_votes.size()
 
-        if (votes_count < L) {
+        if (votes_count < M) {
             None
         } else {
             Some({
@@ -133,7 +133,7 @@ module replica {
         })
 
         val votes_count = similar_votes.size()
-        if (votes_count < L) {
+        if (votes_count < M) {
             None
         } else {
             Some({
@@ -150,7 +150,7 @@ module replica {
     def is_block_in_view_cannot_be_notarized(b: BlockHash, view: ViewNumber, votes: Set[Vote]): bool = {
         val vs1 = votes.filter(v => v.kind == NotarizeKind and v.view == view and v.block_hash != b).map(v => v.sig)
         val vs2 = votes.filter(v => v.kind == NullifyKind and v.view == view).map(v => v.sig)
-        vs1.union(vs2).size() >= L
+        vs1.union(vs2).size() >= M
     }
 
     // Is there a contradiction for the notarized block in the set of votes?
@@ -541,8 +541,8 @@ module replica {
         all {
             // verify view
             cert.view >= self.view, // not in spec
-            // verify certificate: Certificate of ≥ L notarize(c, v) or nullify(v) messages
-            cert.signatures.size() >= L,
+            // verify certificate: Certificate of ≥ M notarize(c, v) or nullify(v) messages
+            cert.signatures.size() >= M,
             // Store the certificate if we do not have already had it.
             //not(cert.in(store_certificate.get(id))),
             _process_certificate(id, certificates, cert),
@@ -698,8 +698,8 @@ module replica {
     val assumptions_valid = all {
         CORRECT.size() + FAULTY.size() == N,
         N >= 5*F+1,
-        2*L <= Q + 1, // Liveness guard, prevents equivocation stall.
-        L + Q > N + F, // Every L-quorum and every Q-quorum share at least one honest replica.
+        2*M <= L + 1, // Liveness guard, prevents equivocation stall.
+        M + L > N + F, // Every M-quorum and every L-quorum share at least one honest replica.
     } 
 
     // No two correct replicas disagree on the committed blocks.
@@ -756,7 +756,7 @@ module replica {
         val certs = store_certificate.get(id)
         certs.forall(cert => and {
             cert.view >= 0,
-            cert.signatures.size() >= L,
+            cert.signatures.size() >= M,
             cert.kind == NotarizationKind or cert.kind == NullificationKind,
             (cert.block_hash == DUMMY_BLOCK_HASH) iff (cert.kind == NullificationKind),
             VALID_BLOCKS.contains(cert.block_hash) or (cert.block_hash == DUMMY_BLOCK_HASH)
@@ -771,10 +771,10 @@ module replica {
     // Suppose that a block B for some slot v is finalized, then no other block B' for slot v can be finalized.
     val validity = tuples(CORRECT, CORRECT, VIEWS).forall(((id1, id2, v)) => {
         val certs1 = store_certificate.get(id1).filter(c => and {
-            c.signatures.size() >= Q, c.kind == NotarizationKind, c.view == v
+            c.signatures.size() >= L, c.kind == NotarizationKind, c.view == v
         })
         val certs2 = store_certificate.get(id2).filter(c => and {
-            c.signatures.size() >= Q, c.kind == NotarizationKind, c.view == v
+            c.signatures.size() >= L, c.kind == NotarizationKind, c.view == v
         })
 
         or {
@@ -792,7 +792,7 @@ module replica {
             AllBlocks.forall(b => not(is_view_finalized(v, votes, b))),
             select_votes(v, NullifyKind, votes)
                 .map(vote => vote.sig)
-                .size() < L
+                .size() < M
         }
     })
 
@@ -805,7 +805,7 @@ module replica {
             select_votes(v, NotarizeKind, votes)
                 .filter(vote => vote.block_hash != b)
                 .map(vote => vote.sig)
-                .size() < L
+                .size() < M
         })
     })
 
@@ -831,11 +831,11 @@ module replica {
     // Test invariants.
 
     val correct_nodes_sent_certificates_valid = sent_certificate.filter(cert => cert.ghost_sender.in(CORRECT)).forall(cert => {
-        cert.signatures.size() >= L
+        cert.signatures.size() >= M
     })
     val store_certificates_are_valid = CORRECT.forall(id => {
         val certs = store_certificate.get(id)
-        certs.forall(cert => cert.signatures.size() >= L)
+        certs.forall(cert => cert.signatures.size() >= M)
     })
 
     val certificates_are_valid = and {
@@ -869,12 +869,12 @@ module replica {
 
     // Check this invariant to see an example of having a subquorum of votes.
     val votes_subquorum_example = CORRECT.forall(id => {
-        store_vote.get(id).size() <= L
+        store_vote.get(id).size() <= M
     })
 
     // Check this invariant to see an example of having a quorum of votes.
     val votes_quorum_example = CORRECT.forall(id => {
-        store_vote.get(id).size() <= Q
+        store_vote.get(id).size() <= L
     })
 
     // Check this invariant to see an example of having a certificate.

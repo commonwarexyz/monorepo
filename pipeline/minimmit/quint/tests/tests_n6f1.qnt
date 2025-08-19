@@ -13,8 +13,8 @@ module tests {
     ).* from "../replica"
 
     run asuumptionsValidTest = all {
-        Q == 5,
-        L == 3,
+        L == 5,
+        M == 3,
         assumptions_valid
     }
 
