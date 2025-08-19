@@ -22,6 +22,7 @@ const UPDATE_CONTEXT: u8 = 1;
 const COMMIT_FLOOR_CONTEXT: u8 = 2;
 const SET_CONTEXT: u8 = 3;
 const COMMIT_CONTEXT: u8 = 4;
+const APPEND_CONTEXT: u8 = 5;
 
 /// Errors returned by operation functions.
 #[derive(Error, Debug)]
@@ -54,6 +55,17 @@ pub enum Fixed<K: Array, V: CodecFixed> {
     CommitFloor(u64),
 }
 
+/// Operations for keyless stores.
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub enum Keyless {
+    /// Indicates a new value has been appended to the database, wrapping the offset of the value
+    /// within in its respective journal section.
+    Append(u32),
+
+    /// Indicates the database has been committed.
+    Commit,
+}
+
 /// An operation applied to an authenticated database with a variable size value.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Variable<K: Array, V: Codec> {
@@ -68,6 +80,11 @@ pub enum Variable<K: Array, V: Codec> {
 
 impl<K: Array, V: CodecFixed> FixedSize for Fixed<K, V> {
     const SIZE: usize = u8::SIZE + K::SIZE + V::SIZE;
+}
+
+impl FixedSize for Keyless {
+    // 1 byte for context + 4 bytes for u32 offset
+    const SIZE: usize = u8::SIZE + u32::SIZE;
 }
 
 impl<K: Array, V: Codec> EncodeSize for Variable<K, V> {
@@ -136,6 +153,22 @@ impl<K: Array, V: Codec> Variable<K, V> {
     }
 }
 
+impl Write for Keyless {
+    fn write(&self, buf: &mut impl BufMut) {
+        match &self {
+            Keyless::Append(offset) => {
+                buf.put_u8(APPEND_CONTEXT);
+                offset.write(buf);
+            }
+            Keyless::Commit => {
+                buf.put_u8(COMMIT_CONTEXT);
+                // Pad with 0 up to [Self::SIZE]
+                buf.put_bytes(0, u32::SIZE);
+            }
+        }
+    }
+}
+
 impl<K: Array, V: CodecFixed> Write for Fixed<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
@@ -188,6 +221,29 @@ impl<K: Array, V: Codec> Write for Variable<K, V> {
     }
 }
 
+impl Read for Keyless {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        at_least(buf, Self::SIZE)?;
+
+        match u8::read(buf)? {
+            APPEND_CONTEXT => Ok(Self::Append(buf.get_u32())),
+            COMMIT_CONTEXT => {
+                // Check that the padding is all zeroes
+                if buf.get_u32() != 0 {
+                    return Err(CodecError::Invalid(
+                        "storage::adb::operation::Keyless",
+                        "commit padding non-zero",
+                    ));
+                }
+                Ok(Self::Commit)
+            }
+            e => Err(CodecError::InvalidEnum(e)),
+        }
+    }
+}
+
 impl<K: Array, V: CodecFixed> Read for Fixed<K, V> {
     type Cfg = <V as Read>::Cfg;
 
@@ -206,7 +262,7 @@ impl<K: Array, V: CodecFixed> Read for Fixed<K, V> {
                 for _ in 0..V::SIZE {
                     if u8::read(buf)? != 0 {
                         return Err(CodecError::Invalid(
-                            "storage::adb::Operation",
+                            "storage::adb::operation::Fixed",
                             "delete value non-zero",
                         ));
                     }
@@ -218,7 +274,7 @@ impl<K: Array, V: CodecFixed> Read for Fixed<K, V> {
                 for _ in 0..(Self::SIZE - 1 - u64::SIZE) {
                     if u8::read(buf)? != 0 {
                         return Err(CodecError::Invalid(
-                            "storage::adb::Operation",
+                            "storage::adb::operation::Fixed",
                             "commit value non-zero",
                         ));
                     }
@@ -255,6 +311,15 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
                 Ok(Self::CommitFloor(floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
+        }
+    }
+}
+
+impl Display for Keyless {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Keyless::Append(offset) => write!(f, "[append at offset: {offset}]"),
+            Keyless::Commit => write!(f, "[commit]"),
         }
     }
 }
@@ -392,5 +457,57 @@ mod tests {
 
         let decoded = Fixed::<U64, U64>::decode(encoded).unwrap();
         assert_eq!(update_op, decoded);
+    }
+
+    #[test]
+    fn test_keyless_append() {
+        let append_op = Keyless::Append(12345);
+
+        let encoded = append_op.encode();
+        assert_eq!(encoded.len(), Keyless::SIZE);
+
+        let decoded = Keyless::decode(encoded).unwrap();
+        assert_eq!(append_op, decoded);
+        assert_eq!(format!("{append_op}"), "[append at offset: 12345]");
+    }
+
+    #[test]
+    fn test_keyless_commit() {
+        let commit_op = Keyless::Commit;
+
+        let encoded = commit_op.encode();
+        assert_eq!(encoded.len(), Keyless::SIZE);
+
+        let decoded = Keyless::decode(encoded).unwrap();
+        assert_eq!(commit_op, decoded);
+        assert_eq!(format!("{commit_op}"), "[commit]");
+    }
+
+    #[test]
+    fn test_keyless_invalid_context() {
+        let invalid = vec![0xFF; Keyless::SIZE];
+        let decoded = Keyless::decode(invalid.as_ref());
+        assert!(matches!(
+            decoded.unwrap_err(),
+            CodecError::InvalidEnum(0xFF)
+        ));
+    }
+
+    #[test]
+    fn test_keyless_commit_padding() {
+        // Test that commit operation has proper zero padding
+        let commit_op = Keyless::Commit;
+        let encoded = commit_op.encode();
+
+        // Check that bytes after context byte are all zero
+        for i in 1..Keyless::SIZE {
+            assert_eq!(encoded[i], 0, "Padding byte at position {} should be 0", i);
+        }
+
+        // Test non-zero padding detection
+        let mut invalid = commit_op.encode();
+        invalid[2] = 0xFF; // Corrupt padding
+        let decoded = Keyless::decode(invalid.as_ref());
+        assert!(matches!(decoded.unwrap_err(), CodecError::Invalid(_, _)));
     }
 }
