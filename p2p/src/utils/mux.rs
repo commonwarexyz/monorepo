@@ -9,6 +9,7 @@ use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{varint::UInt, ReadExt, Write};
 use commonware_cryptography::PublicKey;
+use commonware_runtime::{Handle, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use std::{
     collections::HashMap,
@@ -43,11 +44,11 @@ impl<S: Sender, R: Receiver> Muxer<S, R> {
         }
     }
 
-    /// Open a sub-channel for the given `stream_id`.
+    /// Open a sub-channel for the given `stream_id`. Returns a `(SubSender, SubReceiver)` pair that
+    /// can be used to send and receive messages for that logical stream.
     ///
-    /// Returns a `(SubSender, SubReceiver)` pair that can be used to send and
-    /// receive messages for that logical stream. The caller must be driving
-    /// `Muxer::run` for the receiver to yield messages.
+    /// The caller must be driving [Muxer::run], or have started it using [Muxer::start], for the
+    /// receiver to yield messages.
     pub fn register(&self, stream_id: Channel) -> (SubSender<S>, SubReceiver<R::PublicKey>) {
         let (tx, rx) = mpsc::channel(self.mailbox_size);
         self.routes.lock().unwrap().insert(stream_id, tx);
@@ -62,6 +63,11 @@ impl<S: Sender, R: Receiver> Muxer<S, R> {
                 routes: Arc::clone(&self.routes),
             },
         )
+    }
+
+    /// Start the demuxer using the given spawner.
+    pub fn start<E: Spawner>(self, mut spawner: E) -> Handle<Result<(), R::Error>> {
+        spawner.spawn_ref()(self.run())
     }
 
     /// Drive demultiplexing of frames into per-stream receivers.
@@ -80,6 +86,7 @@ impl<S: Sender, R: Receiver> Muxer<S, R> {
 
             // Forward the message to the appropriate sub-channel.
             // Drops the message if the sub-channel is not found or the queue is full.
+            //
             // Note: We intentionally avoid cloning the Sender here to preserve the
             // bounded semantics of the channel. Cloning `futures::mpsc::Sender`
             // introduces a per-sender fairness slot that effectively increases
@@ -312,9 +319,7 @@ mod tests {
             }
 
             // Give the demuxer a moment to process messages.
-            context.clone().spawn(|_| async move {
-                let _ = mux1.run().await;
-            });
+            mux1.start(context.clone());
             context.sleep(Duration::from_millis(100)).await;
 
             // Drain the receiver.
