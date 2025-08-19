@@ -8,6 +8,7 @@ use crate::{
     store::operation::{Fixed, Variable},
     translator::Translator,
 };
+use commonware_codec::CodecFixed;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, RwLock, Storage};
 use commonware_utils::Array;
@@ -61,7 +62,7 @@ impl<E, K, V, H, T> Resolver for Arc<Any<E, K, V, H, T>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Array,
+    V: CodecFixed<Cfg = ()> + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
@@ -93,7 +94,7 @@ impl<E, K, V, H, T> Resolver for Arc<RwLock<Any<E, K, V, H, T>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Array,
+    V: CodecFixed<Cfg = ()> + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
