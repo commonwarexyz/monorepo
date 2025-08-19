@@ -1032,16 +1032,12 @@ mod tests {
             // Check that no validator achieved consensus through verified threshold signatures
             let mut any_consensus = false;
             for (validator_pk, mut reporter_mailbox) in reporters {
-                // The reporter only advances contiguous_tip when valid threshold signatures are received
-                // and cryptographically verified. A contiguous_tip > 0 means at least one threshold
-                // signature was successfully created and validated, which should be impossible
-                // with insufficient validators (below quorum).
-                let contiguous_tip = reporter_mailbox.get_contiguous_tip().await.unwrap_or(0);
-                if contiguous_tip > 0 {
+                let (tip, _) = reporter_mailbox.get_tip().await.unwrap_or((0, 0));
+                if tip > 0 {
                     any_consensus = true;
                     tracing::warn!(
                         ?validator_pk,
-                        contiguous_tip,
+                        tip,
                         "Unexpected threshold signature consensus with insufficient validators"
                     );
                 }
