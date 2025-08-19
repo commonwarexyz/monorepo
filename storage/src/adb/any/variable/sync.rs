@@ -144,6 +144,7 @@ where
                     .map(|(&s, _)| s)
                     .map(|s| s * db_config.log_items_per_section.get())
                     .unwrap_or(0);
+                // If the oldest blob is after the metadata, use that.
                 persisted_oldest_retained_loc.max(metadata_oldest_retained_loc)
             }
             None => lower_bound,
@@ -187,7 +188,7 @@ where
         let size = journal.size().await.map_err(adb::Error::from)?;
         if size <= lower_bound {
             let mut inner = journal.into_inner();
-            rebuild_lower_section(&mut inner, lower_bound, config.log_items_per_section.get())
+            prune_first_section(&mut inner, lower_bound, config.log_items_per_section.get())
                 .await?;
             inner.close().await.map_err(adb::Error::from)?;
             return Self::create_journal(context, config, lower_bound, upper_bound)
@@ -205,7 +206,7 @@ where
             .map_err(adb::Error::from)?;
 
         // Remove any items below the lower bound within the lower section
-        rebuild_lower_section(
+        prune_first_section(
             &mut variable_journal,
             lower_bound,
             config.log_items_per_section.get(),
@@ -444,7 +445,7 @@ async fn truncate_upper_section<E: Storage + Metrics, V: Codec>(
 /// Remove items before the `lower_bound` location from the lower section.
 /// This rebuilds the section by copying only operations >= lower_bound to a new section.
 /// Assumes each section contains `items_per_section` items.
-async fn rebuild_lower_section<E: Storage + Metrics, V: Codec>(
+async fn prune_first_section<E: Storage + Metrics, V: Codec>(
     journal: &mut VJournal<E, V>,
     lower_bound: u64,
     items_per_section: u64,
@@ -525,21 +526,6 @@ async fn rebuild_lower_section<E: Storage + Metrics, V: Codec>(
         operations_to_keep = operations_to_keep.len(),
         "operations to keep after filtering"
     );
-
-    // If no operations to keep, remove the entire section
-    if operations_to_keep.is_empty() {
-        if let Some(blob) = journal.blobs.remove(&lower_section) {
-            drop(blob);
-            let name = lower_section.to_be_bytes();
-            journal
-                .context
-                .remove(&journal.cfg.partition, Some(&name))
-                .await
-                .map_err(crate::journal::Error::Runtime)?;
-            journal.tracked.dec();
-        }
-        return Ok(());
-    }
 
     // Remove the old section
     if let Some(blob) = journal.blobs.remove(&lower_section) {
