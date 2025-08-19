@@ -396,6 +396,8 @@ mod tests {
                     let namespace = b"my testing namespace";
 
                     // Create a shared reporter
+                    //
+                    // We rely on replay to populate this reporter with a contiguous history of certificates.
                     let (reporter, mut reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
                         namespace,
                         num_validators,
