@@ -179,42 +179,40 @@ where
     }
 
     async fn resize_journal(
-        journal: Self::Journal,
+        mut journal: Self::Journal,
         context: Self::Context,
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
     ) -> Result<Self::Journal, Self::Error> {
         let size = journal.size().await.map_err(adb::Error::from)?;
+        let log_items_per_section = config.log_items_per_section.get();
         if size <= lower_bound {
-            let mut inner = journal.into_inner();
-            prune_first_section(&mut inner, lower_bound, config.log_items_per_section.get())
-                .await?;
+            journal.prune_first_section(lower_bound).await?;
+            let inner = journal.into_inner();
             inner.close().await.map_err(adb::Error::from)?;
             return Self::create_journal(context, config, lower_bound, upper_bound)
                 .await
                 .map_err(adb::Error::from);
         }
 
-        let mut variable_journal = journal.into_inner();
-        let lower_section = lower_bound / config.log_items_per_section.get();
-        let upper_section = upper_bound / config.log_items_per_section.get();
+        let lower_section = lower_bound / log_items_per_section;
+        let upper_section = upper_bound / log_items_per_section;
 
-        variable_journal
+        journal
+            .inner
             .prune(lower_section)
             .await
             .map_err(adb::Error::from)?;
 
         // Remove any items below the lower bound within the lower section
-        prune_first_section(
-            &mut variable_journal,
-            lower_bound,
-            config.log_items_per_section.get(),
-        )
-        .await
-        .map_err(adb::Error::from)?;
+        journal
+            .prune_first_section(lower_bound)
+            .await
+            .map_err(adb::Error::from)?;
 
         // Remove any sections beyond the upper bound
+        let mut variable_journal = journal.into_inner();
         let last_section = variable_journal.blobs.last_key_value().map(|(&s, _)| s);
         if let Some(last_section) = last_section {
             if last_section > upper_section {
@@ -244,13 +242,9 @@ where
         }
 
         // Remove any items beyond upper_bound within the upper section
-        truncate_upper_section(
-            &mut variable_journal,
-            upper_bound,
-            config.log_items_per_section.get(),
-        )
-        .await
-        .map_err(adb::Error::from)?;
+        truncate_upper_section(&mut variable_journal, upper_bound, log_items_per_section)
+            .await
+            .map_err(adb::Error::from)?;
         let size = compute_size(
             &variable_journal,
             config.log_items_per_section,
@@ -442,115 +436,6 @@ async fn truncate_upper_section<E: Storage + Metrics, V: Codec>(
     Ok(())
 }
 
-/// Remove items before the `lower_bound` location from the lower section.
-/// This rebuilds the section by copying only operations >= lower_bound to a new section.
-/// Assumes each section contains `items_per_section` items.
-async fn prune_first_section<E: Storage + Metrics, V: Codec>(
-    journal: &mut VJournal<E, V>,
-    lower_bound: u64,
-    items_per_section: u64,
-) -> Result<(), crate::journal::Error> {
-    // Find which section contains the lower_bound item
-    let lower_section = lower_bound / items_per_section;
-
-    let Some(_blob) = journal.blobs.get(&lower_section) else {
-        return Ok(()); // Section doesn't exist, nothing to rebuild
-    };
-
-    // Calculate the logical item range for this section
-    let section_start = lower_section * items_per_section;
-    let section_end = section_start + items_per_section - 1;
-
-    // If lower_bound is at the very start of the section, no rebuilding needed
-    if lower_bound <= section_start {
-        return Ok(());
-    }
-
-    debug!(
-        lower_section,
-        lower_bound,
-        section_start,
-        section_end,
-        "rebuilding section to remove items before lower_bound"
-    );
-
-    // Read all operations from the current section
-    let mut operations_to_keep = Vec::new();
-    {
-        let stream = journal.replay(commonware_utils::NZUsize!(1024)).await?;
-        pin_mut!(stream);
-
-        let mut current_logical_location = section_start;
-        debug!(
-            "rebuild_lower_section: starting replay from logical location {}",
-            current_logical_location
-        );
-        while let Some(result) = stream.next().await {
-            let (section, offset, size, operation) = result?;
-
-            debug!(
-                "rebuild_lower_section: found operation at section={}, offset={}, size={}, logical_location={}, lower_bound={}",
-                section, offset, size, current_logical_location, lower_bound
-            );
-
-            // Only process operations from the target section
-            if section != lower_section {
-                if section > lower_section {
-                    debug!(
-                        "rebuild_lower_section: reached section {} > target section {}, stopping",
-                        section, lower_section
-                    );
-                    break; // We've moved past our target section
-                }
-                debug!(
-                    "rebuild_lower_section: skipping section {} < target section {}",
-                    section, lower_section
-                );
-                current_logical_location += 1;
-                continue;
-            }
-
-            // Keep operations that are >= lower_bound
-            if current_logical_location >= lower_bound {
-                debug!("rebuild_lower_section: KEEPING operation at logical_location={} (>= lower_bound={})", current_logical_location, lower_bound);
-                operations_to_keep.push(operation);
-            } else {
-                debug!("rebuild_lower_section: DISCARDING operation at logical_location={} (< lower_bound={})", current_logical_location, lower_bound);
-            }
-
-            current_logical_location += 1;
-        }
-    } // stream is dropped here, releasing the borrow
-
-    debug!(
-        operations_to_keep = operations_to_keep.len(),
-        "operations to keep after filtering"
-    );
-
-    // Remove the old section
-    if let Some(blob) = journal.blobs.remove(&lower_section) {
-        drop(blob);
-        let name = lower_section.to_be_bytes();
-        journal
-            .context
-            .remove(&journal.cfg.partition, Some(&name))
-            .await
-            .map_err(crate::journal::Error::Runtime)?;
-        journal.tracked.dec();
-    }
-
-    // Recreate the section with only the operations we want to keep
-    for operation in operations_to_keep {
-        journal.append(lower_section, operation).await?;
-    }
-
-    // Sync the rebuilt section
-    journal.sync(lower_section).await?;
-
-    debug!(lower_section, "section rebuilt successfully");
-    Ok(())
-}
-
 /// Return the byte offset of the next element after `items_count` elements of `blob`.
 async fn compute_offset<E: Storage + Metrics, V: Codec>(
     blob: &commonware_runtime::buffer::Append<E::Blob>,
@@ -633,6 +518,123 @@ where
     /// Return the inner [VJournal].
     pub fn into_inner(self) -> VJournal<E, Variable<K, V>> {
         self.inner
+    }
+}
+
+impl<E, K, V> VariableJournal<E, K, V>
+where
+    E: Storage + Metrics,
+    K: Array,
+    V: Codec,
+{
+    /// Remove items before the `lower_bound` location from the lower section.
+    /// This rebuilds the section by copying only operations >= lower_bound to a new section.
+    /// Assumes each section contains `items_per_section` items.
+    async fn prune_first_section(
+        self: &mut Self,
+        lower_bound: u64,
+    ) -> Result<(), crate::journal::Error> {
+        let items_per_section = self.items_per_section.get();
+
+        // Find which section contains the lower_bound item
+        let lower_section = lower_bound / items_per_section;
+
+        let Some(_blob) = self.inner.blobs.get(&lower_section) else {
+            return Ok(()); // Section doesn't exist, nothing to rebuild
+        };
+
+        // Calculate the logical item range for this section
+        let section_start = lower_section * items_per_section;
+        let section_end = section_start + items_per_section - 1;
+
+        // If lower_bound is at the very start of the section, no rebuilding needed
+        if lower_bound <= section_start {
+            return Ok(());
+        }
+
+        debug!(
+            lower_section,
+            lower_bound,
+            section_start,
+            section_end,
+            "rebuilding section to remove items before lower_bound"
+        );
+
+        // Read all operations from the current section
+        let mut operations_to_keep = Vec::new();
+        {
+            let stream = self.inner.replay(commonware_utils::NZUsize!(1024)).await?;
+            pin_mut!(stream);
+
+            let mut current_logical_location = section_start;
+            debug!(
+                "rebuild_lower_section: starting replay from logical location {}",
+                current_logical_location
+            );
+            while let Some(result) = stream.next().await {
+                let (section, offset, size, operation) = result?;
+
+                debug!(
+                "rebuild_lower_section: found operation at section={}, offset={}, size={}, logical_location={}, lower_bound={}",
+                section, offset, size, current_logical_location, lower_bound
+            );
+
+                // Only process operations from the target section
+                if section != lower_section {
+                    if section > lower_section {
+                        debug!(
+                        "rebuild_lower_section: reached section {} > target section {}, stopping",
+                        section, lower_section
+                    );
+                        break; // We've moved past our target section
+                    }
+                    debug!(
+                        "rebuild_lower_section: skipping section {} < target section {}",
+                        section, lower_section
+                    );
+                    current_logical_location += 1;
+                    continue;
+                }
+
+                // Keep operations that are >= lower_bound
+                if current_logical_location >= lower_bound {
+                    debug!("rebuild_lower_section: KEEPING operation at logical_location={} (>= lower_bound={})", current_logical_location, lower_bound);
+                    operations_to_keep.push(operation);
+                } else {
+                    debug!("rebuild_lower_section: DISCARDING operation at logical_location={} (< lower_bound={})", current_logical_location, lower_bound);
+                }
+
+                current_logical_location += 1;
+            }
+        } // stream is dropped here, releasing the borrow
+
+        debug!(
+            operations_to_keep = operations_to_keep.len(),
+            "operations to keep after filtering"
+        );
+
+        // Remove the old section
+        if let Some(blob) = self.inner.blobs.remove(&lower_section) {
+            drop(blob);
+            let name = lower_section.to_be_bytes();
+            self.inner
+                .context
+                .remove(&self.inner.cfg.partition, Some(&name))
+                .await
+                .map_err(crate::journal::Error::Runtime)?;
+            self.inner.tracked.dec();
+        }
+
+        // Recreate the section with only the operations we want to keep
+        for operation in operations_to_keep {
+            self.inner.append(lower_section, operation).await?;
+        }
+
+        // Sync the rebuilt section
+        self.inner.sync(lower_section).await?;
+
+        debug!(lower_section, "section rebuilt successfully");
+        Ok(())
     }
 }
 
