@@ -53,19 +53,31 @@ cargo bench -p commonware-cryptography
 
 ## Architecture
 
-### Core Primitives (`primitives/`)
-- **broadcast**: Message broadcasting with Byzantine fault tolerance
-- **codec**: Wire format serialization/deserialization
-- **coding**: Erasure coding and fountain codes
-- **collector**: Distributed data aggregation
-- **consensus**: BFT consensus implementations
-- **cryptography**: Ed25519, BLS12-381, cryptographic primitives
-- **deployer**: Environment-specific platform configuration
-- **p2p**: Peer-to-peer networking layer
-- **resolver**: Service discovery and load balancing
-- **runtime**: Async runtime abstraction
-- **storage**: Persistent key-value storage
-- **stream**: Multiplexed streaming channels
+## Core Primitives
+- **broadcast**: Disseminate data over a wide-area network.
+- **codec**: Serialize structured data.
+- **coding**: Encode data to enable recovery from a subset of fragments.
+- **collector**: Collect responses to committable requests.
+- **consensus**: Order opaque messages in a Byzantine environment.
+- **cryptography**: Generate keys, sign arbitrary messages, and deterministically verify signatures.
+- **deployer**: Deploy infrastructure across cloud providers.
+- **p2p**: Communicate with authenticated peers over encrypted connections.
+- **resolver**: Resolve data identified by a fixed-length key.
+- **runtime**: Execute asynchronous tasks with a configurable scheduler.
+- **storage**: Persist and retrieve data from an abstract store.
+- **stream**: Exchange messages over arbitrary transport.
+
+_More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything with a `commonware-` prefix)._
+
+## Examples
+- **alto** (https://github.com/commonwarexyz/alto): A minimal (and wicked fast) blockchain built with the Commonware Library.
+- **bridge** (`examples/bridge`): Send succinct consensus certificates between two networks.
+- **chat** (`examples/chat`): Send encrypted messages to a group of friends.
+- **estimator** (`examples/estimator`): Simulate mechanism performance under realistic network conditions.
+- **flood** (`examples/flood`): Spam peers deployed to AWS EC2 with random messages.
+- **log** (`examples/log`): Commit to a secret log and agree to its hash.
+- **sync** (`examples/sync`): Synchronize state between a server and client.
+- **vrf** (`examples/vrf`): Generate bias-resistant randomness with untrusted contributors.
 
 ### Key Design Principles
 1. **Performance First**: All primitives optimized for high throughput/low latency
