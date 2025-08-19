@@ -1,5 +1,11 @@
-//! The [Keyless] adb allows for append-only storage of arbitrary data that can later be retrieved
-//! by its location.
+//! The [Keyless] adb allows for append-only storage of arbitrary variable-length data that can
+//! later be retrieved by its location.
+//!
+//! The implementation consists of an `mmr` over the commit & append operations applied to the
+//! database, a `locations` journal that logs all those operations, and a `values` journal storing
+//! the actual data. Each append operation in the locations journal contains the offset of the
+//! appended data within the values journal, allowing each value to be efficiently retrieved from
+//! its location.
 
 use crate::{
     adb::Error,
