@@ -58,6 +58,9 @@ pub struct Config<
     /// The number of chunks to process concurrently.
     pub window: NonZeroU64,
 
+    /// Number of indices to track below the tip when collecting acks and/or pruning.
+    pub activity_timeout: u64,
+
     /// Partition for the [commonware_storage::journal::variable::Journal].
     pub journal_partition: String,
 

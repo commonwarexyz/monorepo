@@ -25,6 +25,7 @@ members = [
     "codec/fuzz",
     "coding/fuzz",
     "cryptography/fuzz",
+    "runtime/fuzz",
     "stream/fuzz",
     "storage/fuzz",
     "utils/fuzz"

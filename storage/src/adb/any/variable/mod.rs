@@ -779,11 +779,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             self.oldest_retained_loc.to_be_bytes().to_vec(),
         );
 
-        let section = self.current_section();
         try_join!(
-            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
-            self.log.sync(section).map_err(Error::Journal),
-            self.locations.sync().map_err(Error::Journal),
+            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+            self.log.close().map_err(Error::Journal),
+            self.locations.close().map_err(Error::Journal),
             self.metadata.sync().map_err(Error::Metadata),
         )?;
 

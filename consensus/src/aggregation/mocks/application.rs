@@ -1,40 +1,22 @@
 use crate::{aggregation::types::Index, Automaton as A};
-use commonware_cryptography::{sha256, Hasher, Sha256};
+use commonware_cryptography::{hash, sha256, Hasher, Sha256};
 use futures::channel::oneshot;
-use rand::{thread_rng, Rng};
 use tracing::trace;
 
 #[derive(Clone, Debug)]
-pub enum ByzantineStrategy {
-    None,
-    DoubleHash,
-    RandomDigest,
-    WrongPrefix,
-    ConflictingContent,
+pub enum Strategy {
+    Correct,
+    Incorrect,
 }
 
 #[derive(Clone)]
 pub struct Application {
-    invalid_when: fn(u64) -> bool,
-    byzantine_strategy: ByzantineStrategy,
+    strategy: Strategy,
 }
 
 impl Application {
-    pub fn new(invalid_when: fn(u64) -> bool) -> Self {
-        Self {
-            invalid_when,
-            byzantine_strategy: ByzantineStrategy::DoubleHash,
-        }
-    }
-
-    pub fn with_byzantine_strategy(
-        invalid_when: fn(u64) -> bool,
-        strategy: ByzantineStrategy,
-    ) -> Self {
-        Self {
-            invalid_when,
-            byzantine_strategy: strategy,
-        }
+    pub fn new(strategy: Strategy) -> Self {
+        Self { strategy }
     }
 }
 
@@ -51,37 +33,15 @@ impl A for Application {
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let (sender, receiver) = oneshot::channel();
 
-        let payload = format!("data for index {context}");
-        let mut hasher = Sha256::default();
-        hasher.update(payload.as_bytes());
-
-        let digest = if (self.invalid_when)(context) {
-            match self.byzantine_strategy {
-                ByzantineStrategy::None => hasher.finalize(),
-                ByzantineStrategy::DoubleHash => {
-                    hasher.update(payload.as_bytes());
-                    hasher.finalize()
-                }
-                ByzantineStrategy::RandomDigest => {
-                    let mut random_bytes = [0u8; 32];
-                    thread_rng().fill(&mut random_bytes);
-                    sha256::Digest::from(random_bytes)
-                }
-                ByzantineStrategy::WrongPrefix => {
-                    let mut hasher = Sha256::default();
-                    hasher.update(b"wrong_prefix");
-                    hasher.update(payload.as_bytes());
-                    hasher.finalize()
-                }
-                ByzantineStrategy::ConflictingContent => {
-                    let conflicting_payload = format!("conflicting_data for index {context}");
-                    let mut hasher = Sha256::default();
-                    hasher.update(conflicting_payload.as_bytes());
-                    hasher.finalize()
-                }
+        let digest = match self.strategy {
+            Strategy::Correct => {
+                let payload = format!("data for index {context}");
+                hash(payload.as_bytes())
             }
-        } else {
-            hasher.finalize()
+            Strategy::Incorrect => {
+                let conflicting_payload = format!("conflicting_data for index {context}");
+                hash(conflicting_payload.as_bytes())
+            }
         };
 
         sender.send(digest).unwrap();
@@ -103,8 +63,7 @@ impl A for Application {
         let expected_digest = hasher.finalize();
 
         // Return true only if the payload matches the expected digest
-        let is_valid = payload == expected_digest;
-        sender.send(is_valid).unwrap();
+        sender.send(payload == expected_digest).unwrap();
         receiver
     }
 }
