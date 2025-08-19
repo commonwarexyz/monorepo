@@ -623,7 +623,7 @@ mod tests {
     use commonware_utils::{NZUsize, NZU64};
     use futures::{channel::mpsc, SinkExt as _};
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
-    use std::sync::Arc;
+    use std::{slice::from_ref, sync::Arc};
     use test_case::test_case;
 
     fn test_hasher() -> Standard<Sha256> {
@@ -1786,7 +1786,7 @@ mod tests {
 
             // Add another operation after the sync range
             let final_op = &target_ops[TARGET_DB_OPS - 1];
-            apply_ops(&mut target_db, &[final_op.clone()]).await;
+            apply_ops(&mut target_db, from_ref(final_op)).await;
             target_db.commit().await.unwrap();
 
             // Sync to the "old" range (not including the final op)
