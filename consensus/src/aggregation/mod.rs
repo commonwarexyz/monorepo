@@ -45,9 +45,9 @@
 //! In aggregation, participants never gossip recovered threshold signatures. Rather, they gossip [types::TipAck]s
 //! with partial signatures over some index and their latest tip. This approach reduces the overhead of running aggregation
 //! concurrently with a consensus mechanism and consistently results in local recovery on stable networks. To increase
-//! the likelihood of local recovery, participants should tune the [Config::prune_buffer] to a value larger than the expected
+//! the likelihood of local recovery, participants should tune the [Config::activity_timeout] to a value larger than the expected
 //! drift of online participants (even if all participants are synchronous the tip advancement logic will advance to the `f+1`th highest
-//! reported tip and drop all work below that tip minus the [Config::prune_buffer]).
+//! reported tip and drop all work below that tip minus the [Config::activity_timeout]).
 
 pub mod types;
 
@@ -246,7 +246,7 @@ mod tests {
                     rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_timeout),
                     epoch_bounds: (1, 1),
                     window: std::num::NonZeroU64::new(10).unwrap(),
-                    prune_buffer: 100,
+                    activity_timeout: 100,
                     journal_partition: format!("aggregation/{validator}"),
                     journal_write_buffer: NZUsize!(4096),
                     journal_replay_buffer: NZUsize!(4096),
@@ -496,7 +496,7 @@ mod tests {
                                 rebroadcast_timeout,
                                 epoch_bounds: (1, 1),
                                 window: std::num::NonZeroU64::new(10).unwrap(),
-                                prune_buffer: 1_024, // ensure we don't drop any certificates
+                                activity_timeout: 1_024, // ensure we don't drop any certificates
                                 journal_partition: format!("unclean_shutdown_test/{validator}"),
                                 journal_write_buffer: NZUsize!(4096),
                                 journal_replay_buffer: NZUsize!(4096),
@@ -824,7 +824,7 @@ mod tests {
                         rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(3)),
                         epoch_bounds: (1, 1),
                         window: std::num::NonZeroU64::new(10).unwrap(),
-                        prune_buffer: 100,
+                        activity_timeout: 100,
                         journal_partition: format!("aggregation/{validator}"),
                         journal_write_buffer: NZUsize!(4096),
                         journal_replay_buffer: NZUsize!(4096),

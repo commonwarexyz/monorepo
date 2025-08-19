@@ -103,8 +103,8 @@ pub struct Engine<
     /// The concurrent number of chunks to process.
     window: u64,
 
-    /// Number of indices to retain below the tip when pruning.
-    prune_buffer: u64,
+    /// Number of indices to track below the tip when collecting acks and/or pruning.
+    activity_timeout: u64,
 
     // Messaging
     /// Pool of pending futures to request a digest from the automaton.
@@ -185,7 +185,7 @@ impl<
             namespace: cfg.namespace,
             epoch_bounds: cfg.epoch_bounds,
             window: cfg.window.into(),
-            prune_buffer: cfg.prune_buffer,
+            activity_timeout: cfg.activity_timeout,
             epoch: 0,
             tip: 0,
             safe_tip: SafeTip::default(),
@@ -599,7 +599,7 @@ impl<
         }
 
         // Collect acks below the tip (if we don't yet have a threshold signature)
-        let prune_threshold = self.tip.saturating_sub(self.prune_buffer);
+        let prune_threshold = self.tip.saturating_sub(self.activity_timeout);
         if ack.item.index < prune_threshold {
             return Err(Error::AckThresholded(ack.item.index));
         }
@@ -737,7 +737,7 @@ impl<
         assert!(tip > self.tip);
 
         // Prune data structures with buffer to prevent losing certificates
-        let prune_threshold = tip.saturating_sub(self.prune_buffer);
+        let prune_threshold = tip.saturating_sub(self.activity_timeout);
         self.pending.retain(|index, _| *index >= prune_threshold);
         self.confirmed.retain(|index, _| *index >= prune_threshold);
 
@@ -792,7 +792,7 @@ impl<
 
         // Update the tip to the highest index in the journal
         self.tip = tip;
-        let prune_threshold = tip.saturating_sub(self.prune_buffer);
+        let prune_threshold = tip.saturating_sub(self.activity_timeout);
 
         // Add certified items
         certified
