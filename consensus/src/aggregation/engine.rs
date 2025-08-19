@@ -490,10 +490,10 @@ impl<
         }
         acks.insert(ack.signature.index, ack.clone());
 
-        // If there exists a quorum of acks with the same digest, form a threshold signature
+        // If there exists a quorum of acks with the same digest (or for the verified digest if it exists), form a threshold signature
         let partials = acks
             .values()
-            .filter(|a| a.item.digest == ack.item.digest) // matches the verified digest (if it exists)
+            .filter(|a| a.item.digest == ack.item.digest)
             .map(|ack| &ack.signature)
             .collect::<Vec<_>>();
         if partials.len() >= (quorum as usize) {
