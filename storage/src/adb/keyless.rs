@@ -43,7 +43,7 @@ pub struct Config<C> {
     /// The name of the [Storage] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
 
-    /// The name of the [Storage] partition used to persist the (pruned) values.
+    /// The name of the [Storage] partition used to persist the values.
     pub values_journal_partition: String,
 
     /// The size of the write buffer to use with the values journal.
@@ -228,20 +228,16 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Get the value at location `loc` in the database. Returns None if the location is valid but
     /// does not correspond to an append.
     pub async fn get(&self, loc: u64) -> Result<Option<V>, Error> {
-        match self.locations.read(loc).await {
-            Ok(op) => {
-                if let Operation::Append(offset) = op {
-                    let section = loc / self.values_per_section;
-                    let Some(v) = self.values.get(section, offset).await? else {
-                        panic!("didn't find value at location {loc} and offset {offset}");
-                    };
-                    Ok(Some(v))
-                } else {
-                    Ok(None)
-                }
-            }
-            Err(e) => Err(Error::Journal(e)),
-        }
+        let Operation::Append(offset) = self.locations.read(loc).await? else {
+            return Ok(None);
+        };
+
+        let section = loc / self.values_per_section;
+        let Some(v) = self.values.get(section, offset).await? else {
+            panic!("didn't find value at location {loc} and offset {offset}");
+        };
+
+        Ok(Some(v))
     }
 
     /// Get the number of appends + commits that have been applied to the db.
