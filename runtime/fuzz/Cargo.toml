@@ -1,6 +1,6 @@
 [package]
 name = "commonware-runtime-fuzz"
-version = "0.0.57"
+version = "0.0.58"
 publish = false
 edition = "2021"
 
@@ -12,7 +12,6 @@ arbitrary = { workspace = true, features = ["derive"] }
 libfuzzer-sys = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = {workspace = true }
-rand = { workspace = true }
 
 [[bin]]
 name = "buffer"

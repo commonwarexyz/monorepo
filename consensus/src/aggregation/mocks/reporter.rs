@@ -137,16 +137,8 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                     }
                 }
                 Message::Tip(index) => {
-                    // Update our view of the tip
                     if self.highest.is_none_or(|(h, _)| index > h) {
                         self.highest = Some((index, self.current_epoch));
-                    }
-
-                    // Update the contiguous tip if necessary;
-                    // An individual validator may have missed constructing a signature, but a
-                    // majority of the rest of the network has constructed a signature.
-                    if self.contiguous.is_none_or(|c| index > c) {
-                        self.contiguous = Some(index);
                     }
                 }
                 Message::GetTip(sender) => {

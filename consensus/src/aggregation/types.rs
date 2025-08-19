@@ -50,6 +50,9 @@ pub enum Error {
     /// The acknowledgment's height is outside the accepted bounds
     #[error("Non-useful ack index {0}")]
     AckIndex(u64),
+    /// The acknowledgment's digest is incorrect
+    #[error("Invalid ack digest {0}")]
+    AckDigest(u64),
     /// Duplicate acknowledgment for the same index
     #[error("Duplicate ack from sender {0} for index {1}")]
     AckDuplicate(String, u64),
