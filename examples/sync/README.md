@@ -73,22 +73,6 @@ The sync example supports three database types:
 - **`variable`**: Variable-size Any database ([adb::any::variable::Any](https://docs.rs/commonware-storage/latest/commonware_storage/adb/any/variable/struct.Any.html)) - supports values of varying sizes
 - **`immutable`**: Immutable database ([adb::immutable::Immutable](https://docs.rs/commonware-storage/latest/commonware_storage/adb/immutable/struct.Immutable.html)) - append-only database with historical proofs
 
-### Examples with Different Database Types
-
-```bash
-# Run server with fixed database (default)
-cargo run --bin server
-
-# Run server with variable database
-cargo run --bin server -- --db variable
-
-# Run server with immutable database
-cargo run --bin server -- --db immutable
-
-# Run client with matching database type
-cargo run --bin client -- --db variable
-```
-
 ## Example Session
 
 1. **Start the server:**
