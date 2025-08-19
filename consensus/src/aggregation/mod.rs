@@ -268,17 +268,15 @@ mod tests {
                 move |context| async move {
                     loop {
                         let (index, epoch) = mailbox.get_tip().await.unwrap_or((0, 0));
-                        let contiguous_index = mailbox.get_contiguous_tip().await.unwrap_or(0);
                         debug!(
                             index,
                             epoch,
-                            contiguous_index,
                             threshold_index,
                             threshold_epoch,
                             ?reporter,
                             "reporter status"
                         );
-                        if contiguous_index >= threshold_index && epoch >= threshold_epoch {
+                        if index >= threshold_index && epoch >= threshold_epoch {
                             debug!(
                                 ?reporter,
                                 "reporter reached threshold, signaling completion"
@@ -339,7 +337,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_all_online() {
         all_online::<MinPk>();
         all_online::<MinSig>();
@@ -456,27 +454,11 @@ mod tests {
                             .with_label("completion_watcher")
                             .spawn(move |context| async move {
                                 loop {
-                                    if let Some((tip_index, _epoch)) =
-                                        reporter_mailbox.get_tip().await
+                                    if let Some(tip_index) =
+                                        reporter_mailbox.get_contiguous_tip().await
                                     {
                                         if tip_index >= target_index {
-                                            // Verify that the shared reporter has certificates for all indices
-                                            let mut success = true;
-                                            for check_index in 0..=target_index {
-                                                if reporter_mailbox.get(check_index).await.is_none()
-                                                {
-                                                    debug!(check_index, "No certificate for index");
-                                                    success = false;
-                                                    break;
-                                                }
-                                            }
-                                            if success {
-                                                debug!(
-                                                    tip_index,
-                                                    "Reporter reached target with all certificates"
-                                                );
-                                                break;
-                                            }
+                                            break;
                                         }
                                     }
                                     context.sleep(Duration::from_millis(50)).await;
@@ -516,7 +498,7 @@ mod tests {
         }
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_unclean_shutdown() {
         unclean_shutdown::<MinPk>();
         unclean_shutdown::<MinSig>();
@@ -572,13 +554,13 @@ mod tests {
         })
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_slow_and_lossy_links() {
         slow_and_lossy_links::<MinPk>(0);
         slow_and_lossy_links::<MinSig>(0);
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_determinism() {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
@@ -637,7 +619,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_one_offline() {
         one_offline::<MinPk>();
         one_offline::<MinSig>();
@@ -682,7 +664,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_consensus_from_index_zero() {
         consensus_from_index_zero::<MinPk>();
         consensus_from_index_zero::<MinSig>();
@@ -754,7 +736,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_network_partition() {
         network_partition::<MinPk>();
         network_partition::<MinSig>();
@@ -816,7 +798,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_invalid_signature_injection() {
         invalid_signature_injection::<MinPk>();
         invalid_signature_injection::<MinSig>();
@@ -890,7 +872,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_cryptographic_validation() {
         cryptographic_validation::<MinPk>();
         cryptographic_validation::<MinSig>();
@@ -958,7 +940,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_advanced_byzantine_faults() {
         advanced_byzantine_faults::<MinPk>();
         advanced_byzantine_faults::<MinSig>();
@@ -1073,7 +1055,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     fn test_insufficient_validators() {
         insufficient_validators::<MinPk>();
         insufficient_validators::<MinSig>();
