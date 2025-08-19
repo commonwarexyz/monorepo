@@ -25,7 +25,7 @@ where
     T: Translator,
 {
     type Op = Variable<K, V>;
-    type Journal = journal::Journal<E, K, V>;
+    type Journal = sync::variable_journal::Journal<E, K, V>;
     type Hasher = H;
     type Error = crate::adb::Error;
     type Config = immutable::Config<T, V::Cfg>;
@@ -63,7 +63,7 @@ where
         )
         .await?;
 
-        Ok(journal::Journal::new(
+        Ok(sync::variable_journal::Journal::new(
             journal,
             config.log_items_per_section,
             size,
@@ -148,7 +148,7 @@ where
             .await
             .map_err(crate::adb::Error::from)?;
 
-            Ok(journal::Journal::new(
+            Ok(sync::variable_journal::Journal::new(
                 variable_journal,
                 config.log_items_per_section,
                 size,
