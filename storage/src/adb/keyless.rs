@@ -84,7 +84,7 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
     /// `locations` journal.
     mmr: Mmr<E, H>,
 
-    /// A (pruned) journal of all values ever appended to the db.
+    /// A journal of all values ever appended to the db.
     values: VJournal<E, V>,
 
     /// The total number of values appended (including those that have been pruned).  The next
