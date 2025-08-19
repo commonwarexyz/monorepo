@@ -599,8 +599,8 @@ impl<
         }
 
         // Collect acks below the tip (if we don't yet have a threshold signature)
-        let prune_threshold = self.tip.saturating_sub(self.activity_timeout);
-        if ack.item.index < prune_threshold {
+        let activity_threshold = self.tip.saturating_sub(self.activity_timeout);
+        if ack.item.index < activity_threshold {
             return Err(Error::AckThresholded(ack.item.index));
         }
 
@@ -737,9 +737,10 @@ impl<
         assert!(tip > self.tip);
 
         // Prune data structures with buffer to prevent losing certificates
-        let prune_threshold = tip.saturating_sub(self.activity_timeout);
-        self.pending.retain(|index, _| *index >= prune_threshold);
-        self.confirmed.retain(|index, _| *index >= prune_threshold);
+        let activity_threshold = tip.saturating_sub(self.activity_timeout);
+        self.pending.retain(|index, _| *index >= activity_threshold);
+        self.confirmed
+            .retain(|index, _| *index >= activity_threshold);
 
         // Add tip to journal
         self.record(Activity::Tip(tip)).await;
@@ -747,7 +748,7 @@ impl<
         self.reporter.report(Activity::Tip(tip)).await;
 
         // Prune journal with buffer, ignoring errors
-        let section = self.get_journal_section(prune_threshold);
+        let section = self.get_journal_section(activity_threshold);
         let journal = self.journal.as_mut().expect("journal must be initialized");
         let _ = journal.prune(section).await;
 
@@ -792,12 +793,12 @@ impl<
 
         // Update the tip to the highest index in the journal
         self.tip = tip;
-        let prune_threshold = tip.saturating_sub(self.activity_timeout);
+        let activity_threshold = tip.saturating_sub(self.activity_timeout);
 
         // Add certified items
         certified
             .iter()
-            .filter(|certificate| certificate.item.index >= prune_threshold)
+            .filter(|certificate| certificate.item.index >= activity_threshold)
             .for_each(|certificate| {
                 self.confirmed
                     .insert(certificate.item.index, certificate.clone());
@@ -806,7 +807,8 @@ impl<
         // Group acks by index
         let mut acks_by_index: BTreeMap<Index, Vec<Ack<V, D>>> = BTreeMap::new();
         for ack in acks {
-            if ack.item.index >= prune_threshold && !self.confirmed.contains_key(&ack.item.index) {
+            if ack.item.index >= activity_threshold && !self.confirmed.contains_key(&ack.item.index)
+            {
                 acks_by_index.entry(ack.item.index).or_default().push(ack);
             }
         }
