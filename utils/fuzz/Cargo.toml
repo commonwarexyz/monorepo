@@ -13,6 +13,8 @@ libfuzzer-sys = { workspace = true }
 commonware-utils = { path = ".." }
 commonware-codec = { workspace = true }
 bytes = { workspace = true }
+rand = { workspace = true }
+futures = { workspace = true }
 
 [[bin]]
 name = "lib_functions"
@@ -22,8 +24,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "array"
-path = "fuzz_targets/array.rs"
+name = "sequence"
+path = "fuzz_targets/sequence.rs"
 test = false
 doc = false
 bench = false
@@ -45,6 +47,20 @@ bench = false
 [[bin]]
 name = "stable_buf"
 path = "fuzz_targets/stable_buf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "time"
+path = "fuzz_targets/time.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "futures"
+path = "fuzz_targets/futures.rs"
 test = false
 doc = false
 bench = false
