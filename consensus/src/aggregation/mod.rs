@@ -554,7 +554,7 @@ mod tests {
                             debug!(shutdown_wait = ?shutdown_wait, "Simulating unclean shutdown");
 
                             // Save reporter state before shutdown
-                            let saved_digests = persistent_digests.lock().unwrap();
+                            let mut saved_digests = persistent_digests.lock().unwrap();
                             for (pk, mut reporter_mailbox) in reporters.clone() {
                                 let digests = reporter_mailbox.get_all_digests().await;
                                 debug!(
