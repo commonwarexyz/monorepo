@@ -173,6 +173,7 @@ pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
 
 /// Returns the position of the leaf with number `leaf_num` in an MMR.
 pub(crate) const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
+    // This will never underflow since 2*n >= count_ones(n).
     leaf_num.checked_mul(2).expect("leaf_num overflow") - leaf_num.count_ones() as u64
 }
 
