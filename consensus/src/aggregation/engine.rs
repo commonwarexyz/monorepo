@@ -598,10 +598,13 @@ impl<
             return Err(Error::PeerMismatch);
         }
 
-        // Validate height
-        if ack.item.index < self.tip {
+        // Collect acks below the tip (if we don't yet have a threshold signature)
+        let prune_threshold = self.tip.saturating_sub(self.prune_buffer);
+        if ack.item.index < prune_threshold {
             return Err(Error::AckThresholded(ack.item.index));
         }
+
+        // If the index is above the tip (and the window), ignore for now
         if ack.item.index >= self.tip + self.window {
             return Err(Error::AckIndex(ack.item.index));
         }
@@ -615,9 +618,16 @@ impl<
             Some(Pending::Unverified(epoch_map)) => epoch_map
                 .get(&ack.epoch)
                 .is_some_and(|acks| acks.contains_key(&ack.signature.index)),
-            Some(Pending::Verified(_, epoch_map)) => epoch_map
-                .get(&ack.epoch)
-                .is_some_and(|acks| acks.contains_key(&ack.signature.index)),
+            Some(Pending::Verified(digest, epoch_map)) => {
+                // While we check this in the `handle_ack` function, checking early here avoids an
+                // unnecessary signature check.
+                if ack.item.digest != *digest {
+                    return Err(Error::AckDigest(ack.item.index));
+                }
+                epoch_map
+                    .get(&ack.epoch)
+                    .is_some_and(|acks| acks.contains_key(&ack.signature.index))
+            }
         };
         if have_ack {
             return Err(Error::AckDuplicate(sender.to_string(), ack.item.index));
