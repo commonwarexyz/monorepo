@@ -1,9 +1,7 @@
 //! Types used in [aggregation](super).
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
-};
+use commonware_codec::{Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{
     bls12381::primitives::{group::Share, ops, poly::PartialSignature, variant::Variant},
     Digest,
@@ -102,27 +100,9 @@ pub struct Item<D: Digest> {
     pub digest: D,
 }
 
-impl<D: Digest> Item<D> {
-    /// The size of the item when encoded as a fixed size.
-    const FIXED_SIZE: usize = Index::SIZE + D::SIZE;
-
-    /// Writes a fixed size representation of the item.
-    fn write_fixed(&self, writer: &mut impl BufMut) {
-        self.index.write(writer);
-        self.digest.write(writer);
-    }
-
-    /// Reads a fixed size representation of the item.
-    fn read_fixed(reader: &mut impl Buf) -> Result<Self, CodecError> {
-        let index = Index::read(reader)?;
-        let digest = D::read(reader)?;
-        Ok(Self { index, digest })
-    }
-}
-
 impl<D: Digest> Write for Item<D> {
     fn write(&self, writer: &mut impl BufMut) {
-        UInt(self.index).write(writer);
+        self.index.write(writer);
         self.digest.write(writer);
     }
 }
@@ -131,16 +111,14 @@ impl<D: Digest> Read for Item<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let index = UInt::read(reader)?.into();
+        let index = Index::read(reader)?;
         let digest = D::read(reader)?;
         Ok(Self { index, digest })
     }
 }
 
-impl<D: Digest> EncodeSize for Item<D> {
-    fn encode_size(&self) -> usize {
-        UInt(self.index).encode_size() + self.digest.encode_size()
-    }
+impl<D: Digest> FixedSize for Item<D> {
+    const SIZE: usize = Index::SIZE + D::SIZE;
 }
 
 /// Acknowledgment (ack) represents a validator's partial signature on an item.
@@ -198,7 +176,7 @@ impl<V: Variant, D: Digest> Ack<V, D> {
 impl<V: Variant, D: Digest> Write for Ack<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.item.write(writer);
-        UInt(self.epoch).write(writer);
+        self.epoch.write(writer);
         self.signature.write(writer);
     }
 }
@@ -208,7 +186,7 @@ impl<V: Variant, D: Digest> Read for Ack<V, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let item = Item::read(reader)?;
-        let epoch = UInt::read(reader)?.into();
+        let epoch = Epoch::read(reader)?;
         let signature = PartialSignature::<V>::read(reader)?;
         Ok(Self {
             item,
@@ -218,10 +196,8 @@ impl<V: Variant, D: Digest> Read for Ack<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Ack<V, D> {
-    fn encode_size(&self) -> usize {
-        self.item.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
-    }
+impl<V: Variant, D: Digest> FixedSize for Ack<V, D> {
+    const SIZE: usize = Item::<D>::SIZE + Epoch::SIZE + PartialSignature::<V>::SIZE;
 }
 
 /// Message exchanged between peers containing an acknowledgment and tip information.
@@ -237,7 +213,7 @@ pub struct TipAck<V: Variant, D: Digest> {
 
 impl<V: Variant, D: Digest> Write for TipAck<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        UInt(self.tip).write(writer);
+        self.tip.write(writer);
         self.ack.write(writer);
     }
 }
@@ -246,16 +222,14 @@ impl<V: Variant, D: Digest> Read for TipAck<V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let tip = UInt::read(reader)?.into();
+        let tip = Index::read(reader)?;
         let ack = Ack::<V, D>::read(reader)?;
         Ok(Self { tip, ack })
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for TipAck<V, D> {
-    fn encode_size(&self) -> usize {
-        UInt(self.tip).encode_size() + self.ack.encode_size()
-    }
+impl<V: Variant, D: Digest> FixedSize for TipAck<V, D> {
+    const SIZE: usize = Index::SIZE + Ack::<V, D>::SIZE;
 }
 
 /// A recovered signature for some [Item].
@@ -269,7 +243,7 @@ pub struct Certificate<V: Variant, D: Digest> {
 
 impl<V: Variant, D: Digest> Write for Certificate<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.item.write_fixed(writer);
+        self.item.write(writer);
         self.signature.write(writer);
     }
 }
@@ -278,14 +252,14 @@ impl<V: Variant, D: Digest> Read for Certificate<V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let item = Item::read_fixed(reader)?;
+        let item = Item::read(reader)?;
         let signature = V::Signature::read(reader)?;
         Ok(Self { item, signature })
     }
 }
 
 impl<V: Variant, D: Digest> FixedSize for Certificate<V, D> {
-    const SIZE: usize = Item::<D>::FIXED_SIZE + V::Signature::SIZE;
+    const SIZE: usize = Item::<D>::SIZE + V::Signature::SIZE;
 }
 
 impl<V: Variant, D: Digest> Certificate<V, D> {
@@ -332,7 +306,7 @@ impl<V: Variant, D: Digest> Write for Activity<V, D> {
             }
             Activity::Tip(index) => {
                 2u8.write(writer);
-                UInt(*index).write(writer);
+                index.write(writer);
             }
         }
     }
@@ -345,7 +319,7 @@ impl<V: Variant, D: Digest> Read for Activity<V, D> {
         match u8::read(reader)? {
             0 => Ok(Activity::Ack(Ack::read(reader)?)),
             1 => Ok(Activity::Certified(Certificate::read(reader)?)),
-            2 => Ok(Activity::Tip(UInt::read(reader)?.into())),
+            2 => Ok(Activity::Tip(Index::read(reader)?)),
             _ => Err(CodecError::Invalid(
                 "consensus::aggregation::Activity",
                 "Invalid type",
@@ -359,7 +333,7 @@ impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
         1 + match self {
             Activity::Ack(ack) => ack.encode_size(),
             Activity::Certified(certificate) => certificate.encode_size(),
-            Activity::Tip(index) => UInt(*index).encode_size(),
+            Activity::Tip(index) => index.encode_size(),
         }
     }
 }
