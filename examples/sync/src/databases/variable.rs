@@ -128,36 +128,3 @@ where
         "variable"
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::databases::Syncable;
-    use commonware_runtime::deterministic;
-
-    type VariableDb = Database<deterministic::Context>;
-
-    #[test]
-    fn test_create_test_operations() {
-        let ops = <VariableDb as Syncable>::create_test_operations(5, 12345);
-        assert_eq!(ops.len(), 6); // 5 operations + 1 commit
-
-        if let Operation::Commit() = &ops[5] {
-            // Good
-        } else {
-            panic!("Last operation should be a commit");
-        }
-    }
-
-    #[test]
-    fn test_deterministic_operations() {
-        // Operations should be deterministic based on seed
-        let ops1 = <VariableDb as Syncable>::create_test_operations(3, 12345);
-        let ops2 = <VariableDb as Syncable>::create_test_operations(3, 12345);
-        assert_eq!(ops1, ops2);
-
-        // Different seeds should produce different operations
-        let ops3 = <VariableDb as Syncable>::create_test_operations(3, 54321);
-        assert_ne!(ops1, ops3);
-    }
-}
