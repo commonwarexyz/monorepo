@@ -24,7 +24,6 @@ enum Message<V: Variant, D: Digest> {
     GetTip(oneshot::Sender<Option<(Index, Epoch)>>),
     GetContiguousTip(oneshot::Sender<Option<Index>>),
     Get(Index, oneshot::Sender<Option<(D, Epoch)>>),
-    GetAllDigests(oneshot::Sender<BTreeMap<Index, (D, Epoch)>>),
 }
 
 pub struct Reporter<V: Variant, D: Digest> {
@@ -61,34 +60,9 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
         participants: u32,
         polynomial: poly::Public<V>,
     ) -> (Self, Mailbox<V, D>) {
-        Self::new_with_state(namespace, participants, polynomial, BTreeMap::new())
-    }
-
-    pub fn new_with_state(
-        namespace: &[u8],
-        participants: u32,
-        polynomial: poly::Public<V>,
-        initial_digests: BTreeMap<Index, (D, Epoch)>,
-    ) -> (Self, Mailbox<V, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         let identity = *poly::public::<V>(&polynomial);
         let polynomial = evaluate_all::<V>(&polynomial, participants);
-
-        // Calculate highest and contiguous from initial digests
-        let highest = initial_digests
-            .iter()
-            .max_by_key(|(index, _)| *index)
-            .map(|(index, (_, epoch))| (*index, *epoch));
-
-        let mut contiguous = None;
-        for i in 0.. {
-            if !initial_digests.contains_key(&i) {
-                if i > 0 {
-                    contiguous = Some(i - 1);
-                }
-                break;
-            }
-        }
 
         (
             Reporter {
@@ -97,9 +71,9 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                 identity,
                 polynomial,
                 acks: HashSet::new(),
-                digests: initial_digests,
-                contiguous,
-                highest,
+                digests: BTreeMap::new(),
+                contiguous: None,
+                highest: None,
                 current_epoch: 111, // Initialize with the expected epoch
             },
             Mailbox { sender },
@@ -188,9 +162,6 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
                     let digest = self.digests.get(&index).cloned();
                     sender.send(digest).unwrap();
                 }
-                Message::GetAllDigests(sender) => {
-                    sender.send(self.digests.clone()).unwrap();
-                }
             }
         }
     }
@@ -247,15 +218,6 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
     pub async fn get(&mut self, index: Index) -> Option<(D, Epoch)> {
         let (sender, receiver) = oneshot::channel();
         self.sender.send(Message::Get(index, sender)).await.unwrap();
-        receiver.await.unwrap()
-    }
-
-    pub async fn get_all_digests(&mut self) -> BTreeMap<Index, (D, Epoch)> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::GetAllDigests(sender))
-            .await
-            .unwrap();
         receiver.await.unwrap()
     }
 }
