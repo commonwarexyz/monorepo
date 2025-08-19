@@ -2,7 +2,7 @@ use crate::{
     adb::{
         any::variable::sync::init_journal,
         immutable,
-        sync::{self, variable_journal::compute_size, Journal as _},
+        sync::{self, Journal as _},
     },
     journal::variable,
     mmr::hasher::Standard,
@@ -25,7 +25,7 @@ where
     T: Translator,
 {
     type Op = Variable<K, V>;
-    type Journal = sync::variable_journal::Journal<E, K, V>;
+    type Journal = journal::ImmutableJournal<E, K, V>;
     type Hasher = H;
     type Error = crate::adb::Error;
     type Config = immutable::Config<T, V::Cfg>;
@@ -55,7 +55,7 @@ where
         .await?;
 
         // Compute next append location based on logical locations within [lower_bound, upper_bound]
-        let size = compute_size(
+        let size = journal::compute_size(
             &journal,
             config.log_items_per_section,
             lower_bound_loc,
@@ -63,7 +63,7 @@ where
         )
         .await?;
 
-        Ok(sync::variable_journal::Journal::new(
+        Ok(journal::ImmutableJournal::new(
             journal,
             config.log_items_per_section,
             size,
@@ -139,7 +139,7 @@ where
                 .map_err(crate::adb::Error::from)?;
 
             // Compute next append location based on logical locations within [lower_bound, upper_bound]
-            let size = compute_size(
+            let size = journal::compute_size(
                 &variable_journal,
                 config.log_items_per_section,
                 lower_bound,
@@ -148,7 +148,7 @@ where
             .await
             .map_err(crate::adb::Error::from)?;
 
-            Ok(sync::variable_journal::Journal::new(
+            Ok(journal::ImmutableJournal::new(
                 variable_journal,
                 config.log_items_per_section,
                 size,
