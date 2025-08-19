@@ -348,8 +348,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                             }
                             Variable::Commit() => {
                                 for (key, loc) in uncommitted_ops.iter() {
-                                    Immutable::<E, K, V, H, T>::set_loc(snapshot, key, *loc)
-                                        .await?;
+                                    snapshot.insert(key, *loc);
                                 }
                                 uncommitted_ops.clear();
                                 after_last_commit = None;
@@ -432,21 +431,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             .map_err(Error::Mmr)
     }
 
-    /// Set the index of `key` in the snapshot. Assumes the key has not already been previously set
-    /// and does not check for duplicates.
-    async fn set_loc(snapshot: &mut Index<T, u64>, key: &K, index: u64) -> Result<(), Error> {
-        // If the translated key is not in the snapshot, insert its location.
-        let Some(mut cursor) = snapshot.get_mut_or_insert(key, index) else {
-            return Ok(());
-        };
-
-        // Translated key is already in the snapshot (key conflict). Add the location to the cursor.
-        cursor.next();
-        cursor.insert(index);
-
-        Ok(())
-    }
-
     /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
     /// has been pruned.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
@@ -508,9 +492,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
     /// is reflected in the snapshot, but will be subject to rollback until the next successful
     /// `commit`. Attempting to set an already-set key results in undefined behavior.
+    ///
+    /// Any keys that have been pruned and map to the same translated key will be dropped
+    /// during this call.
     pub async fn set(&mut self, key: K, value: V) -> Result<(), Error> {
         let loc = self.log_size;
-        Immutable::<E, K, V, H, T>::set_loc(&mut self.snapshot, &key, loc).await?;
+        self.snapshot
+            .insert_and_prune(&key, loc, |v| *v < self.oldest_retained_loc);
 
         let op = Variable::Set(key, value);
         self.apply_op(op).await

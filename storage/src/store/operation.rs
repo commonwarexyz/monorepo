@@ -5,9 +5,10 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    util::at_least, Codec, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
+    util::at_least, Codec, CodecFixed, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt,
+    Write,
 };
-use commonware_utils::Array;
+use commonware_utils::{hex, Array};
 use std::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
@@ -41,7 +42,7 @@ pub enum Error {
 
 /// An operation applied to an authenticated database with a fixed size value.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Fixed<K: Array, V: Array> {
+pub enum Fixed<K: Array, V: CodecFixed> {
     /// Indicates the key no longer has a value.
     Delete(K),
 
@@ -65,7 +66,7 @@ pub enum Variable<K: Array, V: Codec> {
     CommitFloor(u64),
 }
 
-impl<K: Array, V: Array> FixedSize for Fixed<K, V> {
+impl<K: Array, V: CodecFixed> FixedSize for Fixed<K, V> {
     const SIZE: usize = u8::SIZE + K::SIZE + V::SIZE;
 }
 
@@ -81,7 +82,7 @@ impl<K: Array, V: Codec> EncodeSize for Variable<K, V> {
     }
 }
 
-impl<K: Array, V: Array> Fixed<K, V> {
+impl<K: Array, V: CodecFixed> Fixed<K, V> {
     // A compile-time assertion that operation's array size is large enough to handle the commit
     // operation, which requires 9 bytes.
     const _MIN_OPERATION_LEN: usize = 9;
@@ -135,7 +136,7 @@ impl<K: Array, V: Codec> Variable<K, V> {
     }
 }
 
-impl<K: Array, V: Array> Write for Fixed<K, V> {
+impl<K: Array, V: CodecFixed> Write for Fixed<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Fixed::Delete(k) => {
@@ -187,16 +188,16 @@ impl<K: Array, V: Codec> Write for Variable<K, V> {
     }
 }
 
-impl<K: Array, V: Array> Read for Fixed<K, V> {
-    type Cfg = ();
+impl<K: Array, V: CodecFixed> Read for Fixed<K, V> {
+    type Cfg = <V as Read>::Cfg;
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         at_least(buf, Self::SIZE)?;
 
         match u8::read(buf)? {
             UPDATE_CONTEXT => {
                 let key = K::read(buf)?;
-                let value = V::read(buf)?;
+                let value = V::read_cfg(buf, cfg)?;
                 Ok(Self::Update(key, value))
             }
             DELETE_CONTEXT => {
@@ -258,23 +259,23 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
     }
 }
 
-impl<K: Array, V: Array> Display for Fixed<K, V> {
+impl<K: Array, V: CodecFixed> Display for Fixed<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Fixed::Delete(key) => write!(f, "[key:{key} <deleted>]"),
-            Fixed::Update(key, value) => write!(f, "[key:{key} value:{value}]"),
+            Fixed::Update(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
             Fixed::CommitFloor(loc) => write!(f, "[commit with inactivity floor: {loc}]"),
         }
     }
 }
 
-impl<K: Array, V: Array> Display for Variable<K, V> {
+impl<K: Array, V: Codec> Display for Variable<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Variable::Set(key, value) => write!(f, "[key:{key} value:{value}]"),
+            Variable::Set(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
             Variable::Commit() => write!(f, "[commit]"),
             Variable::Delete(key) => write!(f, "[key:{key} <deleted>]"),
-            Variable::Update(key, value) => write!(f, "[key:{key} value:{value}]"),
+            Variable::Update(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
             Variable::CommitFloor(loc) => write!(f, "[commit with inactivity floor: {loc}]"),
         }
     }
@@ -370,7 +371,10 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
         let update_op = Fixed::Update(key.clone(), value.clone());
-        assert_eq!(format!("{update_op}"), format!("[key:{key} value:{value}]"));
+        assert_eq!(
+            format!("{update_op}"),
+            format!("[key:{key} value:{}]", hex(&value.encode()))
+        );
 
         let key2 = U64::new(42);
         let delete_op = Fixed::<U64, U64>::Delete(key2.clone());
