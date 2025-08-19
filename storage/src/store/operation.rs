@@ -83,21 +83,21 @@ impl<K: Array, V: CodecFixed> FixedSize for Fixed<K, V> {
 
 impl<K: Array, V: Codec> EncodeSize for Variable<K, V> {
     fn encode_size(&self) -> usize {
-        match self {
-            Variable::Delete(_) => 1 + K::SIZE,
-            Variable::Update(_, v) => 1 + K::SIZE + v.encode_size(),
-            Variable::CommitFloor(_) => 1 + u64::SIZE,
-            Variable::Set(_, v) => 1 + K::SIZE + v.encode_size(),
-            Variable::Commit() => 1,
+        1 + match self {
+            Variable::Delete(_) => K::SIZE,
+            Variable::Update(_, v) => K::SIZE + v.encode_size(),
+            Variable::CommitFloor(_) => u64::SIZE,
+            Variable::Set(_, v) => K::SIZE + v.encode_size(),
+            Variable::Commit() => 0,
         }
     }
 }
 
 impl<V: Codec> EncodeSize for Keyless<V> {
     fn encode_size(&self) -> usize {
-        match self {
-            Keyless::Append(v) => 1 + v.encode_size(),
-            Keyless::Commit => 1,
+        1 + match self {
+            Keyless::Append(v) => v.encode_size(),
+            Keyless::Commit => 0,
         }
     }
 }

@@ -90,7 +90,7 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
     size: u64,
 
     /// The number of operations to put in each section of the operations log.
-    log_per_section: u64,
+    log_items_per_section: u64,
 
     /// A fixed-length journal that maps an appended value's location to its offset within its
     /// respective section of the log journal. (The section number is derived from location.)
@@ -217,7 +217,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             log,
             size: locations_size,
             locations,
-            log_per_section: cfg.log_items_per_section.get(),
+            log_items_per_section: cfg.log_items_per_section.get(),
             hasher,
         })
     }
@@ -227,7 +227,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     pub async fn get(&self, loc: u64) -> Result<Option<V>, Error> {
         let offset = self.locations.read(loc).await?;
 
-        let section = loc / self.log_per_section;
+        let section = loc / self.log_items_per_section;
         let Some(op) = self.log.get(section, offset).await? else {
             panic!("didn't find operation at location {loc} and offset {offset}");
         };
@@ -245,7 +245,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
     /// Returns the section of the operations log where we are currently writing new operations.
     fn current_section(&self) -> u64 {
-        self.size / self.log_per_section
+        self.size / self.log_items_per_section
     }
 
     /// Return the oldest location that remains retrievable.
@@ -270,7 +270,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         self.locations.prune(loc).await?;
 
         // Prune the MMR and operations log to the corresponding positions.
-        let prune_to_section = loc / self.log_per_section;
+        let prune_to_section = loc / self.log_items_per_section;
         try_join!(
             self.mmr
                 .prune_to_pos(&mut self.hasher, leaf_num_to_pos(loc))
@@ -374,7 +374,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let mut ops = Vec::with_capacity((end_index - start_loc + 1) as usize);
         for loc in start_loc..=end_index {
             let offset = self.locations.read(loc).await?;
-            let section = loc / self.log_per_section;
+            let section = loc / self.log_items_per_section;
             let value = self
                 .log
                 .get(section, offset)
