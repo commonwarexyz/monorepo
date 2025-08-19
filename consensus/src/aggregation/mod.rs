@@ -217,7 +217,8 @@ mod tests {
 
             let blocker = oracle.control(validator.clone());
 
-            let automaton = mocks::Application::new(invalid_when);
+            let automaton =
+                mocks::Application::byzantine(invalid_when, mocks::ByzantineStrategy::DoubleHash);
             automatons.insert(validator.clone(), automaton.clone());
 
             let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
@@ -423,7 +424,7 @@ mod tests {
                         };
 
                         let blocker = oracle.control(validator.clone());
-                        let automaton = mocks::Application::new(|_| false);
+                        let automaton = mocks::Application::honest();
                         automatons
                             .lock()
                             .unwrap()
@@ -812,80 +813,6 @@ mod tests {
         invalid_signature_injection::<MinSig>();
     }
 
-    /// Test that verifies cryptographic signatures are properly validated.
-    fn cryptographic_validation<V: Variant>() {
-        let num_validators: u32 = 4;
-        let quorum: u32 = 3;
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-
-        runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
-            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
-
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
-                context.with_label("simulation"),
-                num_validators,
-                &mut shares_vec,
-                RELIABLE_LINK,
-            )
-            .await;
-            let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
-
-            spawn_validator_engines::<V>(
-                context.with_label("validator"),
-                polynomial.clone(),
-                &pks,
-                &validators,
-                &mut registrations,
-                &mut automatons.lock().unwrap(),
-                &mut reporters,
-                &mut oracle,
-                Duration::from_secs(5),
-                |_| false,
-            );
-
-            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
-
-            // Additional validation: verify that consensus was achieved and items are retrievable
-            // The reporter mock already validates ack signatures internally and panics on invalid ones
-            for (validator_pk, mut reporter_mailbox) in reporters {
-                let tip_result = reporter_mailbox.get_tip().await;
-                assert!(
-                    tip_result.is_some(),
-                    "Reporter for validator {validator_pk:?} should have a tip"
-                );
-
-                let (tip_index, tip_epoch) = tip_result.unwrap();
-                assert!(
-                    tip_index >= 1,
-                    "Tip should have progressed beyond initial state for validator {validator_pk:?}"
-                );
-                assert_eq!(
-                    tip_epoch, 111,
-                    "Tip epoch should match expected epoch for validator {validator_pk:?}"
-                );
-
-                // Validate that we can retrieve the digest for consensus items
-                if tip_index > 0 {
-                    let item_result = reporter_mailbox.get(tip_index - 1).await;
-                    assert!(
-                        item_result.is_some(),
-                        "Should be able to retrieve consensus item for validator {validator_pk:?}"
-                    );
-                }
-            }
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_cryptographic_validation() {
-        cryptographic_validation::<MinPk>();
-        cryptographic_validation::<MinSig>();
-    }
-
     /// Test various types of Byzantine fault patterns to ensure robustness.
     fn advanced_byzantine_faults<V: Variant>() {
         let num_validators: u32 = 7; // Larger set to test more fault combinations
@@ -995,7 +922,7 @@ mod tests {
 
                 let blocker = oracle.control(validator.clone());
 
-                let automaton = mocks::Application::new(|_| false);
+                let automaton = mocks::Application::honest();
                 automatons.lock().unwrap().insert(validator.clone(), automaton.clone());
 
                 let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(

@@ -20,20 +20,17 @@ pub struct Application {
 }
 
 impl Application {
-    pub fn new(invalid_when: fn(u64) -> bool) -> Self {
+    pub fn honest() -> Self {
         Self {
-            invalid_when,
-            byzantine_strategy: ByzantineStrategy::DoubleHash,
+            invalid_when: |_| false,
+            byzantine_strategy: ByzantineStrategy::None,
         }
     }
 
-    pub fn with_byzantine_strategy(
-        invalid_when: fn(u64) -> bool,
-        strategy: ByzantineStrategy,
-    ) -> Self {
+    pub fn byzantine(invalid_when: fn(u64) -> bool, byzantine_strategy: ByzantineStrategy) -> Self {
         Self {
             invalid_when,
-            byzantine_strategy: strategy,
+            byzantine_strategy,
         }
     }
 }
