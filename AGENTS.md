@@ -8,48 +8,25 @@ Commonware is a Rust library providing high-performance, production-ready distri
 
 ## Essential Commands
 
-### Build & Test
+### Quick Reference
 ```bash
 # Build entire workspace
 cargo build --workspace --all-targets
 
-# Run all tests
-cargo test --workspace --verbose
-
-# Run tests for specific crate
+# Test specific crate
 cargo test -p commonware-cryptography
 
-# Run single test
+# Test single function
 cargo test -p commonware-consensus test_name
 
-# Run clippy (linting)
-cargo clippy --all-targets --all-features -- -D warnings
-
-# Format code
-cargo +nightly fmt --all
-
-# Check for unsafe code issues
-MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --lib commonware-storage::index::
-```
-
-### Fuzzing
-```bash
-# Run fuzzer for specific primitive (requires nightly)
-cd cryptography
-cargo +nightly fuzz run ed25519_decode -- -max_total_time=60
-```
-
-### Benchmarking
-```bash
-# Run benchmarks for specific crate
+# Run benchmarks
 cargo bench -p commonware-cryptography
-```
 
-### Version Management
-```bash
 # Update all crate versions
 ./scripts/bump_versions.sh <new_version>
 ```
+
+_For linting, formatting, fuzzing, and other CI-related commands, see the [CI/CD Pipeline](#cicd-pipeline) section below._
 
 ## Architecture
 
@@ -88,18 +65,69 @@ _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything wit
 6. **Always Commit Complete Code**: When implementing code and writing tests, always implement complete functionality. If there is a large task, implement the simplest possible solution that works and then incrementally improve it.
 7. **Own Core Mechanisms**: If a primitive relies heavily on some core mechanism/algorithm, we should implement it rather than relying on external crates.
 
+## CI/CD Pipeline
+
+The repository uses GitHub Actions with three main workflows: **Fast** (every push/PR), **Slow** (main/PR, cancellable), and **Coverage** (main/PR).
+
+### Pre-Push Checklist
+
+Run these commands locally before pushing to avoid CI failures:
+
+```bash
+# 1. Format and lint (REQUIRED)
+cargo +nightly fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+
+# 2. Run tests (REQUIRED)
+cargo test --workspace --verbose
+
+# 3. Platform-specific (Linux only, if touching runtime)
+cargo test --features commonware-runtime/iouring-storage
+cargo test --features commonware-runtime/iouring-network
+
+# 4. Check dependencies (if modified)
+cargo +nightly udeps --all-targets
+
+# 5. WASM build (if touching cryptography/utils/storage)
+cargo build --target wasm32-unknown-unknown --release -p commonware-cryptography
+
+# 6. Unsafe code (if adding unsafe blocks)
+MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --lib <module>::
+```
+
+### Extended Checks (before PR)
+
+```bash
+# Long-running tests
+cargo test --workspace -- --ignored
+
+# Fuzz testing (60 seconds per target)
+cd <primitive>/fuzz
+cargo +nightly fuzz run <target> -- -max_total_time=60
+
+# Coverage report
+cargo llvm-cov --workspace --lcov --output-path lcov.info
+```
+
+### CI Matrix
+- **OS**: Ubuntu, Windows, macOS
+- **Features**: Standard, io_uring storage, io_uring network (Linux only)
+- **Toolchain**: Stable (default), Nightly (formatting/fuzzing)
+
 ## Testing Strategy
 - Unit tests: Core logic validation
 - Integration tests: Cross-primitive interaction
 - Fuzz tests: Input validation and edge cases
 - MIRI tests: Memory safety verification for unsafe code
 - Benchmarks: Performance regression detection
+- Coverage: Track test coverage with llvm-cov (see CI section)
 
 ## Development Workflow
 1. Make changes in relevant primitive directory
 2. Run `cargo test -p <crate-name>` for quick iteration
-3. Run `cargo clippy` before committing
+3. Run CI fast checks before committing (see CI section above)
 4. Use `cargo +nightly fmt` for formatting
+5. Run full CI checks locally before creating PR
 
 ## Deterministic Async Testing
 Exclusively use the deterministic runtime (`runtime/src/deterministic.rs`) for reproducible async tests:
