@@ -282,6 +282,14 @@ mod tests {
 - Use `Arc` for shared ownership without cloning data
 - Implement `Clone` as cheaply as possible (often just `Arc` clones)
 - Avoid allocations in hot paths
+- Prefer static dispatch with generics over trait objects where possible
+- Use `spawn_blocking` for CPU-intensive work in async contexts
+- When in doubt, write a benchmark and profile the code (don't trust your intuition)
+
+### Debugging Patterns
+- Use `tracing` for structured, leveled logging throughout the codebase
+- Implement metrics (via prometheus) for performance-critical operations
+- Add comprehensive context to errors for better debugging
 
 ### Safety Guidelines
 - Minimize unsafe blocks with clear `// SAFETY:` comments
