@@ -68,6 +68,7 @@ cfg_if::cfg_if! {
 #[cfg(test)]
 mod tests {
     use super::{mocks, types::Epoch, Config, Engine};
+    use crate::aggregation::mocks::Strategy;
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
@@ -92,7 +93,7 @@ mod tests {
     use futures::{channel::oneshot, future::join_all};
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
-        collections::{BTreeMap, HashMap},
+        collections::{BTreeMap, HashMap, HashSet},
         num::NonZeroUsize,
         sync::{Arc, Mutex},
         time::Duration,
@@ -194,12 +195,12 @@ mod tests {
         reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>,
         oracle: &mut Oracle<PublicKey>,
         rebroadcast_timeout: Duration,
-        invalid_when: fn(u64) -> bool,
+        incorrect: HashSet<PublicKey>,
     ) -> HashMap<PublicKey, mocks::Monitor> {
         let mut monitors = HashMap::new();
         let namespace = b"my testing namespace";
 
-        for (validator, _scheme, share) in validators.iter() {
+        for (validator, _, share) in validators {
             let context = context.with_label(&validator.to_string());
             let monitor = mocks::Monitor::new(111);
             monitors.insert(validator.clone(), monitor.clone());
@@ -217,9 +218,11 @@ mod tests {
 
             let blocker = oracle.control(validator.clone());
 
-            // TODO: this allows all nodes to act as byzantine validators (this is broken?)
-            let automaton =
-                mocks::Application::byzantine(invalid_when, mocks::ByzantineStrategy::DoubleHash);
+            let automaton = mocks::Application::new(if incorrect.contains(validator) {
+                Strategy::Incorrect
+            } else {
+                Strategy::Correct
+            });
             automatons.insert(validator.clone(), automaton.clone());
 
             let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
@@ -341,7 +344,7 @@ mod tests {
                 &mut reporters,
                 &mut oracle,
                 Duration::from_secs(5),
-                |_| false,
+                HashSet::new(),
             );
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
         });
@@ -425,7 +428,7 @@ mod tests {
                         };
 
                         let blocker = oracle.control(validator.clone());
-                        let automaton = mocks::Application::honest();
+                        let automaton = mocks::Application::new(Strategy::Correct);
                         automatons
                             .lock()
                             .unwrap()
@@ -555,7 +558,7 @@ mod tests {
                 &mut reporters,
                 &mut oracle,
                 Duration::from_secs(2),
-                |_| false,
+                HashSet::new(),
             );
 
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
@@ -623,7 +626,7 @@ mod tests {
                 &mut reporters,
                 &mut oracle,
                 Duration::from_secs(5),
-                |_| false,
+                HashSet::new(),
             );
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
         });
@@ -633,51 +636,6 @@ mod tests {
     fn test_one_offline() {
         one_offline::<MinPk>();
         one_offline::<MinSig>();
-    }
-
-    /// Test that consensus can be reached starting from index 0.
-    fn consensus_from_index_zero<V: Variant>() {
-        let num_validators: u32 = 4;
-        let quorum: u32 = 3;
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-
-        runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
-            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
-
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
-                context.with_label("simulation"),
-                num_validators,
-                &mut shares_vec,
-                RELIABLE_LINK,
-            )
-            .await;
-            let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
-
-            spawn_validator_engines::<V>(
-                context.with_label("validator"),
-                polynomial.clone(),
-                &pks,
-                &validators,
-                &mut registrations,
-                &mut automatons.lock().unwrap(),
-                &mut reporters,
-                &mut oracle,
-                Duration::from_secs(5),
-                |_| false,
-            );
-
-            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_consensus_from_index_zero() {
-        consensus_from_index_zero::<MinPk>();
-        consensus_from_index_zero::<MinSig>();
     }
 
     /// Test consensus recovery after a network partition.
@@ -712,7 +670,7 @@ mod tests {
                 &mut reporters,
                 &mut oracle,
                 Duration::from_secs(5),
-                |_| false,
+                HashSet::new(),
             );
 
             for v1 in pks.iter() {
@@ -753,7 +711,7 @@ mod tests {
     }
 
     /// Test consensus resilience to Byzantine behavior.
-    fn invalid_signature_injection<V: Variant>() {
+    fn byzantine_proposer<V: Variant>() {
         let num_validators: u32 = 4;
         let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -774,22 +732,8 @@ mod tests {
             let mut reporters =
                 BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
 
-            // Simulate more realistic Byzantine behavior with pseudo-random faults
-            // Using a deterministic seed based on index for reproducible tests
-            let byzantine_fault_fn = |index: u64| -> bool {
-                use std::{
-                    collections::hash_map::DefaultHasher,
-                    hash::{Hash, Hasher},
-                };
-
-                let mut hasher = DefaultHasher::new();
-                index.hash(&mut hasher);
-                let hash_value = hasher.finish();
-
-                // Create Byzantine faults with ~5% probability using deterministic hash
-                // This simulates realistic sporadic Byzantine behavior
-                (hash_value % 100) < 5
-            };
+            let mut incorrect = HashSet::new();
+            incorrect.insert(pks[0].clone());
 
             spawn_validator_engines::<V>(
                 context.with_label("validator"),
@@ -801,7 +745,7 @@ mod tests {
                 &mut reporters,
                 &mut oracle,
                 Duration::from_secs(5),
-                byzantine_fault_fn,
+                incorrect,
             );
 
             await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
@@ -809,77 +753,9 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_invalid_signature_injection() {
-        invalid_signature_injection::<MinPk>();
-        invalid_signature_injection::<MinSig>();
-    }
-
-    /// Test various types of Byzantine fault patterns to ensure robustness.
-    fn advanced_byzantine_faults<V: Variant>() {
-        let num_validators: u32 = 7; // Larger set to test more fault combinations
-        let quorum: u32 = 5; // Can tolerate up to 2 Byzantine validators
-        let runner = deterministic::Runner::timed(Duration::from_secs(45));
-
-        runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
-            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
-
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
-                context.with_label("simulation"),
-                num_validators,
-                &mut shares_vec,
-                RELIABLE_LINK,
-            )
-            .await;
-            let automatons = Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>::new();
-
-            // More sophisticated Byzantine fault patterns
-            let advanced_byzantine_fn = |index: u64| -> bool {
-                use std::{
-                    collections::hash_map::DefaultHasher,
-                    hash::{Hash, Hasher},
-                };
-
-                let mut hasher = DefaultHasher::new();
-                index.hash(&mut hasher);
-                let hash_value = hasher.finish();
-
-                match index % 11 {
-                    // Use prime number for less predictable pattern
-                    // Occasional random faults (~8% of the time)
-                    0..=2 if (hash_value % 100) < 8 => true,
-                    // Burst faults: consecutive failures
-                    3..=5 if index > 10 && index < 15 => true,
-                    // Periodic but irregular faults
-                    7 if (hash_value % 13) == 0 => true,
-                    _ => false,
-                }
-            };
-
-            spawn_validator_engines::<V>(
-                context.with_label("validator"),
-                polynomial.clone(),
-                &pks,
-                &validators,
-                &mut registrations,
-                &mut automatons.lock().unwrap(),
-                &mut reporters,
-                &mut oracle,
-                Duration::from_secs(8), // Longer timeout for more complex scenarios
-                advanced_byzantine_fn,
-            );
-
-            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_advanced_byzantine_faults() {
-        advanced_byzantine_faults::<MinPk>();
-        advanced_byzantine_faults::<MinSig>();
+    fn test_byzantine_proposer() {
+        byzantine_proposer::<MinPk>();
+        byzantine_proposer::<MinSig>();
     }
 
     /// Test insufficient validator participation (below quorum).
@@ -923,7 +799,7 @@ mod tests {
 
                 let blocker = oracle.control(validator.clone());
 
-                let automaton = mocks::Application::honest();
+                let automaton = mocks::Application::new(Strategy::Correct);
                 automatons.lock().unwrap().insert(validator.clone(), automaton.clone());
 
                 let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
