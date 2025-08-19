@@ -60,13 +60,12 @@ cfg_if::cfg_if! {
 #[cfg(test)]
 mod tests {
     use super::{mocks, types::Epoch, Config, Engine};
-    use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
             primitives::{
                 group::Share,
-                ops as bls_ops, poly,
+                poly,
                 variant::{MinPk, MinSig, Variant},
             },
         },
