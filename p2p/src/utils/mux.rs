@@ -1,10 +1,11 @@
-//! This utility wraps a [Sender] and [Receiver], providing lightweight sub-channels keyed by the
-//! [Channel] type.
+//! This utility wraps a [Sender] and [Receiver], providing lightweight sub-channels keyed by
+//! [Channel].
 //!
 //! Usage:
 //! - Call [Muxer::new] to create the multiplexer.
-//! - Call [Muxer::register] to obtain a `(SubSender, SubReceiver)` pair for that subchannel.
+//! - Call [Muxer::register] to obtain a ([SubSender], [SubReceiver]) pair for that subchannel.
 //! - Drive [Muxer::run] in a background task to demux incoming messages into per-subchannel queues.
+
 use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
@@ -16,8 +17,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 use thiserror::Error;
+use tracing::debug;
 
-/// An asynchronous map of [Channel]s to [mpsc::Sender]s.
+/// Thread-safe routing table mapping each [Channel] to the [mpsc::Sender] for [`Message<P>`].
 type Routes<P> = Arc<Mutex<HashMap<Channel, mpsc::Sender<Message<P>>>>>;
 
 /// Errors that can occur when interacting with a [Muxer].
@@ -31,7 +33,6 @@ pub enum Error {
 pub struct Muxer<S: Sender, R: Receiver> {
     sender: S,
     receiver: R,
-    #[allow(clippy::type_complexity)]
     routes: Routes<R::PublicKey>,
     mailbox_size: usize,
 }
@@ -106,7 +107,9 @@ impl<S: Sender, R: Receiver> Muxer<S, R> {
             // introduces a per-sender fairness slot that effectively increases
             // capacity when cloned per message.
             if let Some(sender) = self.routes.lock().unwrap().get_mut(&subchannel) {
-                let _ = sender.try_send((pk, bytes));
+                if let Err(e) = sender.try_send((pk, bytes)) {
+                    debug!(?subchannel, ?e, "failed to send message to subchannel");
+                }
             }
         }
     }
@@ -156,7 +159,7 @@ impl<P: PublicKey> Receiver for SubReceiver<P> {
 
 impl<P: PublicKey> Drop for SubReceiver<P> {
     fn drop(&mut self) {
-        // Best-effort cleanup to avoid stale routes when a subreceiver is dropped.
+        // Cleanup to avoid stale routes when a subreceiver is dropped.
         self.routes.lock().unwrap().remove(&self.subchannel);
     }
 }
