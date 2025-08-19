@@ -365,6 +365,32 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
         Ok(())
     }
+
+    #[cfg(test)]
+    pub(super) async fn simulate_failure(
+        mut self,
+        sync_values: bool,
+        sync_mmr: bool,
+        sync_locations: bool,
+    ) -> Result<(), Error> {
+        if sync_values {
+            self.values.sync(self.current_section()).await?;
+        } else {
+            assert!(!sync_mmr, "can't sync mmr without syncing values");
+            assert!(
+                !sync_locations,
+                "can't sync locations without syncing values"
+            );
+        }
+        if sync_mmr {
+            self.mmr.sync(&mut self.hasher).await?;
+        }
+        if sync_locations {
+            self.locations.sync().await?;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -432,7 +458,7 @@ mod test {
             db.commit().await.unwrap();
             assert_eq!(db.size(), 1); // floor op added
             let root = db.root(&mut hasher);
-            let mut db = open_db(context.clone()).await;
+            let db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
 
             db.destroy().await.unwrap();
@@ -474,6 +500,95 @@ mod test {
             // Make sure uncommitted items get rolled back.
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
+            assert_eq!(db.root(&mut hasher), root);
+
+            // Make sure commit operation remains after close/reopen.
+            db.close().await.unwrap();
+            let db = open_db(context.clone()).await;
+            assert_eq!(db.size(), 3);
+            assert_eq!(db.root(&mut hasher), root);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    pub fn test_keyless_db_recovery() {
+        let executor = deterministic::Runner::default();
+        const ELEMENTS: u64 = 1000;
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
+            let root = db.root(&mut hasher);
+
+            for i in 0u64..ELEMENTS {
+                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
+                db.append(v.clone()).await.unwrap();
+            }
+
+            // Simulate a failed commit and test that we rollback to the previous empty-db root.
+            db.simulate_failure(false, false, false).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+
+            // re-apply the updates and commit them this time.
+            for i in 0u64..ELEMENTS {
+                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
+                db.append(v.clone()).await.unwrap();
+            }
+            db.commit().await.unwrap();
+            let root = db.root(&mut hasher);
+
+            // Append even more values.
+            for i in ELEMENTS..2 * ELEMENTS {
+                let v = vec![(i % 255) as u8; ((i % 17) + 13) as usize];
+                db.append(v.clone()).await.unwrap();
+            }
+
+            // Simulate a failed commit (mode 1) and test that we rollback to the previous root.
+            db.simulate_failure(false, false, false).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+
+            // Re-apply the updates and simulate different failure mode (mode 2).
+            for i in ELEMENTS..2 * ELEMENTS {
+                let v = vec![(i % 255) as u8; ((i % 17) + 13) as usize];
+                db.append(v.clone()).await.unwrap();
+            }
+            db.simulate_failure(true, false, false).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+
+            // Re-apply the updates and simulate different failure mode (mode 3).
+            for i in ELEMENTS..2 * ELEMENTS {
+                let v = vec![(i % 255) as u8; ((i % 17) + 13) as usize];
+                db.append(v.clone()).await.unwrap();
+            }
+            db.simulate_failure(true, true, false).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+
+            // Re-apply the updates and simulate different failure mode (mode 4).
+            for i in ELEMENTS..2 * ELEMENTS {
+                let v = vec![(i % 255) as u8; ((i % 17) + 13) as usize];
+                db.append(v.clone()).await.unwrap();
+            }
+            db.simulate_failure(true, false, true).await.unwrap();
+            let mut db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
+
+            // Re-apply the updates and commit them this time.
+            for i in ELEMENTS..2 * ELEMENTS {
+                let v = vec![(i % 255) as u8; ((i % 17) + 13) as usize];
+                db.append(v.clone()).await.unwrap();
+            }
+            db.commit().await.unwrap();
+            let root = db.root(&mut hasher);
+
+            // Make sure we can close/reopen and get back to the same state.
+            db.close().await.unwrap();
+            let db = open_db(context.clone()).await;
+            assert_eq!(db.size(), 2 * ELEMENTS + 2);
             assert_eq!(db.root(&mut hasher), root);
 
             db.destroy().await.unwrap();
