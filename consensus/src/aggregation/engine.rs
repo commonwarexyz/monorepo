@@ -36,7 +36,7 @@ use std::{
     num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// An entry for an index that does not yet have a threshold signature.
 enum Pending<V: Variant, D: Digest> {
@@ -828,7 +828,7 @@ impl<
 
             // If our_digest exists, delete everything from acks_group that doesn't match it
             if let Some(digest) = our_digest {
-                acks_group.retain(|ack| ack.item.digest == digest);
+                acks_group.retain(|other| other.item.digest == digest);
             }
 
             // Create a new epoch map
@@ -847,14 +847,17 @@ impl<
                     self.pending
                         .insert(index, Pending::Verified(digest, epoch_map));
 
-                    // If the digest is verified but not yet confirmed, set a rebroadcast deadline
-                    self.set_rebroadcast_deadline(index);
+                    // If we've already generated an ack and it isn't yet confirmed, mark for immediate rebroadcast
+                    self.rebroadcast_deadlines
+                        .put(index, self.context.current());
                 }
                 None => {
                     self.pending.insert(index, Pending::Unverified(epoch_map));
                 }
             }
         }
+
+        info!(self.tip, next = self.next(), "replayed journal");
     }
 
     /// Appends an activity to the journal.
