@@ -81,7 +81,7 @@ _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything wit
 
 ### Key Design Principles
 1. **The Simpler The Better**: Code should look obviously correct and contain the minimum features necessary to achieve a goal.
-2. **Test Everything**: All code should be designed for deterministic and comprehensive testing. We employ an abstract runtime (`runtime/src/deterministic`) commonly in the repository to drive tests.
+2. **Test Everything**: All code should be designed for deterministic and comprehensive testing. We employ an abstract runtime (`runtime/src/deterministic.rs`) commonly in the repository to drive tests.
 3. **Performance Sensitive**: All primitives are optimized for high throughput/low latency.
 4. **Adversarial Safety**: All primitives are designed to operate robustly in adversarial environments.
 5. **Abstract Runtime**: All code outside the `runtime` primitive must be runtime-agnostic (never import `tokio` directly outside of `runtime/`). When requiring some `runtime`, use the provided traits in `runtime/src/lib.rs`.
@@ -99,12 +99,9 @@ _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything wit
 2. Run `cargo test -p <crate-name>` for quick iteration
 3. Run `cargo clippy` before committing
 4. Use `cargo +nightly fmt` for formatting
-5. For cryptography changes, also run `cargo +nightly fmt -p commonware-cryptography`
 
 ## Deterministic Async Testing
-
-Use the deterministic runtime for reproducible async tests:
-
+Exclusively use the deterministic runtime (`runtime/src/deterministic.rs`) for reproducible async tests:
 ```rust
 #[test]
 fn test_async_behavior() {
@@ -129,6 +126,7 @@ fn test_async_behavior() {
 ```
 
 ### Simulated Network Testing
+To simulate network operations, use the simulated network (`p2p/src/simulated`).
 ```rust
 let (network, mut oracle) = Network::new(
     context.with_label("network"),
@@ -149,8 +147,7 @@ oracle.add_link(pk1, pk2, Link {
 - Always use seeds for reproducible tests
 - Label contexts for clear debugging
 - Use `context.auditor().state()` to verify determinism
-- Test with network partitions, delays, and failures
-- Set timeouts with `Runner::timed(Duration::from_secs(30))`
+- Test with network partitions, delays, and Byzantine failures
 
 ## Code Style Guide
 
@@ -160,26 +157,6 @@ oracle.add_link(pk1, pk2, Link {
 - Always use `futures` for async operations
 - Use capabilities exported by `runtime` traits for I/O operations
 - This ensures all primitives remain portable across different runtime implementations
-
-### Import Organization
-Always organize imports in this order:
-```rust
-// 1. Standard library
-use std::{collections::HashMap, sync::Arc};
-
-// 2. External crates (alphabetically)
-use bytes::Bytes;
-use futures::StreamExt;
-use thiserror::Error;
-
-// 3. Internal commonware crates
-use commonware_codec::Encode;
-use commonware_utils::Array;
-
-// 4. Local module imports
-use super::config::Config;
-use crate::Error;
-```
 
 ### Error Handling
 Use `thiserror` for all error types:
@@ -208,6 +185,8 @@ pub enum Error {
 - **Functions/methods**: `snake_case` (e.g., `verify_signature`, `from_bytes`)
 - **Constants**: `SCREAMING_SNAKE_CASE` (e.g., `MAX_MESSAGE_SIZE`)
 - **Traits**: Action-oriented names (`Signer`, `Verifier`) or `-able` suffix (`Viewable`)
+
+_Generally, we try to minimize the length of functions and variables._
 
 ### Trait Patterns
 ```rust
@@ -247,8 +226,6 @@ mod tests {
 ### Module Structure
 - Keep `mod.rs` minimal with re-exports
 - Use `cfg_if!` for platform-specific code
-- Hide internal implementation with `#[doc(hidden)]` or private modules
-- Feature flags: `#[cfg(feature = "feature-name")]`
 
 ### Performance Patterns
 - Prefer `Bytes` over `Vec<u8>` for zero-copy operations
@@ -260,4 +237,3 @@ mod tests {
 - Minimize unsafe blocks with clear `// SAFETY:` comments
 - Prefer safe abstractions over raw unsafe code
 - Enable overflow checks in all profiles (already configured)
-- Use `#[must_use]` for critical return values
