@@ -158,7 +158,7 @@ impl Write for Keyless {
         match &self {
             Keyless::Append(offset) => {
                 buf.put_u8(APPEND_CONTEXT);
-                buf.put_u32(*offset);
+                offset.write(buf);
             }
             Keyless::Commit => {
                 buf.put_u8(COMMIT_CONTEXT);
@@ -234,13 +234,11 @@ impl Read for Keyless {
             }
             COMMIT_CONTEXT => {
                 // Check that the padding is all zeroes
-                for _ in 0..u32::SIZE {
-                    if u8::read(buf)? != 0 {
-                        return Err(CodecError::Invalid(
-                            "storage::adb::Keyless",
-                            "commit padding non-zero",
-                        ));
-                    }
+                if u32::read(buf)? != 0 {
+                    return Err(CodecError::Invalid(
+                        "storage::adb::operation::Keyless",
+                        "commit padding non-zero",
+                    ));
                 }
                 Ok(Self::Commit)
             }
@@ -267,7 +265,7 @@ impl<K: Array, V: CodecFixed> Read for Fixed<K, V> {
                 for _ in 0..V::SIZE {
                     if u8::read(buf)? != 0 {
                         return Err(CodecError::Invalid(
-                            "storage::adb::Operation",
+                            "storage::adb::operation::Fixed",
                             "delete value non-zero",
                         ));
                     }
@@ -279,7 +277,7 @@ impl<K: Array, V: CodecFixed> Read for Fixed<K, V> {
                 for _ in 0..(Self::SIZE - 1 - u64::SIZE) {
                     if u8::read(buf)? != 0 {
                         return Err(CodecError::Invalid(
-                            "storage::adb::Operation",
+                            "storage::adb::operation::Fixed",
                             "commit value non-zero",
                         ));
                     }
