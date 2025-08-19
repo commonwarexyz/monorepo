@@ -2,7 +2,7 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+    varint::UInt, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
     bls12381::primitives::{group::Share, ops, poly::PartialSignature, variant::Variant},
@@ -100,6 +100,24 @@ pub struct Item<D: Digest> {
     pub index: Index,
     /// Cryptographic digest of the data being aggregated
     pub digest: D,
+}
+
+impl<D: Digest> Item<D> {
+    /// The size of the item when encoded as a fixed size.
+    const FIXED_SIZE: usize = Index::SIZE + D::SIZE;
+
+    /// Writes a fixed size representation of the item.
+    fn write_fixed(&self, writer: &mut impl BufMut) {
+        self.index.write(writer);
+        self.digest.write(writer);
+    }
+
+    /// Reads a fixed size representation of the item.
+    fn read_fixed(reader: &mut impl Buf) -> Result<Self, CodecError> {
+        let index = Index::read(reader)?;
+        let digest = D::read(reader)?;
+        Ok(Self { index, digest })
+    }
 }
 
 impl<D: Digest> Write for Item<D> {
@@ -251,7 +269,7 @@ pub struct Certificate<V: Variant, D: Digest> {
 
 impl<V: Variant, D: Digest> Write for Certificate<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.item.write(writer);
+        self.item.write_fixed(writer);
         self.signature.write(writer);
     }
 }
@@ -260,16 +278,14 @@ impl<V: Variant, D: Digest> Read for Certificate<V, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let item = Item::read(reader)?;
+        let item = Item::read_fixed(reader)?;
         let signature = V::Signature::read(reader)?;
         Ok(Self { item, signature })
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Certificate<V, D> {
-    fn encode_size(&self) -> usize {
-        self.item.encode_size() + self.signature.encode_size()
-    }
+impl<V: Variant, D: Digest> FixedSize for Certificate<V, D> {
+    const SIZE: usize = Item::<D>::FIXED_SIZE + V::Signature::SIZE;
 }
 
 impl<V: Variant, D: Digest> Certificate<V, D> {
