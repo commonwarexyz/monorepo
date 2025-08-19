@@ -1,10 +1,10 @@
-//! This utility wraps a [Sender] and [Receiver], providing lightweight sub-channels keyed by
-//! [Channel].
+//! This utility wraps a [Sender] and [Receiver], providing lightweight sub-channels keyed by the
+//! [Channel] type.
 //!
 //! Usage:
-//! - Call `Muxer::new(sender, receiver, mailbox_size)` to create the multiplexer.
-//! - Call `register(stream_id)` to obtain a `(SubSender, SubReceiver)` pair for that logical stream.
-//! - Drive `Muxer::run(self)` in a background task to demultiplex incoming frames into per-stream queues.
+//! - Call [Muxer::new] to create the multiplexer.
+//! - Call [Muxer::register] to obtain a `(SubSender, SubReceiver)` pair for that subchannel.
+//! - Drive [Muxer::run] in a background task to demux incoming messages into per-subchannel queues.
 use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{varint::UInt, ReadExt, Write};
@@ -24,7 +24,7 @@ pub enum Error {
     RecvFailed,
 }
 
-/// A multiplexer of p2p channels into sub-channels.
+/// A multiplexer of p2p channels into subchannels.
 pub struct Muxer<S: Sender, R: Receiver> {
     sender: S,
     receiver: R,
@@ -44,21 +44,21 @@ impl<S: Sender, R: Receiver> Muxer<S, R> {
         }
     }
 
-    /// Open a sub-channel for the given `stream_id`. Returns a `(SubSender, SubReceiver)` pair that
-    /// can be used to send and receive messages for that logical stream.
+    /// Open a `subchannel`. Returns a `(SubSender, SubReceiver)` pair that can be used to send and
+    /// receive messages for that subchannel.
     ///
     /// The caller must be driving [Muxer::run], or have started it using [Muxer::start], for the
     /// receiver to yield messages.
-    pub fn register(&self, stream_id: Channel) -> (SubSender<S>, SubReceiver<R::PublicKey>) {
+    pub fn register(&self, subchannel: Channel) -> (SubSender<S>, SubReceiver<R::PublicKey>) {
         let (tx, rx) = mpsc::channel(self.mailbox_size);
-        self.routes.lock().unwrap().insert(stream_id, tx);
+        self.routes.lock().unwrap().insert(subchannel, tx);
         (
             SubSender {
-                stream_id,
+                subchannel,
                 inner: self.sender.clone(),
             },
             SubReceiver {
-                stream_id,
+                subchannel,
                 receiver: rx,
                 routes: Arc::clone(&self.routes),
             },
@@ -70,39 +70,39 @@ impl<S: Sender, R: Receiver> Muxer<S, R> {
         spawner.spawn_ref()(self.run())
     }
 
-    /// Drive demultiplexing of frames into per-stream receivers.
+    /// Drive demultiplexing of messages into per-subchannel receivers.
     ///
-    /// Callers should run this in a background task for as long as the
-    /// underlying `Receiver` is expected to receive traffic.
+    /// Callers should run this in a background task for as long as the underlying `Receiver` is
+    /// expected to receive traffic.
     pub async fn run(mut self) -> Result<(), R::Error> {
         loop {
             let (pk, mut bytes) = self.receiver.recv().await?;
 
-            // Decode frame: varint(stream_id) || bytes
-            let stream_id: Channel = match UInt::read(&mut bytes) {
+            // Decode message: varint(subchannel) || bytes
+            let subchannel: Channel = match UInt::read(&mut bytes) {
                 Ok(v) => v.into(),
                 Err(_) => continue, // Drop errors silently
             };
 
-            // Forward the message to the appropriate sub-channel.
-            // Drops the message if the sub-channel is not found or the queue is full.
+            // Forward the message to the appropriate subchannel.
+            // Drops the message if the subchannel is not found or the queue is full.
             //
             // Note: We intentionally avoid cloning the Sender here to preserve the
             // bounded semantics of the channel. Cloning `futures::mpsc::Sender`
             // introduces a per-sender fairness slot that effectively increases
             // capacity when cloned per message.
-            if let Some(sender) = self.routes.lock().unwrap().get_mut(&stream_id) {
+            if let Some(sender) = self.routes.lock().unwrap().get_mut(&subchannel) {
                 let _ = sender.try_send((pk, bytes));
             }
         }
     }
 }
 
-/// Sender that frames and routes messages to the sub-channel identified by `stream_id`.
+/// Sender that routes messages to the `subchannel`.
 #[derive(Clone, Debug)]
 pub struct SubSender<S: Sender> {
-    stream_id: Channel,
     inner: S,
+    subchannel: Channel,
 }
 
 impl<S: Sender> Sender for SubSender<S> {
@@ -116,17 +116,17 @@ impl<S: Sender> Sender for SubSender<S> {
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, S::Error> {
         let mut buf = BytesMut::new();
-        UInt(self.stream_id).write(&mut buf);
+        UInt(self.subchannel).write(&mut buf);
         buf.put_slice(&payload);
         self.inner.send(recipients, buf.freeze(), priority).await
     }
 }
 
-/// Receiver that yields messages for a specific sub-channel identified by `stream_id`.
+/// Receiver that yields messages for a specific subchannel.
 #[derive(Debug)]
 pub struct SubReceiver<P: PublicKey> {
-    stream_id: Channel,
     receiver: mpsc::Receiver<Message<P>>,
+    subchannel: Channel,
     routes: Arc<Mutex<HashMap<Channel, mpsc::Sender<Message<P>>>>>,
 }
 
@@ -141,9 +141,8 @@ impl<P: PublicKey> Receiver for SubReceiver<P> {
 
 impl<P: PublicKey> Drop for SubReceiver<P> {
     fn drop(&mut self) {
-        // Best-effort cleanup to avoid stale routes when a sub-receiver is dropped.
-        let mut routes = self.routes.lock().unwrap();
-        routes.remove(&self.stream_id);
+        // Best-effort cleanup to avoid stale routes when a subreceiver is dropped.
+        self.routes.lock().unwrap().remove(&self.subchannel);
     }
 }
 
