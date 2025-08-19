@@ -299,15 +299,25 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         Ok(loc)
     }
 
-    /// Commit the current state of the db.
+    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable.
     pub async fn commit(&mut self) -> Result<(), Error> {
+        // We must sync the values journal before writing the commit operation to locations to ensure all committed
+        // locations will reference valid data in the event of a failure.
+        self.values.sync(self.current_section()).await?;
+
+        let commit_op = Operation::Commit;
         self.mmr
-            .add_batched(&mut self.hasher, &Operation::Commit.encode())
+            .add_batched(&mut self.hasher, &commit_op.encode())
             .await?;
-        self.locations.append(Operation::Commit).await?;
+        self.locations.append(commit_op).await?;
         self.size += 1;
 
-        self.sync().await
+        try_join!(
+            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
+            self.locations.sync().map_err(Error::Journal),
+        )?;
+
+        Ok(())
     }
 
     /// Return the root of the db.
@@ -361,22 +371,6 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         Ok((proof, ops))
     }
 
-    /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
-    /// parallelized if a thread pool is provided.
-    pub(super) async fn sync(&mut self) -> Result<(), Error> {
-        // Always sync the values journal first to ensure that the locations journal is always in a
-        // state where it's referencing a valid offset in the event of a crash.
-        let section = self.current_section();
-        self.values.sync(section).await?;
-
-        try_join!(
-            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
-            self.locations.sync().map_err(Error::Journal),
-        )?;
-
-        Ok(())
-    }
-
     /// Close the db. Operations that have not been committed will be lost.
     pub async fn close(mut self) -> Result<(), Error> {
         // Close the locations journal first to make sure it's synced first (see `sync` for why this
@@ -403,6 +397,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     }
 
     #[cfg(test)]
+    /// Simulate failures during commit.
     pub(super) async fn simulate_failure(
         mut self,
         sync_values: bool,
@@ -418,10 +413,15 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
                 "can't sync locations without syncing values"
             );
         }
+        let commit_op = Operation::Commit;
         if sync_mmr {
+            self.mmr
+                .add_batched(&mut self.hasher, &commit_op.encode())
+                .await?;
             self.mmr.sync(&mut self.hasher).await?;
         }
         if sync_locations {
+            self.locations.append(commit_op).await?;
             self.locations.sync().await?;
         }
 
