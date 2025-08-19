@@ -240,7 +240,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let db = Self {
             mmr,
             log,
-            log_size: oldest_retained_loc,
+            log_size: oldest_retained_loc, // Updated in build_snapshot_from_log
             inactivity_floor_loc: 0,
             oldest_retained_loc,
             metadata,
@@ -297,11 +297,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 let (section, offset, _size, op) = result.map_err(Error::Journal)?;
 
                 if current_index < self.inactivity_floor_loc {
+                    // Don't include operations before the inactivity floor.
                     current_index += 1;
                     continue;
                 }
 
                 if current_index >= mmr_leaves {
+                    // Add operations that are missing from the MMR/location map.
                     debug!(
                         section,
                         offset, "operation was missing from MMR/location map"
@@ -311,6 +313,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                     mmr_leaves += 1;
                 }
 
+                // Track the position and offset after the last commit.
                 if after_last_commit.is_none() {
                     after_last_commit = Some((current_index, offset));
                 }
@@ -333,8 +336,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                         }
                     }
                     Operation::CommitFloor(loc) => {
-                        self.inactivity_floor_loc = loc;
-
                         // Apply all uncommitted operations.
                         for (key, (old_loc, new_loc)) in uncommitted_ops.iter() {
                             if let Some(old_loc) = old_loc {
@@ -349,8 +350,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                         }
                         uncommitted_ops.clear();
 
-                        // Track the position and offset after this commit
                         after_last_commit = None;
+                        self.inactivity_floor_loc = loc;
                         self.log_size = current_index + 1;
                     }
                     _ => unreachable!(
@@ -375,7 +376,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                 .rewind_to_offset(prune_to_section, end_offset)
                 .await?;
             self.log.sync(prune_to_section).await?;
-            self.log_size = end_loc;
         }
 
         // Pop any MMR elements that are ahead of the last log commit point.
