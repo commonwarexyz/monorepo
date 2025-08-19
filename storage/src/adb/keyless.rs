@@ -85,17 +85,13 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
     mmr: Mmr<E, H>,
 
     /// A journal of all values ever appended to the db.
-    values: VJournal<E, V>,
+    values: VJournal<E, Operation<V>>,
 
     /// The total number of values appended (including those that have been pruned).  The next
     /// appended item will have this value as its location.
     size: u64,
 
     /// The number of values to put in each section of the values journal.
-    ///
-    /// Unlike the other variable-type stores, the actual number of values could be less than this
-    /// amount even if the section is "full", since we don't explicitly insert anything into the
-    /// section for commits.
     values_per_section: u64,
 
     /// A fixed-length journal that maps an appended value's location to its offset within its
@@ -103,7 +99,7 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
     ///
     /// The locations structure provides the "source of truth" for the db's pruning boundaries and
     /// overall size, should there be any discrepancies.
-    locations: FJournal<E, Operation>,
+    locations: FJournal<E, u32>,
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
     hasher: Standard<H>,
@@ -155,7 +151,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             mmr.pop((mmr_leaves - locations_size) as usize).await?;
         }
 
-        let mut values = VJournal::<E, V>::init(
+        let mut values = VJournal::<E, Operation<V>>::init(
             context.with_label("values"),
             VConfig {
                 partition: cfg.values_journal_partition,
@@ -176,12 +172,15 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let mut rewind_point = None;
         while op_index > 0 {
             op_index -= 1;
-            match locations.read(op_index).await? {
+            let offset = locations.read(op_index).await?;
+            let section = op_index / cfg.values_items_per_section.get();
+            let value = values.get(section, offset).await?.expect("no value found");
+            match value {
                 Operation::Commit => {
                     last_commit_loc = Some(op_index);
                     break;
                 }
-                Operation::Append(offset) => {
+                Operation::Append(_) => {
                     rewind_point = Some((op_index, offset));
                 }
             }
@@ -228,16 +227,17 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Get the value at location `loc` in the database. Returns None if the location is valid but
     /// does not correspond to an append.
     pub async fn get(&self, loc: u64) -> Result<Option<V>, Error> {
-        let Operation::Append(offset) = self.locations.read(loc).await? else {
-            return Ok(None);
-        };
+        let offset = self.locations.read(loc).await?;
 
         let section = loc / self.values_per_section;
         let Some(v) = self.values.get(section, offset).await? else {
             panic!("didn't find value at location {loc} and offset {offset}");
         };
+        let Operation::Append(value) = v else {
+            return Ok(None);
+        };
 
-        Ok(Some(v))
+        Ok(Some(value))
     }
 
     /// Get the number of appends + commits that have been applied to the db.
@@ -287,10 +287,12 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     pub async fn append(&mut self, value: V) -> Result<u64, Error> {
         let loc = self.size;
         let section = self.current_section();
-        let (offset, _) = self.values.append(section, value).await?;
-        self.locations.append(Operation::Append(offset)).await?;
+        let operation = Operation::Append(value);
+        let encoded_operation = operation.encode();
+        let (offset, _) = self.values.append(section, operation).await?;
+        self.locations.append(offset).await?;
         self.mmr
-            .add_batched(&mut self.hasher, &Operation::Append(offset).encode())
+            .add_batched(&mut self.hasher, &encoded_operation)
             .await?;
 
         self.size += 1;
@@ -302,24 +304,30 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        // We must sync the values journal before writing the commit operation to locations to ensure all committed
-        // locations will reference valid data in the event of a failure.
+    pub async fn commit(&mut self) -> Result<u64, Error> {
+        let loc = self.size;
+        let section = self.current_section();
+        let operation = Operation::Commit;
+
+        // We must update & sync the values journal before writing the commit operation to locations
+        // to ensure all committed locations will reference valid data in the event of a failure.
+        let encoded_operation = operation.encode();
+        let (offset, _) = self.values.append(section, operation).await?;
         self.values.sync(self.current_section()).await?;
 
-        let commit_op = Operation::Commit;
-        self.mmr
-            .add_batched(&mut self.hasher, &commit_op.encode())
-            .await?;
-        self.locations.append(commit_op).await?;
+        self.locations.append(offset).await?;
         self.size += 1;
 
+        self.mmr
+            .add_batched(&mut self.hasher, &encoded_operation)
+            .await?;
+
         try_join!(
-            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
             self.locations.sync().map_err(Error::Journal),
+            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
         )?;
 
-        Ok(())
+        Ok(loc)
     }
 
     /// Return the root of the db.
@@ -345,7 +353,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         &self,
         start_loc: u64,
         max_ops: u64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
         self.historical_proof(self.size, start_loc, max_ops).await
     }
 
@@ -355,7 +363,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         size: u64,
         start_loc: u64,
         max_ops: u64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
         let start_pos = leaf_num_to_pos(start_loc);
         let end_index = std::cmp::min(size - 1, start_loc + max_ops - 1);
         let end_pos = leaf_num_to_pos(end_index);
@@ -367,7 +375,14 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             .await?;
         let mut ops = Vec::with_capacity((end_index - start_loc + 1) as usize);
         for loc in start_loc..=end_index {
-            ops.push(self.locations.read(loc).await?);
+            let offset = self.locations.read(loc).await?;
+            let section = loc / self.values_per_section;
+            let value = self
+                .values
+                .get(section, offset)
+                .await?
+                .expect("no value found");
+            ops.push(value);
         }
 
         Ok((proof, ops))
@@ -406,24 +421,33 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         sync_mmr: bool,
         sync_locations: bool,
     ) -> Result<(), Error> {
-        if sync_values {
-            self.values.sync(self.current_section()).await?;
+        let operation = Operation::Commit;
+
+        // We must update & sync the values journal before writing the commit operation to locations
+        // to ensure all committed locations will reference valid data in the event of a failure.
+        let encoded_operation = operation.encode();
+        let offset = if sync_values {
+            let section = self.current_section();
+            let (offset, _) = self.values.append(section, operation).await?;
+            self.values.sync(section).await?;
+            offset
         } else {
             assert!(!sync_mmr, "can't sync mmr without syncing values");
             assert!(
                 !sync_locations,
                 "can't sync locations without syncing values"
             );
-        }
-        let commit_op = Operation::Commit;
+            0
+        };
+
         if sync_mmr {
             self.mmr
-                .add_batched(&mut self.hasher, &commit_op.encode())
+                .add_batched(&mut self.hasher, &encoded_operation)
                 .await?;
             self.mmr.sync(&mut self.hasher).await?;
         }
         if sync_locations {
-            self.locations.append(commit_op).await?;
+            self.locations.append(offset).await?;
             self.locations.sync().await?;
         }
 
