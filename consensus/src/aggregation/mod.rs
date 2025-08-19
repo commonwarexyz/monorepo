@@ -30,16 +30,21 @@
 //!
 //! ## Missing Signature Resolution
 //!
-//! The engine does not try to "fill gaps" when missing threshold signatures. When validators
+//! The engine does not try to "fill gaps" when threshold signatures are missing. When validators
 //! fall behind or miss signatures for certain indices, the tip may skip ahead and those
 //! signatures may never be emitted by the local engine. Before skipping ahead, we ensure that
-//! at-least-one honest validator has the threshold signature for any skipped index. This design
-//! is intentional to prioritize the creation of threshold signatures as fast as possible. By
-//! advancing the tip, honest validators can continue producing threshold signatures for new
-//! indices rather than getting stuck trying to backfill missing signatures. Validators who are
-//! online and honest can maintain consensus even when others fall behind or go offline.
-//! Backfilling missing signatures is left to other parts of the application that can implement
-//! appropriate recovery strategies.
+//! at-least-one honest validator has the threshold signature for any skipped index.
+//!
+//! Like other consensus primitives, aggregation's design prioritizes doing useful work at tip and
+//! minimal complexity over providing a comprehensive recovery mechanism. As a result, applications that need
+//! to build a complete history of all formed [types::Certificate]s must implement their own mechanism to synchronize
+//! historical results.
+//!
+//! ## Recovering Threshold Signatures
+//!
+//! In aggregation, participants never gossip recovered threshold signatures. Rather, they gossip [types::TipAck]s
+//! with partial signatures over some index and their latest tip. This approach reduces the overhead of running aggregation
+//! concurrently with a consensus mechanism and consistently results in local recovery on stable networks.
 
 pub mod types;
 
