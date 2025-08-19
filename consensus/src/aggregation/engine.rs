@@ -767,19 +767,22 @@ impl<
 
         // Update the tip to the highest index in the journal
         self.tip = tip;
+        let prune_threshold = tip.saturating_sub(self.prune_buffer);
+
         // Add certified items
         certified
             .iter()
-            .filter(|certificate| certificate.item.index >= self.tip)
+            .filter(|certificate| certificate.item.index >= prune_threshold)
             .for_each(|certificate| {
                 self.confirmed
                     .insert(certificate.item.index, certificate.clone());
             });
+
         // Add any acks that haven't resulted in a threshold signature
         acks = acks
             .into_iter()
             .filter(|ack| {
-                ack.item.index >= self.tip && !self.confirmed.contains_key(&ack.item.index)
+                ack.item.index >= prune_threshold && !self.confirmed.contains_key(&ack.item.index)
             })
             .collect::<Vec<_>>();
         acks.iter().for_each(|ack| {
