@@ -65,6 +65,27 @@ _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything wit
 6. **Always Commit Complete Code**: When implementing code and writing tests, always implement complete functionality. If there is a large task, implement the simplest possible solution that works and then incrementally improve it.
 7. **Own Core Mechanisms**: If a primitive relies heavily on some core mechanism/algorithm, we should implement it rather than relying on external crates.
 
+## Technical Documentation
+
+Extensive technical writing in `docs/blogs/` provides deep insights into design decisions and implementation details:
+
+### Core Concepts
+- **introducing-commonware.html**: Overview of the library's philosophy and goals
+- **commonware-the-anti-framework.html**: Why Commonware avoids framework patterns
+
+### Primitive Deep Dives
+- **commonware-runtime.html**: Abstract runtime design and implementation
+- **commonware-cryptography.html**: Cryptographic primitives and safety guarantees
+- **commonware-broadcast.html**: Reliable broadcast protocol implementation
+- **commonware-deployer.html**: Infrastructure deployment automation
+
+### Algorithms & Data Structures
+- **adb-current.html** / **adb-any.html**: Authenticated data broadcast protocols
+- **mmr.html**: Merkle Mountain Range implementation
+- **minimmit.html**: Minimal commit protocol
+- **buffered-signatures.html**: Efficient signature aggregation
+- **threshold-simplex.html**: Threshold consensus mechanism
+
 ## CI/CD Pipeline
 
 The repository uses GitHub Actions with three main workflows: **Fast** (every push/PR), **Slow** (main/PR, cancellable), and **Coverage** (main/PR).
