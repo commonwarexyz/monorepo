@@ -228,13 +228,10 @@ impl Read for Keyless {
         at_least(buf, Self::SIZE)?;
 
         match u8::read(buf)? {
-            APPEND_CONTEXT => {
-                let offset = buf.get_u32();
-                Ok(Self::Append(offset))
-            }
+            APPEND_CONTEXT => Ok(Self::Append(buf.get_u32())),
             COMMIT_CONTEXT => {
                 // Check that the padding is all zeroes
-                if u32::read(buf)? != 0 {
+                if buf.get_u32() != 0 {
                     return Err(CodecError::Invalid(
                         "storage::adb::operation::Keyless",
                         "commit padding non-zero",
