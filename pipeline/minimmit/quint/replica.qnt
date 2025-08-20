@@ -413,7 +413,7 @@ module replica {
             replica_state' = replica_state.set(id, {
                 ...self,
                 nullified: true,
-                ghost_sent_votes: self.ghost_sent_votes.setBy(view, old => old.append(DUMMY_BLOCK_HASH))
+                ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(DUMMY_BLOCK_HASH))
             }),
 
             store_vote' = store_vote,
@@ -563,10 +563,6 @@ module replica {
         val certificates = store_certificate.get(id)
 
         all {
-            // TODO
-            // verify view
-            // cert.view >= self.view, // not in spec
-            // verify certificate: Certificate of ≥ M notarize(c, v) or nullify(v) messages
             or {
                 cert.kind == FinalizationKind and cert.signatures.size() >= L and not(finalized_cert_exist(cert.view, certificates)),
                 cert.kind == NotarizationKind and cert.signatures.size() >= M and not(is_view_notarized(cert.view, certificates)),
@@ -591,7 +587,7 @@ module replica {
             store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
             sent_certificate' = sent_certificate.union(Set(cert)),
             val new_self = enter_new_view(self, cert.view, cert.kind == NotarizationKind, cert.kind == FinalizationKind )
-            if (cert.kind == NotarizationKind and not(self.has_notarized()) and not(self.nullified)) all {
+            if (cert.view == self.view and cert.kind == NotarizationKind and not(self.has_notarized()) and not(self.nullified)) all {
                 sent_vote' = sent_vote.union(Set(notarize(cert.view, id, cert.block_hash))),
                 replica_state' = replica_state.set(id, {
                     ...new_self,
