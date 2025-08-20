@@ -36,7 +36,7 @@ use std::{
     num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// An entry for an index that does not yet have a threshold signature.
 enum Pending<V: Variant, D: Digest> {
@@ -444,7 +444,8 @@ impl<
         let ack = self.sign_ack(index, digest).await?;
 
         // Set the rebroadcast deadline for this index
-        self.set_rebroadcast_deadline(index);
+        self.rebroadcast_deadlines
+            .put(index, self.context.current() + self.rebroadcast_timeout);
 
         // Handle ack as if it was received over the network
         let _ = self.handle_ack(&ack).await;
@@ -567,7 +568,8 @@ impl<
         };
 
         // Reinsert the index with a new deadline
-        self.set_rebroadcast_deadline(index);
+        self.rebroadcast_deadlines
+            .put(index, self.context.current() + self.rebroadcast_timeout);
 
         // Broadcast the ack to all peers
         self.broadcast(ack, sender).await
@@ -664,12 +666,6 @@ impl<
                 timer,
             }
         });
-    }
-
-    // Sets the rebroadcast deadline for the given `index`.
-    fn set_rebroadcast_deadline(&mut self, index: Index) {
-        self.rebroadcast_deadlines
-            .put(index, self.context.current() + self.rebroadcast_timeout);
     }
 
     /// Signs an ack for the given index, and digest. Stores the ack in the journal and returns it.
@@ -828,7 +824,7 @@ impl<
 
             // If our_digest exists, delete everything from acks_group that doesn't match it
             if let Some(digest) = our_digest {
-                acks_group.retain(|ack| ack.item.digest == digest);
+                acks_group.retain(|other| other.item.digest == digest);
             }
 
             // Create a new epoch map
@@ -847,14 +843,17 @@ impl<
                     self.pending
                         .insert(index, Pending::Verified(digest, epoch_map));
 
-                    // If the digest is verified but not yet confirmed, set a rebroadcast deadline
-                    self.set_rebroadcast_deadline(index);
+                    // If we've already generated an ack and it isn't yet confirmed, mark for immediate rebroadcast
+                    self.rebroadcast_deadlines
+                        .put(index, self.context.current());
                 }
                 None => {
                     self.pending.insert(index, Pending::Unverified(epoch_map));
                 }
             }
         }
+
+        info!(self.tip, next = self.next(), "replayed journal");
     }
 
     /// Appends an activity to the journal.
