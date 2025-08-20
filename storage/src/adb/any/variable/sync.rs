@@ -58,13 +58,17 @@ where
         )
         .await?;
 
-        Journal::new(
+        let mut journal = Journal::new(
             journal,
             config.log_items_per_section,
             lower_bound,
             upper_bound,
         )
-        .await
+        .await?;
+
+        journal.prune_first_section(lower_bound).await?;
+
+        Ok(journal)
     }
 
     async fn from_sync_result(
@@ -180,16 +184,18 @@ where
         upper_bound: u64,
     ) -> Result<Self::Journal, Self::Error> {
         let size = journal.size().await.map_err(adb::Error::from)?;
-        let log_items_per_section = config.log_items_per_section.get();
         if size <= lower_bound {
-            journal.prune_first_section(lower_bound).await?;
-            let inner = journal.into_inner();
-            inner.close().await.map_err(adb::Error::from)?;
+            journal
+                .into_inner()
+                .close()
+                .await
+                .map_err(adb::Error::from)?;
             return Self::create_journal(context, config, lower_bound, upper_bound)
                 .await
                 .map_err(adb::Error::from);
         }
 
+        let log_items_per_section = config.log_items_per_section.get();
         let lower_section = lower_bound / log_items_per_section;
         let upper_section = upper_bound / log_items_per_section;
 
