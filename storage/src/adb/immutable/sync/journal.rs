@@ -32,7 +32,7 @@ where
     K: Array,
     V: Codec,
 {
-    /// Create a new sync-compatible [ImmutableJournal].
+    /// Create a new sync-compatible [Journal].
     ///
     /// Arguments:
     /// - `inner`: The wrapped [variable::Journal], whose logical last operation location is `size - 1`.
