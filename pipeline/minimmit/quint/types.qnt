@@ -35,7 +35,7 @@ module types {
     // Get the "hash" of a string
     pure def hash(b: Block): BlockHash = b
 
-    /// Vote for a block at height h
+    // Vote for a block at height h
     type Vote = {
         view: ViewNumber,
         block_hash: BlockHash,
@@ -69,7 +69,7 @@ module types {
         ghost_sender: Signature
     }
 
-    /// Leader-proposal message ⟨propose,h,b_0,…,b_h⟩
+    // Leader-proposal message ⟨propose,h,b_0,…,b_h⟩
     type Proposal = {
         // proposed block
         block: Block,
@@ -83,11 +83,7 @@ module types {
         sig: Signature
     }
 
-
-    type Proof =
-        Empty | Nullification(Certificate) | Notarization(Certificate) | Finalization(Certificate)
-
-    /// Local state kept by each replica
+    // Local state kept by each replica
     type ReplicaState = {
         // Current height (iteration), initially 0
         view: ViewNumber,
