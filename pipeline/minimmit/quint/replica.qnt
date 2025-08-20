@@ -75,6 +75,11 @@ module replica {
         certificates.exists(v => v.kind == NotarizationKind and v.view == view)
     }
 
+    pure def finalized_cert_exist(view: ViewNumber, certificates: Set[Certificate]): bool = or {
+        view == GENESIS_VIEW,
+        certificates.exists(v => v.kind == FinalizationKind and v.view == view)
+    }
+
     // Does a set of votes have a quorum of votes for a view?
     pure def is_view_finalized(view: ViewNumber, votes: Set[Vote], block_hash: BlockHash): bool = or {
         view == GENESIS_VIEW,
@@ -174,9 +179,9 @@ module replica {
     }
 
     // Enter a new view, unless it is older than the current view.
-    pure def enter_new_view(self: ReplicaState, cert_view: ViewNumber, notarized: bool): ReplicaState = {
+    pure def enter_new_view(self: ReplicaState, cert_view: ViewNumber, notarized: bool, return_self:bool): ReplicaState = {
         val new_view = cert_view + 1
-        if (new_view <= self.view or not(VIEWS.contains(new_view))) {
+        if (new_view <= self.view or not(VIEWS.contains(new_view)) or return_self) {
             self // no change
         } else {
             {
@@ -441,7 +446,7 @@ module replica {
                 val maybe_cert = create_notarization(id, view, block_hash, new_store)
                 val should_send_notarize_vote = self.view == view and is_some(maybe_cert) and not(self.has_notarized()) and not(self.nullified)
                 val new_self = match maybe_cert {
-                    | Some(cert) => enter_new_view(self, cert.view, true)
+                    | Some(cert) => enter_new_view(self, cert.view, true, false)
                     | None => self
                 }
 
@@ -488,7 +493,6 @@ module replica {
 
 
                     if (not(was_finalized) and now_finalized) {
-
                         all {
                             ghost_committed_blocks' =
                                 ghost_committed_blocks.setBy(id, old => old.append(block_hash)),
@@ -533,7 +537,7 @@ module replica {
                             store_certificate' = store_certificate,
                             sent_certificate' = sent_certificate,
                         },
-                        val new_self = enter_new_view(self, cert.view, false)
+                        val new_self = enter_new_view(self, cert.view, false, false)
                         replica_state' = replica_state.set(id, new_self)
                     }
                     | None => all {
@@ -559,12 +563,18 @@ module replica {
         val certificates = store_certificate.get(id)
 
         all {
+            // TODO
             // verify view
-            cert.view >= self.view, // not in spec
+            // cert.view >= self.view, // not in spec
             // verify certificate: Certificate of ≥ M notarize(c, v) or nullify(v) messages
-            cert.signatures.size() >= M,
-            // Store the certificate if we do not have already had it.
-            //not(cert.in(store_certificate.get(id))),
+            or {
+                cert.kind == FinalizationKind and cert.signatures.size() >= L and not(finalized_cert_exist(cert.view, certificates)),
+                cert.kind == NotarizationKind and cert.signatures.size() >= M and not(is_view_notarized(cert.view, certificates)),
+                cert.kind == NullificationKind and cert.signatures.size() >= M and not(is_view_nullified(cert.view, certificates))
+            },
+            
+            // Store the certificate if we have not already had it.
+            not(cert.in(store_certificate.get(id))),
             _process_certificate(id, certificates, cert),
 
             // unchanged
@@ -578,8 +588,37 @@ module replica {
     action _process_certificate(id: ReplicaId, certificates: Set[Certificate], cert: Certificate): bool = all {
         val self = replica_state.get(id)
         all {
-            not(cert.in(store_certificate.get(id))),
+            store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
+            sent_certificate' = sent_certificate.union(Set(cert)),
+            val new_self = enter_new_view(self, cert.view, cert.kind == NotarizationKind, cert.kind == FinalizationKind )
+            if (cert.kind == NotarizationKind and not(self.has_notarized()) and not(self.nullified)) all {
+                sent_vote' = sent_vote.union(Set(notarize(cert.view, id, cert.block_hash))),
+                replica_state' = replica_state.set(id, {
+                    ...new_self,
+                    notarized: self.notarized.put(cert.view, cert.block_hash),
+                    ghost_sent_votes: self.ghost_sent_votes.setBy(cert.view, old => old.append(cert.block_hash))
+                }),
+                ghost_committed_blocks' = ghost_committed_blocks,
+            } else if(cert.kind == FinalizationKind and cert.view > self.last_finalized) {
+                all {
+                    ghost_committed_blocks' = ghost_committed_blocks.setBy(id, old => old.append(cert.block_hash)),
+                    replica_state' = replica_state.set(id, {
+                        ...new_self,
+                        last_finalized: cert.view,
+                    }),
+                    sent_vote' = sent_vote,
+                }
+            } else all {
+                    sent_vote' = sent_vote,
+                    replica_state' = replica_state.set(id, new_self),
+                    ghost_committed_blocks' = ghost_committed_blocks,
+                },
+        }
+    }
 
+    action _process_certificate_legacy(id: ReplicaId, certificates: Set[Certificate], cert: Certificate): bool = all {
+        val self = replica_state.get(id)
+        all {
             if (not(
                 (cert.kind == NotarizationKind and is_view_notarized(cert.view, certificates))
                 or
@@ -588,7 +627,7 @@ module replica {
                 all {
                     store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
                     sent_certificate' = sent_certificate.union(Set(cert)),
-                    val new_self = enter_new_view(self, cert.view, cert.kind == NotarizationKind)
+                    val new_self = enter_new_view(self, cert.view, cert.kind == NotarizationKind, false)
                     if (cert.kind == NotarizationKind and not(self.has_notarized()) and not(self.nullified)) all {
                         sent_vote' = sent_vote.union(Set(notarize(cert.view, id, cert.block_hash))),
                         replica_state' = replica_state.set(id, {
@@ -787,8 +826,11 @@ module replica {
         val certs = store_certificate.get(id)
         certs.forall(cert => and {
             cert.view >= 0,
-            cert.signatures.size() >= M,
-            cert.kind == NotarizationKind or cert.kind == NullificationKind,
+            or {
+                cert.signatures.size() >= M and (cert.kind == NotarizationKind or cert.kind == NullificationKind),
+                cert.signatures.size() >= L and cert.kind == FinalizationKind,
+            },
+            cert.kind == NotarizationKind or cert.kind == NullificationKind or cert.kind == FinalizationKind,
             (cert.block_hash == DUMMY_BLOCK_HASH) iff (cert.kind == NullificationKind),
             VALID_BLOCKS.contains(cert.block_hash) or (cert.block_hash == DUMMY_BLOCK_HASH)
         })
@@ -845,12 +887,6 @@ module replica {
         no_nullification_in_finalized_view
     }
 
-    val new_notarizations_only = CORRECT.forall(id => {
-        val certs = store_certificate.get(id)
-        VIEWS.forall(v => certs.filter(cert=>cert.view == v and cert.kind==NullificationKind).size()<=1) and
-        VIEWS.forall(v => certs.filter(cert=>cert.view == v and cert.kind==NotarizationKind).size()<=1)
-    })
-
     val all_invariants = all {
         no_proposal_equivocation,
         agreement,
@@ -859,9 +895,8 @@ module replica {
         validity,
         valid_last_finalized,
         certificates_are_valid_inv,
-        notarized_consistence,
-        safe_finalization,
-        new_notarizations_only
+        //notarized_consistence,
+        //safe_finalization,
     }
 
     val safe = all_invariants

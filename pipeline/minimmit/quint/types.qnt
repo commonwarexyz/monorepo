@@ -30,6 +30,7 @@ module types {
 
     pure val NotarizationKind = "NOTARIZATION_KIND"
     pure val NullificationKind = "NULLIFICATION_KIND"
+    pure val FinalizationKind = "FINALIZATION_KIND"
 
     // Get the "hash" of a string
     pure def hash(b: Block): BlockHash = b
@@ -84,7 +85,7 @@ module types {
 
 
     type Proof =
-        Empty | Nullification(Certificate) | Notarization(Certificate)
+        Empty | Nullification(Certificate) | Notarization(Certificate) | Finalization(Certificate)
 
     /// Local state kept by each replica
     type ReplicaState = {
