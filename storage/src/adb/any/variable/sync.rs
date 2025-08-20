@@ -522,10 +522,7 @@ where
     /// Remove items before the `lower_bound` location from the lower section.
     /// This rebuilds the section by copying only operations >= lower_bound to a new section.
     /// Assumes each section contains `items_per_section` items.
-    async fn prune_first_section(
-        self: &mut Self,
-        lower_bound: u64,
-    ) -> Result<(), crate::journal::Error> {
+    async fn prune_first_section(&mut self, lower_bound: u64) -> Result<(), crate::journal::Error> {
         let items_per_section = self.items_per_section.get();
 
         // Find which section contains the lower_bound item
