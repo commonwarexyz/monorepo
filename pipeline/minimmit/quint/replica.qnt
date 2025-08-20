@@ -895,8 +895,8 @@ module replica {
         validity,
         valid_last_finalized,
         certificates_are_valid_inv,
-        //notarized_consistence,
-        //safe_finalization,
+        notarized_consistence,
+        safe_finalization,
     }
 
     val safe = all_invariants
