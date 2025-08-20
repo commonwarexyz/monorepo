@@ -67,9 +67,7 @@ impl<S: Sender, R: Receiver> Muxer<S, R> {
 
         // Create a new channel to forward messages for the subchannel.
         let (tx, rx) = mpsc::channel(self.mailbox_size);
-        if self.routes.lock().unwrap().insert(subchannel, tx).is_some() {
-            panic!("duplicate subchannel registration: {subchannel}");
-        }
+        assert!(self.routes.lock().unwrap().insert(subchannel, tx).is_none());
 
         // Return the subchannel sender and receiver.
         (
@@ -189,59 +187,123 @@ impl<P: PublicKey> Drop for SubReceiver<P> {
 mod tests {
     use super::*;
     use crate::{
-        simulated::{Config as SimConfig, Link, Network},
+        simulated::{Config as SimConfig, Link, Network, Oracle},
         Recipients,
     };
     use bytes::Bytes;
     use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt, Signer};
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use std::time::Duration;
+
+    type Pk = commonware_cryptography::ed25519::PublicKey;
 
     const LINK: Link = Link {
         latency: 0.0,
         jitter: 0.0,
         success_rate: 1.0,
     };
+    const CAPACITY: usize = 5usize;
+
+    /// Start the network and return the oracle.
+    fn start_network<P: PublicKey>(context: deterministic::Context) -> Oracle<P> {
+        let (network, oracle) = Network::new(
+            context.with_label("network"),
+            SimConfig {
+                max_size: 1024 * 1024,
+            },
+        );
+        network.start();
+        oracle
+    }
+
+    /// Create a public key from a seed.
+    fn pk(seed: u64) -> Pk {
+        PrivateKey::from_seed(seed).public_key()
+    }
+
+    /// Link two peers bidirectionally.
+    async fn link_bidirectional(oracle: &mut Oracle<Pk>, a: Pk, b: Pk) {
+        oracle.add_link(a.clone(), b.clone(), LINK).await.unwrap();
+        oracle.add_link(b, a, LINK).await.unwrap();
+    }
+
+    /// Create a peer and register it with the oracle.
+    async fn create_peer(
+        oracle: &mut Oracle<Pk>,
+        seed: u64,
+    ) -> (
+        Pk,
+        Muxer<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
+    ) {
+        let pubkey = pk(seed);
+        let (sender, receiver) = oracle.register(pubkey.clone(), 0).await.unwrap();
+        (pubkey, Muxer::new(sender, receiver, CAPACITY))
+    }
+
+    /// Test-only: open only a sender for a subchannel without registering a route.
+    fn open_tx<S: Sender, R: Receiver>(mux: &Muxer<S, R>, subchannel: Channel) -> SubSender<S> {
+        SubSender {
+            subchannel,
+            inner: mux.sender.clone(),
+        }
+    }
+
+    /// Test-only: open only a receiver for a subchannel (registers the route).
+    fn open_rx<S: Sender, R: Receiver>(
+        mux: &Muxer<S, R>,
+        subchannel: Channel,
+    ) -> SubReceiver<R::PublicKey> {
+        let (_tx, rx) = mux.register(subchannel);
+        rx
+    }
+
+    /// Send a burst of messages to a list of senders.
+    async fn send_burst<S: Sender>(txs: &mut [SubSender<S>], count: usize) {
+        for i in 0..count {
+            let payload = Bytes::from(vec![i as u8]);
+            for tx in txs.iter_mut() {
+                let _ = tx
+                    .send(Recipients::All, payload.clone(), false)
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    /// Wait for `n` messages to be received on the receiver.
+    async fn expect_n_messages<P: PublicKey>(
+        rx: &mut SubReceiver<P>,
+        n: usize,
+        context: &deterministic::Context,
+    ) {
+        let mut count = 0;
+        loop {
+            select! {
+                res = rx.recv() => {
+                    res.expect("should have received message");
+                    count += 1;
+                },
+                _ = context.sleep(Duration::from_millis(100)) => { break; },
+            }
+        }
+        assert_eq!(n, count);
+    }
 
     #[test]
     fn test_basic_routing() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Create simulated network with two peers
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                SimConfig {
-                    max_size: 1024 * 1024,
-                },
-            );
-            network.start();
+            let mut oracle = start_network(context.clone());
 
-            let pk1 = PrivateKey::from_seed(0).public_key();
-            let pk2 = PrivateKey::from_seed(1).public_key();
-            let (sender1, receiver1) = oracle.register(pk1.clone(), 0).await.unwrap();
-            let (sender2, receiver2) = oracle.register(pk2.clone(), 0).await.unwrap();
+            let (pk1, mux1) = create_peer(&mut oracle, 0).await;
+            let (pk2, mux2) = create_peer(&mut oracle, 1).await;
+            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
-            // Fully link peers
-            oracle
-                .add_link(pk1.clone(), pk2.clone(), LINK)
-                .await
-                .unwrap();
-            oracle
-                .add_link(pk2.clone(), pk1.clone(), LINK)
-                .await
-                .unwrap();
+            let mut sub_rx1 = open_rx(&mux1, 7);
+            mux1.start(context.clone());
 
-            // Start demuxer on peer1
-            let mux1 = Muxer::new(sender1, receiver1, 16);
-            let (_sub_tx1, mut sub_rx1) = mux1.register(7);
-            context.spawn(|_| async move {
-                let _ = mux1.run().await;
-            });
-
-            // Create a sender for the same stream on peer2
-            let mux2 = Muxer::new(sender2, receiver2, 16);
-            let (mut sub_tx2, _sub_rx2) = mux2.register(7);
+            let mut sub_tx2 = open_tx(&mux2, 7);
 
             // Send and receive
             let payload = Bytes::from_static(b"hello");
@@ -259,38 +321,18 @@ mod tests {
     fn test_multiple_routes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                SimConfig {
-                    max_size: 1024 * 1024,
-                },
-            );
-            network.start();
+            let mut oracle = start_network(context.clone());
 
-            let pk1 = PrivateKey::from_seed(0).public_key();
-            let pk2 = PrivateKey::from_seed(1).public_key();
-            let (sender1, receiver1) = oracle.register(pk1.clone(), 0).await.unwrap();
-            let (sender2, receiver2) = oracle.register(pk2.clone(), 0).await.unwrap();
+            let (pk1, mux1) = create_peer(&mut oracle, 0).await;
+            let (pk2, mux2) = create_peer(&mut oracle, 1).await;
+            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
-            oracle
-                .add_link(pk1.clone(), pk2.clone(), LINK)
-                .await
-                .unwrap();
-            oracle
-                .add_link(pk2.clone(), pk1.clone(), LINK)
-                .await
-                .unwrap();
+            let mut rx_a = open_rx(&mux1, 10);
+            let mut rx_b = open_rx(&mux1, 20);
+            mux1.start(context.clone());
 
-            let mux1 = Muxer::new(sender1, receiver1, 16);
-            let (_rx_a_tx, mut rx_a) = mux1.register(10);
-            let (_rx_b_tx, mut rx_b) = mux1.register(20);
-            context.clone().spawn(|_| async move {
-                let _ = mux1.run().await;
-            });
-
-            let mux2 = Muxer::new(sender2, receiver2, 16);
-            let (mut tx2_a, _rx2_a) = mux2.register(10);
-            let (mut tx2_b, _rx2_b) = mux2.register(20);
+            let mut tx2_a = open_tx(&mux2, 10);
+            let mut tx2_b = open_tx(&mux2, 20);
 
             let payload_a = Bytes::from_static(b"A");
             let payload_b = Bytes::from_static(b"B");
@@ -317,110 +359,114 @@ mod tests {
     fn test_mailbox_capacity_blocks() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                SimConfig {
-                    max_size: 1024 * 1024,
-                },
-            );
-            network.start();
+            let mut oracle = start_network(context.clone());
 
-            // Test parameters.
-            const CAPACITY: usize = 5usize;
-            const TOTAL: usize = 10usize;
-
-            // Create the peer who sends messages.
-            let pk1 = PrivateKey::from_seed(0).public_key();
-            let (og_tx1, og_rx1) = oracle.register(pk1.clone(), 0).await.unwrap();
-            let mux1 = Muxer::new(og_tx1, og_rx1, CAPACITY);
-
-            // Create the peer who receives messages.
-            let pk2 = PrivateKey::from_seed(1).public_key();
-            let (og_tx2, og_rx2) = oracle.register(pk2.clone(), 0).await.unwrap();
-            let mux2 = Muxer::new(og_tx2, og_rx2, CAPACITY);
-
-            oracle
-                .add_link(pk1.clone(), pk2.clone(), LINK)
-                .await
-                .unwrap();
-            oracle
-                .add_link(pk2.clone(), pk1.clone(), LINK)
-                .await
-                .unwrap();
+            let (pk1, mux1) = create_peer(&mut oracle, 0).await;
+            let (pk2, mux2) = create_peer(&mut oracle, 1).await;
+            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
             // Register the subchannels.
-            let (mut tx1, _rx1) = mux1.register(99);
-            let (mut tx2, _rx2) = mux1.register(100);
-            let (_tx1, mut rx1) = mux2.register(99);
-            let (_tx2, mut rx2) = mux2.register(100);
+            let tx1 = open_tx(&mux1, 99);
+            let tx2 = open_tx(&mux1, 100);
+            let mut rx1 = open_rx(&mux2, 99);
+            let mut rx2 = open_rx(&mux2, 100);
 
             // Send 10 messages to each subchannel from pk1 to pk2.
-            for i in 0..TOTAL {
-                let payload = Bytes::from(vec![i as u8]);
-                let _ = tx1
-                    .send(Recipients::All, payload.clone(), false)
-                    .await
-                    .unwrap();
-                let _ = tx2.send(Recipients::All, payload, false).await.unwrap();
-            }
+            send_burst(&mut [tx1, tx2], CAPACITY * 2).await;
 
             // Give the demuxers a moment to process messages.
             mux1.start(context.clone());
             mux2.start(context.clone());
             context.sleep(Duration::from_millis(100)).await;
 
-            // Count the number of messages received from each subchannel.
-            let mut count1 = 0usize;
-            let mut count2 = 0usize;
-
             // Try receiving all messages from the second subchannel.
-            loop {
-                select! {
-                    res = rx2.recv() => {
-                        match res {
-                            Ok(_) => count2 += 1,
-                            Err(_) => break,
-                        }
-                    },
-                    _ = context.sleep(Duration::from_millis(100)) => { break; },
-                }
-            }
-
-            // It should have received the buffered messages, but the sender is blocked.
-            assert_eq!(count2, CAPACITY);
+            expect_n_messages(&mut rx2, CAPACITY, &context).await;
 
             // Try receiving from the first subchannel.
-            loop {
-                select! {
-                    res = rx1.recv() => {
-                        match res {
-                            Ok(_) => count1 += 1,
-                            Err(_) => break,
-                        }
-                    },
-                    _ = context.sleep(Duration::from_millis(100)) => { break; },
-                }
-            }
+            expect_n_messages(&mut rx1, CAPACITY * 2, &context).await;
 
-            // It should have received all buffered messages, been unblocked, and received the
-            // next messages.
-            assert_eq!(count1, CAPACITY * 2);
+            // The second subchannel should be unblocked and receive the rest of the messages.
+            expect_n_messages(&mut rx2, CAPACITY, &context).await;
+        });
+    }
 
-            // The second subchannel should be unblocked.
-            loop {
-                select! {
-                    res = rx2.recv() => {
-                        match res {
-                            Ok(_) => count2 += 1,
-                            Err(_) => break,
-                        }
-                    },
-                    _ = context.sleep(Duration::from_millis(100)) => { break; },
-                }
-            }
+    #[test]
+    fn test_drop_a_full_subchannel() {
+        // Drops the subchannel receiver while the sender is blocked.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut oracle = start_network(context.clone());
 
-            // It should have received all messages.
-            assert_eq!(count2, TOTAL);
+            let (pk1, mux1) = create_peer(&mut oracle, 0).await;
+            let (pk2, mux2) = create_peer(&mut oracle, 1).await;
+            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+
+            // Register the subchannels.
+            let tx1 = open_tx(&mux1, 99);
+            let tx2 = open_tx(&mux1, 100);
+            let rx1 = open_rx(&mux2, 99);
+            let mut rx2 = open_rx(&mux2, 100);
+
+            // Send 10 messages to each subchannel from pk1 to pk2.
+            send_burst(&mut [tx1, tx2], CAPACITY * 2).await;
+
+            // Give the demuxers a moment to process messages.
+            mux1.start(context.clone());
+            mux2.start(context.clone());
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Try receiving all messages from the second subchannel.
+            expect_n_messages(&mut rx2, CAPACITY, &context).await;
+
+            // Drop the first subchannel, erroring the sender and dropping it.
+            drop(rx1);
+
+            // The second subchannel should be unblocked and receive the rest of the messages.
+            expect_n_messages(&mut rx2, CAPACITY, &context).await;
+        });
+    }
+
+    #[test]
+    fn test_drop_messages_for_unregistered_subchannel() {
+        // Messages are dropped if the subchannel they are for is not registered.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut oracle = start_network(context.clone());
+
+            let (pk1, mux1) = create_peer(&mut oracle, 0).await;
+            let (pk2, mux2) = create_peer(&mut oracle, 1).await;
+            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+
+            // Register the subchannels.
+            let tx1 = open_tx(&mux1, 1);
+            let tx2 = open_tx(&mux1, 2);
+            // Do not register the first subchannel on the second peer.
+            let mut rx2 = open_rx(&mux2, 2);
+
+            // Send 10 messages to each subchannel from pk1 to pk2.
+            send_burst(&mut [tx1, tx2], CAPACITY * 2).await;
+
+            // Give the demuxers a moment to process messages.
+            mux1.start(context.clone());
+            mux2.start(context.clone());
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Try receiving all messages from the second subchannel.
+            expect_n_messages(&mut rx2, CAPACITY * 2, &context).await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate subchannel registration: 7")]
+    fn test_duplicate_registration() {
+        // Panics if the subchannel is already registered.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut oracle = start_network(context.clone());
+
+            let (_pk1, mux1) = create_peer(&mut oracle, 0).await;
+            let _rx1 = open_rx(&mux1, 7);
+            let _rx2 = open_rx(&mux1, 7); // panics
         });
     }
 }
