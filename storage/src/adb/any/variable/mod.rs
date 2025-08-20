@@ -748,12 +748,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // special recovery.
         let section_with_target = target_prune_loc / self.log_items_per_section;
         self.log.prune(section_with_target).await?;
-        let new_oldest_retained_loc = section_with_target * self.log_items_per_section;
-
-        // For synced databases, don't move oldest_retained_loc backwards
-        if new_oldest_retained_loc > self.oldest_retained_loc {
-            self.oldest_retained_loc = new_oldest_retained_loc;
-        }
+        self.oldest_retained_loc = section_with_target * self.log_items_per_section;
 
         // Prune the MMR & locations map up to the oldest retained item in the log after pruning.
         self.locations.prune(self.oldest_retained_loc).await?;
