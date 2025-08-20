@@ -469,7 +469,6 @@ module tests {
                 assert(replica_state.get("n3").notarized.get(0)=="val_b0"),
                 unchanged_all
             })
-
             
             .expect(all_invariants)
 
@@ -1111,6 +1110,99 @@ module tests {
         .then(replica_receives_nullify_vote("n5", 0, "n4"))
         .then(replica_receives_nullify_vote("n5", 0, "n5"))
 
+        .then(all {
+            assert(replica_state.get("n0").view == 0),
+            assert(replica_state.get("n1").view == 1),
+            assert(replica_state.get("n2").view == 1),
+            assert(replica_state.get("n3").view == 1),
+            assert(replica_state.get("n4").view == 1),
+            assert(replica_state.get("n5").view == 1),
+            unchanged_all,
+        })
+        .expect(all_invariants)
+        .then(all {
+            assert(ghost_committed_blocks.get("n0") == []),
+            assert(ghost_committed_blocks.get("n1") == []),
+            assert(ghost_committed_blocks.get("n2") == []),
+            assert(ghost_committed_blocks.get("n3") == []),
+            assert(ghost_committed_blocks.get("n4") == []),
+            assert(ghost_committed_blocks.get("n5") == []),
+            unchanged_all,
+        })
+    }
+
+    run nullificationTest = {
+        // ----- first block (view 1) -----
+        val proposal1 = {
+            block: "val_b0",
+            block_parent: GENESIS_BLOCK,
+            view: 0,
+            view_parent: GENESIS_VIEW,
+            sig: sig_of("n0")
+        }
+
+        val nullification_n1n2n3 = {
+            view: 0,
+            kind: NullificationKind,
+            block_hash: DUMMY_BLOCK_HASH,
+            signatures: Set("n1", "n2", "n3"),
+            ghost_sender: sig_of("n1"),
+        }
+
+        val nullification_n2n3n4 = {
+            view: 0,
+            kind: NullificationKind,
+            block_hash: DUMMY_BLOCK_HASH,
+            signatures: Set("n4", "n2", "n3"),
+            ghost_sender: sig_of("n2"),
+        }
+
+        initWithLeader(Map(0 -> "n0", 1 -> "n5", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n4"))
+        // === view 0 ===
+        .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW)) // leader n0 proposes, view 0
+        .expect(all_invariants)
+        // n0 has sent notarize vote for its proposal in proposer_step, but all other replicas do not see it
+        .then(on_timer_expired("n1"))
+        .then(on_timer_expired("n2"))
+        .then(on_timer_expired("n3"))
+        .then(on_timer_expired("n4"))
+        .then(on_timer_expired("n5"))
+        .expect(all_invariants)
+
+        .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n0"))
+
+        .then(replica_receives_nullify_vote("n1", 0, "n1"))
+        .then(replica_receives_nullify_vote("n1", 0, "n2"))
+        .then(replica_receives_nullify_vote("n1", 0, "n3"))
+        .then(replica_receives_nullify_vote("n1", 0, "n4"))
+        
+
+        .then(replica_receives_nullify_vote("n2", 0, "n1"))
+        .then(replica_receives_nullify_vote("n2", 0, "n2"))
+        .then(replica_receives_nullify_vote("n2", 0, "n3"))
+        .then(replica_receives_nullify_vote("n2", 0, "n4"))
+        
+
+        .then(replica_receives_nullify_vote("n3", 0, "n1"))
+        .then(replica_receives_nullify_vote("n3", 0, "n2"))
+        .then(replica_receives_nullify_vote("n3", 0, "n3"))
+        .then(replica_receives_nullify_vote("n3", 0, "n4"))
+
+        .then(replica_receives_nullify_vote("n4", 0, "n1"))
+        .then(replica_receives_nullify_vote("n4", 0, "n2"))
+        .then(replica_receives_nullify_vote("n4", 0, "n3"))
+        .then(replica_receives_nullify_vote("n4", 0, "n4"))
+    
+        .then(replica_receives_certificate("n5", nullification_n1n2n3))
+
+        .then(all{
+            assert(store_certificate.get("n5").size() == 1),
+            unchanged_all
+        })
+        .then(all{
+            assert(store_certificate.get("n5").size() == 1),
+            unchanged_all
+        }) 
         .then(all {
             assert(replica_state.get("n0").view == 0),
             assert(replica_state.get("n1").view == 1),
