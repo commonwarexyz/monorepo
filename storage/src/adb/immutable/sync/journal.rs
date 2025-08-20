@@ -9,7 +9,7 @@ use std::num::NonZeroU64;
 /// Namely, it provides a `size` method that returns the number of operations in the journal,
 /// and an `append` method that appends an operation to the journal. These are used by the
 /// sync engine to populate the journal with data from the target database.
-pub struct ImmutableJournal<E, K, V>
+pub struct Journal<E, K, V>
 where
     E: Storage + Metrics,
     K: Array,
@@ -26,7 +26,7 @@ where
     size: u64,
 }
 
-impl<E, K, V> ImmutableJournal<E, K, V>
+impl<E, K, V> Journal<E, K, V>
 where
     E: Storage + Metrics,
     K: Array,
@@ -56,7 +56,7 @@ where
     }
 }
 
-impl<E, K, V> sync::Journal for ImmutableJournal<E, K, V>
+impl<E, K, V> sync::Journal for Journal<E, K, V>
 where
     E: Storage + Metrics,
     K: Array,

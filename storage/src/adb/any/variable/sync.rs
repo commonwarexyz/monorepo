@@ -30,7 +30,7 @@ where
     T: Translator,
 {
     type Op = Variable<K, V>;
-    type Journal = VariableJournal<E, K, V>;
+    type Journal = Journal<E, K, V>;
     type Hasher = H;
     type Error = adb::Error;
     type Config = any::variable::Config<T, V::Cfg>;
@@ -58,7 +58,7 @@ where
         )
         .await?;
 
-        VariableJournal::new(
+        Journal::new(
             journal,
             config.log_items_per_section,
             lower_bound,
@@ -240,7 +240,7 @@ where
             .await
             .map_err(adb::Error::from)?;
 
-        VariableJournal::new(
+        Journal::new(
             variable_journal,
             config.log_items_per_section,
             lower_bound,
@@ -464,7 +464,7 @@ async fn compute_offset<E: Storage + Metrics, V: Codec>(
 /// Namely, it provides a `size` method that returns the number of operations in the journal,
 /// and an `append` method that appends an operation to the journal. These are used by the
 /// sync engine to populate the journal with data from the target database.
-pub struct VariableJournal<E, K, V>
+pub struct Journal<E, K, V>
 where
     E: Storage + Metrics,
     K: Array,
@@ -481,13 +481,13 @@ where
     size: u64,
 }
 
-impl<E, K, V> VariableJournal<E, K, V>
+impl<E, K, V> Journal<E, K, V>
 where
     E: Storage + Metrics,
     K: Array,
     V: Codec,
 {
-    /// Create a new sync-compatible [VariableJournal].
+    /// Create a new sync-compatible [Journal].
     ///
     /// Arguments:
     /// - `inner`: The wrapped [VJournal], whose logical last operation location is `size - 1`.
@@ -513,7 +513,7 @@ where
     }
 }
 
-impl<E, K, V> VariableJournal<E, K, V>
+impl<E, K, V> Journal<E, K, V>
 where
     E: Storage + Metrics,
     K: Array,
@@ -627,7 +627,7 @@ where
     }
 }
 
-impl<E, K, V> sync::Journal for VariableJournal<E, K, V>
+impl<E, K, V> sync::Journal for Journal<E, K, V>
 where
     E: Storage + Metrics,
     K: Array,
