@@ -77,7 +77,11 @@ impl<S: Sender, R: Receiver> Muxer<S, R> {
                 subchannel,
                 inner: self.sender.clone(),
             },
-            SubReceiver { receiver: rx },
+            SubReceiver {
+                receiver: rx,
+                subchannel,
+                routes: self.routes.clone(),
+            },
         )
     }
 
@@ -98,7 +102,7 @@ impl<S: Sender, R: Receiver> Muxer<S, R> {
             let subchannel: Channel = match UInt::read(&mut bytes) {
                 Ok(v) => v.into(),
                 Err(_) => {
-                    debug!(?pk, "no subchannel");
+                    debug!(?pk, "invalid message: missing subchannel");
                     continue;
                 }
             };
@@ -159,6 +163,8 @@ impl<S: Sender> Sender for SubSender<S> {
 #[derive(Debug)]
 pub struct SubReceiver<P: PublicKey> {
     receiver: mpsc::Receiver<Message<P>>,
+    subchannel: Channel,
+    routes: Routes<P>,
 }
 
 impl<P: PublicKey> Receiver for SubReceiver<P> {
@@ -167,6 +173,15 @@ impl<P: PublicKey> Receiver for SubReceiver<P> {
 
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
         self.receiver.next().await.ok_or(Error::RecvFailed)
+    }
+}
+
+impl<P: PublicKey> Drop for SubReceiver<P> {
+    fn drop(&mut self) {
+        // Remove the route for the subchannel. It may be temporarily removed already if the sender
+        // was trying to send a message and the queue was full, so we don't assert that it exists.
+        let mut routes = self.routes.lock().unwrap();
+        routes.remove(&self.subchannel);
     }
 }
 
