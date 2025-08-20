@@ -11,9 +11,9 @@ use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Handle, Spawner};
-use futures::{channel::mpsc, StreamExt};
+use futures::{channel::mpsc, SinkExt, StreamExt};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 use thiserror::Error;
@@ -34,6 +34,7 @@ pub struct Muxer<S: Sender, R: Receiver> {
     sender: S,
     receiver: R,
     routes: Routes<R::PublicKey>,
+    registered: Arc<Mutex<HashSet<Channel>>>,
     mailbox_size: usize,
 }
 
@@ -44,6 +45,7 @@ impl<S: Sender, R: Receiver> Muxer<S, R> {
             sender,
             receiver,
             routes: Arc::new(Mutex::new(HashMap::new())),
+            registered: Arc::new(Mutex::new(HashSet::new())),
             mailbox_size,
         }
     }
@@ -58,10 +60,13 @@ impl<S: Sender, R: Receiver> Muxer<S, R> {
     ///
     /// Panics if the subchannel is already registered.
     pub fn register(&self, subchannel: Channel) -> (SubSender<S>, SubReceiver<R::PublicKey>) {
-        // Create a new channel to forward messages to the subchannel.
-        let (tx, rx) = mpsc::channel(self.mailbox_size);
+        // Panic if the subchannel was already registered at any point.
+        if !self.registered.lock().unwrap().insert(subchannel) {
+            panic!("duplicate subchannel registration: {subchannel}");
+        }
 
-        // Insert the subchannel into the routes map, panicking if it already exists.
+        // Create a new channel to forward messages for the subchannel.
+        let (tx, rx) = mpsc::channel(self.mailbox_size);
         if self.routes.lock().unwrap().insert(subchannel, tx).is_some() {
             panic!("duplicate subchannel registration: {subchannel}");
         }
@@ -72,11 +77,7 @@ impl<S: Sender, R: Receiver> Muxer<S, R> {
                 subchannel,
                 inner: self.sender.clone(),
             },
-            SubReceiver {
-                subchannel,
-                receiver: rx,
-                routes: Arc::clone(&self.routes),
-            },
+            SubReceiver { receiver: rx },
         )
     }
 
@@ -96,20 +97,34 @@ impl<S: Sender, R: Receiver> Muxer<S, R> {
             // Decode message: varint(subchannel) || bytes
             let subchannel: Channel = match UInt::read(&mut bytes) {
                 Ok(v) => v.into(),
-                Err(_) => continue, // Drop errors silently
+                Err(_) => {
+                    debug!(?pk, "no subchannel");
+                    continue;
+                }
             };
 
-            // Forward the message to the appropriate subchannel.
-            // Drops the message if the subchannel is not found or the queue is full.
+            // Get the route for the subchannel.
             //
-            // Note: We intentionally avoid cloning the Sender here to preserve the
-            // bounded semantics of the channel. Cloning `futures::mpsc::Sender`
-            // introduces a per-sender fairness slot that effectively increases
-            // capacity when cloned per message.
-            if let Some(sender) = self.routes.lock().unwrap().get_mut(&subchannel) {
-                if let Err(e) = sender.try_send((pk, bytes)) {
-                    debug!(?subchannel, ?e, "failed to send message to subchannel");
-                }
+            // Note: We intentionally avoid cloning the Sender here to preserve the bounded
+            // semantics of the channel. Cloning `Sender` would introduce a new fairness slot on
+            // every clone which would effectively infinitely increase capacity.
+            let Some(mut sender) = ({
+                let mut routes = self.routes.lock().unwrap();
+                routes.remove(&subchannel)
+            }) else {
+                // Drops the message if the subchannel is not found
+                continue;
+            };
+
+            // Send the message to the subchannel, blocking if the queue is full.
+            // Warning: This blocks across all subchannels.
+            if let Err(e) = sender.send((pk, bytes)).await {
+                // Failure, drop the sender since the receiver is no longer interested.
+                debug!(?subchannel, ?e, "failed to send message to subchannel");
+            } else {
+                // Place the sender back in the map for next time.
+                let mut routes = self.routes.lock().unwrap();
+                assert!(routes.insert(subchannel, sender).is_none());
             }
         }
     }
@@ -144,8 +159,6 @@ impl<S: Sender> Sender for SubSender<S> {
 #[derive(Debug)]
 pub struct SubReceiver<P: PublicKey> {
     receiver: mpsc::Receiver<Message<P>>,
-    subchannel: Channel,
-    routes: Routes<P>,
 }
 
 impl<P: PublicKey> Receiver for SubReceiver<P> {
@@ -154,13 +167,6 @@ impl<P: PublicKey> Receiver for SubReceiver<P> {
 
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
         self.receiver.next().await.ok_or(Error::RecvFailed)
-    }
-}
-
-impl<P: PublicKey> Drop for SubReceiver<P> {
-    fn drop(&mut self) {
-        // Cleanup to avoid stale routes when a subreceiver is dropped.
-        self.routes.lock().unwrap().remove(&self.subchannel);
     }
 }
 
@@ -173,7 +179,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt, Signer};
-    use commonware_macros::select;
+    use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use std::time::Duration;
 
@@ -292,8 +298,8 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_mailbox_capacity_drops() {
+    #[test_traced]
+    fn test_mailbox_capacity_blocks() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, mut oracle) = Network::new(
@@ -304,10 +310,19 @@ mod tests {
             );
             network.start();
 
+            // Test parameters.
+            const CAPACITY: usize = 5usize;
+            const TOTAL: usize = 10usize;
+
+            // Create the peer who sends messages.
             let pk1 = PrivateKey::from_seed(0).public_key();
+            let (og_tx1, og_rx1) = oracle.register(pk1.clone(), 0).await.unwrap();
+            let mux1 = Muxer::new(og_tx1, og_rx1, CAPACITY);
+
+            // Create the peer who receives messages.
             let pk2 = PrivateKey::from_seed(1).public_key();
-            let (sender1, receiver1) = oracle.register(pk1.clone(), 0).await.unwrap();
-            let (sender2, receiver2) = oracle.register(pk2.clone(), 0).await.unwrap();
+            let (og_tx2, og_rx2) = oracle.register(pk2.clone(), 0).await.unwrap();
+            let mux2 = Muxer::new(og_tx2, og_rx2, CAPACITY);
 
             oracle
                 .add_link(pk1.clone(), pk2.clone(), LINK)
@@ -318,34 +333,37 @@ mod tests {
                 .await
                 .unwrap();
 
-            let capacity = 5usize;
-            let total = 10usize;
-            let mux1 = Muxer::new(sender1, receiver1, capacity);
-            let (_tx, mut rx) = mux1.register(99);
+            // Register the subchannels.
+            let (mut tx1, _rx1) = mux1.register(99);
+            let (mut tx2, _rx2) = mux1.register(100);
+            let (_tx1, mut rx1) = mux2.register(99);
+            let (_tx2, mut rx2) = mux2.register(100);
 
-            let mux2 = Muxer::new(sender2, receiver2, capacity);
-            let (mut tx2, _rx2) = mux2.register(99);
-
-            // Send more messages than capacity without receiving to trigger drops.
-            for i in 0..total {
+            // Send 10 messages to each subchannel from pk1 to pk2.
+            for i in 0..TOTAL {
                 let payload = Bytes::from(vec![i as u8]);
-                let _ = tx2
-                    .send(Recipients::One(pk1.clone()), payload, false)
+                let _ = tx1
+                    .send(Recipients::All, payload.clone(), false)
                     .await
                     .unwrap();
+                let _ = tx2.send(Recipients::All, payload, false).await.unwrap();
             }
 
-            // Give the demuxer a moment to process messages.
+            // Give the demuxers a moment to process messages.
             mux1.start(context.clone());
+            mux2.start(context.clone());
             context.sleep(Duration::from_millis(100)).await;
 
-            // Drain the receiver.
-            let mut received = 0usize;
+            // Count the number of messages received from each subchannel.
+            let mut count1 = 0usize;
+            let mut count2 = 0usize;
+
+            // Try receiving all messages from the second subchannel.
             loop {
                 select! {
-                    res = rx.recv() => {
+                    res = rx2.recv() => {
                         match res {
-                            Ok(_) => received += 1,
+                            Ok(_) => count2 += 1,
                             Err(_) => break,
                         }
                     },
@@ -353,9 +371,41 @@ mod tests {
                 }
             }
 
-            // Since mpsc has a per-sender fairness slot, the effective capacity is 1 more than the
-            // mailbox size.
-            assert_eq!(received, capacity + 1);
+            // It should have received the buffered messages, but the sender is blocked.
+            assert_eq!(count2, CAPACITY);
+
+            // Try receiving from the first subchannel.
+            loop {
+                select! {
+                    res = rx1.recv() => {
+                        match res {
+                            Ok(_) => count1 += 1,
+                            Err(_) => break,
+                        }
+                    },
+                    _ = context.sleep(Duration::from_millis(100)) => { break; },
+                }
+            }
+
+            // It should have received all buffered messages, been unblocked, and received the
+            // next messages.
+            assert_eq!(count1, CAPACITY * 2);
+
+            // The second subchannel should be unblocked.
+            loop {
+                select! {
+                    res = rx2.recv() => {
+                        match res {
+                            Ok(_) => count2 += 1,
+                            Err(_) => break,
+                        }
+                    },
+                    _ = context.sleep(Duration::from_millis(100)) => { break; },
+                }
+            }
+
+            // It should have received all messages.
+            assert_eq!(count2, TOTAL);
         });
     }
 }
