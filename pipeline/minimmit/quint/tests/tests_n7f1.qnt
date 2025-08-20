@@ -18,7 +18,6 @@ module tests {
         assumptions_valid
     }
 
-
     // This test reproduces the conditions for the following attack in the case of N = 7, F = 1, M = N-3*F=4, L = N - F=6. 
     // Note, that we use M = 2*F + 1 = 3. So this attack should not be possible, and this test checks exactly that.
     
@@ -63,73 +62,72 @@ module tests {
         }
 
         initWithLeader(Map(0 -> "n6", 1 -> "n6", 2 -> "n6", 3 -> "n6", 4 -> "n6", 5 -> "n6"))
-        // === view 0 ===
-        
-        // A faulty replica equivocates:
-        .then(inject_proposal(proposal_from_n6_1))
-        .then(inject_proposal(proposal_from_n6_2))
+            // === view 0 ===
+            
+            // A faulty replica equivocates:
+            .then(inject_proposal(proposal_from_n6_1))
+            .then(inject_proposal(proposal_from_n6_2))
 
-        // Partition 1 receives the proposal 1
-        .then(on_proposal("n0", proposal_from_n6_1))
-        .then(on_proposal("n1", proposal_from_n6_1))
-        .then(on_proposal("n2", proposal_from_n6_1))
+            // Partition 1 receives the proposal 1
+            .then(on_proposal("n0", proposal_from_n6_1))
+            .then(on_proposal("n1", proposal_from_n6_1))
+            .then(on_proposal("n2", proposal_from_n6_1))
 
-        // Partition 2 receives the proposal 1
-        .then(on_proposal("n3", proposal_from_n6_2))
-        .then(on_proposal("n4", proposal_from_n6_2))
-        .then(on_proposal("n5", proposal_from_n6_2))
-        
-        
-        // n0-n2 notarize 0 and move to view 1
-        .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n0"))
-        .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n1"))
-        .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n2"))
+            // Partition 2 receives the proposal 1
+            .then(on_proposal("n3", proposal_from_n6_2))
+            .then(on_proposal("n4", proposal_from_n6_2))
+            .then(on_proposal("n5", proposal_from_n6_2))
+            
+            
+            // n0-n2 notarize 0 and move to view 1
+            .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n0"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n1"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n2"))
 
-        .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n0"))
-        .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n1"))
-        .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n2"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n0"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n1"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n2"))
 
-        .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n0"))
-        .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n1"))
-        .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n2"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n0"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n1"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n2"))
 
-        .then(replica_receives_notarize_vote("n3", "val_b1", 0, "n3"))
-        .then(replica_receives_notarize_vote("n3", "val_b1", 0, "n4"))
-        .then(replica_receives_notarize_vote("n3", "val_b1", 0, "n5"))
+            .then(replica_receives_notarize_vote("n3", "val_b1", 0, "n3"))
+            .then(replica_receives_notarize_vote("n3", "val_b1", 0, "n4"))
+            .then(replica_receives_notarize_vote("n3", "val_b1", 0, "n5"))
 
-        .then(replica_receives_notarize_vote("n4", "val_b1", 0, "n3"))
-        .then(replica_receives_notarize_vote("n4", "val_b1", 0, "n4"))
-        .then(replica_receives_notarize_vote("n4", "val_b1", 0, "n5"))
+            .then(replica_receives_notarize_vote("n4", "val_b1", 0, "n3"))
+            .then(replica_receives_notarize_vote("n4", "val_b1", 0, "n4"))
+            .then(replica_receives_notarize_vote("n4", "val_b1", 0, "n5"))
 
-        .then(replica_receives_notarize_vote("n5", "val_b1", 0, "n3"))
-        .then(replica_receives_notarize_vote("n5", "val_b1", 0, "n4"))
-        .then(replica_receives_notarize_vote("n5", "val_b1", 0, "n5"))
+            .then(replica_receives_notarize_vote("n5", "val_b1", 0, "n3"))
+            .then(replica_receives_notarize_vote("n5", "val_b1", 0, "n4"))
+            .then(replica_receives_notarize_vote("n5", "val_b1", 0, "n5"))
 
-        
-        .then(all {
-            assert(replica_state.get("n0").view == 1),
-            assert(replica_state.get("n1").view == 1),
-            assert(replica_state.get("n2").view == 1),
-            assert(replica_state.get("n3").view == 1),
-            assert(replica_state.get("n4").view == 1),
-            assert(replica_state.get("n5").view == 1),
-            unchanged_all,
-        })
+            
+            .then(all {
+                assert(replica_state.get("n0").view == 1),
+                assert(replica_state.get("n1").view == 1),
+                assert(replica_state.get("n2").view == 1),
+                assert(replica_state.get("n3").view == 1),
+                assert(replica_state.get("n4").view == 1),
+                assert(replica_state.get("n5").view == 1),
+                unchanged_all,
+            })
 
-        .then(all {
-            assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block_hash == "val_b0").size() == 3),
-            assert(store_vote.get("n3").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block_hash == "val_b1").size() == 3),
-            assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NullifyKind).size() == 0),
-            assert(replica_state.get("n0").nullified == false),
-            assert(replica_state.get("n3").nullified == false),
-            assert(replica_state.get("n0").notarized.get(0) == "val_b0"),
-            assert(replica_state.get("n3").notarized.get(0) == "val_b1"),
-            assert(is_contradicted(replica_state.get("n0"), 0, store_vote.get("n0")) == false),
-            assert(is_contradicted(replica_state.get("n3"), 0, store_vote.get("n3")) == false),
-            unchanged_all,
-        })
-        
-        .expect(all_invariants)
+            .then(all {
+                assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block_hash == "val_b0").size() == 3),
+                assert(store_vote.get("n3").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block_hash == "val_b1").size() == 3),
+                assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NullifyKind).size() == 0),
+                assert(replica_state.get("n0").nullified == false),
+                assert(replica_state.get("n3").nullified == false),
+                assert(replica_state.get("n0").notarized.get(0) == "val_b0"),
+                assert(replica_state.get("n3").notarized.get(0) == "val_b1"),
+                assert(is_contradicted(replica_state.get("n0"), 0, store_vote.get("n0")) == false),
+                assert(is_contradicted(replica_state.get("n3"), 0, store_vote.get("n3")) == false),
+                unchanged_all,
+            })
+            .expect(all_invariants)
     }
 
     action inject_proposal(proposal: Proposal): bool = all {
