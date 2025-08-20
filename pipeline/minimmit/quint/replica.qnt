@@ -439,30 +439,30 @@ module replica {
                 store_vote' = store_vote.set(id, new_store),
                 // try to create a notarization certificate
                 val maybe_cert = create_notarization(id, view, block_hash, new_store)
+                val should_send_notarize_vote = self.view == view and is_some(maybe_cert) and not(self.has_notarized()) and not(self.nullified)
                 val new_self = match maybe_cert {
                     | Some(cert) => enter_new_view(self, cert.view, true)
                     | None => self
                 }
 
-                val should_notarize = is_some(maybe_cert) and not(self.has_notarized()) and not(self.nullified)
                 val was_finalized = self.last_finalized >= view
                 val now_finalized = is_view_finalized(view, new_store, block_hash)
                 val certificates = store_certificate.get(id)
                 all {
-                    val is_cert_stored = or {
+                    val is_new_notarization = or {
                         not(is_view_notarized(view, certificates)),
                         not(was_finalized) and now_finalized,
                     }
                     match maybe_cert {
                         | Some(cert) => all {
-                            if (is_cert_stored) all {
+                            if (is_new_notarization) all {
                                 store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
                                 sent_certificate' = sent_certificate.union(Set(cert)),
                             } else all {
                                 store_certificate' = store_certificate,
                                 sent_certificate' = sent_certificate,
                             },
-                            if (should_notarize) all {
+                            if (should_send_notarize_vote) all {
                                 sent_vote' = sent_vote.union(Set(notarize(view, id, block_hash))),
                             } else all {
                                 sent_vote' = sent_vote,
@@ -476,7 +476,7 @@ module replica {
                         }
                     },
 
-                    val self_maybe_notarize = if (should_notarize)  {
+                    val self_maybe_notarize = if (should_send_notarize_vote)  {
                     {
                         ...new_self,
                         notarized: self.notarized.put(view, block_hash),
@@ -523,10 +523,10 @@ module replica {
 
             all {
                 store_vote' = store_vote.set(id, new_store),
-                val is_cert_stored = not(is_view_nullified(view, certificates))
+                val is_new_nullification = not(is_view_nullified(view, certificates))
                 match create_nullification(id, view, new_store) {
                     | Some(cert) => all {
-                        if (is_cert_stored) all {
+                        if (is_new_nullification) all {
                             store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
                             sent_certificate' = sent_certificate.union(Set(cert)),
                         } else all {
@@ -750,7 +750,6 @@ module replica {
 
     // A correct replica should not send two votes in the same view.
     // Honest replicas may not broadcast a notarize(c, v) after first broadcasting a nullify(v).
-    // TODO:
     val no_vote_equivocation_inv = CORRECT.forall(id => {
         val self = replica_state.get(id)
         VIEWS.forall(v => votes_seq_correct(self.ghost_sent_votes.get(v)))
@@ -846,16 +845,23 @@ module replica {
         no_nullification_in_finalized_view
     }
 
+    val new_notarizations_only = CORRECT.forall(id => {
+        val certs = store_certificate.get(id)
+        VIEWS.forall(v => certs.filter(cert=>cert.view == v and cert.kind==NullificationKind).size()<=1) and
+        VIEWS.forall(v => certs.filter(cert=>cert.view == v and cert.kind==NotarizationKind).size()<=1)
+    })
+
     val all_invariants = all {
         no_proposal_equivocation,
         agreement,
-        //no_vote_equivocation_inv,
+        no_vote_equivocation_inv,
         no_nullification_and_finalization_in_the_same_view,
         validity,
         valid_last_finalized,
         certificates_are_valid_inv,
         notarized_consistence,
-        safe_finalization
+        safe_finalization,
+        new_notarizations_only
     }
 
     val safe = all_invariants

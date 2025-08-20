@@ -249,6 +249,7 @@ module tests {
                 assert(replica_state.get("n3").notarized.get(0)=="val_b0"),
                 unchanged_all
             })
+
             
             .expect(all_invariants)
 
@@ -258,12 +259,10 @@ module tests {
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n2"))
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n3"))
 
-
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n0"))
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n1"))
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n2"))
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n3"))
-
 
             .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n0"))
             .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n1"))
@@ -297,17 +296,40 @@ module tests {
                 assert(not(sent_vote.contains(n5_vote))),
                 assert(store_vote.get("n5").filter(v=>v.view==0 and v.kind==NotarizeKind and v.block_hash == "val_b0").size() == 2),
                 assert(store_certificate.get("n5").size() == 0),
+                assert(not(is_view_notarized(0, store_certificate.get("n5")))),
+                assert(replica_state.get("n5").ghost_sent_votes.get(0).length() == 0),
+                assert(replica_state.get("n5").notarized.get(0) == EMPTY_BLOCK),
+                assert(not(replica_state.get("n5").has_notarized())),
+                assert(replica_state.get("n5").view == 0),
                 unchanged_all
             })
             .then(replica_receives_notarize_vote("n5", "val_b0", 0, "n2"))
-            // since n5 did not vote for the block it must send it's vote now
+            // n5 has votes and M-quorum. 
+            // since n5 did not vote for the block it must send its vote now and add M-notarization (certificate)
             .then(all{
                 assert(store_certificate.get("n5").size() == 1),
                 assert(sent_vote.contains(n5_vote)),
+                assert(replica_state.get("n5").ghost_sent_votes.get(0).length() == 1),
+                assert(replica_state.get("n5").notarized.get(0) == hash("val_b0")),
+                assert(replica_state.get("n5").view == 1),
                 unchanged_all
             })
+            // n5 receives another vote. It should be in new view now, so no votes for previous view or new certificates.
             .then(replica_receives_notarize_vote("n5", "val_b0", 0, "n3"))
+            .then(all{
+                assert(store_certificate.get("n5").size() == 1),
+                assert(is_view_notarized(0, store_certificate.get("n5"))),
+                assert(replica_state.get("n5").ghost_sent_votes.get(0).length() == 1),
+                assert(replica_state.get("n5").ghost_sent_votes.get(1).length() == 0),
+                unchanged_all
+            })
             .then(replica_receives_notarize_vote("n5", "val_b0", 0, "n4"))
+            .then(all{
+                assert(store_certificate.get("n5").size() == 2),
+                assert(is_view_finalized(0, store_vote.get("n5"), "val_b0")),
+                assert(replica_state.get("n5").ghost_sent_votes.get(0).length() == 1),
+                unchanged_all
+            })
 
             .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n4"))
             .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n4"))
