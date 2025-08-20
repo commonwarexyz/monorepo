@@ -141,22 +141,12 @@ where
         let (log, metadata) = journal.into_inner();
         let oldest_retained_loc_key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
         let oldest_retained_loc = match metadata.get(&oldest_retained_loc_key) {
-            Some(bytes) => {
-                let metadata_oldest_retained_loc = u64::from_be_bytes(
-                    bytes
-                        .as_slice()
-                        .try_into()
-                        .expect("oldest_retained_loc bytes could not be converted to u64"),
-                );
-                let persisted_oldest_retained_loc = log
-                    .blobs
-                    .first_key_value()
-                    .map(|(&s, _)| s)
-                    .map(|s| s * db_config.log_items_per_section.get())
-                    .unwrap_or(0);
-                // If the oldest blob is after the metadata, use that.
-                persisted_oldest_retained_loc.max(metadata_oldest_retained_loc)
-            }
+            Some(bytes) => u64::from_be_bytes(
+                bytes
+                    .as_slice()
+                    .try_into()
+                    .expect("oldest_retained_loc bytes could not be converted to u64"),
+            ),
             None => lower_bound,
         };
 
