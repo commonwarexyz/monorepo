@@ -1,8 +1,8 @@
 //! Types used in [crate::threshold_simplex].
 
 use crate::{
-    types::{Round, View},
-    Viewable,
+    types::{Epoch, Round, View},
+    Epochable, Viewable,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -549,6 +549,21 @@ impl<V: Variant, D: Digest> Read for Voter<V, D> {
     }
 }
 
+impl<V: Variant, D: Digest> Epochable for Voter<V, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        match self {
+            Voter::Notarize(v) => v.epoch(),
+            Voter::Notarization(v) => v.epoch(),
+            Voter::Nullify(v) => v.epoch(),
+            Voter::Nullification(v) => v.epoch(),
+            Voter::Finalize(v) => v.epoch(),
+            Voter::Finalization(v) => v.epoch(),
+        }
+    }
+}
+
 impl<V: Variant, D: Digest> Viewable for Voter<V, D> {
     type View = View;
 
@@ -613,6 +628,14 @@ impl<D: Digest> Read for Proposal<D> {
 impl<D: Digest> EncodeSize for Proposal<D> {
     fn encode_size(&self) -> usize {
         self.round.encode_size() + UInt(self.parent).encode_size() + self.payload.encode_size()
+    }
+}
+
+impl<D: Digest> Epochable for Proposal<D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.round.epoch()
     }
 }
 
@@ -770,6 +793,14 @@ impl<V: Variant, D: Digest> Attributable for Notarize<V, D> {
     }
 }
 
+impl<V: Variant, D: Digest> Epochable for Notarize<V, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.proposal.epoch()
+    }
+}
+
 impl<V: Variant, D: Digest> Viewable for Notarize<V, D> {
     type View = View;
 
@@ -868,6 +899,14 @@ impl<V: Variant, D: Digest> Notarization<V, D> {
             1,
         )
         .is_ok()
+    }
+}
+
+impl<V: Variant, D: Digest> Epochable for Notarization<V, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.proposal.epoch()
     }
 }
 
@@ -1053,6 +1092,14 @@ impl<V: Variant> Attributable for Nullify<V> {
     }
 }
 
+impl<V: Variant> Epochable for Nullify<V> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.round.epoch()
+    }
+}
+
 impl<V: Variant> Viewable for Nullify<V> {
     type View = View;
 
@@ -1140,6 +1187,14 @@ impl<V: Variant> Nullification<V> {
             1,
         )
         .is_ok()
+    }
+}
+
+impl<V: Variant> Epochable for Nullification<V> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.round.epoch()
     }
 }
 
@@ -1292,6 +1347,14 @@ impl<V: Variant, D: Digest> Attributable for Finalize<V, D> {
     }
 }
 
+impl<V: Variant, D: Digest> Epochable for Finalize<V, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.proposal.epoch()
+    }
+}
+
 impl<V: Variant, D: Digest> Viewable for Finalize<V, D> {
     type View = View;
 
@@ -1379,6 +1442,14 @@ impl<V: Variant, D: Digest> Finalization<V, D> {
             1,
         )
         .is_ok()
+    }
+}
+
+impl<V: Variant, D: Digest> Epochable for Finalization<V, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.proposal.epoch()
     }
 }
 
@@ -1865,6 +1936,24 @@ impl<V: Variant, D: Digest> Read for Activity<V, D> {
     }
 }
 
+impl<V: Variant, D: Digest> Epochable for Activity<V, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        match self {
+            Activity::Notarize(v) => v.epoch(),
+            Activity::Notarization(v) => v.epoch(),
+            Activity::Nullify(v) => v.epoch(),
+            Activity::Nullification(v) => v.epoch(),
+            Activity::Finalize(v) => v.epoch(),
+            Activity::Finalization(v) => v.epoch(),
+            Activity::ConflictingNotarize(v) => v.epoch(),
+            Activity::ConflictingFinalize(v) => v.epoch(),
+            Activity::NullifyFinalize(v) => v.epoch(),
+        }
+    }
+}
+
 impl<V: Variant, D: Digest> Viewable for Activity<V, D> {
     type View = View;
 
@@ -1903,6 +1992,14 @@ impl<V: Variant> Seed<V> {
         let seed_namespace = seed_namespace(namespace);
         let message = self.round.encode();
         verify_message::<V>(identity, Some(&seed_namespace), &message, &self.signature).is_ok()
+    }
+}
+
+impl<V: Variant> Epochable for Seed<V> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.round.epoch()
     }
 }
 
@@ -2013,6 +2110,14 @@ impl<V: Variant, D: Digest> ConflictingNotarize<V, D> {
 impl<V: Variant, D: Digest> Attributable for ConflictingNotarize<V, D> {
     fn signer(&self) -> u32 {
         self.signature_1.index
+    }
+}
+
+impl<V: Variant, D: Digest> Epochable for ConflictingNotarize<V, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.round.epoch()
     }
 }
 
@@ -2156,6 +2261,14 @@ impl<V: Variant, D: Digest> Attributable for ConflictingFinalize<V, D> {
     }
 }
 
+impl<V: Variant, D: Digest> Epochable for ConflictingFinalize<V, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.round.epoch()
+    }
+}
+
 impl<V: Variant, D: Digest> Viewable for ConflictingFinalize<V, D> {
     type View = View;
 
@@ -2273,11 +2386,19 @@ impl<V: Variant, D: Digest> Attributable for NullifyFinalize<V, D> {
     }
 }
 
+impl<V: Variant, D: Digest> Epochable for NullifyFinalize<V, D> {
+    type Epoch = Epoch;
+
+    fn epoch(&self) -> Epoch {
+        self.proposal.epoch()
+    }
+}
+
 impl<V: Variant, D: Digest> Viewable for NullifyFinalize<V, D> {
     type View = View;
 
     fn view(&self) -> View {
-        self.proposal.round.view()
+        self.proposal.view()
     }
 }
 

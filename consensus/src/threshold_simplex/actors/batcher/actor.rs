@@ -9,8 +9,8 @@ use crate::{
             Finalize, Notarize, Nullify, NullifyFinalize, Voter,
         },
     },
-    types::View,
-    Reporter, ThresholdSupervisor, Viewable,
+    types::{Epoch, View},
+    Epochable, Reporter, ThresholdSupervisor, Viewable,
 };
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
 use commonware_macros::select;
@@ -337,6 +337,7 @@ pub struct Actor<
 
     activity_timeout: View,
     skip_timeout: View,
+    epoch: Epoch,
     namespace: Vec<u8>,
 
     mailbox_receiver: mpsc::Receiver<Message<C, V, D>>,
@@ -403,6 +404,7 @@ impl<
 
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
+                epoch: cfg.epoch,
                 namespace: cfg.namespace,
 
                 mailbox_receiver: receiver,
@@ -521,10 +523,17 @@ impl<
 
                     // If there is a decoding error, block
                     let Ok(message) = message else {
-                        warn!(?sender, "blocking peer");
+                        warn!(?sender, "blocking peer for decoding error");
                         self.blocker.block(sender).await;
                         continue;
                     };
+
+                    // If the epoch is not the current epoch, block
+                    if message.epoch() != self.epoch {
+                        warn!(?sender, "blocking peer for epoch mismatch");
+                        self.blocker.block(sender).await;
+                        continue;
+                    }
 
                     // If the view isn't interesting, we can skip
                     let view = message.view();
