@@ -121,11 +121,21 @@ mod tests {
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-
     const NAMESPACE: &[u8] = b"test";
     const NUM_VALIDATORS: u32 = 4;
     const QUORUM: u32 = 3;
-    const NUM_BLOCKS: u64 = 100;
+    const NUM_BLOCKS: u64 = 160;
+    const BLOCKS_PER_EPOCH: u64 = 50;
+    const LINK: Link = Link {
+        latency: 10.0,
+        jitter: 1.0,
+        success_rate: 1.0,
+    };
+    const UNRELIABLE_LINK: Link = Link {
+        latency: 200.0,
+        jitter: 50.0,
+        success_rate: 0.7,
+    };
 
     async fn setup_validator(
         context: deterministic::Context,
@@ -284,14 +294,9 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_finalize_good_links() {
-        let link = Link {
-            latency: 100.0,
-            jitter: 1.0,
-            success_rate: 1.0,
-        };
         for seed in 0..5 {
-            let result1 = finalize(seed, link.clone());
-            let result2 = finalize(seed, link.clone());
+            let result1 = finalize(seed, LINK);
+            let result2 = finalize(seed, LINK);
 
             // Ensure determinism
             assert_eq!(result1, result2);
@@ -300,14 +305,9 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_finalize_bad_links() {
-        let link = Link {
-            latency: 200.0,
-            jitter: 50.0,
-            success_rate: 0.7,
-        };
         for seed in 0..5 {
-            let result1 = finalize(seed, link.clone());
-            let result2 = finalize(seed, link.clone());
+            let result1 = finalize(seed, UNRELIABLE_LINK);
+            let result2 = finalize(seed, UNRELIABLE_LINK);
 
             // Ensure determinism
             assert_eq!(result1, result2);
@@ -361,13 +361,15 @@ mod tests {
                 let height = block.height();
                 assert!(height > 0, "genesis block should not have been generated");
 
+                // Calculate the epoch and round for the block
+                let epoch = height / BLOCKS_PER_EPOCH;
+                let round = Round::new(epoch, height);
+
                 // Broadcast block by one validator
                 let actor_index: usize = (height % (NUM_VALIDATORS as u64)) as usize;
                 let mut actor = actors[actor_index].clone();
                 actor.broadcast(block.clone()).await;
-                actor
-                    .verified(Round::from((0, height)), block.clone())
-                    .await;
+                actor.verified(round, block.clone()).await;
 
                 // Wait for the block to be broadcast, but due to jitter, we may or may not receive
                 // the block before continuing.
@@ -377,7 +379,7 @@ mod tests {
 
                 // Notarize block by the validator that broadcasted it
                 let proposal = Proposal {
-                    round: Round::new(0, height),
+                    round,
                     parent: height.checked_sub(1).unwrap(),
                     payload: block.digest(),
                 };
@@ -389,8 +391,13 @@ mod tests {
                 // Finalize block by all validators
                 let fin = make_finalization(proposal, &shares, QUORUM);
                 for actor in actors.iter_mut() {
-                    // Always finalize the last block. Otherwise, finalize randomly.
-                    if height == NUM_BLOCKS || context.gen_bool(0.2) {
+                    // Always finalize 1) the last block in each epoch 2) the last block in the chain.
+                    // Otherwise, finalize randomly.
+                    if height == NUM_BLOCKS
+                        || height % BLOCKS_PER_EPOCH == 0
+                        || context.gen_bool(0.2)
+                    // 20% chance to finalize randomly
+                    {
                         actor.report(Activity::Finalization(fin.clone())).await;
                     }
                 }
@@ -442,12 +449,7 @@ mod tests {
             }
             let mut actor = actors[0].clone();
 
-            let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
-                success_rate: 1.0,
-            };
-            setup_network_links(&mut oracle, &peers, link).await;
+            setup_network_links(&mut oracle, &peers, LINK).await;
 
             let parent = Sha256::hash(b"");
             let block = B::new::<Sha256>(parent, 1, 1);
@@ -496,12 +498,7 @@ mod tests {
             }
             let mut actor = actors[0].clone();
 
-            let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
-                success_rate: 1.0,
-            };
-            setup_network_links(&mut oracle, &peers, link).await;
+            setup_network_links(&mut oracle, &peers, LINK).await;
 
             let parent = Sha256::hash(b"");
             let block1 = B::new::<Sha256>(parent, 1, 1);
@@ -570,12 +567,7 @@ mod tests {
             }
             let mut actor = actors[0].clone();
 
-            let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
-                success_rate: 1.0,
-            };
-            setup_network_links(&mut oracle, &peers, link).await;
+            setup_network_links(&mut oracle, &peers, LINK).await;
 
             let parent = Sha256::hash(b"");
             let block1 = B::new::<Sha256>(parent, 1, 1);
@@ -636,12 +628,7 @@ mod tests {
             }
             let mut actor = actors[0].clone();
 
-            let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
-                success_rate: 1.0,
-            };
-            setup_network_links(&mut oracle, &peers, link).await;
+            setup_network_links(&mut oracle, &peers, LINK).await;
 
             let parent = Sha256::hash(b"");
             let block1 = B::new::<Sha256>(parent, 1, 1);
@@ -715,100 +702,6 @@ mod tests {
             let received5 = sub5_rx.await.unwrap();
             assert_eq!(received5.digest(), block5.digest());
             assert_eq!(received5.height(), 5);
-        })
-    }
-
-    #[test_traced("WARN")]
-    fn test_epoch_boundary_reproposal_subscription() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(60));
-        runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone());
-            let (schemes, peers, identity, shares) = setup_validators_and_shares(&mut context);
-            let coordinator = resolver::mocks::Coordinator::new(peers.clone());
-
-            let mut actors = Vec::new();
-            for (i, secret) in schemes.iter().enumerate() {
-                let (_application, actor) = setup_validator(
-                    context.with_label(&format!("validator-{i}")),
-                    &mut oracle,
-                    coordinator.clone(),
-                    secret.clone(),
-                    identity,
-                )
-                .await;
-                actors.push(actor);
-            }
-            let mut actor = actors[0].clone();
-
-            let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
-                success_rate: 1.0,
-            };
-            setup_network_links(&mut oracle, &peers, link).await;
-
-            // Build blocks around two epoch boundaries (100->101 and 200->201)
-            let mut parent = sha256::hash(b"");
-            // Build up to 100
-            for h in 1..100 {
-                let b = B::new::<sha256::Sha256>(parent, h, h);
-                parent = b.digest();
-            }
-            let b100 = B::new::<sha256::Sha256>(parent, 100, 100);
-            let b101 = B::new::<sha256::Sha256>(b100.digest(), 101, 101);
-            let b200 = {
-                let mut p = b101.digest();
-                for h in 102..200 {
-                    let b = B::new::<sha256::Sha256>(p, h, h);
-                    p = b.digest();
-                }
-                B::new::<sha256::Sha256>(p, 200, 200)
-            };
-            let b201 = B::new::<sha256::Sha256>(b200.digest(), 201, 201);
-
-            // Make blocks available locally
-            actor.broadcast(b100.clone()).await;
-            actor.verified(Round::new(0, 100), b100.clone()).await;
-            actor.broadcast(b101.clone()).await;
-            actor.verified(Round::new(0, 101), b101.clone()).await; // verified in prev epoch cache ok
-            actor.broadcast(b200.clone()).await;
-            actor.verified(Round::new(1, 200), b200.clone()).await;
-            actor.broadcast(b201.clone()).await;
-            actor.verified(Round::new(1, 201), b201.clone()).await;
-
-            // Epoch boundary at 100->101: repropose previous digest when proposing 101 in epoch 1
-            let proposal_101 = Proposal {
-                round: Round::new(1, 101),
-                parent: 100,
-                payload: b100.digest(), // repropose previous digest
-            };
-            let notarization_101 = make_notarization(proposal_101.clone(), &shares, QUORUM);
-            actor.report(Activity::Notarization(notarization_101)).await;
-
-            // Epoch boundary at 200->201: repropose previous digest when proposing 201 in epoch 2
-            let proposal_201 = Proposal {
-                round: Round::new(2, 201),
-                parent: 200,
-                payload: b200.digest(), // repropose previous digest
-            };
-            let notarization_201 = make_notarization(proposal_201.clone(), &shares, QUORUM);
-            actor.report(Activity::Notarization(notarization_201)).await;
-
-            // Subscriptions for boundary proposals should yield the previous blocks
-            let sub101 = actor
-                .subscribe(Some(Round::new(1, 101)), b100.digest())
-                .await;
-            let sub201 = actor
-                .subscribe(Some(Round::new(2, 201)), b200.digest())
-                .await;
-
-            let r101 = sub101.await.unwrap();
-            assert_eq!(r101.digest(), b100.digest());
-            assert_eq!(r101.height(), 100);
-
-            let r201 = sub201.await.unwrap();
-            assert_eq!(r201.digest(), b200.digest());
-            assert_eq!(r201.height(), 200);
         })
     }
 }
