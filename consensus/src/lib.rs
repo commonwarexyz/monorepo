@@ -19,6 +19,17 @@ pub mod simplex;
 pub mod threshold_simplex;
 pub mod types;
 
+/// Epochable is a trait that provides access to the epoch number.
+/// Any consensus message or object that is associated with a specific epoch should implement this.
+pub trait Epochable {
+    /// Epoch is the type used to indicate a contiguous sequence of views in which the set of
+    /// validators is constant.
+    type Epoch;
+
+    /// Returns the epoch associated with this object.
+    fn epoch(&self) -> Self::Epoch;
+}
+
 /// Viewable is a trait that provides access to the view (round) number.
 /// Any consensus message or object that is associated with a specific view should implement this.
 pub trait Viewable {

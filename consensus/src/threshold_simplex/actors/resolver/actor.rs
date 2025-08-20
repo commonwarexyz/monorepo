@@ -7,8 +7,8 @@ use crate::{
         actors::voter,
         types::{Backfiller, Notarization, Nullification, Request, Response, Voter},
     },
-    types::View,
-    ThresholdSupervisor, Viewable,
+    types::{Epoch, View},
+    Epochable, ThresholdSupervisor, Viewable,
 };
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
 use commonware_macros::select;
@@ -115,6 +115,7 @@ pub struct Actor<
     blocker: B,
     supervisor: S,
 
+    epoch: Epoch,
     namespace: Vec<u8>,
 
     notarizations: BTreeMap<View, Notarization<V, D>>,
@@ -185,6 +186,7 @@ impl<
                 blocker: cfg.blocker,
                 supervisor: cfg.supervisor,
 
+                epoch: cfg.epoch,
                 namespace: cfg.namespace,
 
                 notarizations: BTreeMap::new(),
@@ -456,16 +458,17 @@ impl<
                         break;
                     };
 
-                    // Skip if there is a decoding error
+                    // Block if there is a decoding error
                     let msg = match msg {
                         Ok(msg) => msg,
                         Err(err) => {
-                            warn!(?err, sender = ?s, "blocking peer");
+                            warn!(?err, sender = ?s, "blocking peer for decoding error");
                             self.requester.block(s.clone());
                             self.blocker.block(s).await;
                             continue;
                         },
                     };
+
                     match msg{
                         Backfiller::Request(request) => {
                             let mut notarizations = Vec::new();
@@ -517,6 +520,14 @@ impl<
                             // Verify message
                             if !response.verify(&self.namespace, &identity) {
                                 warn!(sender = ?s, "blocking peer");
+                                self.requester.block(s.clone());
+                                self.blocker.block(s).await;
+                                continue;
+                            }
+
+                            // Validate that all notarizations and nullifications are from the current epoch
+                            if response.notarizations.iter().any(|n| n.epoch() != self.epoch) || response.nullifications.iter().any(|n| n.epoch() != self.epoch) {
+                                warn!(sender = ?s, "blocking peer for epoch mismatch");
                                 self.requester.block(s.clone());
                                 self.blocker.block(s).await;
                                 continue;

@@ -11,7 +11,7 @@ use crate::{
         },
     },
     types::{Epoch, Round as Rnd, View},
-    Automaton, Relay, Reporter, ThresholdSupervisor, Viewable, LATENCY,
+    Automaton, Epochable, Relay, Reporter, ThresholdSupervisor, Viewable, LATENCY,
 };
 use commonware_cryptography::{
     bls12381::primitives::{
@@ -1991,16 +1991,23 @@ impl<
                 },
                 msg = recovered_receiver.recv() => {
                     // Break if there is an internal error
-                    let Ok((s, msg)) = msg else {
+                    let Ok((sender, msg)) = msg else {
                         break;
                     };
 
-                    // Skip if there is a decoding error
+                    // Block if there is a decoding error
                     let Ok(msg) = msg else {
-                        warn!(sender = ?s, "blocking peer");
-                        self.blocker.block(s).await;
+                        warn!(?sender, "blocking peer for decoding error");
+                        self.blocker.block(sender).await;
                         continue;
                     };
+
+                    // Block if the epoch is not the current epoch
+                    if msg.epoch() != self.epoch {
+                        warn!(?sender, "blocking peer for epoch mismatch");
+                        self.blocker.block(sender).await;
+                        continue;
+                    }
 
                     // Process message
                     //
@@ -2010,37 +2017,37 @@ impl<
                     let action = match msg {
                         Voter::Notarization(notarization) => {
                             self.inbound_messages
-                                .get_or_create(&Inbound::notarization(&s))
+                                .get_or_create(&Inbound::notarization(&sender))
                                 .inc();
                             self.notarization(notarization).await
                         }
                         Voter::Nullification(nullification) => {
                             self.inbound_messages
-                                .get_or_create(&Inbound::nullification(&s))
+                                .get_or_create(&Inbound::nullification(&sender))
                                 .inc();
                             self.nullification(nullification).await
                         }
                         Voter::Finalization(finalization) => {
                             self.inbound_messages
-                                .get_or_create(&Inbound::finalization(&s))
+                                .get_or_create(&Inbound::finalization(&sender))
                                 .inc();
                             self.finalization(finalization).await
                         }
                         Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
-                            warn!(sender=?s, "blocking peer");
-                            self.blocker.block(s).await;
+                            warn!(?sender, "blocking peer for invalid message type");
+                            self.blocker.block(sender).await;
                             continue;
                         }
                     };
                     match action {
                         Action::Process => {}
                         Action::Skip => {
-                            trace!(sender=?s, view, "dropped useless");
+                            trace!(?sender, view, "dropped useless");
                             continue;
                         }
                         Action::Block => {
-                            warn!(sender=?s, view, "blocking peer");
-                            self.blocker.block(s).await;
+                            warn!(?sender, view, "blocking peer");
+                            self.blocker.block(sender).await;
                             continue;
                         }
                     }

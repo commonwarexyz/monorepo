@@ -1,7 +1,7 @@
 mod actor;
 mod ingress;
 
-use crate::Supervisor;
+use crate::{types::Epoch, Supervisor};
 pub use actor::Actor;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::Blocker;
@@ -16,6 +16,7 @@ pub struct Config<C: PublicKey, B: Blocker, S: Supervisor> {
     pub blocker: B,
     pub supervisor: S,
 
+    pub epoch: Epoch,
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,
     pub activity_timeout: u64,
