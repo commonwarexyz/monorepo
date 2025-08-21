@@ -20,7 +20,7 @@ use crate::{
     store::operation::Variable as Operation,
     translator::Translator,
 };
-use commonware_codec::{Codec, Encode as _, Read};
+use commonware_codec::{varint::UInt, Codec, Encode as _, Read};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::{sequence::U32, Array, NZUsize};
@@ -295,7 +295,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                 }
                             }
                             Operation::CommitFloor(loc) => {
-                                self.inactivity_floor_loc = loc;
+                                self.inactivity_floor_loc = loc.into();
 
                                 // Apply all uncommitted operations.
                                 for (key, (old_loc, new_loc)) in uncommitted_ops.iter() {
@@ -675,7 +675,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             self.inactivity_floor_loc += 1;
         }
 
-        self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc))
+        self.apply_op(Operation::CommitFloor(UInt(self.inactivity_floor_loc)))
             .await?;
 
         Ok(())

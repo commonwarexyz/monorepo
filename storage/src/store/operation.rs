@@ -5,8 +5,8 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    util::at_least, Codec, CodecFixed, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt,
-    Write,
+    util::at_least, varint::UInt, Codec, CodecFixed, EncodeSize, Error as CodecError, FixedSize,
+    Read, ReadExt, Write,
 };
 use commonware_utils::{hex, Array};
 use std::{
@@ -74,7 +74,7 @@ pub enum Variable<K: Array, V: Codec> {
     // Operations for mutable stores.
     Delete(K),
     Update(K, V),
-    CommitFloor(u64),
+    CommitFloor(UInt<u64>),
 }
 
 impl<K: Array, V: CodecFixed> FixedSize for Fixed<K, V> {
@@ -86,7 +86,7 @@ impl<K: Array, V: Codec> EncodeSize for Variable<K, V> {
         1 + match self {
             Variable::Delete(_) => K::SIZE,
             Variable::Update(_, v) => K::SIZE + v.encode_size(),
-            Variable::CommitFloor(_) => u64::SIZE,
+            Variable::CommitFloor(floor_loc) => floor_loc.encode_size(),
             Variable::Set(_, v) => K::SIZE + v.encode_size(),
             Variable::Commit() => 0,
         }
@@ -216,7 +216,7 @@ impl<K: Array, V: Codec> Write for Variable<K, V> {
             }
             Variable::CommitFloor(floor_loc) => {
                 buf.put_u8(COMMIT_FLOOR_CONTEXT);
-                buf.put_slice(&floor_loc.to_be_bytes());
+                floor_loc.write(buf);
             }
         }
     }
@@ -297,7 +297,7 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
                 Ok(Self::Update(key, value))
             }
             COMMIT_FLOOR_CONTEXT => {
-                let floor_loc = u64::read(buf)?;
+                let floor_loc = UInt::<u64>::read(buf)?;
                 Ok(Self::CommitFloor(floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
@@ -331,7 +331,7 @@ impl<K: Array, V: Codec> Display for Variable<K, V> {
             Variable::Commit() => write!(f, "[commit]"),
             Variable::Delete(key) => write!(f, "[key:{key} <deleted>]"),
             Variable::Update(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
-            Variable::CommitFloor(loc) => write!(f, "[commit with inactivity floor: {loc}]"),
+            Variable::CommitFloor(loc) => write!(f, "[commit with inactivity floor: {loc:?}]"),
         }
     }
 }

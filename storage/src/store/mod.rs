@@ -105,7 +105,7 @@ use crate::{
     store::operation::Variable as Operation,
     translator::Translator,
 };
-use commonware_codec::{Codec, Read};
+use commonware_codec::{varint::UInt, Codec, Read};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::{sequence::U32, Array, NZUsize};
 use futures::{pin_mut, try_join, StreamExt};
@@ -445,7 +445,7 @@ where
                                 }
                             }
                             Operation::CommitFloor(loc) => {
-                                self.inactivity_floor_loc = loc;
+                                self.inactivity_floor_loc = loc.into();
 
                                 // Apply all uncommitted operations.
                                 for (key, (old_loc, new_loc)) in uncommitted_ops.iter() {
@@ -653,7 +653,7 @@ where
             self.inactivity_floor_loc += 1;
         }
 
-        self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc))
+        self.apply_op(Operation::CommitFloor(UInt(self.inactivity_floor_loc)))
             .await
             .map(|_| ())
     }
