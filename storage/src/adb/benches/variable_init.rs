@@ -89,10 +89,10 @@ fn gen_random_any(cfg: Config, num_elements: u64, num_operations: u64) {
             let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
             db.update(rand_key, v).await.unwrap();
             if rng.next_u32() % COMMIT_FREQUENCY == 0 {
-                db.commit().await.unwrap();
+                db.commit(None).await.unwrap();
             }
         }
-        db.commit().await.unwrap();
+        db.commit(None).await.unwrap();
         info!(
             op_count = db.op_count(),
             oldest_retained_loc = db.oldest_retained_loc().unwrap(),

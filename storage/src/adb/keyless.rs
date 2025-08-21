@@ -235,11 +235,10 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         let Some(op) = self.log.get(section, offset).await? else {
             panic!("didn't find operation at location {loc} and offset {offset}");
         };
-        let Operation::Append(value) = op else {
-            return Ok(None);
-        };
-
-        Ok(Some(value))
+        match op {
+            Operation::Append(v) => Ok(Some(v)),
+            Operation::Commit(v) => Ok(v),
+        }
     }
 
     /// Get the number of appends + commits that have been applied to the db.
@@ -306,16 +305,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable.
-    pub async fn commit(&mut self) -> Result<u64, Error>
-    where
-        V: Default,
-    {
-        self.commit_with_metadata(V::default()).await
-    }
-
-    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable.
     /// Caller can associate an arbitrary `metadata` value with the commit.
-    pub async fn commit_with_metadata(&mut self, metadata: V) -> Result<u64, Error> {
+    pub async fn commit(&mut self, metadata: Option<V>) -> Result<u64, Error> {
         let loc = self.size;
         let section = self.current_section();
         let operation = Operation::Commit(metadata);
@@ -341,7 +332,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         Ok(loc)
     }
 
-    /// Get the metadata associated with the last commit.
+    /// Get the metadata associated with the last commit, or None if no commit has been made or
+    /// there is no metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         let Some(loc) = self.last_commit else {
             return Ok(None);
@@ -355,7 +347,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             return Ok(None);
         };
 
-        Ok(Some(metadata))
+        Ok(metadata)
     }
 
     /// Return the root of the db.
@@ -448,11 +440,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         sync_log: bool,
         sync_mmr: bool,
         sync_locations: bool,
-    ) -> Result<(), Error>
-    where
-        V: Default,
-    {
-        let operation = Operation::Commit(V::default());
+    ) -> Result<(), Error> {
+        let operation = Operation::Commit(None);
 
         // We must update & sync the operations log before writing the commit operation to locations
         // to ensure all committed locations will reference valid data in the event of a failure.
@@ -548,13 +537,13 @@ mod test {
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
-            let metadata = vec![3u8; 10];
-            db.commit_with_metadata(metadata.clone()).await.unwrap();
+            let metadata = Some(vec![3u8; 10]);
+            db.commit(metadata.clone()).await.unwrap();
             assert_eq!(db.size(), 1); // floor op added
             let root = db.root(&mut hasher);
             let db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+            assert_eq!(db.get_metadata().await.unwrap(), metadata);
 
             db.destroy().await.unwrap();
         });
@@ -578,7 +567,7 @@ mod test {
             assert_eq!(db.get(loc2).await.unwrap().unwrap(), v2);
 
             // Make sure closing/reopening gets us back to the same state.
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             assert_eq!(db.size(), 3); // 2 appends, 1 commit
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
@@ -631,7 +620,7 @@ mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.append(v.clone()).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
 
             // Append even more values.
@@ -677,7 +666,7 @@ mod test {
                 let v = vec![(i % 255) as u8; ((i % 17) + 13) as usize];
                 db.append(v.clone()).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
 
             // Make sure we can close/reopen and get back to the same state.
@@ -705,7 +694,7 @@ mod test {
                 values.push(v.clone());
                 db.append(v).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
 
             // Test proof generation for various ranges
@@ -790,7 +779,7 @@ mod test {
                 values.push(v.clone());
                 db.append(v).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
 
             // Add more elements and commit again
             for i in ELEMENTS..ELEMENTS * 2 {
@@ -798,7 +787,7 @@ mod test {
                 values.push(v.clone());
                 db.append(v).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
 
             // Prune the first 30 operations

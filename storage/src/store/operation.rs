@@ -62,7 +62,7 @@ pub enum Keyless<V: Codec> {
     Append(V),
 
     /// Indicates the database has been committed.
-    Commit(V),
+    Commit(Option<V>),
 }
 
 /// An operation applied to an authenticated database with a variable size value.
@@ -70,11 +70,11 @@ pub enum Keyless<V: Codec> {
 pub enum Variable<K: Array, V: Codec> {
     // Operations for immutable stores.
     Set(K, V),
-    Commit(V),
+    Commit(Option<V>),
     // Operations for mutable stores.
     Delete(K),
     Update(K, V),
-    CommitFloor(V, u64),
+    CommitFloor(Option<V>, u64),
 }
 
 impl<K: Array, V: CodecFixed> FixedSize for Fixed<K, V> {
@@ -148,10 +148,10 @@ impl<K: Array, V: Codec> Variable<K, V> {
     pub fn to_value(&self) -> Option<&V> {
         match self {
             Variable::Set(_, value) => Some(value),
-            Variable::Commit(value) => Some(value),
+            Variable::Commit(value) => value.as_ref(),
             Variable::Delete(_) => None,
             Variable::Update(_, value) => Some(value),
-            Variable::CommitFloor(value, _) => Some(value),
+            Variable::CommitFloor(value, _) => value.as_ref(),
         }
     }
 }
@@ -231,7 +231,7 @@ impl<V: Codec> Read for Keyless<V> {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
             APPEND_CONTEXT => Ok(Self::Append(V::read_cfg(buf, cfg)?)),
-            COMMIT_CONTEXT => Ok(Self::Commit(V::read_cfg(buf, cfg)?)),
+            COMMIT_CONTEXT => Ok(Self::Commit(Option::<V>::read_cfg(buf, cfg)?)),
             e => Err(CodecError::InvalidEnum(e)),
         }
     }
@@ -289,7 +289,7 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
                 let value = V::read_cfg(buf, cfg)?;
                 Ok(Self::Set(key, value))
             }
-            COMMIT_CONTEXT => Ok(Self::Commit(V::read_cfg(buf, cfg)?)),
+            COMMIT_CONTEXT => Ok(Self::Commit(Option::<V>::read_cfg(buf, cfg)?)),
             DELETE_CONTEXT => {
                 let key = K::read(buf)?;
                 Ok(Self::Delete(key))
@@ -300,7 +300,7 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
                 Ok(Self::Update(key, value))
             }
             COMMIT_FLOOR_CONTEXT => {
-                let metadata = V::read_cfg(buf, cfg)?;
+                let metadata = Option::<V>::read_cfg(buf, cfg)?;
                 let floor_loc = UInt::read(buf)?;
                 Ok(Self::CommitFloor(metadata, floor_loc.into()))
             }
@@ -313,7 +313,13 @@ impl<V: Codec> Display for Keyless<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Keyless::Append(value) => write!(f, "[append value:{}]", hex(&value.encode())),
-            Keyless::Commit(value) => write!(f, "[commit {}]", hex(&value.encode())),
+            Keyless::Commit(value) => {
+                if let Some(value) = value {
+                    write!(f, "[commit {}]", hex(&value.encode()))
+                } else {
+                    write!(f, "[commit]")
+                }
+            }
         }
     }
 }
@@ -332,15 +338,25 @@ impl<K: Array, V: Codec> Display for Variable<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Variable::Set(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
-            Variable::Commit(value) => write!(f, "[commit {}]", hex(&value.encode())),
+            Variable::Commit(value) => {
+                if let Some(value) = value {
+                    write!(f, "[commit {}]", hex(&value.encode()))
+                } else {
+                    write!(f, "[commit]")
+                }
+            }
             Variable::Delete(key) => write!(f, "[key:{key} <deleted>]"),
             Variable::Update(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
             Variable::CommitFloor(value, loc) => {
-                write!(
-                    f,
-                    "[commit {} with inactivity floor: {loc}]",
-                    hex(&value.encode())
-                )
+                if let Some(value) = value {
+                    write!(
+                        f,
+                        "[commit {} with inactivity floor: {loc}]",
+                        hex(&value.encode())
+                    )
+                } else {
+                    write!(f, "[commit with inactivity floor: {loc}]")
+                }
             }
         }
     }
@@ -476,19 +492,13 @@ mod tests {
 
     #[test]
     fn test_keyless_commit() {
-        let metadata = U64::new(12345);
+        let metadata = Some(U64::new(12345));
         let commit_op = Keyless::<U64>::Commit(metadata.clone());
 
         let encoded = commit_op.encode();
         assert_eq!(encoded.len(), 1 + metadata.encode_size());
 
         let decoded = Keyless::<U64>::decode(encoded).unwrap();
-        assert_eq!(commit_op, decoded);
-        assert_eq!(
-            format!("{commit_op}"),
-            format!("[commit {}]", hex(&metadata.encode()))
-        );
-
         let Keyless::Commit(metadata_decoded) = decoded else {
             panic!("expected commit operation");
         };

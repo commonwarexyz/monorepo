@@ -335,7 +335,7 @@ mod tests {
                     db.set(key, value).await.unwrap();
                 }
                 Variable::Commit(metadata) => {
-                    db.commit_with_metadata(metadata).await.unwrap();
+                    db.commit(metadata).await.unwrap();
                 }
                 _ => {}
             }
@@ -356,10 +356,8 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let target_db_ops = create_test_ops(target_db_ops);
             apply_ops(&mut target_db, target_db_ops.clone()).await;
-            target_db
-                .commit_with_metadata(Sha256::fill(1))
-                .await
-                .unwrap();
+            let metadata = Some(Sha256::fill(1));
+            target_db.commit(metadata).await.unwrap();
             let target_op_count = target_db.op_count();
             let target_oldest_retained_loc = target_db.oldest_retained_loc;
             let mut hasher = test_hasher();
@@ -451,10 +449,7 @@ mod tests {
         executor.start(|mut context| async move {
             // Create an empty target database
             let mut target_db = create_test_db(context.clone()).await;
-            target_db
-                .commit_with_metadata(Sha256::fill(1))
-                .await
-                .unwrap(); // Commit to establish a valid root
+            target_db.commit(Some(Sha256::fill(1))).await.unwrap(); // Commit to establish a valid root
 
             let target_op_count = target_db.op_count();
             let target_oldest_retained_loc = target_db.oldest_retained_loc;
@@ -504,10 +499,7 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(10);
             apply_ops(&mut target_db, target_ops.clone()).await;
-            target_db
-                .commit_with_metadata(Sha256::fill(0))
-                .await
-                .unwrap();
+            target_db.commit(Some(Sha256::fill(0))).await.unwrap();
 
             // Capture target state
             let mut hasher = test_hasher();
@@ -585,10 +577,7 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let initial_ops = create_test_ops(50);
             apply_ops(&mut target_db, initial_ops.clone()).await;
-            target_db
-                .commit_with_metadata(Sha256::fill(0))
-                .await
-                .unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Capture the state after first commit
             let mut hasher = test_hasher();
@@ -599,10 +588,7 @@ mod tests {
             // Add more operations to create the extended target
             let additional_ops = create_test_ops(25);
             apply_ops(&mut target_db, additional_ops.clone()).await;
-            target_db
-                .commit_with_metadata(Sha256::fill(0))
-                .await
-                .unwrap();
+            target_db.commit(None).await.unwrap();
             let final_upper_bound = target_db.op_count() - 1;
             let final_root = target_db.root(&mut hasher);
 
@@ -724,10 +710,7 @@ mod tests {
             let target_ops = create_test_ops(30);
             // Apply all but the last operation
             apply_ops(&mut target_db, target_ops[..29].to_vec()).await;
-            target_db
-                .commit_with_metadata(Sha256::fill(0))
-                .await
-                .unwrap();
+            target_db.commit(None).await.unwrap();
 
             let mut hasher = test_hasher();
             let target_root = target_db.root(&mut hasher);
@@ -736,10 +719,7 @@ mod tests {
 
             // Add final op after capturing the range
             apply_ops(&mut target_db, target_ops[29..].to_vec()).await;
-            target_db
-                .commit_with_metadata(Sha256::fill(0))
-                .await
-                .unwrap();
+            target_db.commit(None).await.unwrap();
 
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
@@ -790,11 +770,8 @@ mod tests {
             // Apply the same operations to both databases
             apply_ops(&mut target_db, original_ops.clone()).await;
             apply_ops(&mut sync_db, original_ops.clone()).await;
-            target_db
-                .commit_with_metadata(Sha256::fill(0))
-                .await
-                .unwrap();
-            sync_db.commit_with_metadata(Sha256::fill(0)).await.unwrap();
+            target_db.commit(None).await.unwrap();
+            sync_db.commit(None).await.unwrap();
 
             // Close sync_db
             sync_db.close().await.unwrap();
@@ -802,10 +779,7 @@ mod tests {
             // Add one more operation and commit the target database
             let last_op = create_test_ops(1);
             apply_ops(&mut target_db, last_op.clone()).await;
-            target_db
-                .commit_with_metadata(Sha256::fill(0))
-                .await
-                .unwrap();
+            target_db.commit(None).await.unwrap();
             let mut hasher = test_hasher();
             let root = target_db.root(&mut hasher);
             let lower_bound_ops = target_db.oldest_retained_loc;
@@ -860,11 +834,8 @@ mod tests {
             // Apply the same operations to both databases
             apply_ops(&mut target_db, target_ops.clone()).await;
             apply_ops(&mut sync_db, target_ops.clone()).await;
-            target_db
-                .commit_with_metadata(Sha256::fill(0))
-                .await
-                .unwrap();
-            sync_db.commit_with_metadata(Sha256::fill(0)).await.unwrap();
+            target_db.commit(None).await.unwrap();
+            sync_db.commit(None).await.unwrap();
 
             // Close sync_db
             sync_db.close().await.unwrap();
@@ -914,10 +885,7 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(100);
             apply_ops(&mut target_db, target_ops).await;
-            target_db
-                .commit_with_metadata(Sha256::fill(0))
-                .await
-                .unwrap();
+            target_db.commit(None).await.unwrap();
 
             target_db.prune(10).await.unwrap();
 
@@ -978,10 +946,7 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(50);
             apply_ops(&mut target_db, target_ops).await;
-            target_db
-                .commit_with_metadata(Sha256::fill(0))
-                .await
-                .unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Capture initial target state
             let mut hasher = test_hasher();
@@ -1040,10 +1005,7 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(100);
             apply_ops(&mut target_db, target_ops.clone()).await;
-            target_db
-                .commit_with_metadata(Sha256::fill(0))
-                .await
-                .unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Capture initial target state
             let mut hasher = test_hasher();
@@ -1054,16 +1016,10 @@ mod tests {
             // Apply more operations to the target database
             let more_ops = create_test_ops(5);
             apply_ops(&mut target_db, more_ops.clone()).await;
-            target_db
-                .commit_with_metadata(Sha256::fill(0))
-                .await
-                .unwrap();
+            target_db.commit(None).await.unwrap();
 
             target_db.prune(10).await.unwrap();
-            target_db
-                .commit_with_metadata(Sha256::fill(0))
-                .await
-                .unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Capture final target state
             let mut hasher = test_hasher();
@@ -1129,10 +1085,7 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(25);
             apply_ops(&mut target_db, target_ops).await;
-            target_db
-                .commit_with_metadata(Sha256::fill(0))
-                .await
-                .unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Capture initial target state
             let mut hasher = test_hasher();
@@ -1188,10 +1141,7 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(10);
             apply_ops(&mut target_db, target_ops).await;
-            target_db
-                .commit_with_metadata(Sha256::fill(0))
-                .await
-                .unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Capture target state
             let mut hasher = test_hasher();

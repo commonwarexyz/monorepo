@@ -590,19 +590,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Also raises the inactivity floor according to the schedule,
     /// and prunes those operations below it. Batch operations will be parallelized if a thread pool
-    /// is provided.
-    pub async fn commit(&mut self) -> Result<(), Error>
-    where
-        V: Default,
-    {
-        self.commit_with_metadata(V::default()).await
-    }
-
-    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
-    /// upon return from this function. Also raises the inactivity floor according to the schedule,
-    /// and prunes those operations below it. Batch operations will be parallelized if a thread pool
     /// is provided. Caller can associate an arbitrary `metadata` value with the commit.
-    pub async fn commit_with_metadata(&mut self, metadata: V) -> Result<(), Error> {
+    pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.
         self.raise_inactivity_floor(metadata, self.uncommitted_ops + 1)
@@ -632,7 +621,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
-        Ok(Some(metadata))
+        Ok(metadata)
     }
 
     /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
@@ -689,7 +678,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// This method does not change the state of the db's snapshot, but it always changes the root
     /// since it applies at least one operation.
-    async fn raise_inactivity_floor(&mut self, metadata: V, max_steps: u64) -> Result<(), Error> {
+    async fn raise_inactivity_floor(
+        &mut self,
+        metadata: Option<V>,
+        max_steps: u64,
+    ) -> Result<(), Error> {
         for _ in 0..max_steps {
             if self.inactivity_floor_loc == self.op_count() {
                 break;
@@ -861,7 +854,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 0);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 1); // floor op added
             let root = db.root(&mut hasher);
             assert!(matches!(db.prune_inactive().await, Ok(())));
@@ -870,7 +863,7 @@ pub(super) mod test {
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
             for _ in 1..100 {
-                db.commit().await.unwrap();
+                db.commit(None).await.unwrap();
                 assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
             }
 
@@ -919,7 +912,7 @@ pub(super) mod test {
             db.sync().await.unwrap();
 
             // Advance over 3 inactive operations.
-            db.raise_inactivity_floor(vec![], 3).await.unwrap();
+            db.raise_inactivity_floor(None, 3).await.unwrap();
             assert_eq!(db.inactivity_floor_loc, 3);
             assert_eq!(db.op_count(), 6); // 4 updates, 1 deletion, 1 commit
             db.sync().await.unwrap();
@@ -944,8 +937,8 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 8);
 
             // Make sure closing/reopening gets us back to the same state.
-            let metadata = vec![99, 100];
-            db.commit_with_metadata(metadata.clone()).await.unwrap();
+            let metadata = Some(vec![99, 100]);
+            db.commit(metadata.clone()).await.unwrap();
             assert_eq!(db.op_count(), 9);
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
@@ -955,11 +948,11 @@ pub(super) mod test {
 
             // Since this db no longer has any active keys, we should be able to raise the
             // inactivity floor to the tip (only the inactive commit op remains).
-            db.raise_inactivity_floor(vec![], 100).await.unwrap();
+            db.raise_inactivity_floor(None, 100).await.unwrap();
             assert_eq!(db.inactivity_floor_loc, db.op_count() - 1);
 
             // Make sure we can still get the metadata.
-            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+            assert_eq!(db.get_metadata().await.unwrap(), metadata);
 
             // Re-activate the keys by updating them.
             db.update(d1, v1.clone()).await.unwrap();
@@ -970,17 +963,17 @@ pub(super) mod test {
             assert_eq!(db.snapshot.keys(), 2);
 
             // Confirm close/reopen gets us back to the same state.
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
             let mut db = open_db(context).await;
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.snapshot.keys(), 2);
-            assert_eq!(db.get_metadata().await.unwrap(), Some(Vec::default()));
+            assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Commit will raise the inactivity floor, which won't affect state but will affect the
             // root.
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
 
             assert!(db.root(&mut hasher) != root);
 
@@ -1039,7 +1032,7 @@ pub(super) mod test {
             assert_eq!(db.snapshot.items(), 857);
 
             // Test that commit will raise the activity floor.
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 2336);
             assert_eq!(db.oldest_retained_loc().unwrap(), 1477);
             assert_eq!(db.inactivity_floor_loc, 1478);
@@ -1055,7 +1048,7 @@ pub(super) mod test {
             assert_eq!(db.snapshot.items(), 857);
 
             // Raise the inactivity floor to the point where all inactive operations can be pruned.
-            db.raise_inactivity_floor(vec![], 3000).await.unwrap();
+            db.raise_inactivity_floor(None, 3000).await.unwrap();
             db.prune_inactive().await.unwrap();
             assert_eq!(db.inactivity_floor_loc, 4478);
             // Inactivity floor should be 858 operations from tip since 858 operations are active
@@ -1083,7 +1076,7 @@ pub(super) mod test {
             let start_pos = db.mmr.pruned_to_pos();
             let start_loc = leaf_pos_to_num(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
-            db.raise_inactivity_floor(vec![], 100).await.unwrap();
+            db.raise_inactivity_floor(None, 100).await.unwrap();
             db.sync().await.unwrap();
             let root = db.root(&mut hasher);
             assert!(start_loc < db.inactivity_floor_loc);
@@ -1113,7 +1106,7 @@ pub(super) mod test {
                 let v = vec![(i % 255) as u8; ((i % 7) + 3) as usize];
                 db.update(k, v).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
 
@@ -1144,14 +1137,14 @@ pub(super) mod test {
                     db.update(k, v.clone()).await.unwrap();
                     map.insert(k, v);
                 }
-                db.commit().await.unwrap();
+                db.commit(None).await.unwrap();
             }
             let k = hash(&((ELEMENTS - 1) * 1000 + (ELEMENTS - 1)).to_be_bytes());
 
             // Do one last delete operation which will be above the inactivity
             // floor, to make sure it gets replayed on restart.
             db.delete(k).await.unwrap();
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             assert!(db.get(&k).await.unwrap().is_none());
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -1192,7 +1185,7 @@ pub(super) mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
 
             // Update every 3rd key
@@ -1219,7 +1212,7 @@ pub(super) mod test {
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
 
             // Delete every 7th key
@@ -1244,7 +1237,7 @@ pub(super) mod test {
                 let k = hash(&i.to_be_bytes());
                 db.delete(k).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
 
             let root = db.root(&mut hasher);
             assert_eq!(db.op_count(), 2787);
@@ -1282,7 +1275,7 @@ pub(super) mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
             let expected_mmr_size = db.mmr.size();
             let expected_log_size = db.log_size;
@@ -1311,7 +1304,7 @@ pub(super) mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
             let expected_mmr_size = db.mmr.size();
             let expected_log_size = db.log_size;
@@ -1346,7 +1339,7 @@ pub(super) mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 9) as usize];
                 db.update(k, v).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
 
             // Add more elements but crash after writing only the locations
@@ -1366,7 +1359,7 @@ pub(super) mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 10) as usize];
                 db.update(k, v).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root(&mut hasher);
 
             // Add more elements but crash after writing only the oldest_retained_loc

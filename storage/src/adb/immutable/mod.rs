@@ -601,24 +601,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Batch operations will be parallelized if a thread pool
-    /// is provided.
-    pub async fn commit(&mut self) -> Result<(), Error>
-    where
-        V: Default,
-    {
-        self.commit_with_metadata(V::default()).await
-    }
-
-    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
-    /// upon return from this function. Batch operations will be parallelized if a thread pool
     /// is provided. Caller can associate an arbitrary `metadata` value with the commit.
-    pub async fn commit_with_metadata(&mut self, metadata: V) -> Result<(), Error> {
+    pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
         self.last_commit = Some(self.log_size);
         self.apply_op(Variable::Commit(metadata)).await?;
         self.sync().await
     }
 
-    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    /// Get the metadata associated with the last commit, or None if no commit has been made or if
+    /// there is no metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
@@ -629,7 +620,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
-        Ok(Some(metadata))
+        Ok(metadata)
     }
 
     /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
@@ -674,7 +665,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     where
         V: Default,
     {
-        self.apply_op(Variable::Commit(V::default())).await?;
+        self.apply_op(Variable::Commit(None)).await?;
         self.log.close().await?;
         self.locations.close().await?;
         self.mmr
@@ -691,7 +682,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     where
         V: Default,
     {
-        self.apply_op(Variable::Commit(V::default())).await?;
+        self.apply_op(Variable::Commit(None)).await?;
         let mut section = self.current_section();
 
         self.mmr.close(&mut self.hasher).await?;
@@ -717,7 +708,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     where
         V: Default,
     {
-        self.apply_op(Variable::Commit(V::default())).await?;
+        self.apply_op(Variable::Commit(None)).await?;
         let op_count = self.op_count();
         assert!(op_count >= operations_to_trim);
 
@@ -797,7 +788,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 0);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 1); // commit op added
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
@@ -831,12 +822,12 @@ pub(super) mod test {
             assert!(db.get(&k2).await.unwrap().is_none());
             assert_eq!(db.op_count(), 1);
             // Commit the first key.
-            let metadata = vec![99, 100];
-            db.commit_with_metadata(metadata.clone()).await.unwrap();
+            let metadata = Some(vec![99, 100]);
+            db.commit(metadata.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get(&k2).await.unwrap().is_none());
             assert_eq!(db.op_count(), 2);
-            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
+            assert_eq!(db.get_metadata().await.unwrap(), metadata.clone());
             // Set the second key.
             db.set(k2, v2.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
@@ -844,12 +835,12 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 3);
 
             // Make sure we can still get metadata.
-            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+            assert_eq!(db.get_metadata().await.unwrap(), metadata);
 
             // Commit the second key.
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 4);
-            assert_eq!(db.get_metadata().await.unwrap(), Some(Vec::default()));
+            assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Capture state.
             let root = db.root(&mut hasher);
@@ -867,7 +858,7 @@ pub(super) mod test {
             assert!(db.get(&k3).await.unwrap().is_none());
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(&mut hasher), root);
-            assert_eq!(db.get_metadata().await.unwrap(), Some(Vec::default()));
+            assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Cleanup.
             db.destroy().await.unwrap();
@@ -891,7 +882,7 @@ pub(super) mod test {
 
             assert_eq!(db.op_count(), ELEMENTS);
 
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -1013,7 +1004,7 @@ pub(super) mod test {
             let k1 = Sha256::fill(1u8);
             let v1 = vec![1, 2, 3];
             db.set(k1, v1).await.unwrap();
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let first_commit_root = db.root(&mut hasher);
 
             // Insert 1000 keys then sync.
@@ -1065,7 +1056,7 @@ pub(super) mod test {
 
             assert_eq!(db.op_count(), ELEMENTS);
 
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // Prune the db to the first half of the operations.
