@@ -62,12 +62,12 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
         operations.push(Operation::Set(key, value));
 
         if (i + 1) % 10 == 0 {
-            operations.push(Operation::Commit(Sha256::fill(0)));
+            operations.push(Operation::Commit(None));
         }
     }
 
     // Always end with a commit
-    operations.push(Operation::Commit(Sha256::fill(1)));
+    operations.push(Operation::Commit(Some(Sha256::fill(1))));
     operations
 }
 
@@ -91,7 +91,7 @@ where
                     database.set(key, value).await?;
                 }
                 Operation::Commit(metadata) => {
-                    database.commit_with_metadata(metadata).await?;
+                    database.commit(metadata).await?;
                 }
                 _ => {}
             }
@@ -100,7 +100,7 @@ where
     }
 
     async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        self.commit_with_metadata(Sha256::fill(0)).await
+        self.commit(None).await
     }
 
     fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
