@@ -2,7 +2,8 @@
 //!
 //! Both peer and link modification can be performed dynamically over the lifetime of the simulated network. This
 //! can be used to mimic transient network partitions, offline nodes (that later connect), and/or degrading link
-//! quality.
+//! quality. Messages on a link are delivered in order, and optional per-peer bandwidth limits account for
+//! transmission delay and queueing.
 //!
 //! # Determinism
 //!
@@ -39,9 +40,11 @@
 //!     // Start network
 //!     let network_handler = network.start();
 //!
-//!     // Register some peers
-//!     let (sender, receiver) = oracle.register(peers[0].clone(), 0, None, None).await.unwrap();
-//!     let (sender, receiver) = oracle.register(peers[1].clone(), 0, None, None).await.unwrap();
+//!     // Register some peers with bandwidth limits
+//!     // peer[0]: 10KB/s egress, unlimited ingress
+//!     let (sender, receiver) = oracle.register(peers[0].clone(), 0, Some(10_000), None).await.unwrap();
+//!     // peer[1]: unlimited egress, 5KB/s ingress
+//!     let (sender, receiver) = oracle.register(peers[1].clone(), 0, None, Some(5_000)).await.unwrap();
 //!
 //!     // Link 2 peers
 //!     oracle.add_link(
