@@ -540,6 +540,7 @@ mod test {
             let metadata = Some(vec![3u8; 10]);
             db.commit(metadata.clone()).await.unwrap();
             assert_eq!(db.size(), 1); // floor op added
+            assert_eq!(db.get(0).await.unwrap(), metadata); // the commit op
             let root = db.root(&mut hasher);
             let db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
@@ -569,6 +570,8 @@ mod test {
             // Make sure closing/reopening gets us back to the same state.
             db.commit(None).await.unwrap();
             assert_eq!(db.size(), 3); // 2 appends, 1 commit
+            assert_eq!(db.get_metadata().await.unwrap(), None);
+            assert_eq!(db.get(2).await.unwrap(), None); // the commit op
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
