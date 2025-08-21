@@ -101,6 +101,9 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
     hasher: Standard<H>,
+
+    /// The location of the last commit, if any.
+    last_commit: Option<u64>,
 }
 
 impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
@@ -219,6 +222,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             locations,
             log_items_per_section: cfg.log_items_per_section.get(),
             hasher,
+            last_commit: last_commit_loc,
         })
     }
 
@@ -335,6 +339,23 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )?;
 
         Ok(loc)
+    }
+
+    /// Get the metadata associated with the last commit.
+    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
+        let Some(loc) = self.last_commit else {
+            return Ok(None);
+        };
+        let offset = self.locations.read(loc).await?;
+        let section = loc / self.log_items_per_section;
+        let Some(op) = self.log.get(section, offset).await? else {
+            panic!("didn't find operation at location {loc} and offset {offset}");
+        };
+        let Operation::Commit(metadata) = op else {
+            return Ok(None);
+        };
+
+        Ok(Some(metadata))
     }
 
     /// Return the root of the db.
@@ -514,6 +535,7 @@ mod test {
             assert_eq!(db.size(), 0);
             assert_eq!(db.oldest_retained_loc().await.unwrap(), None);
             assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
+            assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let v1 = vec![1u8; 8];
@@ -523,13 +545,16 @@ mod test {
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.size(), 0);
+            assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
-            db.commit().await.unwrap();
+            let metadata = vec![3u8; 10];
+            db.commit_with_metadata(metadata.clone()).await.unwrap();
             assert_eq!(db.size(), 1); // floor op added
             let root = db.root(&mut hasher);
             let db = open_db(context.clone()).await;
             assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
             db.destroy().await.unwrap();
         });
