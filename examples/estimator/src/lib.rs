@@ -25,7 +25,16 @@ const MILLISECONDS_TO_SECONDS: f64 = 1000.0;
 // =============================================================================
 
 pub type Region = String;
-pub type Distribution = BTreeMap<Region, usize>;
+
+/// Regional configuration specifying peer count and optional bandwidth limits
+#[derive(Debug, Clone)]
+pub struct RegionConfig {
+    pub count: usize,
+    pub egress_bps: Option<usize>,
+    pub ingress_bps: Option<usize>,
+}
+
+pub type Distribution = BTreeMap<Region, RegionConfig>;
 pub type Behavior = (f64, f64); // (avg_latency_ms, jitter_ms)
 pub type Latencies = BTreeMap<Region, BTreeMap<Region, Behavior>>;
 
@@ -516,7 +525,7 @@ pub fn std_dev(data: &[f64]) -> Option<f64> {
 
 /// Calculate total number of peers across all regions
 pub fn count_peers(distribution: &Distribution) -> usize {
-    let peers = distribution.values().sum();
+    let peers = distribution.values().map(|config| config.count).sum();
     assert!(peers > 1, "must have at least 2 peers");
     peers
 }
@@ -524,9 +533,9 @@ pub fn count_peers(distribution: &Distribution) -> usize {
 /// Calculate which region a proposer belongs to based on their index
 pub fn calculate_proposer_region(proposer_idx: usize, distribution: &Distribution) -> String {
     let mut current = 0;
-    for (region, count) in distribution {
+    for (region, config) in distribution {
         let start = current;
-        current += *count;
+        current += config.count;
         if proposer_idx >= start && proposer_idx < current {
             return region.clone();
         }
