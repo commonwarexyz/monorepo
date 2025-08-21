@@ -37,10 +37,10 @@ impl crate::Blob for Blob {
         let mut buf = buf.into();
         file.seek(SeekFrom::Start(offset))
             .await
-            .map_err(Error::ReadFailed(Box::new))?;
+            .map_err(|e| Error::ReadFailed(Box::new(e)))?;
         file.read_exact(buf.as_mut())
             .await
-            .map_err(Error::ReadFailed(Box::new))?;
+            .map_err(|e| Error::ReadFailed(Box::new(e)))?;
         Ok(buf)
     }
 
@@ -48,25 +48,25 @@ impl crate::Blob for Blob {
         let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(offset))
             .await
-            .map_err(Error::WriteFailed(Box::new))?;
+            .map_err(|e| Error::WriteFailed(Box::new(e)))?;
         file.write_all(buf.into().as_ref())
             .await
-            .map_err(Error::WriteFailed(Box::new))?;
+            .map_err(|e| Error::WriteFailed(Box::new(e)))?;
         Ok(())
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let file = self.file.lock().await;
-        file.set_len(len).await.map_err(|e| {
-            Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), Box::new(e))
-        })?;
+        file.set_len(len)
+            .await
+            .map_err(|e| Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e))?;
         Ok(())
     }
 
     async fn sync(&self) -> Result<(), Error> {
         let file = self.file.lock().await;
-        file.sync_all().await.map_err(|e| {
-            Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), Box::new(e))
-        })
+        file.sync_all()
+            .await
+            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
     }
 }
