@@ -2,9 +2,10 @@
 //! [Channel].
 //!
 //! Usage:
-//! - Call [Muxer::new] to create the multiplexer.
-//! - Call [Muxer::register] to obtain a ([SubSender], [SubReceiver]) pair for that subchannel.
+//! - Call [Muxer::new] to obtain a ([Muxer], [MuxHandle]) pair.
 //! - Drive [Muxer::run] in a background task to demux incoming messages into per-subchannel queues.
+//! - Call [MuxHandle::register] to obtain a ([SubSender], [SubReceiver]) pair for that subchannel,
+//!   even if the muxer is already running.
 
 use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
@@ -34,53 +35,28 @@ pub struct Muxer<S: Sender, R: Receiver> {
     sender: S,
     receiver: R,
     routes: Routes<R::PublicKey>,
-    registered: Arc<Mutex<HashSet<Channel>>>,
-    mailbox_size: usize,
 }
 
 impl<S: Sender, R: Receiver> Muxer<S, R> {
-    /// Create a multiplexed wrapper around a [Sender] and [Receiver] pair.
-    pub fn new(sender: S, receiver: R, mailbox_size: usize) -> Self {
-        Self {
+    /// Create a multiplexed wrapper around a [Sender] and [Receiver] pair, and return a ([Muxer],
+    /// [MuxHandle]) pair that can be used to register routes dynamically.
+    pub fn new(sender: S, receiver: R, mailbox_size: usize) -> (Self, MuxHandle<S, R>) {
+        let routes: Routes<R::PublicKey> = Arc::new(Mutex::new(HashMap::new()));
+
+        let mux = Self {
             sender,
             receiver,
-            routes: Arc::new(Mutex::new(HashMap::new())),
+            routes: Arc::clone(&routes),
+        };
+
+        let handle = MuxHandle {
+            sender: mux.sender.clone(),
+            routes,
             registered: Arc::new(Mutex::new(HashSet::new())),
             mailbox_size,
-        }
-    }
+        };
 
-    /// Open a `subchannel`. Returns a `(SubSender, SubReceiver)` pair that can be used to send and
-    /// receive messages for that subchannel.
-    ///
-    /// The caller must be driving [Muxer::run], or have started it using [Muxer::start], for the
-    /// receiver to yield messages.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the subchannel is already registered.
-    pub fn register(&self, subchannel: Channel) -> (SubSender<S>, SubReceiver<R::PublicKey>) {
-        // Panic if the subchannel was already registered at any point.
-        if !self.registered.lock().unwrap().insert(subchannel) {
-            panic!("duplicate subchannel registration: {subchannel}");
-        }
-
-        // Create a new channel to forward messages for the subchannel.
-        let (tx, rx) = mpsc::channel(self.mailbox_size);
-        assert!(self.routes.lock().unwrap().insert(subchannel, tx).is_none());
-
-        // Return the subchannel sender and receiver.
-        (
-            SubSender {
-                subchannel,
-                inner: self.sender.clone(),
-            },
-            SubReceiver {
-                receiver: rx,
-                subchannel,
-                routes: self.routes.clone(),
-            },
-        )
+        (mux, handle)
     }
 
     /// Start the demuxer using the given spawner.
@@ -129,6 +105,42 @@ impl<S: Sender, R: Receiver> Muxer<S, R> {
                 assert!(routes.insert(subchannel, sender).is_none());
             }
         }
+    }
+}
+
+/// A clonable handle that allows registering routes at any time, even after the [Muxer] is running.
+#[derive(Clone)]
+pub struct MuxHandle<S: Sender, R: Receiver> {
+    sender: S,
+    routes: Routes<R::PublicKey>,
+    registered: Arc<Mutex<HashSet<Channel>>>,
+    mailbox_size: usize,
+}
+
+impl<S: Sender, R: Receiver> MuxHandle<S, R> {
+    /// Open a `subchannel`. Returns a ([SubSender], [SubReceiver]) pair that can be used to send
+    /// and receive messages for that subchannel.
+    ///
+    /// Panics if the subchannel is already registered at any point.
+    pub fn register(&self, subchannel: Channel) -> (SubSender<S>, SubReceiver<R::PublicKey>) {
+        if !self.registered.lock().unwrap().insert(subchannel) {
+            panic!("duplicate subchannel registration: {subchannel}");
+        }
+
+        let (tx, rx) = mpsc::channel(self.mailbox_size);
+        assert!(self.routes.lock().unwrap().insert(subchannel, tx).is_none());
+
+        (
+            SubSender {
+                subchannel,
+                inner: self.sender.clone(),
+            },
+            SubReceiver {
+                receiver: rx,
+                subchannel,
+                routes: self.routes.clone(),
+            },
+        )
     }
 }
 
@@ -230,32 +242,18 @@ mod tests {
 
     /// Create a peer and register it with the oracle.
     async fn create_peer(
+        context: &deterministic::Context,
         oracle: &mut Oracle<Pk>,
         seed: u64,
     ) -> (
         Pk,
-        Muxer<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
+        MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
     ) {
         let pubkey = pk(seed);
         let (sender, receiver) = oracle.register(pubkey.clone(), 0).await.unwrap();
-        (pubkey, Muxer::new(sender, receiver, CAPACITY))
-    }
-
-    /// Test-only: open only a sender for a subchannel without registering a route.
-    fn open_tx<S: Sender, R: Receiver>(mux: &Muxer<S, R>, subchannel: Channel) -> SubSender<S> {
-        SubSender {
-            subchannel,
-            inner: mux.sender.clone(),
-        }
-    }
-
-    /// Test-only: open only a receiver for a subchannel (registers the route).
-    fn open_rx<S: Sender, R: Receiver>(
-        mux: &Muxer<S, R>,
-        subchannel: Channel,
-    ) -> SubReceiver<R::PublicKey> {
-        let (_tx, rx) = mux.register(subchannel);
-        rx
+        let (mux, handle) = Muxer::new(sender, receiver, CAPACITY);
+        mux.start(context.clone());
+        (pubkey, handle)
     }
 
     /// Send a burst of messages to a list of senders.
@@ -296,14 +294,12 @@ mod tests {
         executor.start(|context| async move {
             let mut oracle = start_network(context.clone());
 
-            let (pk1, mux1) = create_peer(&mut oracle, 0).await;
-            let (pk2, mux2) = create_peer(&mut oracle, 1).await;
+            let (pk1, handle1) = create_peer(&context, &mut oracle, 0).await;
+            let (pk2, handle2) = create_peer(&context, &mut oracle, 1).await;
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
-            let mut sub_rx1 = open_rx(&mux1, 7);
-            mux1.start(context.clone());
-
-            let mut sub_tx2 = open_tx(&mux2, 7);
+            let (_, mut sub_rx1) = handle1.register(7);
+            let (mut sub_tx2, _) = handle2.register(7);
 
             // Send and receive
             let payload = Bytes::from_static(b"hello");
@@ -323,16 +319,15 @@ mod tests {
         executor.start(|context| async move {
             let mut oracle = start_network(context.clone());
 
-            let (pk1, mux1) = create_peer(&mut oracle, 0).await;
-            let (pk2, mux2) = create_peer(&mut oracle, 1).await;
+            let (pk1, handle1) = create_peer(&context, &mut oracle, 0).await;
+            let (pk2, handle2) = create_peer(&context, &mut oracle, 1).await;
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
-            let mut rx_a = open_rx(&mux1, 10);
-            let mut rx_b = open_rx(&mux1, 20);
-            mux1.start(context.clone());
+            let (_, mut rx_a) = handle1.register(10);
+            let (_, mut rx_b) = handle1.register(20);
 
-            let mut tx2_a = open_tx(&mux2, 10);
-            let mut tx2_b = open_tx(&mux2, 20);
+            let (mut tx2_a, _) = handle2.register(10);
+            let (mut tx2_b, _) = handle2.register(20);
 
             let payload_a = Bytes::from_static(b"A");
             let payload_b = Bytes::from_static(b"B");
@@ -361,23 +356,18 @@ mod tests {
         executor.start(|context| async move {
             let mut oracle = start_network(context.clone());
 
-            let (pk1, mux1) = create_peer(&mut oracle, 0).await;
-            let (pk2, mux2) = create_peer(&mut oracle, 1).await;
+            let (pk1, handle1) = create_peer(&context, &mut oracle, 0).await;
+            let (pk2, handle2) = create_peer(&context, &mut oracle, 1).await;
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
             // Register the subchannels.
-            let tx1 = open_tx(&mux1, 99);
-            let tx2 = open_tx(&mux1, 100);
-            let mut rx1 = open_rx(&mux2, 99);
-            let mut rx2 = open_rx(&mux2, 100);
+            let (tx1, _) = handle1.register(99);
+            let (tx2, _) = handle1.register(100);
+            let (_, mut rx1) = handle2.register(99);
+            let (_, mut rx2) = handle2.register(100);
 
             // Send 10 messages to each subchannel from pk1 to pk2.
             send_burst(&mut [tx1, tx2], CAPACITY * 2).await;
-
-            // Give the demuxers a moment to process messages.
-            mux1.start(context.clone());
-            mux2.start(context.clone());
-            context.sleep(Duration::from_millis(100)).await;
 
             // Try receiving all messages from the second subchannel.
             expect_n_messages(&mut rx2, CAPACITY, &context).await;
@@ -397,22 +387,20 @@ mod tests {
         executor.start(|context| async move {
             let mut oracle = start_network(context.clone());
 
-            let (pk1, mux1) = create_peer(&mut oracle, 0).await;
-            let (pk2, mux2) = create_peer(&mut oracle, 1).await;
+            let (pk1, handle1) = create_peer(&context, &mut oracle, 0).await;
+            let (pk2, handle2) = create_peer(&context, &mut oracle, 1).await;
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
             // Register the subchannels.
-            let tx1 = open_tx(&mux1, 99);
-            let tx2 = open_tx(&mux1, 100);
-            let rx1 = open_rx(&mux2, 99);
-            let mut rx2 = open_rx(&mux2, 100);
+            let (tx1, _) = handle1.register(99);
+            let (tx2, _) = handle1.register(100);
+            let (_, rx1) = handle2.register(99);
+            let (_, mut rx2) = handle2.register(100);
 
             // Send 10 messages to each subchannel from pk1 to pk2.
             send_burst(&mut [tx1, tx2], CAPACITY * 2).await;
 
             // Give the demuxers a moment to process messages.
-            mux1.start(context.clone());
-            mux2.start(context.clone());
             context.sleep(Duration::from_millis(100)).await;
 
             // Try receiving all messages from the second subchannel.
@@ -433,22 +421,20 @@ mod tests {
         executor.start(|context| async move {
             let mut oracle = start_network(context.clone());
 
-            let (pk1, mux1) = create_peer(&mut oracle, 0).await;
-            let (pk2, mux2) = create_peer(&mut oracle, 1).await;
+            let (pk1, handle1) = create_peer(&context, &mut oracle, 0).await;
+            let (pk2, handle2) = create_peer(&context, &mut oracle, 1).await;
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
             // Register the subchannels.
-            let tx1 = open_tx(&mux1, 1);
-            let tx2 = open_tx(&mux1, 2);
+            let (tx1, _) = handle1.register(1);
+            let (tx2, _) = handle1.register(2);
             // Do not register the first subchannel on the second peer.
-            let mut rx2 = open_rx(&mux2, 2);
+            let (_, mut rx2) = handle2.register(2);
 
             // Send 10 messages to each subchannel from pk1 to pk2.
             send_burst(&mut [tx1, tx2], CAPACITY * 2).await;
 
             // Give the demuxers a moment to process messages.
-            mux1.start(context.clone());
-            mux2.start(context.clone());
             context.sleep(Duration::from_millis(100)).await;
 
             // Try receiving all messages from the second subchannel.
@@ -464,9 +450,9 @@ mod tests {
         executor.start(|context| async move {
             let mut oracle = start_network(context.clone());
 
-            let (_pk1, mux1) = create_peer(&mut oracle, 0).await;
-            let _rx1 = open_rx(&mux1, 7);
-            let _rx2 = open_rx(&mux1, 7); // panics
+            let (_pk1, handle1) = create_peer(&context, &mut oracle, 0).await;
+            let (_, _) = handle1.register(7);
+            let (_, _) = handle1.register(7); // panics
         });
     }
 }
