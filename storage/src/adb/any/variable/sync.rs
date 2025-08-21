@@ -138,17 +138,9 @@ where
 
         let snapshot = Index::init(context.with_label("snapshot"), db_config.translator.clone());
 
-        let (log, metadata) = journal.into_inner();
+        let (log, mut metadata) = journal.into_inner();
         let oldest_retained_loc_key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
-        let oldest_retained_loc = match metadata.get(&oldest_retained_loc_key) {
-            Some(bytes) => u64::from_be_bytes(
-                bytes
-                    .as_slice()
-                    .try_into()
-                    .expect("oldest_retained_loc bytes could not be converted to u64"),
-            ),
-            None => lower_bound,
-        };
+        metadata.put(oldest_retained_loc_key, lower_bound.to_be_bytes().to_vec());
 
         // Create the database instance
         let db = any::variable::Any {
@@ -156,7 +148,7 @@ where
             log,
             log_size: upper_bound + 1,
             inactivity_floor_loc: lower_bound,
-            oldest_retained_loc,
+            oldest_retained_loc: lower_bound,
             metadata,
             locations,
             log_items_per_section: db_config.log_items_per_section.get(),
@@ -581,19 +573,10 @@ where
 
     // Calculate the logical item range for this section
     let section_start = lower_section * items_per_section;
-    let section_end = section_start + items_per_section - 1;
-
-    // If lower_bound is at the very start of the section, no rebuilding needed
-    if lower_bound <= section_start {
-        return Ok(());
-    }
 
     debug!(
         lower_section,
-        lower_bound,
-        section_start,
-        section_end,
-        "rebuilding section to remove items before lower_bound"
+        lower_bound, section_start, "rebuilding section to remove items before lower_bound"
     );
 
     // Read all operations from the current section
@@ -661,15 +644,15 @@ where
         journal.tracked.dec();
     }
 
-    // Recreate the section with only the operations we want to keep
-    for operation in operations_to_keep {
-        journal.append(lower_section, operation).await?;
+    if !operations_to_keep.is_empty() {
+        // Recreate the section with only the operations we want to keep
+        for operation in operations_to_keep {
+            journal.append(lower_section, operation).await?;
+        }
+
+        // Sync the rebuilt section
+        journal.sync(lower_section).await?;
     }
-
-    // Sync the rebuilt section
-    journal.sync(lower_section).await?;
-
-    debug!(lower_section, "section rebuilt successfully");
     Ok(())
 }
 
