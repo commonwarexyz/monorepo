@@ -17,12 +17,20 @@ enum FuzzInput {
     Get { item: Item },
     Remove { item: Item },
     Reconcile { keep: Vec<Item>, default: Priority },
+    Retain { item: Item },
     Contains { item: Item },
     Peek,
     Pop,
     Len,
     IsEmpty,
     Clear,
+}
+
+#[derive(Arbitrary, Debug)]
+enum PredicateType {
+    StartsWith,
+    EndsWith,
+    Contains,
 }
 
 fn fuzz(input: Vec<FuzzInput>) {
@@ -46,6 +54,11 @@ fn fuzz(input: Vec<FuzzInput>) {
                 } else {
                     assert!(result.is_none());
                 }
+            }
+
+            FuzzInput::Retain { item } => {
+                set.retain(|key| key.le(&item));
+                expected_items.retain(|key| key.le(&item));
             }
 
             FuzzInput::Remove { item } => {
@@ -122,6 +135,7 @@ fn fuzz(input: Vec<FuzzInput>) {
             }
 
             FuzzInput::Clear => {
+                set.clear();
                 expected_items.clear();
                 while set.pop().is_some() {}
                 assert!(set.is_empty());
