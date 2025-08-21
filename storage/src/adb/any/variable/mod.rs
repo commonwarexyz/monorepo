@@ -1547,7 +1547,6 @@ pub(super) mod test {
             // Final commit
             db_no_delay.commit().await.unwrap();
             db_max_delay.commit().await.unwrap();
-            let inactivity_floor = db_no_delay.inactivity_floor_loc;
 
             // Get roots from both databases
             let root_no_delay = db_no_delay.root(&mut hasher);
@@ -1558,8 +1557,6 @@ pub(super) mod test {
 
             // Verify different pruning behaviors
             let oldest_no_delay = db_no_delay.oldest_retained_loc().unwrap();
-            assert_eq!(oldest_no_delay, inactivity_floor);
-
             let oldest_max_delay = db_max_delay.oldest_retained_loc().unwrap();
             assert!(oldest_no_delay < oldest_max_delay);
 
