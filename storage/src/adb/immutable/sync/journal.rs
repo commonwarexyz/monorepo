@@ -34,10 +34,11 @@ where
 {
     /// Create a new sync-compatible [Journal].
     ///
-    /// Arguments:
-    /// - `inner`: The wrapped [variable::Journal], whose logical last operation location is `size - 1`.
-    /// - `items_per_section`: Operations per section.
-    /// - `size`: Logical next append location to report.
+    /// # Arguments
+    /// * `inner` - The wrapped [variable::Journal], whose logical last operation location is
+    ///   `size - 1`.
+    /// * `items_per_section` - Operations per section.
+    /// * `size` - Logical next append location to report.
     pub fn new(
         inner: variable::Journal<E, Variable<K, V>>,
         items_per_section: NonZeroU64,
