@@ -160,11 +160,11 @@ impl<V: Codec> Write for Keyless<V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Keyless::Append(value) => {
-                buf.put_u8(APPEND_CONTEXT);
+                APPEND_CONTEXT.write(buf);
                 value.write(buf);
             }
             Keyless::Commit => {
-                buf.put_u8(COMMIT_CONTEXT);
+                COMMIT_CONTEXT.write(buf);
             }
         }
     }
@@ -174,18 +174,18 @@ impl<K: Array, V: CodecFixed> Write for Fixed<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Fixed::Delete(k) => {
-                buf.put_u8(DELETE_CONTEXT);
+                DELETE_CONTEXT.write(buf);
                 k.write(buf);
                 // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, V::SIZE);
             }
             Fixed::Update(k, v) => {
-                buf.put_u8(UPDATE_CONTEXT);
+                UPDATE_CONTEXT.write(buf);
                 k.write(buf);
                 v.write(buf);
             }
             Fixed::CommitFloor(floor_loc) => {
-                buf.put_u8(COMMIT_FLOOR_CONTEXT);
+                COMMIT_FLOOR_CONTEXT.write(buf);
                 buf.put_slice(&floor_loc.to_be_bytes());
                 // Pad with 0 up to [Self::SIZE]
                 buf.put_bytes(0, Self::SIZE - 1 - u64::SIZE);
@@ -198,24 +198,24 @@ impl<K: Array, V: Codec> Write for Variable<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Variable::Set(k, v) => {
-                buf.put_u8(SET_CONTEXT);
+                SET_CONTEXT.write(buf);
                 k.write(buf);
                 v.write(buf);
             }
             Variable::Commit() => {
-                buf.put_u8(COMMIT_CONTEXT);
+                COMMIT_CONTEXT.write(buf);
             }
             Variable::Delete(k) => {
-                buf.put_u8(DELETE_CONTEXT);
+                DELETE_CONTEXT.write(buf);
                 k.write(buf);
             }
             Variable::Update(k, v) => {
-                buf.put_u8(UPDATE_CONTEXT);
+                UPDATE_CONTEXT.write(buf);
                 k.write(buf);
                 v.write(buf);
             }
             Variable::CommitFloor(floor_loc) => {
-                buf.put_u8(COMMIT_FLOOR_CONTEXT);
+                COMMIT_FLOOR_CONTEXT.write(buf);
                 UInt(*floor_loc).write(buf);
             }
         }
