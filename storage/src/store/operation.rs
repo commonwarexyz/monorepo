@@ -338,7 +338,7 @@ impl<K: Array, V: Codec> Display for Variable<K, V> {
             Variable::CommitFloor(value, loc) => {
                 write!(
                     f,
-                    "[commit {}] with inactivity floor: {loc}",
+                    "[commit {} with inactivity floor: {loc}]",
                     hex(&value.encode())
                 )
             }
