@@ -158,6 +158,8 @@ jobs:
       run: cargo build -p commonware-utils --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_utils.rlib
     - name: Build cryptography
       run: cargo build -p commonware-cryptography --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_cryptography.rlib
+    - name: Build storage-core
+      run: cargo build -p commonware-storage-core --no-default-features --target thumbv7em-none-eabihf --release && du -h target/thumbv7em-none-eabihf/release/libcommonware_storage_core.rlib
 
   Unsafe:
     runs-on: ubuntu-latest
