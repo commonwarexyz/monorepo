@@ -1558,7 +1558,7 @@ pub(super) mod test {
             // Verify different pruning behaviors
             let oldest_no_delay = db_no_delay.oldest_retained_loc().unwrap();
             let oldest_max_delay = db_max_delay.oldest_retained_loc().unwrap();
-            assert!(oldest_no_delay < oldest_max_delay);
+            assert!(oldest_no_delay > oldest_max_delay);
 
             // Max delay database should retain everything from the beginning
             assert_eq!(oldest_max_delay, 0);
