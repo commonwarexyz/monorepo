@@ -499,8 +499,8 @@ async fn prune_upper<E: Storage + Metrics, V: Codec>(
 }
 
 /// Remove items before the `lower_bound` location from the first section of the journal, if any.
-/// If the first section contains elements before `lower_bound`, the remaining elements are replayed
-/// at the beginning of the section.
+/// If the section containing `lower_bound` has elements before `lower_bound`, these are removed.
+/// The remaining elements are then replayed at the beginning of the section.
 async fn prune_lower<E, V>(
     journal: &mut VJournal<E, V>,
     lower_bound: u64,

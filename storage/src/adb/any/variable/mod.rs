@@ -1558,12 +1558,10 @@ pub(super) mod test {
 
             // Verify different pruning behaviors
             let oldest_no_delay = db_no_delay.oldest_retained_loc().unwrap();
-            let oldest_max_delay = db_max_delay.oldest_retained_loc().unwrap();
+            assert_eq!(oldest_no_delay, inactivity_floor);
 
-            // No delay database should prune up to the inactivity floor (section-aligned)
-            let expected_no_delay = (inactivity_floor / db_no_delay.log_items_per_section)
-                * db_no_delay.log_items_per_section;
-            assert_eq!(oldest_no_delay, expected_no_delay);
+            let oldest_max_delay = db_max_delay.oldest_retained_loc().unwrap();
+            assert!(oldest_no_delay < oldest_max_delay);
 
             // Max delay database should retain everything from the beginning
             assert_eq!(oldest_max_delay, 0);
