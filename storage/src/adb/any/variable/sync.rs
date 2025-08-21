@@ -349,61 +349,6 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     Ok(journal)
 }
 
-/// Remove items beyond the `upper_bound` location (inclusive).
-/// Assumes each section contains `items_per_section` items.
-async fn prune_upper<E: Storage + Metrics, V: Codec>(
-    journal: &mut VJournal<E, V>,
-    upper_bound: u64,
-    items_per_section: u64,
-) -> Result<(), crate::journal::Error> {
-    // Find which section contains the upper_bound item
-    let upper_section = upper_bound / items_per_section;
-    let Some(blob) = journal.blobs.get(&upper_section) else {
-        return Ok(()); // Section doesn't exist, nothing to truncate
-    };
-
-    // Calculate the logical item range for this section
-    let section_start = upper_section * items_per_section;
-    let section_end = section_start + items_per_section - 1;
-
-    // If upper_bound is at the very end of the section, no truncation needed
-    if upper_bound >= section_end {
-        return Ok(());
-    }
-
-    // Calculate how many items to keep (upper_bound is inclusive)
-    let items_to_keep = (upper_bound - section_start + 1) as u32;
-    debug!(
-        upper_section,
-        upper_bound,
-        section_start,
-        section_end,
-        items_to_keep,
-        "truncating section to remove items beyond upper_bound"
-    );
-
-    // Find where to rewind to (after the last item we want to keep)
-    let target_byte_size = compute_offset::<E, V>(
-        blob,
-        &journal.cfg.codec_config,
-        journal.cfg.compression.is_some(),
-        items_to_keep,
-    )
-    .await?;
-
-    // Rewind to the appropriate position to remove items beyond the upper bound
-    journal
-        .rewind_section(upper_section, target_byte_size)
-        .await?;
-
-    debug!(
-        upper_section,
-        items_to_keep, target_byte_size, "section truncated"
-    );
-
-    Ok(())
-}
-
 /// Return the byte offset of the next element after `items_count` elements of `blob`.
 async fn compute_offset<E: Storage + Metrics, V: Codec>(
     blob: &commonware_runtime::buffer::Append<E::Blob>,
@@ -516,6 +461,61 @@ where
     async fn close(self) -> Result<(), Self::Error> {
         self.inner.close().await
     }
+}
+
+/// Remove items beyond the `upper_bound` location (inclusive).
+/// Assumes each section contains `items_per_section` items.
+async fn prune_upper<E: Storage + Metrics, V: Codec>(
+    journal: &mut VJournal<E, V>,
+    upper_bound: u64,
+    items_per_section: u64,
+) -> Result<(), crate::journal::Error> {
+    // Find which section contains the upper_bound item
+    let upper_section = upper_bound / items_per_section;
+    let Some(blob) = journal.blobs.get(&upper_section) else {
+        return Ok(()); // Section doesn't exist, nothing to truncate
+    };
+
+    // Calculate the logical item range for this section
+    let section_start = upper_section * items_per_section;
+    let section_end = section_start + items_per_section - 1;
+
+    // If upper_bound is at the very end of the section, no truncation needed
+    if upper_bound >= section_end {
+        return Ok(());
+    }
+
+    // Calculate how many items to keep (upper_bound is inclusive)
+    let items_to_keep = (upper_bound - section_start + 1) as u32;
+    debug!(
+        upper_section,
+        upper_bound,
+        section_start,
+        section_end,
+        items_to_keep,
+        "truncating section to remove items beyond upper_bound"
+    );
+
+    // Find where to rewind to (after the last item we want to keep)
+    let target_byte_size = compute_offset::<E, V>(
+        blob,
+        &journal.cfg.codec_config,
+        journal.cfg.compression.is_some(),
+        items_to_keep,
+    )
+    .await?;
+
+    // Rewind to the appropriate position to remove items beyond the upper bound
+    journal
+        .rewind_section(upper_section, target_byte_size)
+        .await?;
+
+    debug!(
+        upper_section,
+        items_to_keep, target_byte_size, "section truncated"
+    );
+
+    Ok(())
 }
 
 /// Remove items before the `lower_bound` location from the first section of the journal, if any.
