@@ -70,6 +70,7 @@ where
         lower_bound: u64,
         upper_bound: u64,
     ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
+        // Initialize the variable journal
         let mut journal = VJournal::init(
             context.clone(),
             VConfig {
@@ -92,8 +93,8 @@ where
         )
         .await?;
 
+        // Prune the journal to the sync range
         let oldest_retained_loc = read_oldest_retained_loc(&metadata, 0);
-
         let (size, new_oldest_retained_loc) = prune_journal(
             &mut journal,
             lower_bound,
@@ -103,9 +104,11 @@ where
         )
         .await?;
 
+        // Update the metadata with the new oldest retained location
         if new_oldest_retained_loc != oldest_retained_loc {
             write_oldest_retained_loc(&mut metadata, new_oldest_retained_loc);
         }
+
         // Create the sync journal wrapper
         Journal::new(journal, config.log_items_per_section, metadata, size).await
     }
@@ -139,7 +142,7 @@ where
         .await
         .map_err(adb::Error::Mmr)?;
 
-        // Initialize locations journal for sync with proper bounds and pruning
+        // Initialize locations journal
         let locations = crate::adb::any::fixed::sync::init_journal(
             context.with_label("locations"),
             fixed::Config {
@@ -154,9 +157,8 @@ where
         .await
         .map_err(adb::Error::Journal)?;
 
-        let snapshot = Index::init(context.with_label("snapshot"), db_config.translator.clone());
-
         // Create the database instance
+        let snapshot = Index::init(context.with_label("snapshot"), db_config.translator.clone());
         let (log, metadata) = journal.into_inner();
         let db = any::variable::Any {
             mmr,
@@ -173,9 +175,10 @@ where
             pruning_delay: db_config.pruning_delay,
         };
 
+        // Build the database from the log
         let mut db = db.build_snapshot_from_log().await?;
 
-        // Persist state
+        // Persist the state
         db.sync().await?;
         db.log.sync_all().await?;
         Ok(db)
