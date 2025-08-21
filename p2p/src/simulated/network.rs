@@ -274,7 +274,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             }
 
             // Determine if there is a link between the sender and recipient
-            let mut link = match self.links.get(&o_r).cloned() {
+            let link = match self.links.get_mut(&o_r) {
                 Some(link) => link,
                 None => {
                     trace!(?origin, ?recipient, reason = "no link", "dropping message",);
@@ -311,65 +311,67 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             };
 
             // Calculate transmission timing
-            let (transmission_duration, send_start_at, receive_start_at) =
-                if let Some(bps) = effective_bps {
-                    let tx_duration =
-                        Duration::from_millis((message.len() as f64 / bps as f64 * 1000.0) as u64);
+            let (send_complete_at, mut receive_complete_at) = if let Some(bps) = effective_bps {
+                let tx_duration =
+                    Duration::from_millis((message.len() as f64 / bps as f64 * 1000.0) as u64);
 
-                    // Sender can start when free, receiver must be free when first bit arrives
-                    let sender_ready_at = sender_egress_available_at.max(now);
-                    let receiver_ready_at = receiver_ingress_available_at
-                        .checked_sub(latency)
-                        .unwrap_or(SystemTime::UNIX_EPOCH);
-                    let send_start_at = sender_ready_at.max(receiver_ready_at);
-                    let receive_start_at = send_start_at + latency;
+                // Sender can start when free, receiver must be free when first bit arrives
+                let sender_ready_at = sender_egress_available_at.max(now);
+                let receiver_ready_at = receiver_ingress_available_at
+                    .checked_sub(latency)
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
 
-                    (tx_duration, send_start_at, receive_start_at)
-                } else {
-                    // No bandwidth limits
-                    (Duration::ZERO, now, now + latency)
-                };
+                let send_complete_at = sender_ready_at.max(receiver_ready_at) + tx_duration;
+                let receive_complete_at = send_complete_at + latency;
+
+                (send_complete_at, receive_complete_at)
+            } else {
+                // No bandwidth limits
+                (now, now + latency)
+            };
+
+            // Apply ordering constraint: messages must arrive after previous message on this link
+            // (we add a 1 microsecond epsilon to ensure strict ordering)
+            receive_complete_at =
+                receive_complete_at.max(link.last_arrival_at + Duration::from_micros(1));
+
+            // Update the link's last arrival time
+            link.last_arrival_at = receive_complete_at;
 
             // Update availability times for peers with bandwidth limits
             if sender_egress_bps.is_some() {
-                self.peers.get_mut(&origin).unwrap().egress_available_at =
-                    send_start_at + transmission_duration;
+                self.peers.get_mut(&origin).unwrap().egress_available_at = send_complete_at;
             }
 
             if receiver_ingress_bps.is_some() {
-                self.peers.get_mut(&recipient).unwrap().ingress_available_at =
-                    receive_start_at + transmission_duration;
+                self.peers.get_mut(&recipient).unwrap().ingress_available_at = receive_complete_at;
             }
-
-            // Total delay until message is fully received
-            let delay = receive_start_at.duration_since(now).unwrap() + transmission_duration;
 
             let should_deliver = self.context.gen_bool(link.success_rate);
             trace!(
                 ?origin,
                 ?recipient,
-                delay_ms = delay.as_millis(),
                 latency_ms = latency.as_millis(),
-                transmission_ms = transmission_duration.as_millis(),
                 "sending message",
             );
 
             // Send message
             self.context.with_label("messenger").spawn({
+                let mut link = link.clone();
                 let message = message.clone();
                 let recipient = recipient.clone();
                 let origin = origin.clone();
                 let mut acquired_sender = acquired_sender.clone();
                 let received_messages = self.received_messages.clone();
                 move |context| async move {
-                    // Mark as sent as soon as soon as execution starts
+                    // Wait for transmission to complete from sender's perspective
+                    context.sleep_until(send_complete_at).await;
+
+                    // Mark as sent once transmission completes
                     acquired_sender.send(()).await.unwrap();
 
-                    // Apply delay to send (once link is not saturated)
-                    //
-                    // Note: messages can be sent out of order (will not occur when using a
-                    // stable TCP connection)
-                    context.sleep(delay).await;
+                    // Wait for message to arrive at receiver
+                    context.sleep_until(receive_complete_at).await;
 
                     // Drop message if success rate is too low
                     if !should_deliver {
@@ -693,14 +695,13 @@ impl<P: PublicKey> Peer<P> {
         });
 
         // Return peer
-        let now = context.current();
         Self {
             socket,
             control: control_sender,
             egress_bps,
             ingress_bps,
-            egress_available_at: now,
-            ingress_available_at: now,
+            egress_available_at: SystemTime::UNIX_EPOCH,
+            ingress_available_at: SystemTime::UNIX_EPOCH,
         }
     }
 
@@ -725,6 +726,9 @@ struct Link {
     sampler: Normal<f64>,
     success_rate: f64,
     inbox: mpsc::UnboundedSender<(Channel, Bytes)>,
+    // Tracks when the last message fully arrived at the destination, used to
+    // ensure in-order delivery.
+    last_arrival_at: SystemTime,
 }
 
 impl Link {
@@ -741,6 +745,7 @@ impl Link {
             sampler,
             success_rate,
             inbox,
+            last_arrival_at: SystemTime::UNIX_EPOCH,
         };
 
         // Spawn a task that will wait for messages to be sent to the link and then send them
