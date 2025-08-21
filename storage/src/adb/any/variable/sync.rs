@@ -78,9 +78,8 @@ where
         lower_bound: u64,
         upper_bound: u64,
     ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
-        // Initialize the underlying variable journal with sync bounds
-        let mut journal = init_journal(
-            context.with_label("log"),
+        let mut journal = VJournal::init(
+            context.clone(),
             VConfig {
                 partition: config.log_journal_partition.clone(),
                 compression: config.log_compression,
@@ -88,9 +87,6 @@ where
                 write_buffer: config.log_write_buffer,
                 buffer_pool: config.buffer_pool.clone(),
             },
-            lower_bound,
-            upper_bound,
-            config.log_items_per_section,
         )
         .await?;
 
@@ -104,21 +100,21 @@ where
         )
         .await?;
 
-        // We just pruned all sections below `lower_section` so the oldest retained location may have moved up.
-        let existing_oldest_retained_loc = read_oldest_retained_loc(&metadata, lower_bound);
-        let items_per_section = config.log_items_per_section.get();
-        let lower_section_start = align_to_section_boundary(lower_bound, items_per_section);
-        let oldest_retained_loc = existing_oldest_retained_loc.max(lower_section_start);
-        write_oldest_retained_loc(&mut metadata, oldest_retained_loc);
+        let oldest_retained_loc = read_oldest_retained_loc(&metadata, lower_bound);
 
-        // Prune any items in the first section that are below the lower_bound
-        prune_lower(
+        // TODO use size
+        let (_size, new_oldest_retained_loc) = prune_journal(
             &mut journal,
             lower_bound,
-            config.log_items_per_section,
+            upper_bound,
             oldest_retained_loc,
+            config.log_items_per_section,
         )
         .await?;
+
+        if new_oldest_retained_loc != oldest_retained_loc {
+            write_oldest_retained_loc(&mut metadata, oldest_retained_loc);
+        }
 
         // Create the sync journal wrapper
         Journal::new(
