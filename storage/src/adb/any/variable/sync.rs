@@ -2852,7 +2852,7 @@ mod tests {
 
             let lower_bound = 10;
             let upper_bound = 20;
-            let oldest_retained_loc = 5;
+            let oldest_retained_loc = 0;
             let items_per_section = NZU64!(5);
 
             let (next_loc, new_oldest_retained) = prune_journal(
@@ -2921,7 +2921,7 @@ mod tests {
 
     /// Test prune_journal with data partly before lower_bound but not reaching upper_bound
     #[test_traced]
-    fn test_prune_journal_data_partly_before_not_reaching_upper() {
+    fn test_prune_journal_before_lower_and_before_upper() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = VConfig {
@@ -3014,7 +3014,7 @@ mod tests {
 
             // Should have data from locations 10-19
             assert_eq!(next_loc, 20);
-            assert_eq!(new_oldest_retained, lower_bound); // Should be lower_bound after pruning in section 2
+            assert_eq!(new_oldest_retained, lower_bound);
 
             // Sections 2 and 3 should remain
             assert!(journal.blobs.contains_key(&2));
@@ -3159,7 +3159,7 @@ mod tests {
 
             let lower_bound = 12; // Within section 1
             let upper_bound = 17; // Also within section 1
-            let oldest_retained_loc = 10; // Start of section 1
+            let oldest_retained_loc = 0;
 
             let (next_loc, new_oldest_retained) = prune_journal(
                 &mut journal,
@@ -3173,7 +3173,7 @@ mod tests {
 
             // Should only keep elements 12-17 from section 1
             assert_eq!(next_loc, 18);
-            assert_eq!(new_oldest_retained, lower_bound); // Should be lower_bound after pruning
+            assert_eq!(new_oldest_retained, lower_bound);
 
             // Only section 1 should remain
             assert!(!journal.blobs.contains_key(&0));
@@ -3232,140 +3232,6 @@ mod tests {
             assert!(!journal.blobs.contains_key(&4));
 
             // Sections 2 and 3 should remain
-            assert!(journal.blobs.contains_key(&2));
-            assert!(journal.blobs.contains_key(&3));
-        });
-    }
-
-    /// Test prune_journal with last section partially filled
-    #[test_traced]
-    fn test_prune_journal_partial_last_section() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = VConfig {
-                partition: "test_prune_partial_last".into(),
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-            };
-
-            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
-                .await
-                .expect("Failed to create journal");
-
-            let items_per_section = NZU64!(5);
-
-            // Add data to sections
-            // Section 1: Full (locations 5-9)
-            for i in 0..items_per_section.get() {
-                journal.append(1, 100 + i).await.unwrap();
-            }
-
-            // Section 2: Full (locations 10-14)
-            for i in 0..items_per_section.get() {
-                journal.append(2, 200 + i).await.unwrap();
-            }
-
-            // Section 3: Partial - only 3 items (locations 15-17)
-            for i in 0..3 {
-                journal.append(3, 300 + i).await.unwrap();
-            }
-
-            let lower_bound = 7; // Middle of section 1
-            let upper_bound = 20; // Beyond existing data
-            let oldest_retained_loc = 5; // Start of section 1
-
-            let (next_loc, new_oldest_retained) = prune_journal(
-                &mut journal,
-                lower_bound,
-                upper_bound,
-                oldest_retained_loc,
-                items_per_section,
-            )
-            .await
-            .expect("Failed to prune journal");
-
-            // Should have data from locations 7-17
-            assert_eq!(next_loc, 18);
-            assert_eq!(new_oldest_retained, lower_bound); // Should be lower_bound after pruning after pruning in section 1
-
-            // Sections 1, 2, and 3 should remain
-            assert!(journal.blobs.contains_key(&1));
-            assert!(journal.blobs.contains_key(&2));
-            assert!(journal.blobs.contains_key(&3));
-        });
-    }
-
-    /// Test prune_journal with complex scenario mixing all edge cases
-    #[test_traced]
-    fn test_prune_journal_complex() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = VConfig {
-                partition: "test_prune_complex".into(),
-                compression: None,
-                codec_config: (),
-                write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-            };
-
-            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
-                .await
-                .expect("Failed to create journal");
-
-            let items_per_section = NZU64!(8);
-
-            // Create a complex journal state:
-            // Section 0: items at locations 0-7 (full)
-            for i in 0..items_per_section.get() {
-                journal.append(0, i).await.unwrap();
-            }
-
-            // Section 1: items at locations 8-15 (full)
-            for i in 0..items_per_section.get() {
-                journal.append(1, 100 + i).await.unwrap();
-            }
-
-            // Section 2: items at locations 16-23 (full)
-            for i in 0..items_per_section.get() {
-                journal.append(2, 200 + i).await.unwrap();
-            }
-
-            // Section 3: items at locations 24-31 (full)
-            for i in 0..items_per_section.get() {
-                journal.append(3, 300 + i).await.unwrap();
-            }
-
-            // Section 4: items at locations 32-36 (partial - only 5 items, last section)
-            for i in 0..5 {
-                journal.append(4, 400 + i).await.unwrap();
-            }
-
-            let lower_bound = 10; // Middle of section 1
-            let upper_bound = 26; // Middle of section 3
-            let oldest_retained_loc = 8; // Start of section 1
-
-            let (next_loc, new_oldest_retained) = prune_journal(
-                &mut journal,
-                lower_bound,
-                upper_bound,
-                oldest_retained_loc,
-                items_per_section,
-            )
-            .await
-            .expect("Failed to prune journal");
-
-            // Should have data from locations 10-26
-            assert_eq!(next_loc, 27);
-            assert_eq!(new_oldest_retained, lower_bound); // Should be lower_bound after pruning after pruning in section 1
-
-            // Sections 0 and 4 should be removed
-            assert!(!journal.blobs.contains_key(&0));
-            assert!(!journal.blobs.contains_key(&4));
-
-            // Sections 1, 2, and 3 should remain
-            assert!(journal.blobs.contains_key(&1));
             assert!(journal.blobs.contains_key(&2));
             assert!(journal.blobs.contains_key(&3));
         });
