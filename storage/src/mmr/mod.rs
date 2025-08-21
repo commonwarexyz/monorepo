@@ -74,7 +74,8 @@ use thiserror::Error;
 
 pub mod bitmap;
 pub mod hasher;
-pub mod iterator;
+// Re-export iterator from storage-core instead of having our own module
+pub use commonware_storage_core::mmr::iterator;
 pub mod journaled;
 pub mod mem;
 pub mod storage;

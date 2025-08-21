@@ -9,7 +9,7 @@
 //! position, but whose digests remain required for proof generation. The digests for pinned nodes
 //! are stored in an auxiliary map, and are at most O(log2(n)) in number.
 use crate::mmr::{
-    iterator::{nodes_needing_parents, PathIterator, PeakIterator},
+    iterator::{nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
     verification::Proof,
     Builder,
     Error::{self, ElementPruned, Empty},
@@ -28,7 +28,7 @@ pub struct Config<H: CHasher> {
     /// pruned.
     pub pruned_to_pos: u64,
 
-    /// The pinned nodes of the MMR, in the order expected by [Proof::nodes_to_pin].
+    /// The pinned nodes of the MMR, in the order expected by [nodes_to_pin].
     pub pinned_nodes: Vec<H::Digest>,
 
     /// Optional thread pool to use for parallelizing batch updates.
@@ -118,7 +118,7 @@ impl<H: CHasher> Mmr<H> {
             return mmr;
         }
 
-        for (i, pos) in Proof::<H::Digest>::nodes_to_pin(config.pruned_to_pos).enumerate() {
+        for (i, pos) in nodes_to_pin(config.pruned_to_pos).enumerate() {
             mmr.pinned_nodes.insert(pos, config.pinned_nodes[i]);
         }
 
@@ -626,7 +626,7 @@ impl<H: CHasher> Mmr<H> {
     /// Get the nodes (position + digest) that need to be pinned (those required for proof
     /// generation) in this MMR when pruned to position `prune_pos`.
     pub(super) fn nodes_to_pin(&self, prune_pos: u64) -> HashMap<u64, H::Digest> {
-        Proof::<H::Digest>::nodes_to_pin(prune_pos)
+        nodes_to_pin(prune_pos)
             .map(|pos| (pos, *self.get_node_unchecked(pos)))
             .collect()
     }
@@ -634,7 +634,7 @@ impl<H: CHasher> Mmr<H> {
     /// Get the digests of nodes that need to be pinned (those required for proof generation) in
     /// this MMR when pruned to position `prune_pos`.
     pub(super) fn node_digests_to_pin(&self, start_pos: u64) -> Vec<H::Digest> {
-        Proof::<H::Digest>::nodes_to_pin(start_pos)
+        nodes_to_pin(start_pos)
             .map(|pos| *self.get_node_unchecked(pos))
             .collect()
     }

@@ -13,6 +13,7 @@ members = [
     "runtime",
     "storage",
     "stream",
+    "storage-core",
     "utils",
     "examples/bridge",
     "examples/chat",
@@ -46,6 +47,7 @@ commonware-p2p = { version = "0.0.60", path = "p2p" }
 commonware-resolver = { version = "0.0.60", path = "resolver" }
 commonware-runtime = { version = "0.0.60", path = "runtime" }
 commonware-storage = { version = "0.0.60", path = "storage" }
+commonware-storage-core = { version = "0.0.60", path = "storage-core" }
 commonware-stream = { version = "0.0.60", path = "stream" }
 commonware-utils = { version = "0.0.60", path = "utils", default-features = false }
 thiserror = { version = "2.0.12", default-features = false }

@@ -11,7 +11,7 @@
 //! against a past state of the MMR rather than its current state.
 
 use crate::mmr::{
-    iterator::{leaf_num_to_pos, leaf_pos_to_num, PathIterator, PeakIterator},
+    iterator::{leaf_num_to_pos, leaf_pos_to_num, nodes_to_pin, PathIterator, PeakIterator},
     storage::Storage,
     Error, Hasher,
 };
@@ -335,22 +335,6 @@ impl<D: Digest> Proof<D> {
         Ok(peak_digests)
     }
 
-    /// Return the list of pruned (pos < `start_pos`) node positions that are still required for
-    /// proving any retained node.
-    ///
-    /// This set consists of every pruned node that is either (1) a peak, or (2) has no descendent
-    /// in the retained section, but its immediate parent does. (A node meeting condition (2) can be
-    /// shown to always be the left-child of its parent.)
-    ///
-    /// This set of nodes does not change with the MMR's size, only the pruning boundary. For a
-    /// given pruning boundary that happens to be a valid MMR size, one can prove that this set is
-    /// exactly the set of peaks for an MMR whose size equals the pruning boundary. If the pruning
-    /// boundary is not a valid MMR size, then the set corresponds to the peaks of the largest MMR
-    /// whose size is less than the pruning boundary.
-    pub fn nodes_to_pin(start_pos: u64) -> impl Iterator<Item = u64> {
-        PeakIterator::new(PeakIterator::to_nearest_size(start_pos)).map(|(pos, _)| pos)
-    }
-
     /// Return the list of node positions required by the range proof for the specified range of
     /// elements, inclusive of both endpoints.
     pub fn nodes_required_for_range_proof(
@@ -592,7 +576,7 @@ impl<D: Digest> Proof<D> {
         end_element_pos: u64,
     ) -> Result<Vec<D>, Error> {
         // Get the positions of all nodes that should be pinned.
-        let pinned_positions: Vec<u64> = Self::nodes_to_pin(start_element_pos).collect();
+        let pinned_positions: Vec<u64> = nodes_to_pin(start_element_pos).collect();
 
         // Get all positions required for the proof.
         let required_positions =
@@ -1240,7 +1224,7 @@ mod tests {
                         );
 
                         let pinned_nodes = extract_result.unwrap();
-                        let expected_pinned: Vec<u64> = Proof::<Digest>::nodes_to_pin(start_pos).collect();
+                        let expected_pinned: Vec<u64> = nodes_to_pin(start_pos).collect();
 
                         // Verify count matches expected
                         assert_eq!(

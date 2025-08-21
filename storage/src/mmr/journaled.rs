@@ -12,7 +12,7 @@ use crate::{
     },
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        iterator::PeakIterator,
+        iterator::{nodes_to_pin, PeakIterator},
         mem::{Config as MemConfig, Mmr as MemMmr},
         verification::Proof,
         Builder, Error, Hasher,
@@ -70,7 +70,7 @@ pub struct SyncConfig<D: Digest> {
     pub upper_bound: u64,
 
     /// The pinned nodes the MMR needs at the pruning boundary given by
-    /// `lower_bound`, in the order specified by [Proof::nodes_to_pin].
+    /// `lower_bound`, in the order specified by [nodes_to_pin].
     /// If `None`, the pinned nodes are expected to already be in the MMR's metadata/journal.
     pub pinned_nodes: Option<Vec<D>>,
 }
@@ -127,7 +127,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     ///
     /// # Arguments
     /// * `context` - Storage context
-    /// * `pinned_nodes` - Digest values in the order returned by `Proof::nodes_to_pin(mmr_size)`
+    /// * `pinned_nodes` - Digest values in the order returned by `nodes_to_pin(mmr_size)`
     /// * `mmr_size` - The logical size of the MMR (all elements before this are considered pruned)
     /// * `config` - Journaled MMR configuration. Any data in the given journal and metadata
     ///   partitions will be overwritten.
@@ -163,7 +163,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         metadata.put(pruning_boundary_key, mmr_size.to_be_bytes().into());
 
         // Store the pinned nodes in metadata
-        let nodes_to_pin_positions = Proof::<H::Digest>::nodes_to_pin(mmr_size);
+        let nodes_to_pin_positions = nodes_to_pin(mmr_size);
         for (pos, digest) in nodes_to_pin_positions.zip(pinned_nodes.iter()) {
             metadata.put(U64::new(NODE_PREFIX, pos), digest.to_vec());
         }
@@ -271,7 +271,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         // Initialize the mem_mmr in the "prune_all" state.
         let mut pinned_nodes = Vec::new();
-        for pos in Proof::<H::Digest>::nodes_to_pin(journal_size) {
+        for pos in nodes_to_pin(journal_size) {
             let digest =
                 Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.push(digest);
@@ -313,7 +313,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         prune_pos: u64,
     ) -> Result<(), Error> {
         let mut pinned_nodes = HashMap::new();
-        for pos in Proof::<H::Digest>::nodes_to_pin(prune_pos) {
+        for pos in nodes_to_pin(prune_pos) {
             let digest = Mmr::<E, H>::get_from_metadata_or_journal(metadata, journal, pos).await?;
             pinned_nodes.insert(pos, digest);
         }
@@ -367,14 +367,14 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         // Write the required pinned nodes to metadata.
         if let Some(pinned_nodes) = cfg.pinned_nodes {
-            let nodes_to_pin_persisted = Proof::<H::Digest>::nodes_to_pin(cfg.lower_bound);
+            let nodes_to_pin_persisted = nodes_to_pin(cfg.lower_bound);
             for (pos, digest) in nodes_to_pin_persisted.zip(pinned_nodes.iter()) {
                 metadata.put(U64::new(NODE_PREFIX, pos), digest.to_vec());
             }
         }
 
         // Create the in-memory MMR with the pinned nodes required for its size.
-        let nodes_to_pin_mem = Proof::<H::Digest>::nodes_to_pin(journal_size);
+        let nodes_to_pin_mem = nodes_to_pin(journal_size);
         let mut mem_pinned_nodes = Vec::new();
         for pos in nodes_to_pin_mem {
             let digest =
@@ -526,7 +526,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
 
         // Reset the mem_mmr to one of the new_size in the "prune_all" state.
         let mut pinned_nodes = Vec::new();
-        for pos in Proof::<H::Digest>::nodes_to_pin(new_size) {
+        for pos in nodes_to_pin(new_size) {
             let digest =
                 Mmr::<E, H>::get_from_metadata_or_journal(&self.metadata, &self.journal, pos)
                     .await?;
@@ -579,7 +579,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared by
         // pruning the mem_mmr.
         let mut pinned_nodes = HashMap::new();
-        for pos in Proof::<H::Digest>::nodes_to_pin(self.pruned_to_pos) {
+        for pos in nodes_to_pin(self.pruned_to_pos) {
             let digest = self.mem_mmr.get_node_unchecked(pos);
             pinned_nodes.insert(pos, *digest);
         }
@@ -599,7 +599,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         prune_to_pos: u64,
     ) -> Result<HashMap<u64, H::Digest>, Error> {
         let mut pinned_nodes = HashMap::new();
-        for pos in Proof::<H::Digest>::nodes_to_pin(prune_to_pos) {
+        for pos in nodes_to_pin(prune_to_pos) {
             let digest = self.get_node(pos).await?.unwrap();
             self.metadata
                 .put(U64::new(NODE_PREFIX, pos), digest.to_vec());
@@ -1513,7 +1513,7 @@ mod tests {
 
             // Get the pinned nodes
             let pinned_nodes_map = original_mmr.get_pinned_nodes();
-            let pinned_nodes: Vec<_> = Proof::<Digest>::nodes_to_pin(original_size)
+            let pinned_nodes: Vec<_> = nodes_to_pin(original_size)
                 .map(|pos| pinned_nodes_map[&pos])
                 .collect();
 

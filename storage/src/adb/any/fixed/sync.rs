@@ -320,7 +320,10 @@ mod tests {
             },
         },
         journal::{self, fixed},
-        mmr::{hasher::Standard, iterator::leaf_num_to_pos, verification::Proof},
+        mmr::{
+            hasher::Standard,
+            iterator::{leaf_num_to_pos, nodes_to_pin},
+        },
         store::operation::Fixed,
         translator::TwoCap,
     };
@@ -1548,7 +1551,7 @@ mod tests {
             let upper_bound_ops = source_db.op_count() - 1;
 
             // Get pinned nodes and target hash before moving source_db
-            let pinned_nodes_pos = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(lower_bound_ops));
+            let pinned_nodes_pos = nodes_to_pin(leaf_num_to_pos(lower_bound_ops));
             let pinned_nodes =
                 join_all(pinned_nodes_pos.map(|pos| source_db.mmr.get_node(pos))).await;
             let pinned_nodes = pinned_nodes
@@ -1672,7 +1675,7 @@ mod tests {
                 }
                 log.sync().await.unwrap();
 
-                let pinned_nodes = Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(lower_bound))
+                let pinned_nodes = nodes_to_pin(leaf_num_to_pos(lower_bound))
                     .map(|pos| source_db.mmr.get_node(pos));
                 let pinned_nodes = join_all(pinned_nodes).await;
                 let pinned_nodes = pinned_nodes
@@ -1750,10 +1753,9 @@ mod tests {
 
             // Get pinned nodes before closing the database
             let pinned_nodes_map = sync_db.mmr.get_pinned_nodes();
-            let pinned_nodes =
-                Proof::<Digest>::nodes_to_pin(leaf_num_to_pos(sync_db_original_size))
-                    .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
-                    .collect::<Vec<_>>();
+            let pinned_nodes = nodes_to_pin(leaf_num_to_pos(sync_db_original_size))
+                .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
+                .collect::<Vec<_>>();
 
             // Close the sync db
             sync_db.close().await.unwrap();

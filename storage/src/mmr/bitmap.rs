@@ -13,7 +13,7 @@
 use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        iterator::leaf_num_to_pos,
+        iterator::{leaf_num_to_pos, nodes_to_pin},
         mem::{Config as MemConfig, Mmr},
         verification::Proof,
         Error,
@@ -153,7 +153,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         let mmr_size = leaf_num_to_pos(pruned_chunks as u64);
 
         let mut pinned_nodes = Vec::new();
-        for (index, pos) in Proof::<H::Digest>::nodes_to_pin(mmr_size).enumerate() {
+        for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
             let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
                 error!(size = mmr_size, pos, "missing pinned node");
                 return Err(MissingNode(pos));
@@ -210,7 +210,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         // Write the pinned nodes.
         let mmr_size = leaf_num_to_pos(self.pruned_chunks as u64);
-        for (i, digest) in Proof::<H::Digest>::nodes_to_pin(mmr_size).enumerate() {
+        for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
             metadata.put(key, digest.to_vec());
