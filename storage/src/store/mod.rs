@@ -79,7 +79,8 @@
 //!     assert_eq!(fetched_value.unwrap(), v);
 //!
 //!     // Commit the operation to make it persistent
-//!     store.commit().await.unwrap();
+//!     let metadata = Digest::random(&mut ctx);
+//!     store.commit_with_metadata(metadata).await.unwrap();
 //!
 //!     // Delete the key's value
 //!     store.delete(k).await.unwrap();
@@ -89,7 +90,7 @@
 //!     assert!(fetched_value.is_none());
 //!
 //!     // Commit the operation to make it persistent
-//!     store.commit().await.unwrap();
+//!     store.commit_with_metadata(metadata).await.unwrap();
 //!
 //!     // Destroy the store
 //!     store.destroy().await.unwrap();
@@ -307,13 +308,38 @@ where
     }
 
     /// Commits all uncommitted operations to the store, making them persistent and recoverable.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        self.raise_inactivity_floor(self.uncommitted_ops + 1)
+    pub async fn commit(&mut self) -> Result<(), Error>
+    where
+        V: Default,
+    {
+        self.commit_with_metadata(V::default()).await
+    }
+
+    /// Commits all uncommitted operations to the store, making them persistent and recoverable.
+    /// Caller can associate an arbitrary `metadata` value with the commit.
+    pub async fn commit_with_metadata(&mut self, metadata: V) -> Result<(), Error> {
+        self.raise_inactivity_floor(metadata, self.uncommitted_ops + 1)
             .await?;
         self.uncommitted_ops = 0;
 
         self.sync().await?;
         self.prune_inactive().await
+    }
+
+    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
+        let mut last_commit = self.op_count() - self.uncommitted_ops;
+        if last_commit == 0 {
+            return Ok(None);
+        }
+        last_commit -= 1;
+        let section = last_commit / self.log_items_per_section;
+        let offset = self.locations.read(last_commit).await?.into();
+        let Some(Operation::CommitFloor(metadata, _)) = self.log.get(section, offset).await? else {
+            unreachable!("no commit operation at location of last commit {last_commit}");
+        };
+
+        Ok(Some(metadata))
     }
 
     /// Closes the store. Any uncommitted operations will be lost if they have not been committed
@@ -444,7 +470,7 @@ where
                                     uncommitted_ops.insert(key, (None, Some(loc)));
                                 }
                             }
-                            Operation::CommitFloor(loc) => {
+                            Operation::CommitFloor(_, loc) => {
                                 self.inactivity_floor_loc = loc;
 
                                 // Apply all uncommitted operations.
@@ -642,7 +668,7 @@ where
     /// operation to the tip and then advances over it.
     ///
     /// This method does not change the state of the db's snapshot.
-    async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
+    async fn raise_inactivity_floor(&mut self, metadata: V, max_steps: u64) -> Result<(), Error> {
         for _ in 0..max_steps {
             if self.inactivity_floor_loc == self.log_size {
                 break;
@@ -653,7 +679,7 @@ where
             self.inactivity_floor_loc += 1;
         }
 
-        self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc))
+        self.apply_op(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
             .await
             .map(|_| ())
     }
@@ -796,6 +822,7 @@ mod test {
             assert_eq!(store.log_size, 0);
             assert_eq!(store.uncommitted_ops, 0);
             assert_eq!(store.inactivity_floor_loc, 0);
+            assert_eq!(store.get_metadata().await.unwrap(), None);
 
             // Insert a key-value pair
             store.update(key, value.clone()).await.unwrap();
@@ -805,7 +832,9 @@ mod test {
             assert_eq!(store.inactivity_floor_loc, 0);
 
             // Persist the changes
-            store.commit().await.unwrap();
+            let metadata = vec![99, 100];
+            store.commit_with_metadata(metadata.clone()).await.unwrap();
+            assert_eq!(store.get_metadata().await.unwrap(), Some(metadata.clone()));
 
             // Even though the store was pruned, the inactivity floor was raised by 2, and
             // the old operations remain in the same blob as an active operation, so they're
@@ -836,7 +865,11 @@ mod test {
             assert_eq!(store.uncommitted_ops, 2);
             assert_eq!(store.inactivity_floor_loc, 2);
 
+            // Make sure we can still get metadata.
+            assert_eq!(store.get_metadata().await.unwrap(), Some(metadata));
+
             store.commit().await.unwrap();
+            assert_eq!(store.get_metadata().await.unwrap(), Some(Vec::default()));
 
             assert_eq!(store.log_size, 9);
             assert_eq!(store.uncommitted_ops, 0);

@@ -114,6 +114,9 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
 
     /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
     hasher: Standard<H>,
+
+    /// The location of the last commit operation, or None if no commit has been made.
+    last_commit: Option<u64>,
 }
 
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
@@ -176,6 +179,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
+        let last_commit = if log_size > 0 {
+            Some(log_size - 1)
+        } else {
+            None
+        };
+
         Ok(Immutable {
             mmr,
             log,
@@ -185,6 +194,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             log_items_per_section: cfg.log_items_per_section.get(),
             snapshot,
             hasher,
+            last_commit,
         })
     }
 
@@ -243,6 +253,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
+        let last_commit = if log_size > 0 {
+            Some(log_size - 1)
+        } else {
+            None
+        };
+
         let mut db = Immutable {
             mmr,
             log: cfg.log,
@@ -252,6 +268,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             log_items_per_section: cfg.db_config.log_items_per_section.get(),
             snapshot,
             hasher: Standard::<H>::new(),
+            last_commit,
         };
 
         db.sync().await?;
@@ -346,7 +363,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                             Variable::Set(key, _) => {
                                 uncommitted_ops.push((key, loc));
                             }
-                            Variable::Commit() => {
+                            Variable::Commit(_) => {
                                 for (key, loc) in uncommitted_ops.iter() {
                                     snapshot.insert(key, *loc);
                                 }
@@ -416,7 +433,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // Prune the log up to the section containing the requested pruning location. We always
         // prune the log first, and then prune the MMR+locations structures based on the log's
-        // actual pruning boundary. This procedure ensures all log operations always have
+        // actual pruning boundary. This procedure ensure all log operations always have
         // corresponding MMR & location entries, even in the event of failures, with no need for
         // special recovery.
         let section = loc / self.log_items_per_section;
@@ -585,9 +602,34 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Batch operations will be parallelized if a thread pool
     /// is provided.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        self.apply_op(Variable::Commit()).await?;
+    pub async fn commit(&mut self) -> Result<(), Error>
+    where
+        V: Default,
+    {
+        self.commit_with_metadata(V::default()).await
+    }
+
+    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
+    /// upon return from this function. Batch operations will be parallelized if a thread pool
+    /// is provided. Caller can associate an arbitrary `metadata` value with the commit.
+    pub async fn commit_with_metadata(&mut self, metadata: V) -> Result<(), Error> {
+        self.last_commit = Some(self.log_size);
+        self.apply_op(Variable::Commit(metadata)).await?;
         self.sync().await
+    }
+
+    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+        let section = last_commit / self.log_items_per_section;
+        let offset = self.locations.read(last_commit).await?.into();
+        let Some(Variable::Commit(metadata)) = self.log.get(section, offset).await? else {
+            unreachable!("no commit operation at location of last commit {last_commit}");
+        };
+
+        Ok(Some(metadata))
     }
 
     /// Sync the db to disk ensuring the current state is persisted. Batch operations will be
@@ -628,8 +670,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Simulate a failed commit that successfully writes the log to the commit point, but without
     /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening.
     #[cfg(test)]
-    pub async fn simulate_failed_commit_mmr(mut self, write_limit: usize) -> Result<(), Error> {
-        self.apply_op(Variable::Commit()).await?;
+    pub async fn simulate_failed_commit_mmr(mut self, write_limit: usize) -> Result<(), Error>
+    where
+        V: Default,
+    {
+        self.apply_op(Variable::Commit(V::default())).await?;
         self.log.close().await?;
         self.locations.close().await?;
         self.mmr
@@ -642,8 +687,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Simulate a failed commit that successfully writes the MMR to the commit point, but without
     /// fully committing the log, requiring rollback of the MMR and log upon reopening.
     #[cfg(test)]
-    pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error> {
-        self.apply_op(Variable::Commit()).await?;
+    pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error>
+    where
+        V: Default,
+    {
+        self.apply_op(Variable::Commit(V::default())).await?;
         let mut section = self.current_section();
 
         self.mmr.close(&mut self.hasher).await?;
@@ -665,8 +713,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn simulate_failed_commit_locations(
         mut self,
         operations_to_trim: u64,
-    ) -> Result<(), Error> {
-        self.apply_op(Variable::Commit()).await?;
+    ) -> Result<(), Error>
+    where
+        V: Default,
+    {
+        self.apply_op(Variable::Commit(V::default())).await?;
         let op_count = self.op_count();
         assert!(op_count >= operations_to_trim);
 
@@ -733,6 +784,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
             assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
+            assert!(db.get_metadata().await.unwrap().is_none());
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let k1 = Sha256::fill(1u8);
@@ -779,15 +831,18 @@ pub(super) mod test {
             assert!(db.get(&k2).await.unwrap().is_none());
             assert_eq!(db.op_count(), 1);
             // Commit the first key.
-            db.commit().await.unwrap();
+            let metadata = vec![99, 100];
+            db.commit_with_metadata(metadata.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get(&k2).await.unwrap().is_none());
             assert_eq!(db.op_count(), 2);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
             // Set the second key.
             db.set(k2, v2.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
             assert_eq!(db.op_count(), 3);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
             // Commit the second key.
             db.commit().await.unwrap();
             assert_eq!(db.op_count(), 4);

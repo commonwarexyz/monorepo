@@ -174,7 +174,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             let section = op_index / cfg.log_items_per_section.get();
             let op = log.get(section, offset).await?.expect("no operation found");
             match op {
-                Operation::Commit => {
+                Operation::Commit(_) => {
                     last_commit_loc = Some(op_index);
                     break;
                 }
@@ -302,10 +302,19 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable.
-    pub async fn commit(&mut self) -> Result<u64, Error> {
+    pub async fn commit(&mut self) -> Result<u64, Error>
+    where
+        V: Default,
+    {
+        self.commit_with_metadata(V::default()).await
+    }
+
+    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable.
+    /// Caller can associate an arbitrary `metadata` value with the commit.
+    pub async fn commit_with_metadata(&mut self, metadata: V) -> Result<u64, Error> {
         let loc = self.size;
         let section = self.current_section();
-        let operation = Operation::Commit;
+        let operation = Operation::Commit(metadata);
 
         // We must update & sync the operations log before writing the commit operation to locations
         // to ensure all committed locations will reference valid data in the event of a failure.
@@ -418,8 +427,11 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         sync_log: bool,
         sync_mmr: bool,
         sync_locations: bool,
-    ) -> Result<(), Error> {
-        let operation = Operation::Commit;
+    ) -> Result<(), Error>
+    where
+        V: Default,
+    {
+        let operation = Operation::Commit(V::default());
 
         // We must update & sync the operations log before writing the commit operation to locations
         // to ensure all committed locations will reference valid data in the event of a failure.
@@ -712,7 +724,7 @@ mod test {
                     } else if loc == ELEMENTS {
                         // Should be a Commit operation
                         assert!(
-                            matches!(op, Operation::Commit),
+                            matches!(op, Operation::Commit(_)),
                             "Expected Commit operation at location {loc}, got {op:?}",
                         );
                     }
