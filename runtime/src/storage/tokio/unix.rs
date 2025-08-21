@@ -1,7 +1,7 @@
 use crate::Error;
 use commonware_utils::{hex, StableBuf};
 use std::{fs::File, os::unix::fs::FileExt, sync::Arc};
-use tokio::task::{self, JoinError};
+use tokio::task;
 
 #[derive(Clone)]
 pub struct Blob {
@@ -34,7 +34,7 @@ impl crate::Blob for Blob {
             Ok(buf)
         })
         .await
-        .map_err(|e: JoinError| Error::ReadFailed(Box::new(e)))?
+        .map_err(|e| Error::ReadFailed(Box::new(e)))?
     }
 
     async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
@@ -46,7 +46,7 @@ impl crate::Blob for Blob {
             Ok(())
         })
         .await
-        .map_err(|e: JoinError| Error::WriteFailed(Box::new(e)))?
+        .map_err(|e| Error::WriteFailed(Box::new(e)))?
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

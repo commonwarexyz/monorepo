@@ -1732,7 +1732,7 @@ mod tests {
             ) -> Result<String, Error> {
                 let read = stream.recv(vec![0; content_length]).await?;
                 String::from_utf8(read.as_ref().to_vec())
-                    .map_err(|err| Error::ReadFailed(Box::new(err)))
+                    .map_err(|e| Error::ReadFailed(Box::new(e)))
             }
 
             // Simulate a client connecting to the server
