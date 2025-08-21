@@ -9,7 +9,7 @@
 /// [(14, 3), (17, 1), (18, 0)]
 /// ```
 #[derive(Default)]
-pub(crate) struct PeakIterator {
+pub struct PeakIterator {
     size: u64,     // number of nodes in the MMR at the point the iterator was initialized
     node_pos: u64, // position of the current node
     two_h: u64,    // 2^(height+1) of the current node
@@ -17,7 +17,7 @@ pub(crate) struct PeakIterator {
 
 impl PeakIterator {
     /// Return a new PeakIterator over the peaks of a MMR with the given number of nodes.
-    pub(crate) fn new(size: u64) -> PeakIterator {
+    pub fn new(size: u64) -> PeakIterator {
         if size == 0 {
             return PeakIterator::default();
         }
@@ -36,7 +36,7 @@ impl PeakIterator {
     /// Return the position of the last leaf in an MMR of the given size.
     ///
     /// This is an O(log2(n)) operation.
-    pub(crate) fn last_leaf_pos(size: u64) -> u64 {
+    pub fn last_leaf_pos(size: u64) -> u64 {
         if size == 0 {
             return 0;
         }
@@ -49,7 +49,7 @@ impl PeakIterator {
     ///
     /// The implementation verifies that peaks in the MMR of the given size have strictly decreasing
     /// height, which is a necessary condition for MMR validity.
-    pub(crate) const fn check_validity(size: u64) -> bool {
+    pub const fn check_validity(size: u64) -> bool {
         if size == 0 {
             return true;
         }
@@ -82,7 +82,7 @@ impl PeakIterator {
     //
     // TODO(https://github.com/commonwarexyz/monorepo/issues/820): This is an O(log2(n)^2)
     // implementation but it's reasonably straightforward to make it O(log2(n)).
-    pub(crate) fn to_nearest_size(mut size: u64) -> u64 {
+    pub fn to_nearest_size(mut size: u64) -> u64 {
         while !PeakIterator::check_validity(size) {
             // A size-0 MMR is always valid so this loop must terminate before underflow.
             size -= 1;
@@ -116,7 +116,7 @@ impl Iterator for PeakIterator {
 /// with the given peaks. This set is non-empty only if there is a height-0 (leaf) peak in the MMR.
 /// The result will contain this leaf peak plus the other MMR peaks with contiguously increasing
 /// height. Nodes in the result are ordered by decreasing height.
-pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
+pub fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
     let mut peaks = Vec::new();
     let mut last_height = u32::MAX;
 
@@ -140,7 +140,7 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
 /// this is not a leaf.
 ///
 /// This computation is O(log2(n)) in the given position.
-pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
+pub const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
     if leaf_pos == 0 {
         return Some(0);
     }
@@ -172,13 +172,13 @@ pub(crate) const fn leaf_pos_to_num(leaf_pos: u64) -> Option<u64> {
 }
 
 /// Returns the position of the leaf with number `leaf_num` in an MMR.
-pub(crate) const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
+pub const fn leaf_num_to_pos(leaf_num: u64) -> u64 {
     // This will never underflow since 2*n >= count_ones(n).
     leaf_num.checked_mul(2).expect("leaf_num overflow") - leaf_num.count_ones() as u64
 }
 
 /// Returns the height of the node at position `pos` in an MMR.
-pub(crate) const fn pos_to_height(mut pos: u64) -> u32 {
+pub const fn pos_to_height(mut pos: u64) -> u32 {
     if pos == 0 {
         return 0;
     }
@@ -212,7 +212,7 @@ pub(crate) const fn pos_to_height(mut pos: u64) -> u32 {
 ///    [(6, 2), (5, 4)]
 /// ```
 #[derive(Debug)]
-pub(crate) struct PathIterator {
+pub struct PathIterator {
     leaf_pos: u64, // position of the leaf node in the path
     node_pos: u64, // current node position in the path from peak to leaf
     two_h: u64,    // 2^height of the current node
@@ -222,7 +222,7 @@ impl PathIterator {
     /// Return a PathIterator over the siblings of nodes along the path from peak to leaf in the
     /// perfect binary tree with peak `peak_pos` and having height `height`, not including the peak
     /// itself.
-    pub(crate) fn new(leaf_pos: u64, peak_pos: u64, height: u32) -> PathIterator {
+    pub fn new(leaf_pos: u64, peak_pos: u64, height: u32) -> PathIterator {
         PathIterator {
             leaf_pos,
             node_pos: peak_pos,
