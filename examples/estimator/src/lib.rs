@@ -1289,4 +1289,49 @@ broadcast{1}
         let content = "wait{1, threshold=1} && wait{2, threshold=1})";
         parse_task(content);
     }
+
+    #[test]
+    fn test_parse_task_commands_with_message_sizes() {
+        let content = r#"
+propose{1, size=1024}
+broadcast{2, size=100}
+reply{3, size=64}
+reply{4}
+"#;
+
+        let commands = parse_task(content);
+        assert_eq!(commands.len(), 4);
+
+        match &commands[0].1 {
+            Command::Propose(id, size) => {
+                assert_eq!(*id, 1);
+                assert_eq!(*size, Some(1024));
+            }
+            _ => panic!("Expected Propose command with size"),
+        }
+
+        match &commands[1].1 {
+            Command::Broadcast(id, size) => {
+                assert_eq!(*id, 2);
+                assert_eq!(*size, Some(100));
+            }
+            _ => panic!("Expected Broadcast command with size"),
+        }
+
+        match &commands[2].1 {
+            Command::Reply(id, size) => {
+                assert_eq!(*id, 3);
+                assert_eq!(*size, Some(64));
+            }
+            _ => panic!("Expected Reply command with size"),
+        }
+
+        match &commands[3].1 {
+            Command::Reply(id, size) => {
+                assert_eq!(*id, 4);
+                assert_eq!(*size, None);
+            }
+            _ => panic!("Expected Reply command without size"),
+        }
+    }
 }
