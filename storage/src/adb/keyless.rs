@@ -688,9 +688,7 @@ mod test {
                 // Verify the proof
                 assert!(
                     verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
-                    "Failed to verify proof for range starting at {} with max {} ops",
-                    start_loc,
-                    max_ops
+                    "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops",
                 );
 
                 // Check that we got the expected number of operations
@@ -698,9 +696,8 @@ mod test {
                 assert_eq!(
                     ops.len() as u64,
                     expected_ops,
-                    "Expected {} operations, got {}",
-                    expected_ops,
-                    ops.len()
+                    "Expected {expected_ops} operations, got {}",
+                    ops.len(),
                 );
 
                 // Verify operation types
@@ -710,17 +707,13 @@ mod test {
                         // Should be an Append operation
                         assert!(
                             matches!(op, Operation::Append(_)),
-                            "Expected Append operation at location {}, got {:?}",
-                            loc,
-                            op
+                            "Expected Append operation at location {loc}, got {op:?}",
                         );
                     } else if loc == ELEMENTS {
                         // Should be a Commit operation
                         assert!(
                             matches!(op, Operation::Commit),
-                            "Expected Commit operation at location {}, got {:?}",
-                            loc,
-                            op
+                            "Expected Commit operation at location {loc}, got {op:?}",
                         );
                     }
                 }
@@ -802,7 +795,7 @@ mod test {
                 match result {
                     Ok(None) => {} // Commit operation or pruned
                     Ok(Some(_)) => {
-                        panic!("Should not be able to get pruned value at location {}", i)
+                        panic!("Should not be able to get pruned value at location {i}")
                     }
                     Err(_) => {} // Expected error for pruned data
                 }
@@ -827,9 +820,7 @@ mod test {
                 // Verify the proof still works
                 assert!(
                     verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
-                    "Failed to verify proof for range starting at {} with max {} ops after pruning",
-                    start_loc,
-                    max_ops
+                    "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops after pruning",
                 );
 
                 // Check that we got operations
@@ -837,9 +828,8 @@ mod test {
                 assert_eq!(
                     ops.len() as u64,
                     expected_ops,
-                    "Expected {} operations, got {}",
-                    expected_ops,
-                    ops.len()
+                    "Expected {expected_ops} operations, got {}",
+                    ops.len(),
                 );
             }
 

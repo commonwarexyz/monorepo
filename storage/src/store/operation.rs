@@ -494,7 +494,7 @@ mod tests {
 
         // Check that bytes after context byte are all zero
         for i in 1..encoded.len() {
-            assert_eq!(encoded[i], 0, "Padding byte at position {} should be 0", i);
+            assert_eq!(encoded[i], 0, "Padding byte at position {i} should be 0");
         }
 
         // Test non-zero padding detection
