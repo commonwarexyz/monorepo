@@ -590,7 +590,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Also raises the inactivity floor according to the schedule,
     /// and prunes those operations below it. Batch operations will be parallelized if a thread pool
-    /// is provided. Caller can associate an arbitrary `metadata` value with the commit.
+    /// is provided.
     pub async fn commit(&mut self) -> Result<(), Error>
     where
         V: Default,
@@ -601,7 +601,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
     /// upon return from this function. Also raises the inactivity floor according to the schedule,
     /// and prunes those operations below it. Batch operations will be parallelized if a thread pool
-    /// is provided.
+    /// is provided. Caller can associate an arbitrary `metadata` value with the commit.
     pub async fn commit_with_metadata(&mut self, metadata: V) -> Result<(), Error> {
         // Raise the inactivity floor by the # of uncommitted operations, plus 1 to account for the
         // commit op that will be appended.
@@ -631,6 +631,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let Some(Operation::CommitFloor(metadata, _)) = self.log.get(section, offset).await? else {
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
+
         Ok(Some(metadata))
     }
 
