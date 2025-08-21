@@ -62,10 +62,10 @@ pub enum Error {
     BindFailed,
     #[error("connection failed")]
     ConnectionFailed,
-    #[error("write failed. error: {0}")]
-    WriteFailed(String),
-    #[error("read failed. error: {0}")]
-    ReadFailed(String),
+    #[error("write failed. context: {0}")]
+    WriteFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("read failed. context: {0}")]
+    ReadFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("send failed")]
     SendFailed,
     #[error("recv failed")]
@@ -1706,7 +1706,7 @@ mod tests {
                     }
                     line.push(byte[0]);
                 }
-                String::from_utf8(line).map_err(|e| Error::ReadFailed(e.utf8_error().to_string()))
+                String::from_utf8(line).map_err(|e| Error::ReadFailed(Box::new(e)))
             }
 
             async fn read_headers<St: Stream>(
@@ -1732,7 +1732,7 @@ mod tests {
             ) -> Result<String, Error> {
                 let read = stream.recv(vec![0; content_length]).await?;
                 String::from_utf8(read.as_ref().to_vec())
-                    .map_err(|err| Error::ReadFailed(err.utf8_error().to_string()))
+                    .map_err(|err| Error::ReadFailed(Box::new(err)))
             }
 
             // Simulate a client connecting to the server

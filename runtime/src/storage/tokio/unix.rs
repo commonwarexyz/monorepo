@@ -30,11 +30,11 @@ impl crate::Blob for Blob {
         let file = self.file.clone();
         task::spawn_blocking(move || {
             file.read_exact_at(buf.as_mut(), offset)
-                .map_err(|e| Error::ReadFailed(e.to_string()))?;
+                .map_err(|e| Error::ReadFailed(Box::new(e)))?;
             Ok(buf)
         })
         .await
-        .map_err(|e: JoinError| Error::ReadFailed(e.to_string()))?
+        .map_err(|e: JoinError| Error::ReadFailed(Box::new(e)))?
     }
 
     async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
@@ -42,11 +42,11 @@ impl crate::Blob for Blob {
         let file = self.file.clone();
         task::spawn_blocking(move || {
             file.write_all_at(buf.as_ref(), offset)
-                .map_err(|e| Error::WriteFailed(e.to_string()))?;
+                .map_err(|e| Error::WriteFailed(Box::new(e)))?;
             Ok(())
         })
         .await
-        .map_err(|e: JoinError| Error::WriteFailed(e.to_string()))?
+        .map_err(|e: JoinError| Error::WriteFailed(Box::new(e)))?
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

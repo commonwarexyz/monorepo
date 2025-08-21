@@ -45,7 +45,10 @@ impl crate::Listener for Listener {
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         match self.listener.next().await {
             Some((socket, sender, receiver)) => Ok((socket, Sink { sender }, Stream { receiver })),
-            None => Err(Error::ReadFailed("listener closed".to_string())),
+            None => Err(Error::ReadFailed(Box::new(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "listener channel closed",
+            )))),
         }
     }
 
