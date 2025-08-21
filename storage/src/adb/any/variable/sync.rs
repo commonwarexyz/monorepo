@@ -9,6 +9,7 @@ use crate::{
         fixed,
         variable::{Config as VConfig, Journal as VJournal},
     },
+    metadata::Metadata,
     mmr::{hasher::Standard, iterator::leaf_num_to_pos},
     store::operation::Variable,
     translator::Translator,
@@ -20,6 +21,40 @@ use commonware_utils::{sequence::prefixed_u64::U64, Array, NZUsize};
 use futures::{pin_mut, StreamExt};
 use std::{num::NonZeroU64, ops::Bound};
 use tracing::debug;
+
+/// Read the oldest_retained_loc from metadata, returning the provided default if not found.
+fn read_oldest_retained_loc<E: Storage + Clock + Metrics>(
+    metadata: &Metadata<E, U64, Vec<u8>>,
+    default: u64,
+) -> u64 {
+    let key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
+    match metadata.get(&key) {
+        Some(bytes) => u64::from_be_bytes(
+            bytes
+                .as_slice()
+                .try_into()
+                .expect("oldest_retained_loc bytes could not be converted to u64"),
+        ),
+        None => default,
+    }
+}
+
+/// Write the oldest_retained_loc to metadata.
+fn write_oldest_retained_loc<E: Storage + Clock + Metrics>(
+    metadata: &mut Metadata<E, U64, Vec<u8>>,
+    value: u64,
+) {
+    let key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
+    metadata.put(key, value.to_be_bytes().to_vec());
+}
+
+/// Calculate the section-aligned oldest retained location based on a target location.
+///
+/// This ensures that oldest_retained_loc is always aligned to section boundaries,
+/// which is required for proper journal pruning behavior.
+fn align_to_section_boundary(target_loc: u64, items_per_section: u64) -> u64 {
+    (target_loc / items_per_section) * items_per_section
+}
 
 impl<E, K, V, H, T> sync::Database for any::variable::Any<E, K, V, H, T>
 where
@@ -43,7 +78,8 @@ where
         lower_bound: u64,
         upper_bound: u64,
     ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
-        let journal = init_journal(
+        // Initialize the underlying variable journal with sync bounds
+        let mut journal = init_journal(
             context.with_label("log"),
             VConfig {
                 partition: config.log_journal_partition.clone(),
@@ -58,36 +94,41 @@ where
         )
         .await?;
 
-        let mut metadata = crate::metadata::Metadata::<E, U64, Vec<u8>>::init(
+        // Initialize metadata storage
+        let mut metadata = Metadata::<E, U64, Vec<u8>>::init(
             context.with_label("metadata"),
             crate::metadata::Config {
                 partition: config.metadata_partition.clone(),
                 codec_config: ((0..).into(), ()),
             },
         )
-        .await
-        .map_err(|_| crate::journal::Error::CompressionFailed)?; // TODO remove dummy error
+        .await?;
 
-        let oldest_retained_loc_key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
-        metadata.put(oldest_retained_loc_key, lower_bound.to_be_bytes().to_vec());
+        // We just pruned all sections below `lower_section` so the oldest retained location may have moved up.
+        let existing_oldest_retained_loc = read_oldest_retained_loc(&metadata, lower_bound);
+        let items_per_section = config.log_items_per_section.get();
+        let lower_section_start = align_to_section_boundary(lower_bound, items_per_section);
+        let oldest_retained_loc = existing_oldest_retained_loc.max(lower_section_start);
+        write_oldest_retained_loc(&mut metadata, oldest_retained_loc);
 
-        let mut journal = Journal::new(
+        // Prune any items in the first section that are below the lower_bound
+        prune_lower(
+            &mut journal,
+            lower_bound,
+            config.log_items_per_section,
+            oldest_retained_loc,
+        )
+        .await?;
+
+        // Create the sync journal wrapper
+        Journal::new(
             journal,
             config.log_items_per_section,
             lower_bound,
             upper_bound,
             metadata,
         )
-        .await?;
-
-        prune_first_section(
-            &mut journal.inner,
-            lower_bound,
-            config.log_items_per_section,
-        )
-        .await?;
-
-        Ok(journal)
+        .await
     }
 
     async fn from_sync_result(
@@ -136,11 +177,8 @@ where
 
         let snapshot = Index::init(context.with_label("snapshot"), db_config.translator.clone());
 
-        let (log, mut metadata) = journal.into_inner();
-        let oldest_retained_loc_key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
-        metadata.put(oldest_retained_loc_key, lower_bound.to_be_bytes().to_vec());
-
         // Create the database instance
+        let (log, metadata) = journal.into_inner();
         let db = any::variable::Any {
             mmr,
             log,
@@ -190,25 +228,34 @@ where
         let upper_section = upper_bound / log_items_per_section;
 
         let (mut journal, mut metadata) = journal.into_inner();
+
+        // Prune sections below the lower bound
         journal
             .prune(lower_section)
             .await
             .map_err(adb::Error::from)?;
 
-        // Remove any items below the lower bound within the lower section
-        prune_first_section(&mut journal, lower_bound, config.log_items_per_section)
-            .await
-            .map_err(adb::Error::from)?;
+        // We just pruned all sections below `lower_section` so the oldest retained location may have moved up.
+        let oldest_retained_loc = read_oldest_retained_loc(&metadata, 0);
+        let lower_section_start = align_to_section_boundary(lower_bound, log_items_per_section);
+        let oldest_retained_loc = oldest_retained_loc.max(lower_section_start);
+        write_oldest_retained_loc(&mut metadata, oldest_retained_loc);
 
-        let oldest_retained_loc_key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
-        metadata.put(oldest_retained_loc_key, lower_bound.to_be_bytes().to_vec());
+        // Remove any items below the lower bound within the lower section
+        prune_lower(
+            &mut journal,
+            lower_bound,
+            config.log_items_per_section,
+            oldest_retained_loc,
+        )
+        .await
+        .map_err(adb::Error::from)?;
 
         // Remove any sections beyond the upper bound
-        let mut variable_journal = journal;
-        let last_section = variable_journal.blobs.last_key_value().map(|(&s, _)| s);
+        let last_section = journal.blobs.last_key_value().map(|(&s, _)| s);
         if let Some(last_section) = last_section {
             if last_section > upper_section {
-                let sections_to_remove: Vec<u64> = variable_journal
+                let sections_to_remove: Vec<u64> = journal
                     .blobs
                     .range((
                         std::ops::Bound::Excluded(upper_section),
@@ -218,28 +265,28 @@ where
                     .collect();
 
                 for section in sections_to_remove {
-                    if let Some(blob) = variable_journal.blobs.remove(&section) {
+                    if let Some(blob) = journal.blobs.remove(&section) {
                         drop(blob);
                         let name = section.to_be_bytes();
-                        variable_journal
+                        journal
                             .context
-                            .remove(&variable_journal.cfg.partition, Some(&name))
+                            .remove(&journal.cfg.partition, Some(&name))
                             .await
                             .map_err(crate::journal::Error::Runtime)
                             .map_err(adb::Error::from)?;
-                        variable_journal.tracked.dec();
+                        journal.tracked.dec();
                     }
                 }
             }
         }
 
         // Remove any items beyond upper_bound within the upper section
-        truncate_upper_section(&mut variable_journal, upper_bound, log_items_per_section)
+        prune_upper(&mut journal, upper_bound, log_items_per_section)
             .await
             .map_err(adb::Error::from)?;
 
         Journal::new(
-            variable_journal,
+            journal,
             config.log_items_per_section,
             lower_bound,
             upper_bound,
@@ -365,14 +412,14 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     }
 
     // Remove any items beyond upper_bound
-    truncate_upper_section(&mut journal, upper_bound, items_per_section).await?;
+    prune_upper(&mut journal, upper_bound, items_per_section).await?;
 
     Ok(journal)
 }
 
 /// Remove items beyond the `upper_bound` location (inclusive).
 /// Assumes each section contains `items_per_section` items.
-async fn truncate_upper_section<E: Storage + Metrics, V: Codec>(
+async fn prune_upper<E: Storage + Metrics, V: Codec>(
     journal: &mut VJournal<E, V>,
     upper_bound: u64,
     items_per_section: u64,
@@ -459,10 +506,7 @@ async fn compute_offset<E: Storage + Metrics, V: Codec>(
     Ok((current_offset as u64) * ITEM_ALIGNMENT)
 }
 
-/// Wraps a [VJournal] to provide a sync-compatible interface for Variable databases.
-/// Namely, it provides a `size` method that returns the number of operations in the journal,
-/// and an `append` method that appends an operation to the journal. These are used by the
-/// sync engine to populate the journal with data from the target database.
+/// Wraps a [VJournal] to provide a sync-compatible interface.
 pub struct Journal<E, K, V>
 where
     E: Storage + Metrics + Clock,
@@ -472,15 +516,14 @@ where
     /// Underlying variable journal storing the operations.
     inner: VJournal<E, Variable<K, V>>,
 
-    /// Logical operations per storage section.
+    /// Operations per storage section in the `inner` journal.
     items_per_section: NonZeroU64,
 
-    /// Logical next append location (number of ops present).
-    /// Invariant: computed by caller so `lower_bound <= size <= upper_bound + 1`.
+    /// Next location to append to in the `inner` journal.
     size: u64,
 
-    /// Metadata for the journal.
-    metadata: crate::metadata::Metadata<E, U64, Vec<u8>>,
+    /// Tracks the oldest retained location in the `inner` journal.
+    metadata: Metadata<E, U64, Vec<u8>>,
 }
 
 impl<E, K, V> Journal<E, K, V>
@@ -494,13 +537,15 @@ where
     /// Arguments:
     /// - `inner`: The wrapped [VJournal], whose logical last operation location is `size - 1`.
     /// - `items_per_section`: Operations per section.
-    /// - `size`: Logical next append location to report.
+    /// - `lower_bound`: Lower bound of the range being synced.
+    /// - `upper_bound`: Upper bound of the range being synced.
+    /// - `metadata`: Metadata for the journal. Tracks the oldest retained location.
     pub async fn new(
         inner: VJournal<E, Variable<K, V>>,
         items_per_section: NonZeroU64,
         lower_bound: u64,
         upper_bound: u64,
-        metadata: crate::metadata::Metadata<E, U64, Vec<u8>>,
+        metadata: Metadata<E, U64, Vec<u8>>,
     ) -> Result<Self, crate::journal::Error> {
         let size = compute_size(&inner, items_per_section, lower_bound, upper_bound).await?;
         Ok(Self {
@@ -511,13 +556,8 @@ where
         })
     }
 
-    /// Return the inner [VJournal].
-    pub fn into_inner(
-        self,
-    ) -> (
-        VJournal<E, Variable<K, V>>,
-        crate::metadata::Metadata<E, U64, Vec<u8>>,
-    ) {
+    /// Return the inner [VJournal] and [Metadata].
+    pub fn into_inner(self) -> (VJournal<E, Variable<K, V>>, Metadata<E, U64, Vec<u8>>) {
         (self.inner, self.metadata)
     }
 }
@@ -547,34 +587,33 @@ where
     }
 }
 
-/// Remove items before the `lower_bound` location from the lower section.
-/// This rebuilds the section by copying only operations >= lower_bound to a new section.
-/// Assumes each section contains `items_per_section` items.
-async fn prune_first_section<E, K, V>(
-    journal: &mut VJournal<E, Variable<K, V>>,
+/// Remove items before the `lower_bound` location from the first section of the journal, if any.
+/// If the first section contains elements before `lower_bound`, the remaining elements are replayed
+/// at the beginning of the section.
+async fn prune_lower<E, V>(
+    journal: &mut VJournal<E, V>,
     lower_bound: u64,
     items_per_section: NonZeroU64,
+    oldest_retained_loc: u64,
 ) -> Result<(), crate::journal::Error>
 where
     E: Storage + Metrics + Clock,
-    K: Array,
     V: Codec,
 {
-    let items_per_section = items_per_section.get();
+    if oldest_retained_loc >= lower_bound {
+        return Ok(());
+    }
 
     // Find which section contains the lower_bound item
-    let lower_section = lower_bound / items_per_section;
+    let lower_section = lower_bound / items_per_section.get();
 
     let Some(_blob) = journal.blobs.get(&lower_section) else {
-        return Ok(()); // Section doesn't exist, nothing to rebuild
+        return Ok(()); // Section doesn't exist, nothing to prune
     };
-
-    // Calculate the logical item range for this section
-    let section_start = lower_section * items_per_section;
 
     debug!(
         lower_section,
-        lower_bound, section_start, "rebuilding section to remove items before lower_bound"
+        lower_bound, oldest_retained_loc, "rebuilding section to remove items before lower_bound"
     );
 
     // Read all operations from the current section
@@ -583,45 +622,26 @@ where
         let stream = journal.replay(commonware_utils::NZUsize!(1024)).await?;
         pin_mut!(stream);
 
-        let mut current_logical_location = section_start;
+        let mut loc = oldest_retained_loc;
         debug!(
             "rebuild_lower_section: starting replay from logical location {}",
-            current_logical_location
+            loc
         );
         while let Some(result) = stream.next().await {
-            let (section, offset, size, operation) = result?;
-
-            debug!(
-                "rebuild_lower_section: found operation at section={}, offset={}, size={}, logical_location={}, lower_bound={}",
-                section, offset, size, current_logical_location, lower_bound
-            );
+            let (section, _offset, _size, operation) = result?;
 
             // Only process operations from the target section
             if section != lower_section {
-                if section > lower_section {
-                    debug!(
-                        "rebuild_lower_section: reached section {} > target section {}, stopping",
-                        section, lower_section
-                    );
-                    break; // We've moved past our target section
-                }
-                debug!(
-                    "rebuild_lower_section: skipping section {} < target section {}",
-                    section, lower_section
-                );
-                current_logical_location += 1;
-                continue;
+                assert!(section > lower_section);
+                break; // We've moved past our target section
             }
 
             // Keep operations that are >= lower_bound
-            if current_logical_location >= lower_bound {
-                debug!("rebuild_lower_section: KEEPING operation at logical_location={} (>= lower_bound={})", current_logical_location, lower_bound);
+            if loc >= lower_bound {
                 operations_to_keep.push(operation);
-            } else {
-                debug!("rebuild_lower_section: DISCARDING operation at logical_location={} (< lower_bound={})", current_logical_location, lower_bound);
             }
 
-            current_logical_location += 1;
+            loc += 1;
         }
     } // stream is dropped here, releasing the borrow
 
@@ -1337,13 +1357,13 @@ mod tests {
         });
     }
 
-    /// Test `truncate_upper_section` correctly removes items beyond sync boundaries.
+    /// Test `prune_upper` correctly removes items beyond sync boundaries.
     #[test_traced]
-    fn test_truncate_section_to_upper_bound() {
+    fn test_prune_upper() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = VConfig {
-                partition: "test_truncate_section".into(),
+                partition: "test_prune_upper".into(),
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
@@ -1372,7 +1392,7 @@ mod tests {
             {
                 let mut journal = create_journal().await;
                 let upper_bound = 9; // End of section 1 (section 1: ops 5-9)
-                truncate_upper_section(&mut journal, upper_bound, items_per_section)
+                prune_upper(&mut journal, upper_bound, items_per_section)
                     .await
                     .unwrap();
 
@@ -1386,7 +1406,7 @@ mod tests {
             {
                 let mut journal = create_journal().await;
                 let upper_bound = 7; // Middle of section 1 (keep ops 5, 6, 7)
-                truncate_upper_section(&mut journal, upper_bound, items_per_section)
+                prune_upper(&mut journal, upper_bound, items_per_section)
                     .await
                     .unwrap();
 
@@ -1408,7 +1428,7 @@ mod tests {
             // Test 3: Non-existent section (should not error)
             {
                 let mut journal = create_journal().await;
-                truncate_upper_section(
+                prune_upper(
                     &mut journal,
                     99, // upper_bound that would be in a non-existent section
                     items_per_section,
@@ -1423,7 +1443,7 @@ mod tests {
                 let mut journal = create_journal().await;
                 let upper_bound = 15; // Beyond section 2
                 let original_section_2_size = journal.size(2).await.unwrap();
-                truncate_upper_section(&mut journal, upper_bound, items_per_section)
+                prune_upper(&mut journal, upper_bound, items_per_section)
                     .await
                     .unwrap();
 
@@ -1435,13 +1455,13 @@ mod tests {
         });
     }
 
-    /// Test intra-section truncation.
+    /// Test intra-section pruning.
     #[test_traced]
-    fn test_truncate_section_mid_section() {
+    fn test_prune_mid_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = VConfig {
-                partition: "test_truncation_integration".into(),
+                partition: "test_prune_mid_section".into(),
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
@@ -1466,7 +1486,7 @@ mod tests {
             }
             journal.close().await.unwrap();
 
-            // Test sync with upper_bound in middle of section 1 (upper_bound = 4)
+            // Test with upper_bound in middle of section 1 (upper_bound = 4)
             // Should keep: items 2, 3, 4 (sections 0 partially removed, 1 truncated, 2 removed)
             let lower_bound = 2;
             let upper_bound = 4;

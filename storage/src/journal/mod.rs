@@ -68,4 +68,6 @@ pub enum Error {
     DecompressionFailed,
     #[error("invalid sync range: lower_bound={0} upper_bound={1}")]
     InvalidSyncRange(u64, u64),
+    #[error("metadata error: {0}")]
+    Metadata(#[from] crate::metadata::Error),
 }
