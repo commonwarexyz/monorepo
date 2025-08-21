@@ -179,11 +179,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let last_commit = if log_size > 0 {
-            Some(log_size - 1)
-        } else {
-            None
-        };
+        let last_commit = log_size.checked_sub(1);
 
         Ok(Immutable {
             mmr,
@@ -253,11 +249,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let last_commit = if log_size > 0 {
-            Some(log_size - 1)
-        } else {
-            None
-        };
+        let last_commit = log_size.checked_sub(1);
 
         let mut db = Immutable {
             mmr,
