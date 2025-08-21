@@ -842,10 +842,14 @@ pub(super) mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
             assert_eq!(db.op_count(), 3);
+
+            // Make sure we can still get metadata.
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+
             // Commit the second key.
             db.commit().await.unwrap();
             assert_eq!(db.op_count(), 4);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(Vec::default()));
 
             // Capture state.
             let root = db.root(&mut hasher);
@@ -863,6 +867,7 @@ pub(super) mod test {
             assert!(db.get(&k3).await.unwrap().is_none());
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(Vec::default()));
 
             // Cleanup.
             db.destroy().await.unwrap();
