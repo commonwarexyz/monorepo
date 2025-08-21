@@ -11,18 +11,18 @@ enum FuzzInput {
     FromVec(Vec<u8>),
     FromBytesMut(Vec<u8>),
     PutSlice(Vec<u8>),
-    Truncate(Vec<u8>, usize, StableBufFuzz),
-    GetMut(Vec<u8>, StableBufFuzz),
-    GetMutPtr(Vec<u8>, StableBufFuzz),
-    Len(Vec<u8>, StableBufFuzz),
-    IsEmpty(Vec<u8>, StableBufFuzz),
-    Index(Vec<u8>, usize, StableBufFuzz),
-    ConvertToBytes(Vec<u8>, StableBufFuzz),
-    ConvertToVec(Vec<u8>, StableBufFuzz),
+    Truncate(Vec<u8>, usize, StableBufBase),
+    GetMut(Vec<u8>, StableBufBase),
+    GetMutPtr(Vec<u8>, StableBufBase),
+    Len(Vec<u8>, StableBufBase),
+    IsEmpty(Vec<u8>, StableBufBase),
+    Index(Vec<u8>, usize, StableBufBase),
+    ConvertToBytes(Vec<u8>, StableBufBase),
+    ConvertToVec(Vec<u8>, StableBufBase),
 }
 
 #[derive(Arbitrary, Debug)]
-enum StableBufFuzz {
+enum StableBufBase {
     Vec,
     BytesMut,
 }
@@ -80,10 +80,10 @@ fn fuzz(input: Vec<FuzzInput>) {
                 }
             }
 
-            FuzzInput::Truncate(data, new_len, kind) => {
-                let mut buf = match kind {
-                    StableBufFuzz::Vec => StableBuf::Vec(data.clone()),
-                    StableBufFuzz::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
+            FuzzInput::Truncate(data, new_len, base) => {
+                let mut buf = match base {
+                    StableBufBase::Vec => StableBuf::Vec(data.clone()),
+                    StableBufBase::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
                 };
                 if new_len <= buf.len() {
                     buf.truncate(new_len);
@@ -91,10 +91,10 @@ fn fuzz(input: Vec<FuzzInput>) {
                 }
             }
 
-            FuzzInput::GetMutPtr(data, kind) => {
-                let mut buf = match kind {
-                    StableBufFuzz::Vec => StableBuf::Vec(data.clone()),
-                    StableBufFuzz::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
+            FuzzInput::GetMutPtr(data, base) => {
+                let mut buf = match base {
+                    StableBufBase::Vec => StableBuf::Vec(data.clone()),
+                    StableBufBase::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
                 };
 
                 let ptr1 = buf.as_mut_ptr();
@@ -107,40 +107,40 @@ fn fuzz(input: Vec<FuzzInput>) {
                 }
             }
 
-            FuzzInput::GetMut(data, kind) => {
-                let mut buf = match kind {
-                    StableBufFuzz::Vec => StableBuf::Vec(data.clone()),
-                    StableBufFuzz::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
+            FuzzInput::GetMut(data, base) => {
+                let mut buf = match base {
+                    StableBufBase::Vec => StableBuf::Vec(data.clone()),
+                    StableBufBase::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
                 };
                 let b = buf.as_mut();
-                if b.len() > 0 {
+                if b.is_empty() {
                     b[0] = 0;
                     assert_eq!(buf[0], 0);
                 }
             }
 
-            FuzzInput::Len(data, kind) => {
-                let buf = match kind {
-                    StableBufFuzz::Vec => StableBuf::Vec(data.clone()),
-                    StableBufFuzz::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
+            FuzzInput::Len(data, base) => {
+                let buf = match base {
+                    StableBufBase::Vec => StableBuf::Vec(data.clone()),
+                    StableBufBase::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
                 };
                 let len = data.len();
                 assert_eq!(buf.len(), len);
             }
 
-            FuzzInput::IsEmpty(data, kind) => {
+            FuzzInput::IsEmpty(data, base) => {
                 let is_empty = data.is_empty();
-                let buf = match kind {
-                    StableBufFuzz::Vec => StableBuf::Vec(data.clone()),
-                    StableBufFuzz::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
+                let buf = match base {
+                    StableBufBase::Vec => StableBuf::Vec(data.clone()),
+                    StableBufBase::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
                 };
                 assert_eq!(buf.is_empty(), is_empty);
             }
 
-            FuzzInput::Index(data, idx, kind) => {
-                let buf = match kind {
-                    StableBufFuzz::Vec => StableBuf::Vec(data.clone()),
-                    StableBufFuzz::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
+            FuzzInput::Index(data, idx, base) => {
+                let buf = match base {
+                    StableBufBase::Vec => StableBuf::Vec(data.clone()),
+                    StableBufBase::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
                 };
 
                 if idx < buf.len() {
@@ -151,19 +151,19 @@ fn fuzz(input: Vec<FuzzInput>) {
                 }
             }
 
-            FuzzInput::ConvertToBytes(data, kind) => {
-                let buf = match kind {
-                    StableBufFuzz::Vec => StableBuf::Vec(data.clone()),
-                    StableBufFuzz::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
+            FuzzInput::ConvertToBytes(data, base) => {
+                let buf = match base {
+                    StableBufBase::Vec => StableBuf::Vec(data.clone()),
+                    StableBufBase::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
                 };
                 let bytes: Bytes = buf.into();
                 assert_eq!(bytes.to_vec(), data);
             }
 
-            FuzzInput::ConvertToVec(data, kind) => {
-                let buf = match kind {
-                    StableBufFuzz::Vec => StableBuf::Vec(data.clone()),
-                    StableBufFuzz::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
+            FuzzInput::ConvertToVec(data, base) => {
+                let buf = match base {
+                    StableBufBase::Vec => StableBuf::Vec(data.clone()),
+                    StableBufBase::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
                 };
                 let vec: Vec<u8> = buf.into();
                 assert_eq!(vec, data);
