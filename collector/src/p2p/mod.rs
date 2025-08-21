@@ -66,13 +66,13 @@ mod tests {
 
     const MAILBOX_SIZE: usize = 1024;
     const LINK: Link = Link {
-        latency: 10.0,
-        jitter: 1.0,
+        latency: Duration::from_millis(10),
+        jitter: Duration::from_millis(1),
         success_rate: 1.0,
     };
     const LINK_SLOW: Link = Link {
-        latency: 1_000.0,
-        jitter: 1.0,
+        latency: Duration::from_millis(1_000),
+        jitter: Duration::from_millis(1),
         success_rate: 1.0,
     };
 
@@ -104,8 +104,8 @@ mod tests {
 
         let mut connections = Vec::new();
         for peer in &peers {
-            let (sender1, receiver1) = oracle.register(peer.clone(), 0).await.unwrap();
-            let (sender2, receiver2) = oracle.register(peer.clone(), 1).await.unwrap();
+            let (sender1, receiver1) = oracle.register(peer.clone(), 0, None, None).await.unwrap();
+            let (sender2, receiver2) = oracle.register(peer.clone(), 1, None, None).await.unwrap();
             connections.push(((sender1, receiver1), (sender2, receiver2)));
         }
 

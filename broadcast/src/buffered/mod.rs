@@ -84,14 +84,14 @@ mod tests {
 
         let mut registrations: Registrations = BTreeMap::new();
         for peer in peers.iter() {
-            let (sender, receiver) = oracle.register(peer.clone(), 0).await.unwrap();
+            let (sender, receiver) = oracle.register(peer.clone(), 0, None, None).await.unwrap();
             registrations.insert(peer.clone(), (sender, receiver));
         }
 
         // Add links between all peers
         let link = Link {
-            latency: NETWORK_SPEED.as_millis() as f64,
-            jitter: 0.0,
+            latency: NETWORK_SPEED,
+            jitter: Duration::ZERO,
             success_rate,
         };
         for p1 in peers.iter() {

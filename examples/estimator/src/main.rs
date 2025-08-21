@@ -272,7 +272,7 @@ async fn setup_network_identities(
         for _ in 0..*count {
             let identity = ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
             let (sender, receiver) = oracle
-                .register(identity.clone(), DEFAULT_CHANNEL)
+                .register(identity.clone(), DEFAULT_CHANNEL, None, None)
                 .await
                 .unwrap();
             let (sender, receiver) = wrap::<_, _, u32>((), sender, receiver);
@@ -297,8 +297,8 @@ async fn setup_network_links(
             }
             let latency = latencies[region][other_region];
             let link = Link {
-                latency: latency.0,
-                jitter: latency.1,
+                latency: Duration::from_micros((latency.0 * 1000.0) as u64),
+                jitter: Duration::from_micros((latency.1 * 1000.0) as u64),
                 success_rate: DEFAULT_SUCCESS_RATE,
             };
             oracle

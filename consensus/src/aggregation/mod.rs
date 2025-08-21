@@ -107,8 +107,8 @@ mod tests {
 
     /// Reliable network link configuration for testing.
     const RELIABLE_LINK: Link = Link {
-        latency: 10.0,
-        jitter: 1.0,
+        latency: Duration::from_millis(10),
+        jitter: Duration::from_millis(1),
         success_rate: 1.0,
     };
 
@@ -119,7 +119,10 @@ mod tests {
     ) -> Registrations<PublicKey> {
         let mut registrations = BTreeMap::new();
         for participant in participants.iter() {
-            let (sender, receiver) = oracle.register(participant.clone(), 0).await.unwrap();
+            let (sender, receiver) = oracle
+                .register(participant.clone(), 0, None, None)
+                .await
+                .unwrap();
             registrations.insert(participant.clone(), (sender, receiver));
         }
         registrations
@@ -581,8 +584,8 @@ mod tests {
 
             // Use degraded network links with realistic conditions
             let degraded_link = Link {
-                latency: 200.0,
-                jitter: 150.0,
+                latency: Duration::from_millis(200),
+                jitter: Duration::from_millis(150),
                 success_rate: 0.5,
             };
 
@@ -733,8 +736,8 @@ mod tests {
             context.sleep(Duration::from_secs(20)).await;
 
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             for v1 in pks.iter() {

@@ -97,8 +97,14 @@ mod tests {
     ) -> Registrations<PublicKey> {
         let mut registrations = BTreeMap::new();
         for participant in participants.iter() {
-            let (a1, a2) = oracle.register(participant.clone(), 0).await.unwrap();
-            let (b1, b2) = oracle.register(participant.clone(), 1).await.unwrap();
+            let (a1, a2) = oracle
+                .register(participant.clone(), 0, None, None)
+                .await
+                .unwrap();
+            let (b1, b2) = oracle
+                .register(participant.clone(), 1, None, None)
+                .await
+                .unwrap();
             registrations.insert(participant.clone(), ((a1, a2), (b1, b2)));
         }
         registrations
@@ -174,8 +180,8 @@ mod tests {
 
         let registrations = register_participants(&mut oracle, &pks).await;
         let link = Link {
-            latency: 10.0,
-            jitter: 1.0,
+            latency: Duration::from_millis(10),
+            jitter: Duration::from_millis(1),
             success_rate: 1.0,
         };
         link_participants(&mut oracle, &pks, Action::Link(link), None).await;
@@ -407,8 +413,8 @@ mod tests {
 
                 let mut registrations = register_participants(&mut oracle, &pks).await;
                 let link = commonware_p2p::simulated::Link {
-                    latency: 10.0,
-                    jitter: 1.0,
+                    latency: Duration::from_millis(10),
+                    jitter: Duration::from_millis(1),
                     success_rate: 1.0,
                 };
                 link_participants(&mut oracle, &pks, Action::Link(link), None).await;
@@ -525,8 +531,8 @@ mod tests {
 
             // Heal the partition by re-adding links.
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_participants(&mut oracle, &pks, Action::Link(link), None).await;
@@ -567,8 +573,8 @@ mod tests {
             )
             .await;
             let delayed_link = Link {
-                latency: 50.0,
-                jitter: 40.0,
+                latency: Duration::from_millis(50),
+                jitter: Duration::from_millis(40),
                 success_rate: 0.5,
             };
             let mut oracle_clone = oracle.clone();
@@ -740,8 +746,8 @@ mod tests {
 
             // Heal the partition by re-adding links.
             let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_participants(&mut oracle, &pks, Action::Link(link), None).await;
@@ -809,8 +815,8 @@ mod tests {
             // Register all participants
             let mut registrations = register_participants(&mut oracle, &participants).await;
             let link = commonware_p2p::simulated::Link {
-                latency: 10.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
             link_participants(&mut oracle, &participants, Action::Link(link), None).await;
@@ -969,8 +975,8 @@ mod tests {
             )
             .await;
             let delayed_link = Link {
-                latency: 80.0,
-                jitter: 10.0,
+                latency: Duration::from_millis(80),
+                jitter: Duration::from_millis(10),
                 success_rate: 0.98,
             };
             let mut oracle_clone = oracle.clone();

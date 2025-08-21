@@ -151,17 +151,19 @@ mod tests {
 
             // Create a dummy network mailbox
             let peer = schemes[1].public_key();
-            let (voter_sender, voter_receiver) =
-                oracle.register(validator.clone(), 0).await.unwrap();
+            let (voter_sender, voter_receiver) = oracle
+                .register(validator.clone(), 0, None, None)
+                .await
+                .unwrap();
             let (mut peer_sender, mut peer_receiver) =
-                oracle.register(peer.clone(), 0).await.unwrap();
+                oracle.register(peer.clone(), 0, None, None).await.unwrap();
             oracle
                 .add_link(
                     validator.clone(),
                     peer.clone(),
                     Link {
-                        latency: 0.0,
-                        jitter: 0.0,
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
                         success_rate: 1.0,
                     },
                 )
@@ -172,8 +174,8 @@ mod tests {
                     peer,
                     validator,
                     Link {
-                        latency: 0.0,
-                        jitter: 0.0,
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
                         success_rate: 1.0,
                     },
                 )
@@ -348,17 +350,19 @@ mod tests {
 
             // Create a dummy network mailbox
             let peer = private_keys[1].public_key();
-            let (voter_sender, voter_receiver) =
-                oracle.register(validator.clone(), 0).await.unwrap();
+            let (voter_sender, voter_receiver) = oracle
+                .register(validator.clone(), 0, None, None)
+                .await
+                .unwrap();
             let (mut peer_sender, mut peer_receiver) =
-                oracle.register(peer.clone(), 0).await.unwrap();
+                oracle.register(peer.clone(), 0, None, None).await.unwrap();
             oracle
                 .add_link(
                     validator.clone(),
                     peer.clone(),
                     Link {
-                        latency: 0.0,
-                        jitter: 0.0,
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
                         success_rate: 1.0,
                     },
                 )
@@ -369,8 +373,8 @@ mod tests {
                     peer,
                     validator,
                     Link {
-                        latency: 0.0,
-                        jitter: 0.0,
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
                         success_rate: 1.0,
                     },
                 )
