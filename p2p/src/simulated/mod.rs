@@ -126,7 +126,10 @@ mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer as _};
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        PrivateKeyExt as _, Signer as _,
+    };
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -392,7 +395,6 @@ mod tests {
             assert!(matches!(result, Err(Error::InvalidSuccessRate(_))));
         });
     }
-
 
     #[test]
     fn test_simple_message_delivery() {
@@ -715,5 +717,320 @@ mod tests {
             let result = oracle.remove_link(pk1, pk2).await;
             assert!(matches!(result, Err(Error::LinkMissing)));
         });
+    }
+
+    async fn test_bandwidth_between_peers(
+        context: &mut deterministic::Context,
+        oracle: &mut Oracle<PublicKey>,
+        sender_bps: Option<usize>,
+        receiver_bps: Option<usize>,
+        message_size: usize,
+        expected_duration_ms: u64,
+    ) {
+        // Create two agents
+        let pk1 = PrivateKey::from_seed(context.gen::<u64>()).public_key();
+        let pk2 = PrivateKey::from_seed(context.gen::<u64>()).public_key();
+        let (mut sender, _) = oracle
+            .register(pk1.clone(), 0, sender_bps, None)
+            .await
+            .unwrap();
+        let (_, mut receiver) = oracle
+            .register(pk2.clone(), 0, None, receiver_bps)
+            .await
+            .unwrap();
+
+        // Link the two agents
+        oracle
+            .add_link(
+                pk1.clone(),
+                pk2.clone(),
+                Link {
+                    // No latency so it doesn't interfere with bandwidth delay calculation
+                    latency: Duration::ZERO,
+                    jitter: Duration::ZERO,
+                    success_rate: 1.0,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Send a message from agent 1 to 2
+        let msg = Bytes::from(vec![42u8; message_size]);
+        let start = context.current();
+        sender
+            .send(Recipients::One(pk2.clone()), msg.clone(), true)
+            .await
+            .unwrap();
+
+        // Measure how long it takes for agent 2 to receive the message
+        let (origin, received) = receiver.recv().await.unwrap();
+        let elapsed = context.current().duration_since(start).unwrap();
+
+        assert_eq!(origin, pk1);
+        assert_eq!(received, msg);
+        assert!(
+            elapsed >= Duration::from_millis(expected_duration_ms),
+            "Message arrived too quickly: {elapsed:?} (expected >= {expected_duration_ms}ms)"
+        );
+        assert!(
+            elapsed < Duration::from_millis(expected_duration_ms + 100),
+            "Message took too long: {elapsed:?} (expected ~{expected_duration_ms}ms)"
+        );
+    }
+
+    #[test]
+    fn test_bandwidth() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+            network.start();
+
+            // Both sender and receiver have the same bandiwdth (1000 B/s)
+            // 500 bytes at 1000 B/s = 0.5 seconds
+            test_bandwidth_between_peers(
+                &mut context,
+                &mut oracle,
+                Some(1000), // sender egress
+                Some(1000), // receiver ingress
+                500,        // message size
+                500,        // expected duration in ms
+            )
+            .await;
+
+            // Sender has lower bandwidth (500 B/s) than receiver (2000 B/s)
+            // Should be limited by sender's 500 B/s
+            // 250 bytes at 500 B/s = 0.5 seconds
+            test_bandwidth_between_peers(
+                &mut context,
+                &mut oracle,
+                Some(500),  // sender egress
+                Some(2000), // receiver ingress
+                250,        // message size
+                500,        // expected duration in ms
+            )
+            .await;
+
+            // Sender has higher bandwidth (2000 B/s) than receiver (500 B/s)
+            // Should be limited by receiver's 500 B/s
+            // 250 bytes at 500 B/s = 0.5 seconds
+            test_bandwidth_between_peers(
+                &mut context,
+                &mut oracle,
+                Some(2000), // sender egress
+                Some(500),  // receiver ingress
+                250,        // message size
+                500,        // expected duration in ms
+            )
+            .await;
+
+            // Unlimited sender, limited receiver
+            // Should be limited by receiver's 1000 B/s
+            // 500 bytes at 1000 B/s = 0.5 seconds
+            test_bandwidth_between_peers(
+                &mut context,
+                &mut oracle,
+                None,       // sender egress (unlimited)
+                Some(1000), // receiver ingress
+                500,        // message size
+                500,        // expected duration in ms
+            )
+            .await;
+
+            // Limited sender, unlimited receiver
+            // Should be limited by sender's 1000 B/s
+            // 500 bytes at 1000 B/s = 0.5 seconds
+            test_bandwidth_between_peers(
+                &mut context,
+                &mut oracle,
+                Some(1000), // sender egress
+                None,       // receiver ingress (unlimited)
+                500,        // message size
+                500,        // expected duration in ms
+            )
+            .await;
+
+            // Unlimited sender, unlimited receiver
+            // Delivery should be (almost) instant
+            test_bandwidth_between_peers(
+                &mut context,
+                &mut oracle,
+                None, // sender egress (unlimited)
+                None, // receiver ingress (unlimited)
+                500,  // message size
+                0,    // expected duration in ms
+            )
+            .await;
+        });
+    }
+
+    #[test]
+    fn test_bandwidth_contention() {
+        // Test that multiple senders to the same receiver cause queueing delays
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+            network.start();
+
+            // Create three agents
+            let sender1 = PrivateKey::from_seed(1).public_key();
+            let sender2 = PrivateKey::from_seed(2).public_key();
+            let receiver = PrivateKey::from_seed(3).public_key();
+
+            // Register senders with high egress bandwidth (2000 B/s each)
+            let (mut sender1_tx, _) = oracle
+                .register(sender1.clone(), 0, Some(2000), None)
+                .await
+                .unwrap();
+            let (mut sender2_tx, _) = oracle
+                .register(sender2.clone(), 0, Some(2000), None)
+                .await
+                .unwrap();
+
+            // Register receiver with limited ingress bandwidth (1000 B/s)
+            let (_, mut receiver_rx) = oracle
+                .register(receiver.clone(), 0, None, Some(1000))
+                .await
+                .unwrap();
+
+            // Link both senders to the receiver with no latency
+            oracle
+                .add_link(
+                    sender1.clone(),
+                    receiver.clone(),
+                    Link {
+                        latency: Duration::ZERO,
+                        jitter: Duration::ZERO,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    sender2.clone(),
+                    receiver.clone(),
+                    Link {
+                        latency: Duration::ZERO,
+                        jitter: Duration::ZERO,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            // Both senders send 500-byte messages simultaneously
+            let msg1 = Bytes::from(vec![1u8; 500]);
+            let msg2 = Bytes::from(vec![1u8; 500]);
+            let receiver2 = receiver.clone();
+
+            // Spawn both sends concurrently
+            context.with_label("send1").spawn(|_| async move {
+                sender1_tx
+                    .send(Recipients::One(receiver), msg1, true)
+                    .await
+                    .unwrap()
+            });
+
+            context.with_label("send2").spawn(|_| async move {
+                sender2_tx
+                    .send(Recipients::One(receiver2), msg2, true)
+                    .await
+                    .unwrap()
+            });
+
+            // Start timing after dispatching sends
+            let start = context.current();
+
+            // Receive first message
+            let (origin1, _) = receiver_rx.recv().await.unwrap();
+            let time1 = context.current().duration_since(start).unwrap();
+
+            // Receive second message
+            let (origin2, _) = receiver_rx.recv().await.unwrap();
+            let time2 = context.current().duration_since(start).unwrap();
+
+            // Verify both messages arrived from different senders
+            assert_ne!(origin1, origin2, "Messages must be from different senders");
+
+            // With bandwidth contention at the receiver (1000 B/s):
+            // - First 500-byte message should take ~500ms
+            // - Second 500-byte message should be delayed and arrive ~500ms later
+            assert!(
+                time1 >= Duration::from_millis(500),
+                "First message arrived too quickly: {time1:?} (expected >= 500ms)"
+            );
+            assert!(
+                time2 >= Duration::from_millis(1000),
+                "Second message arrived too quickly: {time2:?} (expected >= 1000ms)"
+            );
+        });
+    }
+
+    #[test]
+    fn test_message_ordering() {
+        // Test that messages arrive in order even with variable latency
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+            network.start();
+
+            // Register agents
+            let pk1 = PrivateKey::from_seed(1).public_key();
+            let pk2 = PrivateKey::from_seed(2).public_key();
+            let (mut sender, _) = oracle.register(pk1.clone(), 0, None, None).await.unwrap();
+            let (_, mut receiver) = oracle.register(pk2.clone(), 0, None, None).await.unwrap();
+
+            // Link agents with high jitter to create variable delays
+            oracle
+                .add_link(
+                    pk1.clone(),
+                    pk2.clone(),
+                    Link {
+                        latency: Duration::from_millis(50),
+                        jitter: Duration::from_millis(40),
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            // Send multiple messages that should arrive in order
+            let messages = vec![
+                Bytes::from("message 1"),
+                Bytes::from("message 2"),
+                Bytes::from("message 3"),
+                Bytes::from("message 4"),
+                Bytes::from("message 5"),
+            ];
+
+            for msg in messages.clone() {
+                sender
+                    .send(Recipients::One(pk2.clone()), msg, true)
+                    .await
+                    .unwrap();
+            }
+
+            // Receive messages and verify they arrive in order
+            for expected_msg in messages {
+                let (origin, received_msg) = receiver.recv().await.unwrap();
+                assert_eq!(origin, pk1);
+                assert_eq!(received_msg, expected_msg);
+            }
+        })
     }
 }
