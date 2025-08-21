@@ -689,11 +689,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// This method does not change the state of the db's snapshot, but it always changes the root
     /// since it applies at least one operation.
-    pub(super) async fn raise_inactivity_floor(
-        &mut self,
-        metadata: V,
-        max_steps: u64,
-    ) -> Result<(), Error> {
+    async fn raise_inactivity_floor(&mut self, metadata: V, max_steps: u64) -> Result<(), Error> {
         for _ in 0..max_steps {
             if self.inactivity_floor_loc == self.op_count() {
                 break;

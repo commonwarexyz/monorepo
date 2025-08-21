@@ -606,7 +606,7 @@ impl<
     ///
     /// This method does not change the state of the db's snapshot, but it always changes the root
     /// since it applies at least one operation.
-    pub(crate) async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
+    async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
         for _ in 0..max_steps {
             if self.inactivity_floor_loc == self.op_count() {
                 break;
