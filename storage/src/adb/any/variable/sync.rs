@@ -20,7 +20,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage, Storage};
-use commonware_utils::{sequence::prefixed_u64::U64, Array, NZUsize};
+use commonware_utils::{sequence::prefixed_u64::U64, Array};
 use futures::{pin_mut, StreamExt};
 use std::{num::NonZeroU64, ops::Bound};
 use tracing::debug;
@@ -329,40 +329,6 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec>(
     Ok(journal)
 }
 
-/// Return the byte offset of the next element after `items_count` elements of `blob`.
-async fn compute_offset<E: Storage + Metrics, V: Codec>(
-    blob: &commonware_runtime::buffer::Append<E::Blob>,
-    codec_config: &V::Cfg,
-    compressed: bool,
-    items_count: u32,
-) -> Result<u64, crate::journal::Error> {
-    use crate::journal::variable::{Journal, ITEM_ALIGNMENT};
-
-    if items_count == 0 {
-        return Ok(0);
-    }
-
-    let mut current_offset = 0u32;
-
-    // Read through items one by one to find where each one ends
-    for _ in 0..items_count {
-        match Journal::<E, V>::read(compressed, codec_config, blob, current_offset).await {
-            Ok((next_slot, _item_len, _item)) => {
-                current_offset = next_slot;
-            }
-            Err(crate::journal::Error::Runtime(
-                commonware_runtime::Error::BlobInsufficientLength,
-            )) => {
-                // This section has fewer than `items_count` items.
-                break;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-
-    Ok((current_offset as u64) * ITEM_ALIGNMENT)
-}
-
 /// Wraps a [VJournal] to provide a sync-compatible interface.
 pub struct Journal<E, K, V>
 where
@@ -496,6 +462,40 @@ async fn prune_upper<E: Storage + Metrics, V: Codec>(
     );
 
     Ok(())
+}
+
+/// Return the byte offset of the next element after `items_count` elements of `blob`.
+async fn compute_offset<E: Storage + Metrics, V: Codec>(
+    blob: &commonware_runtime::buffer::Append<E::Blob>,
+    codec_config: &V::Cfg,
+    compressed: bool,
+    items_count: u32,
+) -> Result<u64, crate::journal::Error> {
+    use crate::journal::variable::{Journal, ITEM_ALIGNMENT};
+
+    if items_count == 0 {
+        return Ok(0);
+    }
+
+    let mut current_offset = 0u32;
+
+    // Read through items one by one to find where each one ends
+    for _ in 0..items_count {
+        match Journal::<E, V>::read(compressed, codec_config, blob, current_offset).await {
+            Ok((next_slot, _item_len, _item)) => {
+                current_offset = next_slot;
+            }
+            Err(crate::journal::Error::Runtime(
+                commonware_runtime::Error::BlobInsufficientLength,
+            )) => {
+                // This section has fewer than `items_count` items.
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok((current_offset as u64) * ITEM_ALIGNMENT)
 }
 
 /// Remove items before the `lower_bound` location from the first section of the journal, if any.
@@ -658,15 +658,13 @@ where
         }
     }
 
-    // Step 3: Prune the lower section if needed
-    // Only prune if there are items in the lower section that need to be removed
-    // (i.e., if lower_bound is not at the start of the section)
+    // Prune the lower section if needed
     let lower_section_start = lower_section * items_per_section_val;
     if lower_bound > lower_section_start && journal.blobs.contains_key(&lower_section) {
         prune_lower(journal, lower_bound, items_per_section, oldest_retained_loc).await?;
     }
 
-    // Step 4: Prune the upper section if needed
+    // Prune the upper section if needed
     prune_upper(journal, upper_bound, items_per_section_val).await?;
 
     // Step 5: Compute the next location to write and the new oldest_retained_loc
@@ -678,23 +676,15 @@ where
     // If oldest_retained_loc was before lower_bound, we've now pruned up to lower_bound.
     oldest_retained_loc = lower_bound.max(oldest_retained_loc);
 
-    let mut last_location = oldest_retained_loc.saturating_sub(1);
+    let last_section_start = journal
+        .blobs
+        .last_key_value()
+        .map(|(section, _)| section * items_per_section_val)
+        .unwrap();
+    let last_section_end = last_section_start + items_per_section_val - 1;
+    let next_loc = (last_section_end + 1).min(upper_bound + 1);
 
-    let stream = journal.replay(NZUsize!(1024)).await?;
-    pin_mut!(stream);
-
-    while let Some(item) = stream.next().await {
-        let _ = item?;
-        last_location = last_location.saturating_add(1);
-
-        // Stop if we've gone beyond the upper bound
-        if last_location > upper_bound {
-            last_location = upper_bound;
-            break;
-        }
-    }
-
-    Ok((last_location + 1, oldest_retained_loc))
+    Ok((next_loc, oldest_retained_loc))
 }
 
 #[cfg(test)]
