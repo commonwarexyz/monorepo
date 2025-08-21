@@ -221,9 +221,9 @@ To simulate the performance of HotStuff, Simplicity, and Minimmit on an [Alto-li
 # Basic simulation without bandwidth constraints
 cargo run -- --distribution us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 hotstuff.lazy
 
-# With realistic bandwidth limits (10 Mbps symmetric)
-cargo run -- --distribution us-west-1:5:1250000,us-east-1:5:1250000,eu-west-1:5:1250000,ap-northeast-1:5:1250000,eu-north-1:5:1250000,ap-south-1:5:1250000,sa-east-1:5:1250000,eu-central-1:5:1250000,ap-northeast-2:5:1250000,ap-southeast-2:5:1250000 simplex_with_sizes.lazy
+# With realistic bandwidth limits (1 Gbps symmetric)
+cargo run -- --distribution us-west-1:5:125000000,us-east-1:5:125000000,eu-west-1:5:125000000,ap-northeast-1:5:125000000,eu-north-1:5:125000000,ap-south-1:5:125000000,sa-east-1:5:125000000,eu-central-1:5:125000000,ap-northeast-2:5:125000000,ap-southeast-2:5:125000000 simplex_with_sizes.lazy
 
 # With asymmetric bandwidth (varying by region to simulate different network conditions)
-cargo run -- --distribution us-west-1:5:2000000/1000000,us-east-1:5:2000000/1000000,eu-west-1:5:1500000/750000,ap-northeast-1:5:1000000/500000 minimmit.lazy
+cargo run -- --distribution us-west-1:5:200000000/100000000,us-east-1:5:200000000/100000000,eu-west-1:5:150000000/75000000,ap-northeast-1:5:100000000/50000000 minimmit.lazy
 ```
