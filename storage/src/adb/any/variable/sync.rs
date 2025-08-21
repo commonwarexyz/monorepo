@@ -48,14 +48,6 @@ fn write_oldest_retained_loc<E: Storage + Clock + Metrics>(
     metadata.put(key, value.to_be_bytes().to_vec());
 }
 
-/// Calculate the section-aligned oldest retained location based on a target location.
-///
-/// This ensures that oldest_retained_loc is always aligned to section boundaries,
-/// which is required for proper journal pruning behavior.
-fn align_to_section_boundary(target_loc: u64, items_per_section: u64) -> u64 {
-    (target_loc / items_per_section) * items_per_section
-}
-
 impl<E, K, V, H, T> sync::Database for any::variable::Any<E, K, V, H, T>
 where
     E: RStorage + Clock + Metrics,
@@ -100,10 +92,9 @@ where
         )
         .await?;
 
-        let oldest_retained_loc = read_oldest_retained_loc(&metadata, lower_bound);
+        let oldest_retained_loc = read_oldest_retained_loc(&metadata, 0);
 
-        // TODO use size
-        let (_size, new_oldest_retained_loc) = prune_journal(
+        let (size, new_oldest_retained_loc) = prune_journal(
             &mut journal,
             lower_bound,
             upper_bound,
@@ -113,18 +104,10 @@ where
         .await?;
 
         if new_oldest_retained_loc != oldest_retained_loc {
-            write_oldest_retained_loc(&mut metadata, oldest_retained_loc);
+            write_oldest_retained_loc(&mut metadata, new_oldest_retained_loc);
         }
-
         // Create the sync journal wrapper
-        Journal::new(
-            journal,
-            config.log_items_per_section,
-            lower_bound,
-            upper_bound,
-            metadata,
-        )
-        .await
+        Journal::new(journal, config.log_items_per_section, metadata, size).await
     }
 
     async fn from_sync_result(
@@ -219,74 +202,27 @@ where
                 .map_err(adb::Error::from);
         }
 
-        let log_items_per_section = config.log_items_per_section.get();
-        let lower_section = lower_bound / log_items_per_section;
-        let upper_section = upper_bound / log_items_per_section;
-
         let (mut journal, mut metadata) = journal.into_inner();
+        let oldest_retained_loc = read_oldest_retained_loc(&metadata, lower_bound);
 
-        // Prune sections below the lower bound
-        journal
-            .prune(lower_section)
-            .await
-            .map_err(adb::Error::from)?;
-
-        // We just pruned all sections below `lower_section` so the oldest retained location may have moved up.
-        let oldest_retained_loc = read_oldest_retained_loc(&metadata, 0);
-        let lower_section_start = align_to_section_boundary(lower_bound, log_items_per_section);
-        let oldest_retained_loc = oldest_retained_loc.max(lower_section_start);
-        write_oldest_retained_loc(&mut metadata, oldest_retained_loc);
-
-        // Remove any items below the lower bound within the lower section
-        prune_lower(
+        let (next_write_loc, new_oldest_retained_loc) = prune_journal(
             &mut journal,
             lower_bound,
-            config.log_items_per_section,
+            upper_bound,
             oldest_retained_loc,
+            config.log_items_per_section,
         )
-        .await
-        .map_err(adb::Error::from)?;
+        .await?;
 
-        // Remove any sections beyond the upper bound
-        let last_section = journal.blobs.last_key_value().map(|(&s, _)| s);
-        if let Some(last_section) = last_section {
-            if last_section > upper_section {
-                let sections_to_remove: Vec<u64> = journal
-                    .blobs
-                    .range((
-                        std::ops::Bound::Excluded(upper_section),
-                        std::ops::Bound::Unbounded,
-                    ))
-                    .map(|(&section, _)| section)
-                    .collect();
-
-                for section in sections_to_remove {
-                    if let Some(blob) = journal.blobs.remove(&section) {
-                        drop(blob);
-                        let name = section.to_be_bytes();
-                        journal
-                            .context
-                            .remove(&journal.cfg.partition, Some(&name))
-                            .await
-                            .map_err(crate::journal::Error::Runtime)
-                            .map_err(adb::Error::from)?;
-                        journal.tracked.dec();
-                    }
-                }
-            }
+        if new_oldest_retained_loc != oldest_retained_loc {
+            write_oldest_retained_loc(&mut metadata, new_oldest_retained_loc);
         }
-
-        // Remove any items beyond upper_bound within the upper section
-        prune_upper(&mut journal, upper_bound, log_items_per_section)
-            .await
-            .map_err(adb::Error::from)?;
 
         Journal::new(
             journal,
             config.log_items_per_section,
-            lower_bound,
-            upper_bound,
             metadata,
+            next_write_loc,
         )
         .await
         .map_err(adb::Error::from)
@@ -539,11 +475,9 @@ where
     pub async fn new(
         inner: VJournal<E, Variable<K, V>>,
         items_per_section: NonZeroU64,
-        lower_bound: u64,
-        upper_bound: u64,
         metadata: Metadata<E, U64, Vec<u8>>,
+        size: u64,
     ) -> Result<Self, crate::journal::Error> {
-        let size = compute_size(&inner, items_per_section, lower_bound, upper_bound).await?;
         Ok(Self {
             inner,
             items_per_section,
@@ -553,6 +487,7 @@ where
     }
 
     /// Return the inner [VJournal] and [Metadata].
+    #[allow(clippy::type_complexity)]
     pub fn into_inner(self) -> (VJournal<E, Variable<K, V>>, Metadata<E, U64, Vec<u8>>) {
         (self.inner, self.metadata)
     }
@@ -596,10 +531,6 @@ where
     E: Storage + Metrics + Clock,
     V: Codec,
 {
-    if oldest_retained_loc >= lower_bound {
-        return Ok(());
-    }
-
     // Find which section contains the lower_bound item
     let lower_section = lower_bound / items_per_section.get();
 
@@ -690,7 +621,7 @@ pub async fn prune_journal<E, V>(
     journal: &mut VJournal<E, V>,
     lower_bound: u64,
     upper_bound: u64,
-    oldest_retained_loc: u64,
+    mut oldest_retained_loc: u64,
     items_per_section: NonZeroU64,
 ) -> Result<(u64, u64), crate::journal::Error>
 where
@@ -718,12 +649,16 @@ where
         "pruning journal"
     );
 
-    // Step 1: Remove sections before the lower_section
+    // Remove sections before the lower_section
     if lower_section > 0 {
         journal.prune(lower_section).await?;
     }
+    // If the oldest_retained_loc was just pruned, we need to update it
+    if oldest_retained_loc < lower_section * items_per_section_val {
+        oldest_retained_loc = lower_section * items_per_section_val;
+    }
 
-    // Step 2: Remove sections after the upper_section
+    // Remove sections after the upper_section
     let sections_to_remove: Vec<u64> = journal
         .blobs
         .range((Bound::Excluded(upper_section), Bound::Unbounded))
@@ -748,9 +683,7 @@ where
     // (i.e., if lower_bound is not at the start of the section)
     let lower_section_start = lower_section * items_per_section_val;
     if lower_bound > lower_section_start && journal.blobs.contains_key(&lower_section) {
-        // Use the max of oldest_retained_loc and lower_section_start as the starting point
-        let effective_oldest = oldest_retained_loc.max(lower_section_start);
-        prune_lower(journal, lower_bound, items_per_section, effective_oldest).await?;
+        prune_lower(journal, lower_bound, items_per_section, oldest_retained_loc).await?;
     }
 
     // Step 4: Prune the upper section if needed
@@ -762,102 +695,26 @@ where
         return Ok((lower_bound, lower_bound));
     }
 
-    // After pruning, the new oldest_retained_loc is simply lower_bound
-    // (since we've removed everything before it)
-    let new_oldest_retained = lower_bound;
+    // If oldest_retained_loc was before lower_bound, we've now pruned up to lower_bound.
+    oldest_retained_loc = lower_bound.max(oldest_retained_loc);
 
-    // Scan the journal to find the last element's location within the sync range
-    // We need to properly account for pruned sections when calculating logical locations
-    let mut last_location = lower_bound;
-    let mut current_section: Option<u64> = None;
-    let mut index_in_section: u64 = 0;
+    let mut last_location = oldest_retained_loc.saturating_sub(1);
 
     let stream = journal.replay(NZUsize!(1024)).await?;
     pin_mut!(stream);
 
     while let Some(item) = stream.next().await {
-        match item {
-            Ok((section, _offset, _size, _op)) => {
-                if current_section != Some(section) {
-                    current_section = Some(section);
-                    index_in_section = 0;
-                }
+        let _ = item?;
+        last_location = last_location.saturating_add(1);
 
-                // For the lower section that may have been pruned,
-                // the first element starts at lower_bound
-                let section_start = if section == lower_section {
-                    lower_bound
-                } else {
-                    section * items_per_section_val
-                };
-
-                let loc = section_start.saturating_add(index_in_section);
-
-                if loc >= lower_bound && loc <= upper_bound {
-                    last_location = loc;
-                }
-
-                index_in_section = index_in_section.saturating_add(1);
-            }
-            Err(e) => return Err(e),
+        // Stop if we've gone beyond the upper bound
+        if last_location > upper_bound {
+            last_location = upper_bound;
+            break;
         }
     }
 
-    // Return the next location after the last valid element
-    // If we have elements up to upper_bound, return upper_bound + 1
-    // Otherwise return the next location after the last element we have
-    let next_write_loc = if last_location == upper_bound {
-        upper_bound + 1
-    } else {
-        last_location + 1
-    };
-
-    Ok((next_write_loc, new_oldest_retained))
-}
-
-/// Compute the next append location (size) by scanning the variable journal and
-/// counting only items whose logical location is within [lower_bound, upper_bound].
-async fn compute_size<E, K, V>(
-    journal: &VJournal<E, Variable<K, V>>,
-    items_per_section: NonZeroU64,
-    lower_bound: u64,
-    upper_bound: u64,
-) -> Result<u64, crate::journal::Error>
-where
-    E: Storage + Metrics,
-    K: Array,
-    V: Codec,
-{
-    let items_per_section = items_per_section.get();
-    let mut size = lower_bound;
-    let mut current_section: Option<u64> = None;
-    let mut index_in_section: u64 = 0;
-    let stream = journal.replay(NZUsize!(1024)).await?;
-    pin_mut!(stream);
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok((section, _offset, _size, _op)) => {
-                if current_section != Some(section) {
-                    current_section = Some(section);
-                    index_in_section = 0;
-                }
-                let loc = section
-                    .saturating_mul(items_per_section)
-                    .saturating_add(index_in_section);
-                if loc < lower_bound {
-                    index_in_section = index_in_section.saturating_add(1);
-                    continue;
-                }
-                if loc > upper_bound {
-                    return Ok(size);
-                }
-                size = loc.saturating_add(1);
-                index_in_section = index_in_section.saturating_add(1);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(size)
+    Ok((last_location + 1, oldest_retained_loc))
 }
 
 #[cfg(test)]
@@ -3010,7 +2867,7 @@ mod tests {
 
             // Should have data from locations 10-19
             assert_eq!(next_loc, 20);
-            assert_eq!(new_oldest_retained, lower_bound);
+            assert_eq!(new_oldest_retained, oldest_retained_loc);
 
             // Sections 2 and 3 should remain
             assert!(journal.blobs.contains_key(&2));
@@ -3060,7 +2917,7 @@ mod tests {
 
             // Should have data from locations 10-22
             assert_eq!(next_loc, 23);
-            assert_eq!(new_oldest_retained, lower_bound); // Should be lower_bound after pruning in section 2
+            assert_eq!(new_oldest_retained, oldest_retained_loc);
 
             // Section 5 should be removed
             assert!(!journal.blobs.contains_key(&5));
