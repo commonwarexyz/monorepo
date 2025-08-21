@@ -203,7 +203,7 @@ where
         }
 
         let (mut journal, mut metadata) = journal.into_inner();
-        let oldest_retained_loc = read_oldest_retained_loc(&metadata, lower_bound);
+        let oldest_retained_loc = read_oldest_retained_loc(&metadata, 0);
 
         let (next_write_loc, new_oldest_retained_loc) = prune_journal(
             &mut journal,
