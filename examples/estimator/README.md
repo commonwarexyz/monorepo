@@ -27,16 +27,32 @@ cargo run -- [OPTIONS]
 ### Command-Line Options
 
 - `<TASK>` (required): Path to the .lazy file defining the simulation behavior (e.g., `minimmit.lazy`).
-- `--distribution <DISTRIBUTION>` (required): Specify the distribution of peers across regions in the format `<region>:<count>`, comma-separated. Example: `us-east-1:10,eu-west-1:5`. Regions must match AWS regions from the latency data (e.g., us-east-1, eu-west-1).
+- `--distribution <DISTRIBUTION>` (required): Specify the distribution of peers across regions with optional bandwidth limits:
+  - `<region>:<count>` (unlimited bandwidth)
+  - `<region>:<count>:<egress>/<ingress>` (asymmetric bandwidth)
+  - `<region>:<count>:<bandwidth>` (symmetric bandwidth)
+
+  Bandwidth is in bytes per second. Examples:
+  - `us-east-1:10,eu-west-1:5` (no bandwidth limits)
+  - `us-east-1:3:1000/500,eu-west-1:2:2000` (with bandwidth limits)
+
+  Regions must match AWS regions from the latency data (e.g., us-east-1, eu-west-1).
 - `--reload` (optional flag): Download fresh latency data from cloudping.co instead of using embedded data.
 
-### Example
+### Examples
 
 ```
+# Basic usage without bandwidth limits
 cargo run -- hotstuff.lazy --distribution us-east-1:3,eu-west-1:2
+
+# With bandwidth limits (asymmetric: 1000 B/s egress, 500 B/s ingress for us-east-1; symmetric: 2000 B/s for eu-west-1)
+cargo run -- hotstuff.lazy --distribution us-east-1:3:1000/500,eu-west-1:2:2000
+
+# With message sizes for more realistic bandwidth simulation
+cargo run -- simplex_with_sizes.lazy --distribution us-east-1:3:1000,eu-west-1:2:2000
 ```
 
-This runs simulations with 5 peers (3 in us-east-1, 2 in eu-west-1), using the DSL from `hotstuff.lazy`.
+The first example runs simulations with 5 peers (3 in us-east-1, 2 in eu-west-1) without bandwidth constraints. The second adds bandwidth limits, and the third uses message sizes for more realistic simulations.
 
 ### Output
 
@@ -104,27 +120,57 @@ The DSL is a plain text file where each non-empty line represents a command or c
 - AND (`&&`) has higher precedence than OR (`||`). Use parentheses to override.
 - If a `wait` or `collect` has a per-message delay and it is used in an AND or OR expression, the delay (in milliseconds) is applied for each check on an incoming message (i.e. the delay is additive).
 
+### Message Sizes and Bandwidth
+
+All message commands (`propose`, `broadcast`, `reply`) support an optional `size` parameter to specify message size in bytes. This allows for more realistic simulations when combined with bandwidth limits:
+
+- **Default behavior**: Without the `size` parameter, messages are 4 bytes (just the message ID)
+- **With size parameter**: Messages are padded to the specified size with the ID in the first 4 bytes
+- **Bandwidth impact**: Larger messages take longer to transmit over limited bandwidth connections
+- **Realistic simulation**: Use message sizes that match your actual protocol (e.g., 1KB block proposals, 64-byte votes)
+
+Example with different message sizes:
+```
+# 1KB block proposal
+propose{0, size=1024}
+
+# Small 64-byte votes
+reply{1, size=64}
+
+# Medium 200-byte certificates
+broadcast{2, size=200}
+```
+
 ### Supported Commands
 
-1. **propose{<id>}**
+1. **propose{<id>[, size=<size>]}**
    - Description: If the peer is the current proposer, sends a proposal message with the given ID to all peers (including self). Non-proposers skip this but advance.
    - Parameters:
      - `id`: Unique message identifier (u32).
-   - Example: `propose{0}`
+     - `size` (optional): Message size in bytes. If not specified, defaults to 4 bytes (just the ID).
+   - Examples:
+     - `propose{0}` (4-byte message)
+     - `propose{0, size=1024}` (1KB message)
    - Use case: Initiate a proposal in proposer-based protocols.
 
-2. **broadcast{<id>}**
+2. **broadcast{<id>[, size=<size>]}**
    - Description: Broadcasts a message with the given ID to all peers (including self).
    - Parameters:
      - `id`: Unique message identifier (u32).
-   - Example: `broadcast{1}`
+     - `size` (optional): Message size in bytes. If not specified, defaults to 4 bytes (just the ID).
+   - Examples:
+     - `broadcast{1}` (4-byte message)
+     - `broadcast{1, size=100}` (100-byte message)
    - Use case: Disseminate information to the entire network.
 
-3. **reply{<id>}**
+3. **reply{<id>[, size=<size>]}**
    - Description: If not the proposer, sends a reply message with the given ID directly to the proposer. If the proposer, just records its own receipt.
    - Parameters:
      - `id`: Unique message identifier (u32).
-   - Example: `reply{2}`
+     - `size` (optional): Message size in bytes. If not specified, defaults to 4 bytes (just the ID).
+   - Examples:
+     - `reply{2}` (4-byte message)
+     - `reply{2, size=64}` (64-byte message)
    - Use case: Respond to a proposer's proposal or broadcast.
 
 4. **collect{<id>, threshold=<threshold> [, delay=(<msg_delay>,<comp_delay>)]}**
@@ -172,7 +218,12 @@ The DSL supports complex conditional logic using AND (`&&`) and OR (`||`) operat
 To simulate the performance of HotStuff, Simplicity, and Minimmit on an [Alto-like Network](https://alto.commonware.xyz), run the following commands:
 
 ```
+# Basic simulation without bandwidth constraints
 cargo run -- --distribution us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 hotstuff.lazy
-cargo run -- --distribution us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 simplex.lazy
-cargo run -- --distribution us-west-1:5,us-east-1:5,eu-west-1:5,ap-northeast-1:5,eu-north-1:5,ap-south-1:5,sa-east-1:5,eu-central-1:5,ap-northeast-2:5,ap-southeast-2:5 minimmit.lazy
+
+# With realistic bandwidth limits (10 Mbps symmetric)
+cargo run -- --distribution us-west-1:5:1250000,us-east-1:5:1250000,eu-west-1:5:1250000,ap-northeast-1:5:1250000,eu-north-1:5:1250000,ap-south-1:5:1250000,sa-east-1:5:1250000,eu-central-1:5:1250000,ap-northeast-2:5:1250000,ap-southeast-2:5:1250000 simplex_with_sizes.lazy
+
+# With asymmetric bandwidth (varying by region to simulate different network conditions)
+cargo run -- --distribution us-west-1:5:2000000/1000000,us-east-1:5:2000000/1000000,eu-west-1:5:1500000/750000,ap-northeast-1:5:1000000/500000 minimmit.lazy
 ```
