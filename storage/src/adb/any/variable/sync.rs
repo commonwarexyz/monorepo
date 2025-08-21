@@ -674,6 +674,151 @@ where
     Ok(())
 }
 
+/// Prune a journal to ensure it only contains elements within [lower_bound, upper_bound].
+///
+/// This function consolidates the pruning logic from init_journal and resize_journal by:
+/// 1. Removing all sections before the one containing lower_bound
+/// 2. Pruning the section containing lower_bound to remove elements before it
+/// 3. Removing all sections after the one containing upper_bound
+/// 4. Rewinding the section containing upper_bound to remove elements after it
+///
+/// Returns a tuple of (next_write_location, new_oldest_retained_loc) where:
+/// - next_write_location: The next logical location that should be written to by the sync engine
+///   - If the journal is empty: returns lower_bound
+///   - If the journal has elements in the sync range but not up to upper_bound: returns the next location after the last element
+///   - If the journal goes past upper_bound: returns upper_bound + 1
+/// - new_oldest_retained_loc: The logical location of the earliest element remaining in the journal
+///   - If the journal is empty: returns lower_bound
+///   - Otherwise: returns the location of the first element found in the journal
+pub async fn prune_journal<E, V>(
+    journal: &mut VJournal<E, V>,
+    lower_bound: u64,
+    upper_bound: u64,
+    oldest_retained_loc: u64,
+    items_per_section: NonZeroU64,
+) -> Result<(u64, u64), crate::journal::Error>
+where
+    E: Storage + Metrics + Clock,
+    V: Codec,
+{
+    if lower_bound > upper_bound {
+        return Err(crate::journal::Error::InvalidSyncRange(
+            lower_bound,
+            upper_bound,
+        ));
+    }
+
+    let items_per_section_val = items_per_section.get();
+    let lower_section = lower_bound / items_per_section_val;
+    let upper_section = upper_bound / items_per_section_val;
+
+    debug!(
+        lower_bound,
+        upper_bound,
+        oldest_retained_loc,
+        lower_section,
+        upper_section,
+        items_per_section = items_per_section_val,
+        "pruning journal"
+    );
+
+    // Step 1: Remove sections before the lower_section
+    if lower_section > 0 {
+        journal.prune(lower_section).await?;
+    }
+
+    // Step 2: Remove sections after the upper_section
+    let sections_to_remove: Vec<u64> = journal
+        .blobs
+        .range((Bound::Excluded(upper_section), Bound::Unbounded))
+        .map(|(&section, _)| section)
+        .collect();
+
+    for section in sections_to_remove {
+        debug!(section, "removing section beyond upper bound");
+        if let Some(blob) = journal.blobs.remove(&section) {
+            drop(blob);
+            let name = section.to_be_bytes();
+            journal
+                .context
+                .remove(&journal.cfg.partition, Some(&name))
+                .await?;
+            journal.tracked.dec();
+        }
+    }
+
+    // Step 3: Prune the lower section if needed
+    // Only prune if there are items in the lower section that need to be removed
+    // (i.e., if lower_bound is not at the start of the section)
+    let lower_section_start = lower_section * items_per_section_val;
+    if lower_bound > lower_section_start && journal.blobs.contains_key(&lower_section) {
+        // Use the max of oldest_retained_loc and lower_section_start as the starting point
+        let effective_oldest = oldest_retained_loc.max(lower_section_start);
+        prune_lower(journal, lower_bound, items_per_section, effective_oldest).await?;
+    }
+
+    // Step 4: Prune the upper section if needed
+    prune_upper(journal, upper_bound, items_per_section_val).await?;
+
+    // Step 5: Compute the next location to write and the new oldest_retained_loc
+    // If journal is empty, return (lower_bound, lower_bound)
+    if journal.blobs.is_empty() {
+        return Ok((lower_bound, lower_bound));
+    }
+
+    // After pruning, the new oldest_retained_loc is simply lower_bound
+    // (since we've removed everything before it)
+    let new_oldest_retained = lower_bound;
+
+    // Scan the journal to find the last element's location within the sync range
+    // We need to properly account for pruned sections when calculating logical locations
+    let mut last_location = lower_bound;
+    let mut current_section: Option<u64> = None;
+    let mut index_in_section: u64 = 0;
+
+    let stream = journal.replay(NZUsize!(1024)).await?;
+    pin_mut!(stream);
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok((section, _offset, _size, _op)) => {
+                if current_section != Some(section) {
+                    current_section = Some(section);
+                    index_in_section = 0;
+                }
+
+                // For the lower section that may have been pruned,
+                // the first element starts at lower_bound
+                let section_start = if section == lower_section {
+                    lower_bound
+                } else {
+                    section * items_per_section_val
+                };
+
+                let loc = section_start.saturating_add(index_in_section);
+
+                if loc >= lower_bound && loc <= upper_bound {
+                    last_location = loc;
+                }
+
+                index_in_section = index_in_section.saturating_add(1);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    // Return the next location after the last valid element
+    // If we have elements up to upper_bound, return upper_bound + 1
+    // Otherwise return the next location after the last element we have
+    let next_write_loc = if last_location == upper_bound {
+        upper_bound + 1
+    } else {
+        last_location + 1
+    };
+
+    Ok((next_write_loc, new_oldest_retained))
+}
+
 /// Compute the next append location (size) by scanning the variable journal and
 /// counting only items whose logical location is within [lower_bound, upper_bound].
 async fn compute_size<E, K, V>(
@@ -2685,6 +2830,640 @@ mod tests {
             // Attempt to sync - should fail due to resolver error
             let result: Result<AnyTest, _> = sync::sync(engine_config).await;
             assert!(result.is_err());
+        });
+    }
+
+    /// Test prune_journal with an empty journal
+    #[test_traced]
+    fn test_prune_journal_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = VConfig {
+                partition: "test_prune_empty".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
+                .await
+                .expect("Failed to create journal");
+
+            let lower_bound = 10;
+            let upper_bound = 20;
+            let oldest_retained_loc = 5;
+            let items_per_section = NZU64!(5);
+
+            let (next_loc, new_oldest_retained) = prune_journal(
+                &mut journal,
+                lower_bound,
+                upper_bound,
+                oldest_retained_loc,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to prune journal");
+
+            // Empty journal should return (lower_bound, lower_bound)
+            assert_eq!(next_loc, lower_bound);
+            assert_eq!(new_oldest_retained, lower_bound);
+            assert!(journal.blobs.is_empty());
+        });
+    }
+
+    /// Test prune_journal with data entirely before lower_bound
+    #[test_traced]
+    fn test_prune_journal_data_before_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = VConfig {
+                partition: "test_prune_before".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
+                .await
+                .expect("Failed to create journal");
+
+            let items_per_section = NZU64!(5);
+
+            // Add data to sections 0 and 1 (locations 0-9)
+            for section in 0..2 {
+                for i in 0..items_per_section.get() {
+                    journal.append(section, section * 100 + i).await.unwrap();
+                }
+            }
+
+            let lower_bound = 15; // Section 3
+            let upper_bound = 25; // Section 5
+            let oldest_retained_loc = 0;
+
+            let (next_loc, new_oldest_retained) = prune_journal(
+                &mut journal,
+                lower_bound,
+                upper_bound,
+                oldest_retained_loc,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to prune journal");
+
+            // All data is before lower_bound, should be pruned
+            assert_eq!(next_loc, lower_bound);
+            assert_eq!(new_oldest_retained, lower_bound); // Empty journal
+            assert!(journal.blobs.is_empty());
+        });
+    }
+
+    /// Test prune_journal with data partly before lower_bound but not reaching upper_bound
+    #[test_traced]
+    fn test_prune_journal_data_partly_before_not_reaching_upper() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = VConfig {
+                partition: "test_prune_partly_before".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
+                .await
+                .expect("Failed to create journal");
+
+            let items_per_section = NZU64!(5);
+
+            // Add data to sections 0, 1, 2 (locations 0-14)
+            for section in 0..3 {
+                for i in 0..items_per_section.get() {
+                    journal.append(section, section * 100 + i).await.unwrap();
+                }
+            }
+
+            let lower_bound = 7; // Middle of section 1
+            let upper_bound = 20; // Section 4
+            let oldest_retained_loc = 0;
+
+            let (next_loc, new_oldest_retained) = prune_journal(
+                &mut journal,
+                lower_bound,
+                upper_bound,
+                oldest_retained_loc,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to prune journal");
+
+            // Should have data from locations 7-14 (rest of section 1 and all of section 2)
+            assert_eq!(next_loc, 15);
+            assert_eq!(new_oldest_retained, lower_bound); // Should be lower_bound after pruning
+
+            // Section 0 should be removed
+            assert!(!journal.blobs.contains_key(&0));
+
+            // Sections 1 and 2 should remain
+            assert!(journal.blobs.contains_key(&1));
+            assert!(journal.blobs.contains_key(&2));
+        });
+    }
+
+    /// Test prune_journal with data starting after lower_bound but not reaching upper_bound
+    #[test_traced]
+    fn test_prune_journal_data_after_lower_not_reaching_upper() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = VConfig {
+                partition: "test_prune_after_lower".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
+                .await
+                .expect("Failed to create journal");
+
+            let items_per_section = NZU64!(5);
+
+            // Add data to sections 2 and 3 (locations 10-19)
+            for section in 2..4 {
+                for i in 0..items_per_section.get() {
+                    journal.append(section, section * 100 + i).await.unwrap();
+                }
+            }
+
+            let lower_bound = 5; // Section 1
+            let upper_bound = 25; // Section 5
+            let oldest_retained_loc = 10; // Start of section 2
+
+            let (next_loc, new_oldest_retained) = prune_journal(
+                &mut journal,
+                lower_bound,
+                upper_bound,
+                oldest_retained_loc,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to prune journal");
+
+            // Should have data from locations 10-19
+            assert_eq!(next_loc, 20);
+            assert_eq!(new_oldest_retained, lower_bound); // Should be lower_bound after pruning in section 2
+
+            // Sections 2 and 3 should remain
+            assert!(journal.blobs.contains_key(&2));
+            assert!(journal.blobs.contains_key(&3));
+        });
+    }
+
+    /// Test prune_journal with data starting after lower_bound and extending past upper_bound
+    #[test_traced]
+    fn test_prune_journal_data_after_lower_past_upper() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = VConfig {
+                partition: "test_prune_after_lower_past_upper".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
+                .await
+                .expect("Failed to create journal");
+
+            let items_per_section = NZU64!(5);
+
+            // Add data to sections 2, 3, 4, 5 (locations 10-29)
+            for section in 2..6 {
+                for i in 0..items_per_section.get() {
+                    journal.append(section, section * 100 + i).await.unwrap();
+                }
+            }
+
+            let lower_bound = 5; // Section 1
+            let upper_bound = 22; // Middle of section 4
+            let oldest_retained_loc = 10; // Start of section 2
+
+            let (next_loc, new_oldest_retained) = prune_journal(
+                &mut journal,
+                lower_bound,
+                upper_bound,
+                oldest_retained_loc,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to prune journal");
+
+            // Should have data from locations 10-22
+            assert_eq!(next_loc, 23);
+            assert_eq!(new_oldest_retained, lower_bound); // Should be lower_bound after pruning in section 2
+
+            // Section 5 should be removed
+            assert!(!journal.blobs.contains_key(&5));
+
+            // Sections 2, 3, and 4 should remain
+            assert!(journal.blobs.contains_key(&2));
+            assert!(journal.blobs.contains_key(&3));
+            assert!(journal.blobs.contains_key(&4));
+        });
+    }
+
+    /// Test prune_journal with data that is a superset of sync range
+    #[test_traced]
+    fn test_prune_journal_data_superset_of_range() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = VConfig {
+                partition: "test_prune_spanning".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
+                .await
+                .expect("Failed to create journal");
+
+            let items_per_section = NZU64!(5);
+
+            // Add data to sections 0-4 (locations 0-24)
+            for section in 0..5 {
+                for i in 0..items_per_section.get() {
+                    journal.append(section, section * 100 + i).await.unwrap();
+                }
+            }
+
+            let lower_bound = 7; // Middle of section 1
+            let upper_bound = 17; // Middle of section 3
+            let oldest_retained_loc = 5; // Start of section 1
+
+            let (next_loc, new_oldest_retained) = prune_journal(
+                &mut journal,
+                lower_bound,
+                upper_bound,
+                oldest_retained_loc,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to prune journal");
+
+            // Should have data from location 7 to 17
+            assert_eq!(next_loc, 18);
+            assert_eq!(new_oldest_retained, lower_bound); // Should be lower_bound after pruning after pruning lower section
+
+            // Sections 0 and 4 should be removed
+            assert!(!journal.blobs.contains_key(&0));
+            assert!(!journal.blobs.contains_key(&4));
+
+            // Sections 1, 2, and 3 should remain
+            assert!(journal.blobs.contains_key(&1));
+            assert!(journal.blobs.contains_key(&2));
+            assert!(journal.blobs.contains_key(&3));
+        });
+    }
+
+    /// Test prune_journal with lower and upper bounds in the same section
+    #[test_traced]
+    fn test_prune_journal_bounds_same_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = VConfig {
+                partition: "test_prune_same_section".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
+                .await
+                .expect("Failed to create journal");
+
+            let items_per_section = NZU64!(10);
+
+            // Add data to sections 0-2 (locations 0-29)
+            for section in 0..3 {
+                for i in 0..items_per_section.get() {
+                    journal.append(section, section * 100 + i).await.unwrap();
+                }
+            }
+
+            let lower_bound = 12; // Within section 1
+            let upper_bound = 17; // Also within section 1
+            let oldest_retained_loc = 10; // Start of section 1
+
+            let (next_loc, new_oldest_retained) = prune_journal(
+                &mut journal,
+                lower_bound,
+                upper_bound,
+                oldest_retained_loc,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to prune journal");
+
+            // Should only keep elements 12-17 from section 1
+            assert_eq!(next_loc, 18);
+            assert_eq!(new_oldest_retained, lower_bound); // Should be lower_bound after pruning
+
+            // Only section 1 should remain
+            assert!(!journal.blobs.contains_key(&0));
+            assert!(journal.blobs.contains_key(&1));
+            assert!(!journal.blobs.contains_key(&2));
+        });
+    }
+
+    /// Test prune_journal with bounds at section boundaries
+    #[test_traced]
+    fn test_prune_journal_bounds_at_boundaries() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = VConfig {
+                partition: "test_prune_boundaries".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
+                .await
+                .expect("Failed to create journal");
+
+            let items_per_section = NZU64!(5);
+
+            // Add data to sections 0-4 (locations 0-24)
+            for section in 0..5 {
+                for i in 0..items_per_section.get() {
+                    journal.append(section, section * 100 + i).await.unwrap();
+                }
+            }
+
+            let lower_bound = 10; // Start of section 2
+            let upper_bound = 19; // End of section 3
+            let oldest_retained_loc = 0;
+
+            let (next_loc, new_oldest_retained) = prune_journal(
+                &mut journal,
+                lower_bound,
+                upper_bound,
+                oldest_retained_loc,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to prune journal");
+
+            // Should have data from location 10 to 19
+            assert_eq!(next_loc, 20);
+            assert_eq!(new_oldest_retained, lower_bound); // Should be lower_bound after pruning at start of section 2
+
+            // Sections 0, 1, and 4 should be removed
+            assert!(!journal.blobs.contains_key(&0));
+            assert!(!journal.blobs.contains_key(&1));
+            assert!(!journal.blobs.contains_key(&4));
+
+            // Sections 2 and 3 should remain
+            assert!(journal.blobs.contains_key(&2));
+            assert!(journal.blobs.contains_key(&3));
+        });
+    }
+
+    /// Test prune_journal with last section partially filled
+    #[test_traced]
+    fn test_prune_journal_partial_last_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = VConfig {
+                partition: "test_prune_partial_last".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
+                .await
+                .expect("Failed to create journal");
+
+            let items_per_section = NZU64!(5);
+
+            // Add data to sections
+            // Section 1: Full (locations 5-9)
+            for i in 0..items_per_section.get() {
+                journal.append(1, 100 + i).await.unwrap();
+            }
+
+            // Section 2: Full (locations 10-14)
+            for i in 0..items_per_section.get() {
+                journal.append(2, 200 + i).await.unwrap();
+            }
+
+            // Section 3: Partial - only 3 items (locations 15-17)
+            for i in 0..3 {
+                journal.append(3, 300 + i).await.unwrap();
+            }
+
+            let lower_bound = 7; // Middle of section 1
+            let upper_bound = 20; // Beyond existing data
+            let oldest_retained_loc = 5; // Start of section 1
+
+            let (next_loc, new_oldest_retained) = prune_journal(
+                &mut journal,
+                lower_bound,
+                upper_bound,
+                oldest_retained_loc,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to prune journal");
+
+            // Should have data from locations 7-17
+            assert_eq!(next_loc, 18);
+            assert_eq!(new_oldest_retained, lower_bound); // Should be lower_bound after pruning after pruning in section 1
+
+            // Sections 1, 2, and 3 should remain
+            assert!(journal.blobs.contains_key(&1));
+            assert!(journal.blobs.contains_key(&2));
+            assert!(journal.blobs.contains_key(&3));
+        });
+    }
+
+    /// Test prune_journal with complex scenario mixing all edge cases
+    #[test_traced]
+    fn test_prune_journal_complex() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = VConfig {
+                partition: "test_prune_complex".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
+                .await
+                .expect("Failed to create journal");
+
+            let items_per_section = NZU64!(8);
+
+            // Create a complex journal state:
+            // Section 0: items at locations 0-7 (full)
+            for i in 0..items_per_section.get() {
+                journal.append(0, i).await.unwrap();
+            }
+
+            // Section 1: items at locations 8-15 (full)
+            for i in 0..items_per_section.get() {
+                journal.append(1, 100 + i).await.unwrap();
+            }
+
+            // Section 2: items at locations 16-23 (full)
+            for i in 0..items_per_section.get() {
+                journal.append(2, 200 + i).await.unwrap();
+            }
+
+            // Section 3: items at locations 24-31 (full)
+            for i in 0..items_per_section.get() {
+                journal.append(3, 300 + i).await.unwrap();
+            }
+
+            // Section 4: items at locations 32-36 (partial - only 5 items, last section)
+            for i in 0..5 {
+                journal.append(4, 400 + i).await.unwrap();
+            }
+
+            let lower_bound = 10; // Middle of section 1
+            let upper_bound = 26; // Middle of section 3
+            let oldest_retained_loc = 8; // Start of section 1
+
+            let (next_loc, new_oldest_retained) = prune_journal(
+                &mut journal,
+                lower_bound,
+                upper_bound,
+                oldest_retained_loc,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to prune journal");
+
+            // Should have data from locations 10-26
+            assert_eq!(next_loc, 27);
+            assert_eq!(new_oldest_retained, lower_bound); // Should be lower_bound after pruning after pruning in section 1
+
+            // Sections 0 and 4 should be removed
+            assert!(!journal.blobs.contains_key(&0));
+            assert!(!journal.blobs.contains_key(&4));
+
+            // Sections 1, 2, and 3 should remain
+            assert!(journal.blobs.contains_key(&1));
+            assert!(journal.blobs.contains_key(&2));
+            assert!(journal.blobs.contains_key(&3));
+        });
+    }
+
+    /// Test prune_journal when pruning items from lower section without removing sections
+    #[test_traced]
+    fn test_prune_journal_partial_lower_section_pruning() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = VConfig {
+                partition: "test_prune_partial_lower".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
+                .await
+                .expect("Failed to create journal");
+
+            let items_per_section = NZU64!(10);
+
+            // Add data to sections 1, 2, and 3 (locations 10-39)
+            for section in 1..4 {
+                for i in 0..items_per_section.get() {
+                    journal.append(section, section * 1000 + i).await.unwrap();
+                }
+            }
+
+            let lower_bound = 13; // Middle of section 1
+            let upper_bound = 25; // Middle of section 2
+            let oldest_retained_loc = 10; // Start of section 1
+
+            let (next_loc, new_oldest_retained) = prune_journal(
+                &mut journal,
+                lower_bound,
+                upper_bound,
+                oldest_retained_loc,
+                items_per_section,
+            )
+            .await
+            .expect("Failed to prune journal");
+
+            // Should have data from locations 13-25
+            assert_eq!(next_loc, 26);
+            assert_eq!(new_oldest_retained, 13); // First element after pruning within section 1
+
+            // Section 3 should be removed
+            assert!(!journal.blobs.contains_key(&3));
+
+            // Sections 1 and 2 should remain
+            assert!(journal.blobs.contains_key(&1));
+            assert!(journal.blobs.contains_key(&2));
+
+            // Verify oldest_retained_loc was updated even though no full sections were removed
+            assert!(new_oldest_retained > oldest_retained_loc);
+            assert_eq!(new_oldest_retained, lower_bound); // Should equal lower_bound since we pruned up to it
+        });
+    }
+
+    /// Test prune_journal with invalid bounds (lower > upper)
+    #[test_traced]
+    fn test_prune_journal_invalid_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = VConfig {
+                partition: "test_prune_invalid".into(),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            let mut journal = VJournal::<deterministic::Context, u64>::init(context.clone(), cfg)
+                .await
+                .expect("Failed to create journal");
+
+            let lower_bound = 20;
+            let upper_bound = 10; // Invalid: lower > upper
+            let oldest_retained_loc = 0;
+            let items_per_section = NZU64!(5);
+
+            let result = prune_journal(
+                &mut journal,
+                lower_bound,
+                upper_bound,
+                oldest_retained_loc,
+                items_per_section,
+            )
+            .await;
+
+            // Should return an error for invalid bounds
+            assert!(matches!(
+                result,
+                Err(crate::journal::Error::InvalidSyncRange(_, _))
+            ));
         });
     }
 }
