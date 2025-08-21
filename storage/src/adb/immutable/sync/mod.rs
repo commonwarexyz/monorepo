@@ -13,7 +13,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{Array, NZUsize};
-use futures::{pin_mut, StreamExt as _};
+use futures::{pin_mut, StreamExt};
 use std::num::NonZeroU64;
 
 mod journal;

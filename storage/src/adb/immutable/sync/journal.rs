@@ -1,10 +1,19 @@
+//! Sync-facing journal wrapper for the Immutable database.
+//!
+//! - Sync engine uses `size` and `append` to update the journal.
+//! - This wrapper tracks a synthetic global `size` (next append location) and maps it to
+//!   sections via `items_per_section` when appending.
+//! - Callers must prepare the variable journal (e.g., `init_sync`) and compute the initial
+//!   `size` from a replay that considers only `[lower_bound, upper_bound]`.
+//! - No pruning/bound checks are done here; the sync engine handles range validation.
+
 use crate::{adb::sync, journal::variable, store::operation::Variable};
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
 use commonware_utils::Array;
 use std::num::NonZeroU64;
 
-/// Wraps a [variable::Journal] to provide a sync-compatible interface for Immutable databases.
+/// Wraps a [variable::Journal] to provide a sync-compatible interface.
 /// Namely, it provides a `size` method that returns the number of operations in the journal,
 /// and an `append` method that appends an operation to the journal. These are used by the
 /// sync engine to populate the journal with data from the target database.
