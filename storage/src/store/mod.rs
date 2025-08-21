@@ -90,7 +90,7 @@
 //!     assert!(fetched_value.is_none());
 //!
 //!     // Commit the operation to make it persistent
-//!     store.commit().await.unwrap();
+//!     store.commit(None).await.unwrap();
 //!
 //!     // Destroy the store
 //!     store.destroy().await.unwrap();
