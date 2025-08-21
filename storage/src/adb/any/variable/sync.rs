@@ -58,7 +58,7 @@ where
         )
         .await?;
 
-        let metadata = crate::metadata::Metadata::<E, U64, Vec<u8>>::init(
+        let mut metadata = crate::metadata::Metadata::<E, U64, Vec<u8>>::init(
             context.with_label("metadata"),
             crate::metadata::Config {
                 partition: config.metadata_partition.clone(),
@@ -67,6 +67,9 @@ where
         )
         .await
         .map_err(|_| crate::journal::Error::CompressionFailed)?; // TODO remove dummy error
+
+        let oldest_retained_loc_key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
+        metadata.put(oldest_retained_loc_key, lower_bound.to_be_bytes().to_vec());
 
         let mut journal = Journal::new(
             journal,
@@ -83,11 +86,6 @@ where
             config.log_items_per_section,
         )
         .await?;
-
-        let oldest_retained_loc_key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
-        journal
-            .metadata
-            .put(oldest_retained_loc_key, lower_bound.to_be_bytes().to_vec());
 
         Ok(journal)
     }
