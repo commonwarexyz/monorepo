@@ -8,8 +8,8 @@ use libfuzzer_sys::fuzz_target;
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
     Default,
-    FromVec(Vec<u8>),
-    FromBytesMut(Vec<u8>),
+    FromVec(Vec<u8>, StableBufBase),
+    FromBytesMut(Vec<u8>, StableBufBase),
     PutSlice(Vec<u8>),
     Truncate(Vec<u8>, usize, StableBufBase),
     GetMut(Vec<u8>, StableBufBase),
@@ -35,9 +35,12 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert_eq!(b.len(), 0);
             }
 
-            FuzzInput::FromVec(data) => {
+            FuzzInput::FromVec(data, base) => {
                 let len = data.len();
-                let buf = StableBuf::from(data.clone());
+                let buf = match base {
+                    StableBufBase::Vec => StableBuf::Vec(data.clone()),
+                    StableBufBase::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
+                };
                 assert_eq!(buf.len(), len);
 
                 let stable_buf_vec = StableBuf::Vec(data.clone());
@@ -51,12 +54,15 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert_eq!(bytes_from_vec, bytes_from_bytes_mut);
             }
 
-            FuzzInput::FromBytesMut(data) => {
+            FuzzInput::FromBytesMut(data, base) => {
                 let len = data.len();
-                let buf = BytesMut::from(data.as_slice());
+                let buf = match base {
+                    StableBufBase::Vec => StableBuf::Vec(data.clone()),
+                    StableBufBase::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
+                };
                 assert_eq!(buf.len(), len);
 
-                let stable_buf: StableBuf = buf.into();
+                let stable_buf: StableBuf = buf;
                 assert_eq!(stable_buf.len(), len);
             }
 
@@ -113,7 +119,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                     StableBufBase::BytesMut => StableBuf::BytesMut(BytesMut::from(&data[..])),
                 };
                 let b = buf.as_mut();
-                if b.is_empty() {
+                if !b.is_empty() {
                     b[0] = 0;
                     assert_eq!(buf[0], 0);
                 }
