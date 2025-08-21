@@ -15,6 +15,7 @@
 //! use commonware_p2p::simulated::{Config, Link, Network};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, PrivateKeyExt as _};
 //! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
+//! use std::time::Duration;
 //!
 //! // Generate peers
 //! let peers = vec![
@@ -47,8 +48,8 @@
 //!         peers[0].clone(),
 //!         peers[1].clone(),
 //!         Link {
-//!             latency: 5.0,
-//!             jitter: 2.5,
+//!             latency: Duration::from_millis(5),
+//!             jitter: Duration::from_millis(2),
 //!             success_rate: 0.75,
 //!         },
 //!     ).await.unwrap();
@@ -64,8 +65,8 @@
 //!         peers[0].clone(),
 //!         peers[1].clone(),
 //!         Link {
-//!             latency: 100.0,
-//!             jitter: 25.0,
+//!             latency: Duration::from_millis(100),
+//!             jitter: Duration::from_millis(25),
 //!             success_rate: 0.8,
 //!         },
 //!     ).await.unwrap();
@@ -112,8 +113,6 @@ pub enum Error {
     DialFailed,
     #[error("peer missing")]
     PeerMissing,
-    #[error("invalid connection definition: latency={0}, jitter={1}")]
-    InvalidBehavior(f64, f64),
 }
 
 pub use ingress::{Link, Oracle};
@@ -182,8 +181,8 @@ mod tests {
                             agent.clone(),
                             other.clone(),
                             Link {
-                                latency: 5.0,
-                                jitter: 2.5,
+                                latency: Duration::from_millis(5),
+                                jitter: Duration::from_millis(2),
                                 success_rate: 0.75,
                             },
                         )
@@ -315,8 +314,8 @@ mod tests {
                     pk.clone(),
                     pk,
                     Link {
-                        latency: 5.0,
-                        jitter: 2.5,
+                        latency: Duration::from_millis(5),
+                        jitter: Duration::from_millis(2),
                         success_rate: 0.75,
                     },
                 )
@@ -379,8 +378,8 @@ mod tests {
                     pk1,
                     pk2,
                     Link {
-                        latency: 5.0,
-                        jitter: 2.5,
+                        latency: Duration::from_millis(5),
+                        jitter: Duration::from_millis(2),
                         success_rate: 1.5,
                     },
                 )
@@ -391,60 +390,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_invalid_behavior() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                },
-            );
-
-            // Start network
-            network.start();
-
-            // Register agents
-            let pk1 = PrivateKey::from_seed(0).public_key();
-            let pk2 = PrivateKey::from_seed(1).public_key();
-            oracle.register(pk1.clone(), 0, None, None).await.unwrap();
-            oracle.register(pk2.clone(), 0, None, None).await.unwrap();
-
-            // Attempt to link with invalid jitter
-            let result = oracle
-                .add_link(
-                    pk1.clone(),
-                    pk2.clone(),
-                    Link {
-                        latency: -5.0,
-                        jitter: 2.5,
-                        success_rate: 1.0,
-                    },
-                )
-                .await;
-
-            // Confirm error is correct
-            assert!(matches!(result, Err(Error::InvalidBehavior(-5.0, 2.5))));
-
-            // Attempt to link with invalid jitter
-            let result = oracle
-                .add_link(
-                    pk1,
-                    pk2,
-                    Link {
-                        latency: 5.0,
-                        jitter: -2.5,
-                        success_rate: 1.0,
-                    },
-                )
-                .await;
-
-            // Confirm error is correct
-            assert!(matches!(result, Err(Error::InvalidBehavior(5.0, -2.5))));
-        });
-    }
 
     #[test]
     fn test_simple_message_delivery() {
@@ -479,8 +424,8 @@ mod tests {
                     pk1.clone(),
                     pk2.clone(),
                     Link {
-                        latency: 5.0,
-                        jitter: 2.5,
+                        latency: Duration::from_millis(5),
+                        jitter: Duration::from_millis(2),
                         success_rate: 1.0,
                     },
                 )
@@ -491,8 +436,8 @@ mod tests {
                     pk2.clone(),
                     pk1.clone(),
                     Link {
-                        latency: 5.0,
-                        jitter: 2.5,
+                        latency: Duration::from_millis(5),
+                        jitter: Duration::from_millis(2),
                         success_rate: 1.0,
                     },
                 )
@@ -548,8 +493,8 @@ mod tests {
                     pk1,
                     pk2.clone(),
                     Link {
-                        latency: 5.0,
-                        jitter: 0.0,
+                        latency: Duration::from_millis(5),
+                        jitter: Duration::ZERO,
                         success_rate: 1.0,
                     },
                 )
@@ -602,8 +547,8 @@ mod tests {
                     pk1.clone(),
                     pk2.clone(),
                     Link {
-                        latency: 5.0,
-                        jitter: 2.5,
+                        latency: Duration::from_millis(5),
+                        jitter: Duration::from_millis(2),
                         success_rate: 1.0,
                     },
                 )
@@ -614,8 +559,8 @@ mod tests {
                     pk2.clone(),
                     pk1.clone(),
                     Link {
-                        latency: 5.0,
-                        jitter: 2.5,
+                        latency: Duration::from_millis(5),
+                        jitter: Duration::from_millis(2),
                         success_rate: 1.0,
                     },
                 )
@@ -696,8 +641,8 @@ mod tests {
                     pk1.clone(),
                     pk2.clone(),
                     Link {
-                        latency: 5.0,
-                        jitter: 2.5,
+                        latency: Duration::from_millis(5),
+                        jitter: Duration::from_millis(2),
                         success_rate: 1.0,
                     },
                 )
@@ -708,8 +653,8 @@ mod tests {
                     pk2.clone(),
                     pk1.clone(),
                     Link {
-                        latency: 5.0,
-                        jitter: 2.5,
+                        latency: Duration::from_millis(5),
+                        jitter: Duration::from_millis(2),
                         success_rate: 1.0,
                     },
                 )

@@ -821,8 +821,8 @@ mod tests {
 
             // Add link
             let link = ingress::Link {
-                latency: 2.0,
-                jitter: 1.0,
+                latency: Duration::from_millis(2),
+                jitter: Duration::from_millis(1),
                 success_rate: 0.9,
             };
             oracle

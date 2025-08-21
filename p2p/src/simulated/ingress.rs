@@ -6,6 +6,7 @@ use futures::{
     SinkExt,
 };
 use rand_distr::Normal;
+use std::time::Duration;
 
 pub enum Message<P: PublicKey> {
     Register {
@@ -45,11 +46,11 @@ pub enum Message<P: PublicKey> {
 /// for a bidirectional connection).
 #[derive(Clone)]
 pub struct Link {
-    /// Mean latency for the delivery of a message in milliseconds.
-    pub latency: f64,
+    /// Mean latency for the delivery of a message.
+    pub latency: Duration,
 
-    /// Standard deviation of the latency for the delivery of a message in milliseconds.
-    pub jitter: f64,
+    /// Standard deviation of the latency for the delivery of a message.
+    pub jitter: Duration,
 
     /// Probability of a message being delivered successfully (in range \[0,1\]).
     pub success_rate: f64,
@@ -128,13 +129,13 @@ impl<P: PublicKey> Oracle<P> {
         if config.success_rate < 0.0 || config.success_rate > 1.0 {
             return Err(Error::InvalidSuccessRate(config.success_rate));
         }
-        if config.latency < 0.0 || config.jitter < 0.0 {
-            return Err(Error::InvalidBehavior(config.latency, config.jitter));
-        }
+
+        // Convert Duration to milliseconds as f64 for the Normal distribution
+        let latency_ms = config.latency.as_secs_f64() * 1000.0;
+        let jitter_ms = config.jitter.as_secs_f64() * 1000.0;
 
         // Create distribution
-        let sampler = Normal::new(config.latency, config.jitter)
-            .map_err(|_| Error::InvalidBehavior(config.latency, config.jitter))?;
+        let sampler = Normal::new(latency_ms, jitter_ms).unwrap();
 
         // Wait for update to complete
         let (s, r) = oneshot::channel();
