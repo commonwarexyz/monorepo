@@ -1,7 +1,10 @@
 use crate::{
     adb::{
         self,
-        any::{self, variable::OLDEST_RETAINED_LOC_PREFIX},
+        any::{
+            self,
+            variable::{read_oldest_retained_loc, write_oldest_retained_loc},
+        },
         sync::{self, Journal as SyncJournal},
     },
     index::Index,
@@ -21,32 +24,6 @@ use commonware_utils::{sequence::prefixed_u64::U64, Array, NZUsize};
 use futures::{pin_mut, StreamExt};
 use std::{num::NonZeroU64, ops::Bound};
 use tracing::debug;
-
-/// Read the oldest_retained_loc from metadata, returning the provided default if not found.
-fn read_oldest_retained_loc<E: Storage + Clock + Metrics>(
-    metadata: &Metadata<E, U64, Vec<u8>>,
-    default: u64,
-) -> u64 {
-    let key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
-    match metadata.get(&key) {
-        Some(bytes) => u64::from_be_bytes(
-            bytes
-                .as_slice()
-                .try_into()
-                .expect("oldest_retained_loc bytes could not be converted to u64"),
-        ),
-        None => default,
-    }
-}
-
-/// Write the oldest_retained_loc to metadata.
-fn write_oldest_retained_loc<E: Storage + Clock + Metrics>(
-    metadata: &mut Metadata<E, U64, Vec<u8>>,
-    value: u64,
-) {
-    let key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
-    metadata.put(key, value.to_be_bytes().to_vec());
-}
 
 impl<E, K, V, H, T> sync::Database for any::variable::Any<E, K, V, H, T>
 where

@@ -44,6 +44,32 @@ const SNAPSHOT_READ_BUFFER_SIZE: usize = 1 << 16;
 /// Prefix used for the oldest_retained_loc key in metadata.
 const OLDEST_RETAINED_LOC_PREFIX: u8 = 0;
 
+/// Read the oldest_retained_loc from metadata, returning the provided default if not found.
+pub(super) fn read_oldest_retained_loc<E: RStorage + Clock + Metrics>(
+    metadata: &Metadata<E, U64, Vec<u8>>,
+    default: u64,
+) -> u64 {
+    let key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
+    match metadata.get(&key) {
+        Some(bytes) => u64::from_be_bytes(
+            bytes
+                .as_slice()
+                .try_into()
+                .expect("oldest_retained_loc bytes could not be converted to u64"),
+        ),
+        None => default,
+    }
+}
+
+/// Write the oldest_retained_loc to metadata.
+pub(super) fn write_oldest_retained_loc<E: RStorage + Clock + Metrics>(
+    metadata: &mut Metadata<E, U64, Vec<u8>>,
+    value: u64,
+) {
+    let key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
+    metadata.put(key, value.to_be_bytes().to_vec());
+}
+
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
@@ -223,19 +249,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         .await?;
 
         // Restore oldest_retained_loc from metadata or default to 0
-        let oldest_retained_loc_key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
-        let oldest_retained_loc = match metadata.get(&oldest_retained_loc_key) {
-            Some(bytes) => u64::from_be_bytes(
-                bytes
-                    .as_slice()
-                    .try_into()
-                    .expect("oldest_retained_loc bytes could not be converted to u64"),
-            ),
-            None => {
-                debug!("metadata does not contain oldest_retained_loc, initializing as 0");
-                0
-            }
-        };
+        let oldest_retained_loc = read_oldest_retained_loc(&metadata, 0);
 
         let db = Self {
             mmr,
@@ -646,11 +660,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// parallelized if a thread pool is provided.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
         // Update the metadata with the current oldest_retained_loc.
-        let oldest_retained_loc_key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
-        self.metadata.put(
-            oldest_retained_loc_key,
-            self.oldest_retained_loc.to_be_bytes().to_vec(),
-        );
+        write_oldest_retained_loc(&mut self.metadata, self.oldest_retained_loc);
 
         let section = self.current_section();
         try_join!(
@@ -768,11 +778,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         }
 
         // Update the metadata with the current oldest_retained_loc.
-        let oldest_retained_loc_key = U64::new(OLDEST_RETAINED_LOC_PREFIX, 0);
-        self.metadata.put(
-            oldest_retained_loc_key,
-            self.oldest_retained_loc.to_be_bytes().to_vec(),
-        );
+        write_oldest_retained_loc(&mut self.metadata, self.oldest_retained_loc);
 
         try_join!(
             self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
