@@ -21,7 +21,7 @@ use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tracing::{error, trace};
 
@@ -155,6 +155,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             ingress::Message::Register {
                 public_key,
                 channel,
+                egress_bps,
+                ingress_bps,
                 result,
             } => {
                 // If peer does not exist, then create it.
@@ -163,6 +165,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                         &mut self.context.clone(),
                         public_key.clone(),
                         self.get_next_socket(),
+                        egress_bps,
+                        ingress_bps,
                         self.max_size,
                     );
                     self.peers.insert(public_key.clone(), peer);
@@ -284,10 +288,71 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
                 .inc();
 
-            // Apply link settings
-            let delay = link.sampler.sample(&mut self.context);
+            // Sample latency and get current time
+            let latency = Duration::from_millis(link.sampler.sample(&mut self.context) as u64);
+            let now = self.context.current();
+
+            // Get peer bandwidth info and calculate effective bandwidth
+            let (sender_egress_bps, sender_egress_available_at) = {
+                let sender = self.peers.get(&origin).unwrap();
+                (sender.egress_bps, sender.egress_available_at)
+            };
+
+            let (receiver_ingress_bps, receiver_ingress_available_at) = {
+                let receiver = self.peers.get(&recipient).unwrap();
+                (receiver.ingress_bps, receiver.ingress_available_at)
+            };
+
+            let effective_bps = match (sender_egress_bps, receiver_ingress_bps) {
+                (Some(egress), Some(ingress)) => Some(egress.min(ingress)),
+                (Some(egress), None) => Some(egress),
+                (None, Some(ingress)) => Some(ingress),
+                (None, None) => None,
+            };
+
+            // Calculate transmission timing
+            let (transmission_duration, send_start_at, receive_start_at) =
+                if let Some(bps) = effective_bps {
+                    let tx_duration =
+                        Duration::from_millis((message.len() as f64 / bps as f64 * 1000.0) as u64);
+
+                    // Sender can start when free, receiver must be free when first bit arrives
+                    let sender_ready_at = sender_egress_available_at.max(now);
+                    let receiver_ready_at = receiver_ingress_available_at
+                        .checked_sub(latency)
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    let send_start_at = sender_ready_at.max(receiver_ready_at);
+                    let receive_start_at = send_start_at + latency;
+
+                    (tx_duration, send_start_at, receive_start_at)
+                } else {
+                    // No bandwidth limits
+                    (Duration::ZERO, now, now + latency)
+                };
+
+            // Update availability times for peers with bandwidth limits
+            if sender_egress_bps.is_some() {
+                self.peers.get_mut(&origin).unwrap().egress_available_at =
+                    send_start_at + transmission_duration;
+            }
+
+            if receiver_ingress_bps.is_some() {
+                self.peers.get_mut(&recipient).unwrap().ingress_available_at =
+                    receive_start_at + transmission_duration;
+            }
+
+            // Total delay until message is fully received
+            let delay = receive_start_at.duration_since(now).unwrap() + transmission_duration;
+
             let should_deliver = self.context.gen_bool(link.success_rate);
-            trace!(?origin, ?recipient, ?delay, "sending message",);
+            trace!(
+                ?origin,
+                ?recipient,
+                delay_ms = delay.as_millis(),
+                latency_ms = latency.as_millis(),
+                transmission_ms = transmission_duration.as_millis(),
+                "sending message",
+            );
 
             // Send message
             self.context.with_label("messenger").spawn({
@@ -304,7 +369,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     //
                     // Note: messages can be sent out of order (will not occur when using a
                     // stable TCP connection)
-                    context.sleep(Duration::from_millis(delay as u64)).await;
+                    context.sleep(delay).await;
 
                     // Drop message if success rate is too low
                     if !should_deliver {
@@ -493,6 +558,14 @@ struct Peer<P: PublicKey> {
 
     // Control to register new channels
     control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult<P>>)>,
+
+    // Bandwidth configuration in bytes per second
+    egress_bps: Option<usize>,
+    ingress_bps: Option<usize>,
+
+    // When this peer can next send/receive
+    egress_available_at: SystemTime,
+    ingress_available_at: SystemTime,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -500,10 +573,12 @@ impl<P: PublicKey> Peer<P> {
     ///
     /// The peer will listen for incoming connections on the given `socket` address.
     /// `max_size` is the maximum size of a message that can be sent to the peer.
-    fn new<E: Spawner + RNetwork + Metrics>(
+    fn new<E: Spawner + RNetwork + Metrics + Clock>(
         context: &mut E,
         public_key: P,
         socket: SocketAddr,
+        egress_bps: Option<usize>,
+        ingress_bps: Option<usize>,
         max_size: usize,
     ) -> Self {
         // The control is used to register channels.
@@ -618,9 +693,14 @@ impl<P: PublicKey> Peer<P> {
         });
 
         // Return peer
+        let now = context.current();
         Self {
             socket,
             control: control_sender,
+            egress_bps,
+            ingress_bps,
+            egress_available_at: now,
+            ingress_available_at: now,
         }
     }
 
@@ -723,14 +803,14 @@ mod tests {
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
             // Register
-            oracle.register(pk1.clone(), 0).await.unwrap();
-            oracle.register(pk1.clone(), 1).await.unwrap();
-            oracle.register(pk2.clone(), 0).await.unwrap();
-            oracle.register(pk2.clone(), 1).await.unwrap();
+            oracle.register(pk1.clone(), 0, None, None).await.unwrap();
+            oracle.register(pk1.clone(), 1, None, None).await.unwrap();
+            oracle.register(pk2.clone(), 0, None, None).await.unwrap();
+            oracle.register(pk2.clone(), 1, None, None).await.unwrap();
 
             // Expect error when registering again
             assert!(matches!(
-                oracle.register(pk1.clone(), 1).await,
+                oracle.register(pk1.clone(), 1, None, None).await,
                 Err(Error::ChannelAlreadyRegistered(_))
             ));
 

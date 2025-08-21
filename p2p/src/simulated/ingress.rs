@@ -11,6 +11,8 @@ pub enum Message<P: PublicKey> {
     Register {
         public_key: P,
         channel: Channel,
+        egress_bps: Option<usize>,
+        ingress_bps: Option<usize>,
         #[allow(clippy::type_complexity)]
         result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
     },
@@ -90,16 +92,23 @@ impl<P: PublicKey> Oracle<P> {
     ///
     /// By default, the peer will not be linked to any other peers. If a peer is already
     /// registered on a given channel, it will return an error.
+    ///
+    /// Bandwidth can be specified for the peer's egress (upload) and ingress (download)
+    /// rates in bytes per second. `None` means unlimited bandwidth.
     pub async fn register(
         &mut self,
         public_key: P,
         channel: Channel,
+        egress_bps: Option<usize>,
+        ingress_bps: Option<usize>,
     ) -> Result<(Sender<P>, Receiver<P>), Error> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Register {
                 public_key,
                 channel,
+                egress_bps,
+                ingress_bps,
                 result: sender,
             })
             .await
