@@ -33,12 +33,40 @@ const DEFAULT_CHANNEL: u32 = 0;
 /// The success rate over all links (1.0 = 100%)
 const DEFAULT_SUCCESS_RATE: f64 = 1.0;
 
+/// The message type
+type Message = Vec<u8>;
+
+/// Create a message containing the ID encoded as a big-endian u32,
+/// padded to the given size.
+fn create_message(id: u32, target_size: Option<usize>) -> Message {
+    match target_size {
+        Some(size) => {
+            let mut message = Vec::with_capacity(size);
+            message.extend_from_slice(&id.to_be_bytes());
+            if size > 4 {
+                message.resize(size, 42u8);
+            }
+            message
+        }
+        None => id.to_be_bytes().to_vec(),
+    }
+}
+
+/// Extract the ID from a message.
+fn extract_id_from_message(message: &Message) -> u32 {
+    if message.len() >= 4 {
+        u32::from_be_bytes([message[0], message[1], message[2], message[3]])
+    } else {
+        0
+    }
+}
+
 /// All state for a given peer
 type PeerIdentity = (
     ed25519::PublicKey,
     String,
-    WrappedSender<Sender<ed25519::PublicKey>, u32>,
-    WrappedReceiver<Receiver<ed25519::PublicKey>, u32>,
+    WrappedSender<Sender<ed25519::PublicKey>, Message>,
+    WrappedReceiver<Receiver<ed25519::PublicKey>, Message>,
 );
 
 /// The result of a peer job execution
@@ -275,7 +303,9 @@ async fn setup_network_identities(
                 .register(identity.clone(), DEFAULT_CHANNEL, None, None)
                 .await
                 .unwrap();
-            let (sender, receiver) = wrap::<_, _, u32>((), sender, receiver);
+            // Allow messages up to 10MB
+            let config = (commonware_codec::RangeCfg::from(0..=10_000_000), ());
+            let (sender, receiver) = wrap::<_, _, Message>(config, sender, receiver);
             identities.push((identity, region.clone(), sender, receiver));
             peer_idx += 1;
         }
@@ -368,7 +398,8 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
 
                 // Wait for incoming message
                 let (other_identity, message) = receiver.recv().await.unwrap();
-                let msg_id = message.unwrap();
+                let msg = message.unwrap();
+                let msg_id = extract_id_from_message(&msg);
                 received.entry(msg_id).or_default().insert(other_identity);
             }
 
@@ -473,16 +504,17 @@ async fn process_command<C: Spawner + Clock>(
     command_ctx: &mut CommandContext,
     current_index: &mut usize,
     command: &(usize, Command),
-    sender: &mut WrappedSender<Sender<ed25519::PublicKey>, u32>,
+    sender: &mut WrappedSender<Sender<ed25519::PublicKey>, Message>,
     received: &mut BTreeMap<u32, BTreeSet<ed25519::PublicKey>>,
     completions: &mut Vec<(usize, Duration)>,
 ) -> bool {
     let is_proposer = command_ctx.identity == command_ctx.proposer_identity;
     match &command.1 {
-        Command::Propose(id) => {
+        Command::Propose(id, size) => {
             if is_proposer {
+                let message = create_message(*id, *size);
                 sender
-                    .send(commonware_p2p::Recipients::All, *id, true)
+                    .send(commonware_p2p::Recipients::All, message, true)
                     .await
                     .unwrap();
                 received
@@ -493,9 +525,10 @@ async fn process_command<C: Spawner + Clock>(
             *current_index += 1;
             true
         }
-        Command::Broadcast(id) => {
+        Command::Broadcast(id, size) => {
+            let message = create_message(*id, *size);
             sender
-                .send(commonware_p2p::Recipients::All, *id, true)
+                .send(commonware_p2p::Recipients::All, message, true)
                 .await
                 .unwrap();
             received
@@ -505,17 +538,18 @@ async fn process_command<C: Spawner + Clock>(
             *current_index += 1;
             true
         }
-        Command::Reply(id) => {
+        Command::Reply(id, size) => {
             if is_proposer {
                 received
                     .entry(*id)
                     .or_default()
                     .insert(command_ctx.identity.clone());
             } else {
+                let message = create_message(*id, *size);
                 sender
                     .send(
                         commonware_p2p::Recipients::One(command_ctx.proposer_identity.clone()),
-                        *id,
+                        message,
                         true,
                     )
                     .await

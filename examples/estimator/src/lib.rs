@@ -51,9 +51,9 @@ struct PeerState {
 
 #[derive(Clone)]
 pub enum Command {
-    Propose(u32),
-    Broadcast(u32),
-    Reply(u32),
+    Propose(u32, Option<usize>),   // id, size in bytes
+    Broadcast(u32, Option<usize>), // id, size in bytes
+    Reply(u32, Option<usize>),     // id, size in bytes
     Collect(u32, Threshold, Option<(Duration, Duration)>),
     Wait(u32, Threshold, Option<(Duration, Duration)>),
     Or(Box<Command>, Box<Command>),
@@ -176,9 +176,24 @@ fn parse_single_command(line: &str) -> Command {
     }
 
     match command {
-        "propose" => Command::Propose(id),
-        "broadcast" => Command::Broadcast(id),
-        "reply" => Command::Reply(id),
+        "propose" => {
+            let size = parsed_args
+                .get("size")
+                .map(|s| s.parse::<usize>().expect("Invalid size"));
+            Command::Propose(id, size)
+        }
+        "broadcast" => {
+            let size = parsed_args
+                .get("size")
+                .map(|s| s.parse::<usize>().expect("Invalid size"));
+            Command::Broadcast(id, size)
+        }
+        "reply" => {
+            let size = parsed_args
+                .get("size")
+                .map(|s| s.parse::<usize>().expect("Invalid size"));
+            Command::Reply(id, size)
+        }
         "collect" | "wait" => {
             let thresh = if let Some(thresh_str) = parsed_args.get("threshold") {
                 if thresh_str.ends_with('%') {
@@ -535,9 +550,9 @@ pub fn can_command_advance(
     received: &BTreeMap<u32, BTreeSet<PublicKey>>,
 ) -> bool {
     match cmd {
-        Command::Propose(_) => true, // Propose always advances (proposer check handled by caller)
-        Command::Broadcast(_) => true, // Broadcast always advances
-        Command::Reply(_) => true,   // Reply always advances
+        Command::Propose(_, _) => true, // Propose always advances (proposer check handled by caller)
+        Command::Broadcast(_, _) => true, // Broadcast always advances
+        Command::Reply(_, _) => true,   // Reply always advances
         Command::Collect(id, thresh, _) => {
             if is_proposer {
                 let count = received.get(id).map_or(0, |s| s.len());
@@ -605,17 +620,17 @@ pub fn validate(commands: &[(usize, Command)], peers: usize, proposer: usize) ->
                 // If command advances, execute side effects (message sending, state updates)
                 if advanced {
                     match cmd {
-                        Command::Propose(id) => {
+                        Command::Propose(id, _) => {
                             if is_proposer {
                                 messages.push((p, Recipients::All, *id));
                                 state.received.entry(*id).or_default().insert(identity);
                             }
                         }
-                        Command::Broadcast(id) => {
+                        Command::Broadcast(id, _) => {
                             messages.push((p, Recipients::All, *id));
                             state.received.entry(*id).or_default().insert(identity);
                         }
-                        Command::Reply(id) => {
+                        Command::Reply(id, _) => {
                             let proposer_key = keys[proposer].clone();
                             if is_proposer {
                                 state.received.entry(*id).or_default().insert(identity);
@@ -773,17 +788,17 @@ reply{3}
         assert_eq!(commands.len(), 3);
 
         match &commands[0].1 {
-            Command::Propose(id) => assert_eq!(*id, 1),
+            Command::Propose(id, _) => assert_eq!(*id, 1),
             _ => panic!("Expected Propose command"),
         }
 
         match &commands[1].1 {
-            Command::Broadcast(id) => assert_eq!(*id, 2),
+            Command::Broadcast(id, _) => assert_eq!(*id, 2),
             _ => panic!("Expected Broadcast command"),
         }
 
         match &commands[2].1 {
-            Command::Reply(id) => assert_eq!(*id, 3),
+            Command::Reply(id, _) => assert_eq!(*id, 3),
             _ => panic!("Expected Reply command"),
         }
     }
@@ -1233,18 +1248,18 @@ broadcast{1}
                 match cmd1.as_ref() {
                     Command::And(and_cmd1, and_cmd2) => {
                         match and_cmd1.as_ref() {
-                            Command::Propose(id) => assert_eq!(*id, 1),
+                            Command::Propose(id, _) => assert_eq!(*id, 1),
                             _ => panic!("Expected Propose id=1"),
                         }
                         match and_cmd2.as_ref() {
-                            Command::Broadcast(id) => assert_eq!(*id, 2),
+                            Command::Broadcast(id, _) => assert_eq!(*id, 2),
                             _ => panic!("Expected Broadcast id=2"),
                         }
                     }
                     _ => panic!("Expected And command"),
                 }
                 match cmd2.as_ref() {
-                    Command::Reply(id) => assert_eq!(*id, 3),
+                    Command::Reply(id, _) => assert_eq!(*id, 3),
                     _ => panic!("Expected Reply id=3"),
                 }
             }
