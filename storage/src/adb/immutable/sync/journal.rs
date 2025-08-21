@@ -1,8 +1,7 @@
 use crate::{adb::sync, journal::variable, store::operation::Variable};
 use commonware_codec::Codec;
 use commonware_runtime::{Metrics, Storage};
-use commonware_utils::{Array, NZUsize};
-use futures::{pin_mut, StreamExt};
+use commonware_utils::Array;
 use std::num::NonZeroU64;
 
 /// Wraps a [variable::Journal] to provide a sync-compatible interface for Immutable databases.
@@ -80,49 +79,4 @@ where
     async fn close(self) -> Result<(), Self::Error> {
         self.inner.close().await
     }
-}
-
-/// Compute the next append location (size) by scanning the variable journal and
-/// counting only items whose logical location is within [lower_bound, upper_bound].
-pub async fn compute_size<E, K, V>(
-    journal: &variable::Journal<E, Variable<K, V>>,
-    items_per_section: NonZeroU64,
-    lower_bound: u64,
-    upper_bound: u64,
-) -> Result<u64, crate::journal::Error>
-where
-    E: Storage + Metrics,
-    K: Array,
-    V: Codec,
-{
-    let items_per_section = items_per_section.get();
-    let mut size = lower_bound;
-    let mut current_section: Option<u64> = None;
-    let mut index_in_section: u64 = 0;
-    let stream = journal.replay(NZUsize!(1024)).await?;
-    pin_mut!(stream);
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok((section, _offset, _size, _op)) => {
-                if current_section != Some(section) {
-                    current_section = Some(section);
-                    index_in_section = 0;
-                }
-                let loc = section
-                    .saturating_mul(items_per_section)
-                    .saturating_add(index_in_section);
-                if loc < lower_bound {
-                    index_in_section = index_in_section.saturating_add(1);
-                    continue;
-                }
-                if loc > upper_bound {
-                    return Ok(size);
-                }
-                size = loc.saturating_add(1);
-                index_in_section = index_in_section.saturating_add(1);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(size)
 }
