@@ -583,11 +583,10 @@ where
 
 /// Prune a journal to ensure it only contains elements within [lower_bound, upper_bound].
 ///
-/// This function consolidates the pruning logic from init_journal and resize_journal by:
-/// 1. Removing all sections before the one containing lower_bound
-/// 2. Pruning the section containing lower_bound to remove elements before it
-/// 3. Removing all sections after the one containing upper_bound
-/// 4. Rewinding the section containing upper_bound to remove elements after it
+/// 1. Remove all sections before the one containing lower_bound
+/// 2. Prune the section containing lower_bound to remove elements before it
+/// 3. Remove all sections after the one containing upper_bound
+/// 4. Rewind the section containing upper_bound to remove elements after it
 ///
 /// Returns a tuple of (next_write_location, new_oldest_retained_loc) where:
 /// - next_write_location: The next logical location that should be written to by the sync engine
