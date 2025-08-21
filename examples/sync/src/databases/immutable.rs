@@ -1,7 +1,7 @@
 //! Immutable database types and helpers for the sync example.
 
 use crate::{Hasher, Key, Translator, Value};
-use commonware_cryptography::Hasher as CryptoHasher;
+use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
     adb::{
@@ -62,12 +62,12 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
         operations.push(Operation::Set(key, value));
 
         if (i + 1) % 10 == 0 {
-            operations.push(Operation::Commit());
+            operations.push(Operation::Commit(Sha256::fill(0)));
         }
     }
 
     // Always end with a commit
-    operations.push(Operation::Commit());
+    operations.push(Operation::Commit(Sha256::fill(1)));
     operations
 }
 
@@ -90,8 +90,8 @@ where
                 Operation::Set(key, value) => {
                     database.set(key, value).await?;
                 }
-                Operation::Commit() => {
-                    database.commit().await?;
+                Operation::Commit(metadata) => {
+                    database.commit_with_metadata(metadata).await?;
                 }
                 _ => {}
             }
@@ -100,7 +100,7 @@ where
     }
 
     async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        self.commit().await
+        self.commit_with_metadata(Sha256::fill(0)).await
     }
 
     fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
