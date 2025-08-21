@@ -13,6 +13,7 @@ members = [
     "runtime",
     "storage",
     "stream",
+    "storage-core",
     "utils",
     "examples/bridge",
     "examples/chat",
@@ -39,13 +40,14 @@ commonware-codec = { version = "0.0.61", path = "codec", default-features = fals
 commonware-coding = { version = "0.0.61", path = "coding" }
 commonware-collector = { version = "0.0.61", path = "collector" }
 commonware-consensus = { version = "0.0.61", path = "consensus" }
-commonware-cryptography = { version = "0.0.61", path = "cryptography" }
+commonware-cryptography = { version = "0.0.61", path = "cryptography", default-features = false }
 commonware-deployer = { version = "0.0.61", path = "deployer", default-features = false }
 commonware-macros = { version = "0.0.61", path = "macros" }
 commonware-p2p = { version = "0.0.61", path = "p2p" }
 commonware-resolver = { version = "0.0.61", path = "resolver" }
 commonware-runtime = { version = "0.0.61", path = "runtime" }
 commonware-storage = { version = "0.0.61", path = "storage" }
+commonware-storage-core = { version = "0.0.61", path = "storage-core", default-features = false }
 commonware-stream = { version = "0.0.61", path = "stream" }
 commonware-utils = { version = "0.0.61", path = "utils", default-features = false }
 anyhow = { version = "1.0.99", default-features = false }

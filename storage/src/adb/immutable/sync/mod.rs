@@ -5,7 +5,7 @@ use crate::{
         sync::{self, Journal as _},
     },
     journal::variable,
-    mmr::hasher::Standard,
+    mmr::StandardHasher as Standard,
     store::operation::Variable,
     translator::Translator,
 };
@@ -250,7 +250,7 @@ mod tests {
                 Engine, Journal, Target,
             },
         },
-        mmr::hasher::Standard,
+        mmr::StandardHasher as Standard,
         store::operation::Variable,
         translator::TwoCap,
     };
