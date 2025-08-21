@@ -297,7 +297,7 @@ impl<K: Array, V: Codec> Read for Variable<K, V> {
                 Ok(Self::Update(key, value))
             }
             COMMIT_FLOOR_CONTEXT => {
-                let floor_loc = UInt::<u64>::read(buf)?;
+                let floor_loc = UInt::read(buf)?;
                 Ok(Self::CommitFloor(floor_loc.into()))
             }
             e => Err(CodecError::InvalidEnum(e)),
