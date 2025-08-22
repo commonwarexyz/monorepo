@@ -4,21 +4,17 @@ use super::{
     tracing::{export, Config},
     Context,
 };
-use crate::{Clock, Metrics, Spawner};
+use crate::{Metrics, Spawner};
 use axum::{
     body::Body,
     http::{header, Response, StatusCode},
     routing::get,
     serve, Extension, Router,
 };
-use prometheus_client::{metrics::gauge::Gauge, registry::Registry as PrometheusRegistry};
-use std::{net::SocketAddr, time::Duration};
-use sysinfo::{ProcessRefreshKind, System};
+use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
-
-const TICK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Logging configuration.
 pub struct Logging {
@@ -31,43 +27,6 @@ pub struct Logging {
     /// If you are running things locally, it is recommended to use
     /// `json = false` to get a human-readable format.
     pub json: bool,
-}
-
-/// Spawn a background task that periodically updates runtime metrics.
-pub fn run(context: Context, runtime_registry: &mut PrometheusRegistry) {
-    // Register metrics
-    let rss_gauge = Gauge::default();
-    runtime_registry.register(
-        "rss",
-        "Resident set size of the current process (B)",
-        rss_gauge.clone(),
-    );
-
-    // Spawn background updater
-    context.spawn(move |context| async move {
-        loop {
-            update_rss(&rss_gauge);
-            context.sleep(TICK_INTERVAL).await;
-        }
-    });
-}
-
-/// Update the RSS gauge.
-fn update_rss(gauge: &Gauge) {
-    // Select PID
-    let pid = sysinfo::Pid::from(std::process::id() as usize);
-    let mut system = System::new();
-    system.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::Some(&[pid]),
-        false,
-        ProcessRefreshKind::nothing().with_memory(),
-    );
-
-    // Update gauge
-    if let Some(process) = system.process(pid) {
-        let rss_bytes = process.memory();
-        gauge.set(rss_bytes as i64);
-    }
 }
 
 /// Initialize telemetry with the given configuration.

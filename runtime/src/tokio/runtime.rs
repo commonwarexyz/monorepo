@@ -11,7 +11,7 @@ use crate::{
 };
 use crate::{
     network::metered::Network as MeteredNetwork, signal::Signal,
-    storage::metered::Storage as MeteredStorage, telemetry::metrics::task::Label, tokio::telemetry,
+    storage::metered::Storage as MeteredStorage, system, telemetry::metrics::task::Label,
     utils::signal::Stopper, Clock, Error, Handle, Metrics as _, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
@@ -31,6 +31,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
+
+const TICK_INTERVAL: Duration = Duration::from_secs(10);
 
 #[cfg(feature = "iouring-network")]
 const IOURING_NETWORK_SIZE: u32 = 1024;
@@ -242,10 +244,10 @@ impl crate::Runner for Runner {
     {
         // Create a new registry
         let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
-        let metrics = Arc::new(Metrics::init(runtime_registry));
+        let metrics = Arc::new(Metrics::init(&mut runtime_registry));
         let runtime = Builder::new_multi_thread()
             .worker_threads(self.cfg.worker_threads)
             .max_blocking_threads(self.cfg.max_blocking_threads)
@@ -303,11 +305,14 @@ impl crate::Runner for Runner {
             }
         }
 
-        // Initialize telemetry
-        let label = Label::root();
-        metrics.tasks_spawned.get_or_create(&label).inc();
-        let gauge = metrics.tasks_running.get_or_create(&label).clone();
-        telemetry::run(context.with_label("telemetry"), &mut runtime_registry);
+        // Collect system metrics
+        let mut system_metrics = system::metered::Metrics::init(runtime_registry);
+        runtime.spawn(async move {
+            loop {
+                system_metrics.update();
+                tokio::time::sleep(TICK_INTERVAL).await;
+            }
+        });
 
         // Initialize executor
         let executor = Arc::new(Executor {
@@ -317,6 +322,11 @@ impl crate::Runner for Runner {
             runtime,
             shutdown: Mutex::new(Stopper::default()),
         });
+
+        // Get metrics
+        let label = Label::root();
+        executor.metrics.tasks_spawned.get_or_create(&label).inc();
+        let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
 
         // Run the future
         let context = Context {
