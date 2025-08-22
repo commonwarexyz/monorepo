@@ -1,7 +1,10 @@
 //! Process metrics collection.
 
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
+use std::{future::Future, time::Duration};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Process metrics collector.
 pub struct Metrics {
@@ -40,7 +43,7 @@ impl Metrics {
     }
 
     /// Update all process metrics.
-    pub fn update(&mut self) {
+    fn update(&mut self) {
         // Refresh process information
         let pid = sysinfo::Pid::from(std::process::id() as usize);
         self.system.refresh_processes_specifics(
@@ -53,6 +56,21 @@ impl Metrics {
         if let Some(process) = self.system.process(pid) {
             self.rss.set(process.memory() as i64);
             self.virtual_memory.set(process.virtual_memory() as i64);
+        }
+    }
+
+    /// Update process metrics periodically.
+    ///
+    /// This function takes a sleep function as a parameter to allow different runtimes
+    /// to provide their own implementation.
+    pub async fn collect<F, Fut>(mut self, sleep_fn: F)
+    where
+        F: Fn(Duration) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        loop {
+            self.update();
+            sleep_fn(UPDATE_INTERVAL).await;
         }
     }
 }

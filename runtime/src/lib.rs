@@ -1677,25 +1677,28 @@ mod tests {
     fn test_tokio_process_rss_metric() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            // Get metrics
-            let metrics = context.encode();
+            loop {
+                // Wait for RSS metric to be available
+                let metrics = context.encode();
+                if !metrics.contains("runtime_process_rss") {
+                    context.sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
 
-            // Check for RSS metric
-            assert!(
-                metrics.contains("runtime_process_rss"),
-                "RSS metric not found in output"
-            );
-
-            // Verify the RSS value is reasonable (greater than 0)
-            for line in metrics.lines() {
-                if line.starts_with("runtime_process_rss")
-                    && !line.starts_with("runtime_process_rss{")
-                {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 2 {
-                        let rss_value: i64 = parts[1].parse().expect("Failed to parse RSS value");
-                        assert!(rss_value > 1_000_000, "RSS is too small: {rss_value} bytes");
-                        return;
+                // Verify the RSS value is reasonable (greater than 0)
+                for line in metrics.lines() {
+                    if line.starts_with("runtime_process_rss")
+                        && !line.starts_with("runtime_process_rss{")
+                    {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 2 {
+                            let rss_value: i64 =
+                                parts[1].parse().expect("Failed to parse RSS value");
+                            if rss_value > 1_000_000 {
+                                // While initializing, the RSS value may be 0
+                                return;
+                            }
+                        }
                     }
                 }
             }

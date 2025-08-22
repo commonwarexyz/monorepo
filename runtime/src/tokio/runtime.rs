@@ -32,8 +32,6 @@ use std::{
 };
 use tokio::runtime::{Builder, Runtime};
 
-const TICK_INTERVAL: Duration = Duration::from_secs(10);
-
 #[cfg(feature = "iouring-network")]
 const IOURING_NETWORK_SIZE: u32 = 1024;
 #[cfg(feature = "iouring-network")]
@@ -305,15 +303,12 @@ impl crate::Runner for Runner {
             }
         }
 
-        // Collect process metrics
-        let mut process = ProcessMetrics::init(runtime_registry);
-        process.update();
-        runtime.spawn(async move {
-            loop {
-                tokio::time::sleep(TICK_INTERVAL).await;
-                process.update();
-            }
-        });
+        // Collect process metrics.
+        //
+        // We prefer to collect process metrics outside of `Context` because
+        // we are using `runtime_registry` rather than the one provided by `Context`.
+        let process = ProcessMetrics::init(runtime_registry);
+        runtime.spawn(process.collect(tokio::time::sleep));
 
         // Initialize executor
         let executor = Arc::new(Executor {
