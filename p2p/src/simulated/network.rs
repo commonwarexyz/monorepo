@@ -316,9 +316,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             let effective_bps = sender_egress_bps.min(receiver_ingress_bps);
 
             // Calculate transmission timing
-            let tx_duration = Duration::from_millis(
-                (message.len() as f64 / effective_bps as f64 * 1000.0) as u64,
-            );
+            let tx_duration = if effective_bps == 0 {
+                Duration::MAX
+            } else {
+                Duration::from_secs_f64(message.len() as f64 / effective_bps as f64)
+            };
 
             // Sender can start when free, receiver must be free when first bit arrives
             let sender_ready_at = sender_egress_available_at.max(now);
