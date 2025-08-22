@@ -8,6 +8,7 @@ use commonware_cryptography::{
     Hasher,
 };
 use libfuzzer_sys::fuzz_target;
+use p256::elliptic_curve::zeroize::Zeroize;
 
 #[derive(Debug, Arbitrary)]
 pub struct FuzzInput {
@@ -16,7 +17,6 @@ pub struct FuzzInput {
     pub case_selector: u8,
 }
 
-// Basic hashing comparison with chunks
 fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
     let mut our_hasher = OurBlake3::new();
     let mut ref_hasher = RefBlake3::new();
@@ -31,7 +31,6 @@ fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
     assert_eq!(our_result.as_ref(), ref_result.as_bytes());
 }
 
-// Reset functionality
 fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
     let mut our_hasher = OurBlake3::new();
     let mut ref_hasher = RefBlake3::new();
@@ -63,7 +62,6 @@ fn fuzz_reset_functionality(chunks: &[Vec<u8>]) {
     );
 }
 
-// Chunked vs all-at-once hashing
 fn fuzz_chunked_vs_whole(chunks: &[Vec<u8>]) {
     let mut our_hasher = OurBlake3::new();
     let mut ref_hasher = RefBlake3::new();
@@ -80,7 +78,6 @@ fn fuzz_chunked_vs_whole(chunks: &[Vec<u8>]) {
     assert_eq!(our_final.as_ref(), ref_final.as_bytes());
 }
 
-// Differential fuzzing
 fn fuzz_diff_hash(data: &[u8]) {
     let our_hash_result = our_hash(data);
     let mut ref_hasher = RefBlake3::new();
@@ -90,7 +87,21 @@ fn fuzz_diff_hash(data: &[u8]) {
     );
 }
 
-// Encode/decode functionality
+fn fuzz_digest_operations(data: &[u8]) {
+    let empty_digest = OurBlake3::empty();
+    assert_eq!(empty_digest.len(), 32);
+
+    let hash_result = our_hash(data);
+    let digest_from_hash = hash_result;
+
+    let slice_ref: &[u8] = &digest_from_hash;
+    assert_eq!(slice_ref.len(), 32);
+
+    let mut mutable_digest = digest_from_hash;
+    mutable_digest.zeroize();
+    assert_eq!(mutable_digest.as_ref(), &[0u8; 32]);
+}
+
 fn fuzz_encode_decode(data: &[u8]) {
     let mut hasher = OurBlake3::new();
     hasher.update(data);
@@ -104,6 +115,22 @@ fn fuzz_encode_decode(data: &[u8]) {
     assert_eq!(digest, decoded);
 }
 
+fn fuzz_clone_and_format(chunks: &[Vec<u8>]) {
+    let mut original_hasher = OurBlake3::new();
+    for chunk in chunks {
+        original_hasher.update(chunk);
+    }
+
+    let mut cloned_hasher = original_hasher.clone();
+    let original_digest = original_hasher.finalize();
+    let cloned_digest = cloned_hasher.finalize();
+
+    let debug_str = format!("{original_digest:?}");
+    let display_str = format!("{cloned_digest}");
+    assert_eq!(debug_str, display_str);
+    assert!(!debug_str.is_empty());
+}
+
 fn fuzz(input: FuzzInput) {
     match input.case_selector % 5 {
         0 => fuzz_basic_hashing(&input.chunks),
@@ -111,6 +138,8 @@ fn fuzz(input: FuzzInput) {
         2 => fuzz_chunked_vs_whole(&input.chunks),
         3 => fuzz_diff_hash(&input.data),
         4 => fuzz_encode_decode(&input.data),
+        5 => fuzz_clone_and_format(&input.chunks),
+        6 => fuzz_digest_operations(&input.data),
         _ => unreachable!(),
     }
 }

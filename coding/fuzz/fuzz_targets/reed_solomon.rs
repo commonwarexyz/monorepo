@@ -15,9 +15,9 @@ struct FuzzInput {
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        let min = u.int_in_range(1..=256)?; // min > 0
-        let total = u.int_in_range(min + 1..=1000)?; // total > min
-        let data_len = u.int_in_range(0..=u16::MAX)?; // data.len() <= u32:Max
+        let min = u.int_in_range(1..=u16::MAX - 1)?; // min > 0
+        let total = u.int_in_range(min + 1..=u16::MAX)?; // total > min
+        let data_len = u.int_in_range(0..=u32::MAX)?; // data.len() <= u32:Max
         let data = u.bytes(data_len as usize)?.to_vec();
         let shuffle_bytes = u.bytes(8)?.to_vec();
 
@@ -55,10 +55,12 @@ impl ShuffledChunks {
 fn fuzz(input: FuzzInput) {
     let total = input.total;
     let min = input.min;
-    let payload = input.data;
+    let data = input.data;
     let shuffle_bytes = input.shuffle_bytes;
 
-    let (root, chunks) = match encode::<Sha256>(total, min, payload.to_vec()) {
+    // if encode returns Digest then we should be able to decode it later.
+    // we return in Error case, because the underlying library can panic on arbitrary input.
+    let (root, chunks) = match encode::<Sha256>(total, min, data.to_vec()) {
         Ok(result) => result,
         Err(_) => return,
     };
@@ -73,7 +75,7 @@ fn fuzz(input: FuzzInput) {
         Ok(data) => data,
         Err(e) => panic!("decode with all chunks failed: {e:?}"),
     };
-    assert_eq!(decoded, payload, "decode with all chunks failed");
+    assert_eq!(decoded, data, "decode with all chunks failed");
 
     let subset =
         ShuffledChunks::from_chunks(chunks, &shuffle_bytes).expect("failed to shuffle chunks");
@@ -82,7 +84,7 @@ fn fuzz(input: FuzzInput) {
         Ok(data) => data,
         Err(e) => panic!("decode with min chunks failed: {e:?}"),
     };
-    assert_eq!(decoded_subset, payload);
+    assert_eq!(decoded_subset, data);
 }
 
 fuzz_target!(|input: FuzzInput| {
