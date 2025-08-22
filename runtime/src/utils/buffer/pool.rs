@@ -202,7 +202,9 @@ impl PoolRef {
         let fetch_result = fetch_future.await;
         if !is_first_fetcher {
             // Copy the requested portion of the page into the buffer and return immediately.
-            let page_buf: Vec<u8> = fetch_result.map_err(|_| Error::ReadFailed)?.into();
+            let page_buf: Vec<u8> = fetch_result
+                .map_err(|e| Error::ReadFailed(Box::new(e)))?
+                .into();
             let bytes_to_copy = std::cmp::min(buf.len(), page_size - offset_in_page);
             buf[..bytes_to_copy]
                 .copy_from_slice(&page_buf[offset_in_page..offset_in_page + bytes_to_copy]);
@@ -220,7 +222,7 @@ impl PoolRef {
 
         // Cache the result in the buffer pool.
         let Ok(page_buf) = fetch_result else {
-            return Err(Error::ReadFailed);
+            return Err(Error::ReadFailed(Box::new(fetch_result.unwrap_err())));
         };
         pool.cache(page_size, blob_id, page_buf.as_ref(), page_num);
 
