@@ -172,18 +172,14 @@ mod tests {
 
             // Create a dummy network mailbox
             let peer = schemes[1].public_key();
-            let (pending_sender, _pending_receiver) = oracle
-                .register(validator.clone(), 0, None, None)
-                .await
-                .unwrap();
-            let (recovered_sender, recovered_receiver) = oracle
-                .register(validator.clone(), 1, None, None)
-                .await
-                .unwrap();
+            let (pending_sender, _pending_receiver) =
+                oracle.register(validator.clone(), 0).await.unwrap();
+            let (recovered_sender, recovered_receiver) =
+                oracle.register(validator.clone(), 1).await.unwrap();
             let (mut _peer_pending_sender, mut _peer_pending_receiver) =
-                oracle.register(peer.clone(), 0, None, None).await.unwrap();
+                oracle.register(peer.clone(), 0).await.unwrap();
             let (mut peer_recovered_sender, mut peer_recovered_receiver) =
-                oracle.register(peer.clone(), 1, None, None).await.unwrap();
+                oracle.register(peer.clone(), 1).await.unwrap();
             oracle
                 .add_link(
                     validator.clone(),
@@ -485,18 +481,14 @@ mod tests {
 
             // Create a dummy network mailbox
             let peer = private_keys[1].public_key();
-            let (pending_sender, _pending_receiver) = oracle
-                .register(validator.clone(), 0, None, None)
-                .await
-                .unwrap();
-            let (recovered_sender, recovered_receiver) = oracle
-                .register(validator.clone(), 1, None, None)
-                .await
-                .unwrap();
+            let (pending_sender, _pending_receiver) =
+                oracle.register(validator.clone(), 0).await.unwrap();
+            let (recovered_sender, recovered_receiver) =
+                oracle.register(validator.clone(), 1).await.unwrap();
             let (mut _peer_pending_sender, mut _peer_pending_receiver) =
-                oracle.register(peer.clone(), 0, None, None).await.unwrap();
+                oracle.register(peer.clone(), 0).await.unwrap();
             let (mut peer_recovered_sender, mut peer_recovered_receiver) =
-                oracle.register(peer.clone(), 1, None, None).await.unwrap();
+                oracle.register(peer.clone(), 1).await.unwrap();
             oracle
                 .add_link(
                     validator.clone(),

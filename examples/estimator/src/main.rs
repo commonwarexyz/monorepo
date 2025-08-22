@@ -335,16 +335,13 @@ async fn setup_network_identities(
     let peers = count_peers(distribution);
     let mut identities = Vec::with_capacity(peers);
     let mut peer_idx = 0;
+
+    // Register all peers
     for (region, config) in distribution {
         for _ in 0..config.count {
             let identity = ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
             let (sender, receiver) = oracle
-                .register(
-                    identity.clone(),
-                    DEFAULT_CHANNEL,
-                    config.egress_bps,
-                    config.ingress_bps,
-                )
+                .register(identity.clone(), DEFAULT_CHANNEL)
                 .await
                 .unwrap();
             // Allow messages up to 10MB
@@ -353,6 +350,15 @@ async fn setup_network_identities(
             identities.push((identity, region.clone(), sender, receiver));
             peer_idx += 1;
         }
+    }
+
+    // Set bandwidth limits for each peer based on their region config
+    for (identity, region, _, _) in &identities {
+        let config = &distribution[region];
+        oracle
+            .set_bandwidth(identity.clone(), config.egress_bps, config.ingress_bps)
+            .await
+            .unwrap();
     }
 
     identities

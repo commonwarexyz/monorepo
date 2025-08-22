@@ -166,14 +166,10 @@ mod tests {
     ) -> HashMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))> {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
-            let (voter_sender, voter_receiver) = oracle
-                .register(validator.clone(), 0, None, None)
-                .await
-                .unwrap();
-            let (resolver_sender, resolver_receiver) = oracle
-                .register(validator.clone(), 1, None, None)
-                .await
-                .unwrap();
+            let (voter_sender, voter_receiver) =
+                oracle.register(validator.clone(), 0).await.unwrap();
+            let (resolver_sender, resolver_receiver) =
+                oracle.register(validator.clone(), 1).await.unwrap();
             registrations.insert(
                 validator.clone(),
                 (

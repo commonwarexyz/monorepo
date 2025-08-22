@@ -256,18 +256,12 @@ mod tests {
     > {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
-            let (pending_sender, pending_receiver) = oracle
-                .register(validator.clone(), 0, None, None)
-                .await
-                .unwrap();
-            let (recovered_sender, recovered_receiver) = oracle
-                .register(validator.clone(), 1, None, None)
-                .await
-                .unwrap();
-            let (resolver_sender, resolver_receiver) = oracle
-                .register(validator.clone(), 2, None, None)
-                .await
-                .unwrap();
+            let (pending_sender, pending_receiver) =
+                oracle.register(validator.clone(), 0).await.unwrap();
+            let (recovered_sender, recovered_receiver) =
+                oracle.register(validator.clone(), 1).await.unwrap();
+            let (resolver_sender, resolver_receiver) =
+                oracle.register(validator.clone(), 2).await.unwrap();
             registrations.insert(
                 validator.clone(),
                 (

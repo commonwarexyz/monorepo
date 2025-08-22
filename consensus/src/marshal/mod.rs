@@ -170,17 +170,11 @@ mod tests {
             codec_config: (),
         };
         let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
-        let network = oracle
-            .register(secret.public_key(), 1, None, None)
-            .await
-            .unwrap();
+        let network = oracle.register(secret.public_key(), 1).await.unwrap();
         broadcast_engine.start(network);
 
         // Start the actor
-        let backfill = oracle
-            .register(secret.public_key(), 2, None, None)
-            .await
-            .unwrap();
+        let backfill = oracle.register(secret.public_key(), 2).await.unwrap();
         actor.start(application.clone(), buffer, backfill);
 
         (application, mailbox)

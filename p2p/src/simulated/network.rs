@@ -155,8 +155,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             ingress::Message::Register {
                 public_key,
                 channel,
-                egress_bps,
-                ingress_bps,
                 result,
             } => {
                 // If peer does not exist, then create it.
@@ -165,8 +163,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                         &mut self.context.clone(),
                         public_key.clone(),
                         self.get_next_socket(),
-                        egress_bps,
-                        ingress_bps,
+                        None,
+                        None,
                         self.max_size,
                     );
                     self.peers.insert(public_key.clone(), peer);
@@ -189,6 +187,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 );
                 send_result(result, Ok((sender, receiver)))
             }
+            ingress::Message::SetBandwidth {
+                public_key,
+                egress_bps,
+                ingress_bps,
+                result,
+            } => match self.peers.get_mut(&public_key) {
+                Some(peer) => {
+                    peer.set_bandwidth(egress_bps, ingress_bps);
+                    send_result(result, Ok(()));
+                }
+                None => send_result(result, Err(Error::PeerMissing)),
+            },
             ingress::Message::AddLink {
                 sender,
                 receiver,
@@ -717,6 +727,15 @@ impl<P: PublicKey> Peer<P> {
             .map_err(|_| Error::NetworkClosed)?;
         receiver.await.map_err(|_| Error::NetworkClosed)?
     }
+
+    /// Set bandwidth limits for the peer.
+    ///
+    /// Bandwidth can be specified for the peer's egress (upload) and ingress (download)
+    /// rates in bytes per second. `None` means unlimited bandwidth.
+    fn set_bandwidth(&mut self, egress_bps: Option<usize>, ingress_bps: Option<usize>) {
+        self.egress_bps = egress_bps;
+        self.ingress_bps = ingress_bps;
+    }
 }
 
 // A unidirectional link between two peers.
@@ -808,14 +827,14 @@ mod tests {
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
             // Register
-            oracle.register(pk1.clone(), 0, None, None).await.unwrap();
-            oracle.register(pk1.clone(), 1, None, None).await.unwrap();
-            oracle.register(pk2.clone(), 0, None, None).await.unwrap();
-            oracle.register(pk2.clone(), 1, None, None).await.unwrap();
+            oracle.register(pk1.clone(), 0).await.unwrap();
+            oracle.register(pk1.clone(), 1).await.unwrap();
+            oracle.register(pk2.clone(), 0).await.unwrap();
+            oracle.register(pk2.clone(), 1).await.unwrap();
 
             // Expect error when registering again
             assert!(matches!(
-                oracle.register(pk1.clone(), 1, None, None).await,
+                oracle.register(pk1.clone(), 1).await,
                 Err(Error::ChannelAlreadyRegistered(_))
             ));
 
