@@ -6,9 +6,9 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 /// Process metrics collector.
 pub struct Metrics {
     /// Resident set size in bytes.
-    pub process_rss_bytes: Gauge,
+    pub rss: Gauge,
     /// Virtual memory size in bytes.
-    pub process_virtual_memory_bytes: Gauge,
+    pub virtual_memory: Gauge,
 
     /// System information handle.
     system: System,
@@ -18,22 +18,22 @@ impl Metrics {
     /// Initialize process metrics and register them with the given registry.
     pub fn init(registry: &mut Registry) -> Self {
         let metrics = Self {
-            process_rss_bytes: Gauge::default(),
-            process_virtual_memory_bytes: Gauge::default(),
+            rss: Gauge::default(),
+            virtual_memory: Gauge::default(),
 
             system: System::new(),
         };
 
         // Register all metrics
         registry.register(
-            "process_rss_bytes",
-            "Resident set size of the current process in bytes",
-            metrics.process_rss_bytes.clone(),
+            "process_rss",
+            "Resident set size of the current process",
+            metrics.rss.clone(),
         );
         registry.register(
-            "process_virtual_memory_bytes",
-            "Virtual memory size of the current process in bytes",
-            metrics.process_virtual_memory_bytes.clone(),
+            "process_virtual_memory",
+            "Virtual memory size of the current process",
+            metrics.virtual_memory.clone(),
         );
 
         metrics
@@ -51,9 +51,8 @@ impl Metrics {
 
         // If the process exists, update the metrics
         if let Some(process) = self.system.process(pid) {
-            self.process_rss_bytes.set(process.memory() as i64);
-            self.process_virtual_memory_bytes
-                .set(process.virtual_memory() as i64);
+            self.rss.set(process.memory() as i64);
+            self.virtual_memory.set(process.virtual_memory() as i64);
         }
     }
 }
@@ -71,11 +70,11 @@ mod tests {
         metrics.update();
 
         // Check that RSS is reasonable (> 1MB for a running process)
-        let rss = metrics.process_rss_bytes.get();
+        let rss = metrics.rss.get();
         assert!(rss > 1_000_000, "RSS should be > 1MB, got: {rss}");
 
         // Check that virtual memory is >= RSS
-        let virt = metrics.process_virtual_memory_bytes.get();
+        let virt = metrics.virtual_memory.get();
         assert!(virt >= rss, "Virtual memory should be >= RSS");
     }
 }
