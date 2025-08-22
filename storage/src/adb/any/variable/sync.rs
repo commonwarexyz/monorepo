@@ -10,7 +10,7 @@ use crate::{
     index::Index,
     journal::{
         fixed,
-        variable::{Config as VConfig, Journal as VJournal},
+        variable::{Config as VConfig, Journal as VJournal, ITEM_ALIGNMENT},
     },
     metadata::Metadata,
     mmr::{hasher::Standard, iterator::leaf_num_to_pos},
@@ -471,17 +471,13 @@ async fn compute_offset<E: Storage + Metrics, V: Codec>(
     compressed: bool,
     items_count: u32,
 ) -> Result<u64, crate::journal::Error> {
-    use crate::journal::variable::{Journal, ITEM_ALIGNMENT};
-
     if items_count == 0 {
         return Ok(0);
     }
 
     let mut current_offset = 0u32;
-
-    // Read through items one by one to find where each one ends
     for _ in 0..items_count {
-        match Journal::<E, V>::read(compressed, codec_config, blob, current_offset).await {
+        match VJournal::<E, V>::read(compressed, codec_config, blob, current_offset).await {
             Ok((next_slot, _item_len, _item)) => {
                 current_offset = next_slot;
             }
@@ -504,14 +500,11 @@ async fn count_items_in_section<E: Storage + Metrics, V: Codec>(
     codec_config: &V::Cfg,
     compressed: bool,
 ) -> Result<u32, crate::journal::Error> {
-    use crate::journal::variable::Journal;
-
     let mut current_offset = 0u32;
     let mut item_count = 0u32;
 
-    // Read through items one by one to count them
     loop {
-        match Journal::<E, V>::read(compressed, codec_config, blob, current_offset).await {
+        match VJournal::<E, V>::read(compressed, codec_config, blob, current_offset).await {
             Ok((next_slot, _item_len, _item)) => {
                 current_offset = next_slot;
                 item_count += 1;
