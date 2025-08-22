@@ -21,6 +21,7 @@ use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry},
 };
+use sysinfo::{ProcessRefreshKind, System};
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
     env,
@@ -41,6 +42,7 @@ const IOURING_NETWORK_FORCE_POLL: Option<Duration> = Some(Duration::from_millis(
 struct Metrics {
     tasks_spawned: Family<Label, Counter>,
     tasks_running: Family<Label, Gauge>,
+    process_rss_bytes: Gauge,
 }
 
 impl Metrics {
@@ -48,6 +50,7 @@ impl Metrics {
         let metrics = Self {
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
+            process_rss_bytes: Gauge::default(),
         };
         registry.register(
             "tasks_spawned",
@@ -59,7 +62,28 @@ impl Metrics {
             "Number of tasks currently running",
             metrics.tasks_running.clone(),
         );
+        registry.register(
+            "process_rss_bytes",
+            "Resident set size of the current process in bytes",
+            metrics.process_rss_bytes.clone(),
+        );
         metrics
+    }
+
+    pub fn update_rss(&self) {
+        let pid = sysinfo::Pid::from(std::process::id() as usize);
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            false,
+            ProcessRefreshKind::nothing().with_memory()
+        );
+        
+        if let Some(process) = system.process(pid) {
+            // memory() returns RSS in KB, convert to bytes
+            let rss_bytes = process.memory() * 1024;
+            self.process_rss_bytes.set(rss_bytes as i64);
+        }
     }
 }
 
@@ -311,6 +335,21 @@ impl crate::Runner for Runner {
             runtime,
             shutdown: Mutex::new(Stopper::default()),
         });
+
+        // Update RSS metric immediately
+        executor.metrics.update_rss();
+
+        // Spawn RSS metric updater
+        {
+            let metrics = executor.metrics.clone();
+            executor.runtime.spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(10));
+                loop {
+                    interval.tick().await;
+                    metrics.update_rss();
+                }
+            });
+        }
 
         // Get metrics
         let label = Label::root();
