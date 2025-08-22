@@ -338,18 +338,23 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             receive_complete_at =
                 receive_complete_at.max(link.last_arrival_at + Duration::from_micros(1));
 
-            // Update the link's last arrival time
-            link.last_arrival_at = receive_complete_at;
+            // Determine if message should be delivered
+            let should_deliver = self.context.gen_bool(link.success_rate);
 
-            // Update availability times
+            // Always update sender's egress (sender uses bandwidth regardless of delivery)
             self.peers.get_mut(&origin).unwrap().egress_available_at = send_complete_at;
 
-            // Only reserve receiver if tx actually consumes time
-            if !tx_duration.is_zero() {
-                self.peers.get_mut(&recipient).unwrap().ingress_available_at = receive_complete_at;
+            // Only update receiver's ingress and link arrival time if message will be delivered
+            if should_deliver {
+                link.last_arrival_at = receive_complete_at;
+
+                // Only reserve receiver if tx actually consumes time
+                if !tx_duration.is_zero() {
+                    self.peers.get_mut(&recipient).unwrap().ingress_available_at =
+                        receive_complete_at;
+                }
             }
 
-            let should_deliver = self.context.gen_bool(link.success_rate);
             trace!(
                 ?origin,
                 ?recipient,
@@ -373,9 +378,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     // Mark as sent once transmission completes
                     acquired_sender.send(()).await.unwrap();
 
-                    // Wait for message to arrive at receiver
-                    context.sleep_until(receive_complete_at).await;
-
                     // Drop message if success rate is too low
                     if !should_deliver {
                         trace!(
@@ -385,6 +387,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                         );
                         return;
                     }
+
+                    // Wait for message to arrive at receiver
+                    context.sleep_until(receive_complete_at).await;
 
                     // Send message
                     if let Err(err) = link.send(channel, message).await {
