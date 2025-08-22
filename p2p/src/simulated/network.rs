@@ -346,6 +346,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 ?origin,
                 ?recipient,
                 latency_ms = latency.as_millis(),
+                tx_duration_ms = tx_duration.as_millis(),
                 "sending message",
             );
 
