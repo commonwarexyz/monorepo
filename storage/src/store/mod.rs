@@ -79,7 +79,8 @@
 //!     assert_eq!(fetched_value.unwrap(), v);
 //!
 //!     // Commit the operation to make it persistent
-//!     store.commit().await.unwrap();
+//!     let metadata = Some(Digest::random(&mut ctx));
+//!     store.commit(metadata).await.unwrap();
 //!
 //!     // Delete the key's value
 //!     store.delete(k).await.unwrap();
@@ -89,7 +90,7 @@
 //!     assert!(fetched_value.is_none());
 //!
 //!     // Commit the operation to make it persistent
-//!     store.commit().await.unwrap();
+//!     store.commit(None).await.unwrap();
 //!
 //!     // Destroy the store
 //!     store.destroy().await.unwrap();
@@ -307,13 +308,31 @@ where
     }
 
     /// Commits all uncommitted operations to the store, making them persistent and recoverable.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        self.raise_inactivity_floor(self.uncommitted_ops + 1)
+    /// Caller can associate an arbitrary `metadata` value with the commit.
+    pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
+        self.raise_inactivity_floor(metadata, self.uncommitted_ops + 1)
             .await?;
         self.uncommitted_ops = 0;
 
         self.sync().await?;
         self.prune_inactive().await
+    }
+
+    /// Get the metadata associated with the last commit, or None if no commit has been made or
+    /// there is no metadata associated with the last commit.
+    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
+        let mut last_commit = self.op_count() - self.uncommitted_ops;
+        if last_commit == 0 {
+            return Ok(None);
+        }
+        last_commit -= 1;
+        let section = last_commit / self.log_items_per_section;
+        let offset = self.locations.read(last_commit).await?.into();
+        let Some(Operation::CommitFloor(metadata, _)) = self.log.get(section, offset).await? else {
+            unreachable!("no commit operation at location of last commit {last_commit}");
+        };
+
+        Ok(metadata)
     }
 
     /// Closes the store. Any uncommitted operations will be lost if they have not been committed
@@ -444,7 +463,7 @@ where
                                     uncommitted_ops.insert(key, (None, Some(loc)));
                                 }
                             }
-                            Operation::CommitFloor(loc) => {
+                            Operation::CommitFloor(_, loc) => {
                                 self.inactivity_floor_loc = loc;
 
                                 // Apply all uncommitted operations.
@@ -642,7 +661,11 @@ where
     /// operation to the tip and then advances over it.
     ///
     /// This method does not change the state of the db's snapshot.
-    async fn raise_inactivity_floor(&mut self, max_steps: u64) -> Result<(), Error> {
+    async fn raise_inactivity_floor(
+        &mut self,
+        metadata: Option<V>,
+        max_steps: u64,
+    ) -> Result<(), Error> {
         for _ in 0..max_steps {
             if self.inactivity_floor_loc == self.log_size {
                 break;
@@ -653,7 +676,7 @@ where
             self.inactivity_floor_loc += 1;
         }
 
-        self.apply_op(Operation::CommitFloor(self.inactivity_floor_loc))
+        self.apply_op(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
             .await
             .map(|_| ())
     }
@@ -741,14 +764,14 @@ mod test {
             assert_eq!(db.op_count(), 0);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 1);
             assert!(matches!(db.prune_inactive().await, Ok(())));
             let mut db = create_test_store(context.clone()).await;
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
             for _ in 1..100 {
-                db.commit().await.unwrap();
+                db.commit(None).await.unwrap();
                 assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
             }
 
@@ -796,6 +819,7 @@ mod test {
             assert_eq!(store.log_size, 0);
             assert_eq!(store.uncommitted_ops, 0);
             assert_eq!(store.inactivity_floor_loc, 0);
+            assert_eq!(store.get_metadata().await.unwrap(), None);
 
             // Insert a key-value pair
             store.update(key, value.clone()).await.unwrap();
@@ -805,7 +829,9 @@ mod test {
             assert_eq!(store.inactivity_floor_loc, 0);
 
             // Persist the changes
-            store.commit().await.unwrap();
+            let metadata = Some(vec![99, 100]);
+            store.commit(metadata.clone()).await.unwrap();
+            assert_eq!(store.get_metadata().await.unwrap(), metadata);
 
             // Even though the store was pruned, the inactivity floor was raised by 2, and
             // the old operations remain in the same blob as an active operation, so they're
@@ -836,7 +862,11 @@ mod test {
             assert_eq!(store.uncommitted_ops, 2);
             assert_eq!(store.inactivity_floor_loc, 2);
 
-            store.commit().await.unwrap();
+            // Make sure we can still get metadata.
+            assert_eq!(store.get_metadata().await.unwrap(), metadata);
+
+            store.commit(None).await.unwrap();
+            assert_eq!(store.get_metadata().await.unwrap(), None);
 
             assert_eq!(store.log_size, 9);
             assert_eq!(store.uncommitted_ops, 0);
@@ -870,7 +900,7 @@ mod test {
             let iter = store.snapshot.get(&k);
             assert_eq!(iter.count(), 1);
 
-            store.commit().await.unwrap();
+            store.commit(None).await.unwrap();
             store.close().await.unwrap();
 
             // Re-open the store to ensure it replays the log correctly.
@@ -912,7 +942,7 @@ mod test {
             assert_eq!(store.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(store.get(&k2).await.unwrap().unwrap(), v2);
 
-            store.commit().await.unwrap();
+            store.commit(None).await.unwrap();
             store.close().await.unwrap();
 
             // Re-open the store to ensure it builds the snapshot for the conflicting
@@ -950,7 +980,7 @@ mod test {
             assert!(fetched_value.is_none());
 
             // Commit the changes
-            store.commit().await.unwrap();
+            store.commit(None).await.unwrap();
 
             // Re-open the store and ensure the key is still deleted
             let mut store = create_test_store(ctx.with_label("store")).await;
@@ -963,7 +993,7 @@ mod test {
             assert_eq!(fetched_value.unwrap(), v);
 
             // Commit the changes
-            store.commit().await.unwrap();
+            store.commit(None).await.unwrap();
 
             // Re-open the store and ensure the snapshot restores the key, after processing
             // the delete and the subsequent set.
@@ -1003,7 +1033,7 @@ mod test {
             store.update(k_a, v_a.clone()).await.unwrap();
             store.update(k_b, v_b.clone()).await.unwrap();
 
-            store.commit().await.unwrap();
+            store.commit(None).await.unwrap();
             assert_eq!(store.op_count(), 6);
             assert_eq!(store.uncommitted_ops, 0);
             assert_eq!(store.inactivity_floor_loc, 3);
@@ -1012,7 +1042,7 @@ mod test {
             store.update(k_b, v_a.clone()).await.unwrap();
             store.update(k_a, v_c.clone()).await.unwrap();
 
-            store.commit().await.unwrap();
+            store.commit(None).await.unwrap();
             assert_eq!(store.op_count(), 9);
             assert_eq!(store.uncommitted_ops, 0);
             assert_eq!(store.inactivity_floor_loc, 6);
@@ -1048,7 +1078,7 @@ mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let op_count = db.op_count();
 
             // Update every 3rd key
@@ -1075,7 +1105,7 @@ mod test {
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let op_count = db.op_count();
             assert_eq!(op_count, 2561);
             assert_eq!(db.snapshot.items(), 1000);
@@ -1107,7 +1137,7 @@ mod test {
                 let k = hash(&i.to_be_bytes());
                 db.delete(k).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
 
             assert_eq!(db.op_count(), 2787);
             assert_eq!(db.inactivity_floor_loc, 1480);

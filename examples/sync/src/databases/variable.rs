@@ -64,12 +64,12 @@ where
             operations.push(Operation::Update(key, value));
 
             if (i + 1) % 10 == 0 {
-                operations.push(Operation::Commit());
+                operations.push(Operation::Commit(None));
             }
         }
 
         // Always end with a commit
-        operations.push(Operation::Commit());
+        operations.push(Operation::Commit(None));
         operations
     }
 
@@ -88,11 +88,11 @@ where
                 Operation::Set(key, value) => {
                     database.update(key, value).await?;
                 }
-                Operation::Commit() => {
-                    database.commit().await?;
+                Operation::Commit(metadata) => {
+                    database.commit(metadata).await?;
                 }
-                Operation::CommitFloor(_) => {
-                    database.commit().await?;
+                Operation::CommitFloor(metadata, _) => {
+                    database.commit(metadata).await?;
                 }
             }
         }
@@ -100,7 +100,7 @@ where
     }
 
     async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        self.commit().await
+        self.commit(None).await
     }
 
     fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {

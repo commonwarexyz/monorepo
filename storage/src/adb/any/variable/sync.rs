@@ -1590,7 +1590,7 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let updates = create_updates(100);
             apply_updates(&mut target_db, &updates).await;
-            target_db.commit().await.unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Capture target state
             let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
@@ -1665,12 +1665,12 @@ mod tests {
                 Variable::Delete(key) => {
                     db.delete(*key).await.unwrap();
                 }
-                Variable::Commit() => {
-                    db.commit().await.unwrap();
+                Variable::Commit(metadata) => {
+                    db.commit(*metadata).await.unwrap();
                 }
-                Variable::CommitFloor(_floor) => {
+                Variable::CommitFloor(metadata, _floor) => {
                     // variable::Any doesn't have commit_floor, just use regular commit
-                    db.commit().await.unwrap();
+                    db.commit(*metadata).await.unwrap();
                 }
             }
         }
@@ -1691,7 +1691,7 @@ mod tests {
             let target_db_ops = create_test_ops(target_db_ops);
 
             apply_ops(&mut target_db, &target_db_ops).await;
-            target_db.commit().await.unwrap();
+            target_db.commit(None).await.unwrap();
             let target_op_count = target_db.op_count();
             let target_inactivity_floor = target_db.inactivity_floor_loc();
 
@@ -1725,7 +1725,8 @@ mod tests {
                             }
                         }
                     }
-                    Variable::CommitFloor(_) | Variable::Commit() => {}
+                    Variable::CommitFloor(_metadata, _floor) => {}
+                    Variable::Commit(_metadata) => {}
                 }
             }
 
@@ -1797,8 +1798,8 @@ mod tests {
             apply_ops(&mut got_db, &new_ops).await;
             apply_ops(&mut *target_db.write().await, &new_ops).await;
 
-            got_db.commit().await.unwrap();
-            target_db.write().await.commit().await.unwrap();
+            got_db.commit(None).await.unwrap();
+            target_db.write().await.commit(None).await.unwrap();
 
             // Verify that the databases match
             for (key, value) in &new_kvs {
@@ -1901,7 +1902,7 @@ mod tests {
             let target_ops = create_test_ops(TARGET_DB_OPS);
             // Apply all but the last operation
             apply_ops(&mut target_db, &target_ops[0..TARGET_DB_OPS - 1]).await;
-            target_db.commit().await.unwrap();
+            target_db.commit(None).await.unwrap();
 
             let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
             let root = target_db.root(&mut hasher);
@@ -1911,7 +1912,7 @@ mod tests {
             // Add another operation after the sync range
             let final_op = &target_ops[TARGET_DB_OPS - 1];
             apply_ops(&mut target_db, from_ref(final_op)).await;
-            target_db.commit().await.unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Sync to the "old" range (not including the final op)
             let config = sync::engine::Config {
@@ -1973,8 +1974,8 @@ mod tests {
             // Apply the same operations to both databases
             apply_ops(&mut target_db, &original_ops).await;
             apply_ops(&mut sync_db, &original_ops).await;
-            target_db.commit().await.unwrap();
-            sync_db.commit().await.unwrap();
+            target_db.commit(None).await.unwrap();
+            sync_db.commit(None).await.unwrap();
 
             // Close sync_db
             sync_db.close().await.unwrap();
@@ -1982,7 +1983,7 @@ mod tests {
             // Add one more operation and commit the target database
             let last_op = create_test_ops(1);
             apply_ops(&mut target_db, &last_op).await;
-            target_db.commit().await.unwrap();
+            target_db.commit(None).await.unwrap();
             let mut hasher = crate::mmr::hasher::Standard::<Sha256>::new();
             let root = target_db.root(&mut hasher);
             let lower_bound_ops = target_db.inactivity_floor_loc;
@@ -2045,7 +2046,7 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(NUM_OPS);
             apply_ops(&mut target_db, &target_ops).await;
-            target_db.commit().await.unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Capture target state
             let target_db_op_count = target_db.op_count();
@@ -2059,7 +2060,7 @@ mod tests {
                 .await
                 .unwrap();
             apply_ops(&mut sync_db, &target_ops).await;
-            sync_db.commit().await.unwrap();
+            sync_db.commit(None).await.unwrap();
 
             // Verify they have the same state before sync
             assert_eq!(sync_db.op_count(), target_db_op_count);
@@ -2128,7 +2129,7 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(50);
             apply_ops(&mut target_db, &target_ops).await;
-            target_db.commit().await.unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Capture initial target state
             let mut hasher = test_hasher();
@@ -2189,7 +2190,7 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(50);
             apply_ops(&mut target_db, &target_ops).await;
-            target_db.commit().await.unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Capture initial target state
             let mut hasher = test_hasher();
@@ -2250,7 +2251,7 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(100);
             apply_ops(&mut target_db, &target_ops).await;
-            target_db.commit().await.unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Capture initial target state
             let mut hasher = test_hasher();
@@ -2261,7 +2262,7 @@ mod tests {
             // Apply more operations to the target database
             let more_ops = create_test_ops(1);
             apply_ops(&mut target_db, &more_ops).await;
-            target_db.commit().await.unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Capture final target state
             let mut hasher = test_hasher();
@@ -2328,7 +2329,7 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(50);
             apply_ops(&mut target_db, &target_ops).await;
-            target_db.commit().await.unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Capture initial target state
             let mut hasher = test_hasher();
@@ -2386,7 +2387,7 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(10);
             apply_ops(&mut target_db, &target_ops).await;
-            target_db.commit().await.unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Capture target state
             let mut hasher = test_hasher();
@@ -2464,7 +2465,7 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(initial_ops);
             apply_ops(&mut target_db, &target_ops).await;
-            target_db.commit().await.unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Capture initial target state
             let mut hasher = test_hasher();
@@ -2512,7 +2513,7 @@ mod tests {
             let new_root = {
                 let mut db = target_db.write().await;
                 apply_ops(&mut db, &additional_ops).await;
-                db.commit().await.unwrap();
+                db.commit(None).await.unwrap();
 
                 // Capture new target state
                 let mut hasher = test_hasher();
@@ -2592,7 +2593,7 @@ mod tests {
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(10);
             apply_ops(&mut target_db, &target_ops).await;
-            target_db.commit().await.unwrap();
+            target_db.commit(None).await.unwrap();
 
             // Capture target state
             let mut hasher = test_hasher();
