@@ -132,7 +132,7 @@ _If replica `r` is the leader, propose._
 
 1. On entering view `v`, if `leader(v) == r`:
    1. Let `(c', v') = select_parent(r, v)`.
-   1. If `c'` == `⊥`, return.
+   1. If `c' == ⊥`, return.
    1. Let `c = build(c')`.
    1. Set `r.notarized = c`.
    1. Broadcast `propose(r, c, v, (c', v'))`.
@@ -165,10 +165,11 @@ _After `M` messages, create and broadcast a `notarization(c, v)` certificate. Af
 
 1. On receiving `notarize(c, v)` from replica `r'`:
    1. If `!record_message(r, r', notarize(c, v))`, return.
-1. On observing `≥ M` `notarize(c, v)` messages:
+1. On observing `≥ M` `notarize(c, v)` messages for some `c` with `r.view == v`:
    1. Assemble `notarization(c, v)`.
    1. Add `notarization(c, v)` to `r.proofs[v]`.
    1. Broadcast `notarization(c, v)`.
+   1. If `r.notarized == ⊥` and `r.nullified == false`, broadcast `notarize(c, v)`.
    1. Call `enter_view(r, v + 1)`.
 1. On observing `≥ L` `notarize(c, v)` messages:
    1. Finalize `c` and all of its ancestors.
@@ -180,7 +181,7 @@ _After `M` messages, create and broadcast a `nullification(v)` certificate._
 
 1. On receiving `nullify(v)` from replica `r'`:
    1. If `!record_message(r, r', nullify(v))`, return.
-1. On observing `≥ M` `nullify(v)` messages (or a single `nullification(v)` message):
+1. On observing `≥ M` `nullify(v)` messages (or a single `nullification(v)` message) with `r.view == v`:
    1. Assemble `nullification(v)`.
    1. Add `nullification(v)` to `r.proofs[v]`.
    1. Broadcast `nullification(v)`.
