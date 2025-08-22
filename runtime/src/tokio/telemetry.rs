@@ -11,7 +11,9 @@ use axum::{
     routing::get,
     serve, Extension, Router,
 };
-use std::net::SocketAddr;
+use prometheus_client::metrics::gauge::Gauge;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+use sysinfo::{ProcessRefreshKind, System};
 use tokio::net::TcpListener;
 use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
@@ -27,6 +29,39 @@ pub struct Logging {
     /// If you are running things locally, it is recommended to use
     /// `json = false` to get a human-readable format.
     pub json: bool,
+}
+
+/// Spawn a background task that periodically updates the RSS metric.
+pub fn spawn_rss_tracker(context: Context, rss_gauge: Arc<Gauge>) {
+    // Update RSS immediately
+    update_rss(&rss_gauge);
+    
+    // Spawn background updater
+    context
+        .with_label("rss_tracker")
+        .spawn(move |_context| async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                update_rss(&rss_gauge);
+            }
+        });
+}
+
+fn update_rss(gauge: &Gauge) {
+    let pid = sysinfo::Pid::from(std::process::id() as usize);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        false,
+        ProcessRefreshKind::nothing().with_memory(),
+    );
+    
+    if let Some(process) = system.process(pid) {
+        // memory() returns RSS in KB, convert to bytes
+        let rss_bytes = process.memory() * 1024;
+        gauge.set(rss_bytes as i64);
+    }
 }
 
 /// Initialize telemetry with the given configuration.

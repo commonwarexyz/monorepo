@@ -21,7 +21,6 @@ use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry},
 };
-use sysinfo::{ProcessRefreshKind, System};
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
     env,
@@ -68,22 +67,6 @@ impl Metrics {
             metrics.process_rss_bytes.clone(),
         );
         metrics
-    }
-
-    pub fn update_rss(&self) {
-        let pid = sysinfo::Pid::from(std::process::id() as usize);
-        let mut system = System::new();
-        system.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::Some(&[pid]),
-            false,
-            ProcessRefreshKind::nothing().with_memory()
-        );
-        
-        if let Some(process) = system.process(pid) {
-            // memory() returns RSS in KB, convert to bytes
-            let rss_bytes = process.memory() * 1024;
-            self.process_rss_bytes.set(rss_bytes as i64);
-        }
     }
 }
 
@@ -336,21 +319,6 @@ impl crate::Runner for Runner {
             shutdown: Mutex::new(Stopper::default()),
         });
 
-        // Update RSS metric immediately
-        executor.metrics.update_rss();
-
-        // Spawn RSS metric updater
-        {
-            let metrics = executor.metrics.clone();
-            executor.runtime.spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(10));
-                loop {
-                    interval.tick().await;
-                    metrics.update_rss();
-                }
-            });
-        }
-
         // Get metrics
         let label = Label::root();
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
@@ -364,6 +332,10 @@ impl crate::Runner for Runner {
             executor: executor.clone(),
             network,
         };
+        
+        // Start RSS tracking
+        super::telemetry::spawn_rss_tracker(context.clone(), Arc::new(executor.metrics.process_rss_bytes.clone()));
+        
         let output = executor.runtime.block_on(f(context));
         gauge.dec();
 
