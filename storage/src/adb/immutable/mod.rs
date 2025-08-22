@@ -458,7 +458,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
     /// if loc precedes the oldest retained location. The location is otherwise assumed valid.
-    pub async fn keyless_get(&self, loc: u64) -> Result<Option<V>, Error> {
+    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
         assert!(loc < self.op_count());
         if loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(loc));

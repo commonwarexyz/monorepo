@@ -279,7 +279,7 @@ where
     /// Get the value of the operation with location `loc` in the db. Returns
     /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
-    pub async fn keyless_get(&self, loc: u64) -> Result<Option<V>, Error> {
+    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
         assert!(loc < self.log_size);
         let op = self.get_op(loc).await?;
 
@@ -293,7 +293,7 @@ where
     /// if the store is closed without committing.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let new_loc = self.log_size;
-        if let Some(old_loc) = self.get_loc(&key).await? {
+        if let Some(old_loc) = self.get_key_loc(&key).await? {
             Self::update_loc(&mut self.snapshot, &key, old_loc, new_loc);
         } else {
             self.snapshot.insert(&key, new_loc);
@@ -307,7 +307,7 @@ where
     /// Deletes the value associated with the given key in the store. If the key has no value,
     /// the operation is a no-op.
     pub async fn delete(&mut self, key: K) -> Result<(), Error> {
-        let Some(old_loc) = self.get_loc(&key).await? else {
+        let Some(old_loc) = self.get_key_loc(&key).await? else {
             // Key does not exist, so this is a no-op.
             return Ok(());
         };
@@ -458,7 +458,7 @@ where
 
                         match op {
                             Operation::Delete(key) => {
-                                let result = self.get_loc(&key).await?;
+                                let result = self.get_key_loc(&key).await?;
                                 if let Some(old_loc) = result {
                                     uncommitted_ops.insert(key, (Some(old_loc), None));
                                 } else {
@@ -466,7 +466,7 @@ where
                                 }
                             }
                             Operation::Update(key, _) => {
-                                let result = self.get_loc(&key).await?;
+                                let result = self.get_key_loc(&key).await?;
                                 if let Some(old_loc) = result {
                                     uncommitted_ops.insert(key, (Some(old_loc), Some(loc)));
                                 } else {
@@ -569,7 +569,7 @@ where
 
     /// Gets the location of the most recent [Operation::Update] for the key, or [None] if the key
     /// does not have a value.
-    async fn get_loc(&self, key: &K) -> Result<Option<u64>, Error> {
+    async fn get_key_loc(&self, key: &K) -> Result<Option<u64>, Error> {
         for loc in self.snapshot.get(key) {
             match self.get_op(*loc).await {
                 Ok(Operation::Update(k, _)) => {
