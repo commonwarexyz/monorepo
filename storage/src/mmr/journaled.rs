@@ -116,11 +116,14 @@ const NODE_PREFIX: u8 = 0;
 const PRUNE_TO_POS_PREFIX: u8 = 1;
 
 impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
-    /// Initialize a new journaled MMR from a set of pinned nodes.
+    /// Initialize a new journaled MMR from an MMR's size and set of pinned nodes.
     ///
     /// This creates a journaled MMR that appears to have `mmr_size` elements, all of which
-    /// are considered pruned away, leaving only the minimal set of `pinned_nodes` required
-    /// for proof generation. The next element added will be at position `mmr_size`.
+    /// are pruned, leaving only the minimal set of `pinned_nodes` required for proof generation.
+    /// The next element added will be at position `mmr_size`.
+    ///
+    /// The returned MMR is functionally equivalent to a journaled MMR that was created,
+    /// populated, and then pruned up to its size.
     ///
     /// # Arguments
     /// * `context` - Storage context
