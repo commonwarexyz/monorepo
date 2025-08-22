@@ -240,7 +240,7 @@ impl<E: Spawner, R: Receiver> Receiver for SubReceiver<E, R> {
 
 impl<E: Spawner, R: Receiver> Debug for SubReceiver<E, R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SubReceiver")
+        write!(f, "SubReceiver({})", self.subchannel)
     }
 }
 
