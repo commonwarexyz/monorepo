@@ -265,7 +265,7 @@ where
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         for &loc in self.snapshot.get(key) {
             let Operation::Update(k, v) = self.get_op(loc).await? else {
-                panic!("location ({loc}) does not reference update operation");
+                unreachable!("location ({loc}) does not reference update operation");
             };
 
             if &k == key {
@@ -576,8 +576,10 @@ where
                         return Ok(Some(*loc));
                     }
                 }
-                Err(Error::OperationPruned(_)) => panic!("invalid location in snapshot: loc={loc}"),
-                _ => panic!("non-update operation referenced by snapshot: loc={loc}"),
+                Err(Error::OperationPruned(_)) => {
+                    unreachable!("invalid location in snapshot: loc={loc}")
+                }
+                _ => unreachable!("non-update operation referenced by snapshot: loc={loc}"),
             }
         }
 
