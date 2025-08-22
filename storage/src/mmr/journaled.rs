@@ -129,7 +129,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
     /// * `context` - Storage context
     /// * `pinned_nodes` - Digest values in the order returned by `Proof::nodes_to_pin(mmr_size)`
     /// * `mmr_size` - The logical size of the MMR (all elements before this are considered pruned)
-    /// * `config` - Journaled MMR configuration
+    /// * `config` - Journaled MMR configuration. Any data in the given journal and metadata
+    ///   partitions will be overwritten.
     pub async fn init_from_pinned_nodes(
         context: E,
         pinned_nodes: Vec<H::Digest>,
