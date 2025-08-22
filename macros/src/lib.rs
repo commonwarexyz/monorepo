@@ -1,8 +1,8 @@
 //! Augment the development of primitives with procedural macros.
 
 #![doc(
-    html_logo_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/rustdoc_logo.png",
-    html_favicon_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/favicon.ico"
+    html_logo_url = "https://commonware.xyz/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
 use proc_macro::TokenStream;

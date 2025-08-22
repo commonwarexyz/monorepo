@@ -1,8 +1,8 @@
 //! Simulate mechanism performance under realistic network conditions.
 
 #![doc(
-    html_logo_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/rustdoc_logo.png",
-    html_favicon_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/favicon.ico"
+    html_logo_url = "https://commonware.xyz/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
 use commonware_cryptography::{

@@ -6,8 +6,8 @@
 //! expect breaking changes and occasional instability.
 
 #![doc(
-    html_logo_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/rustdoc_logo.png",
-    html_favicon_url = "https://raw.githubusercontent.com/commonwarexyz/monorepo/main/docs/favicon.ico"
+    html_logo_url = "https://commonware.xyz/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
 pub mod reed_solomon;
