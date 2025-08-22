@@ -338,7 +338,6 @@ impl crate::Runner for Runner {
             executor: executor.clone(),
             network,
         };
-
         let output = executor.runtime.block_on(f(context));
         gauge.dec();
 
