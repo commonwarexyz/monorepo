@@ -624,7 +624,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// made.
     pub async fn get_metadata(&self) -> Result<Option<(u64, Option<V>)>, Error> {
         let mut last_commit = self.op_count() - self.uncommitted_ops;
         if last_commit == 0 {
