@@ -280,6 +280,7 @@ where
     /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
     pub async fn keyless_get(&self, loc: u64) -> Result<Option<V>, Error> {
+        assert!(loc < self.log_size);
         let op = self.get_op(loc).await?;
 
         Ok(op.into_value())
@@ -590,6 +591,7 @@ where
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
     async fn get_op(&self, loc: u64) -> Result<Operation<K, V>, Error> {
+        assert!(loc < self.log_size);
         if loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(loc));
         }

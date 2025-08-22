@@ -370,6 +370,7 @@ impl<
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
     pub async fn keyless_get(&self, loc: u64) -> Result<Option<V>, Error> {
+        assert!(loc < self.op_count());
         if loc < self.inactivity_floor_loc {
             return Err(Error::OperationPruned(loc));
         }
