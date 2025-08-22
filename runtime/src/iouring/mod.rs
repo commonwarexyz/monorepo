@@ -70,6 +70,8 @@ use io_uring::{
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+pub mod probe;
+
 /// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
 /// Reserved ID for a CQE that indicates the event loop timed out
@@ -239,6 +241,9 @@ fn handle_cqe(
 /// This function will block until `receiver` is closed or an error occurs.
 /// It should be run in a separate task.
 pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::Receiver<Op>) {
+    // Initialize capability probing
+    probe::init();
+
     let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
     let mut next_work_id: u64 = 0;
     // Maps a work ID to the sender that we will send the result to
