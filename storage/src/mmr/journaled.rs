@@ -1470,12 +1470,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journaled_mmr_init_from_pinned_nodes_basic() {
+    fn test_journaled_mmr_init_from_pinned_nodes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
 
-            // First, create a regular MMR with some elements
+            // Create an in-memory MMR with some elements
             let mut original_mmr = Mmr::init(
                 context.clone(),
                 &mut hasher,
@@ -1491,35 +1491,31 @@ mod tests {
             .await
             .unwrap();
 
-            // Add some elements
-            for i in 0..10 {
+            // Add some elements and prune to the size of the MMR
+            for i in 0..1_000 {
                 original_mmr
                     .add(&mut hasher, &test_digest(i))
                     .await
                     .unwrap();
             }
             original_mmr.sync(&mut hasher).await.unwrap();
-
             let original_size = original_mmr.size();
-
-            // Prune everything and get the pinned nodes
             original_mmr
                 .prune_to_pos(&mut hasher, original_size)
                 .await
                 .unwrap();
 
-            // Get the journal hash
+            // Get the journal digest
             let mut hasher = Standard::<Sha256>::new();
-            let original_journal_hash = original_mmr.root(&mut hasher);
+            let original_journal_digest = original_mmr.root(&mut hasher);
 
+            // Get the pinned nodes
             let pinned_nodes_map = original_mmr.get_pinned_nodes();
-
-            // Extract pinned nodes in the correct order
             let pinned_nodes: Vec<_> = Proof::<Digest>::nodes_to_pin(original_size)
                 .map(|pos| pinned_nodes_map[&pos])
                 .collect();
 
-            // Now create a new MMR from pinned nodes
+            // Create a journaled MMR from the pinned nodes
             let new_mmr_config = Config {
                 journal_partition: "new_journal".into(),
                 metadata_partition: "new_metadata".into(),
@@ -1537,14 +1533,13 @@ mod tests {
             .await
             .unwrap();
 
-            // Verify basic properties
+            // Verify the journaled MMR has the same properties as the original MMR
             assert_eq!(new_mmr.size(), original_size);
             assert_eq!(new_mmr.pruned_to_pos(), original_size);
             assert_eq!(new_mmr.oldest_retained_pos(), None);
-
             // Verify the roots match
-            let new_journal_hash = new_mmr.root(&mut hasher);
-            assert_eq!(new_journal_hash, original_journal_hash);
+            let new_journal_digest = new_mmr.root(&mut hasher);
+            assert_eq!(new_journal_digest, original_journal_digest);
 
             // Insert a new element into the new journaled MMR and the original MMR
             let new_element = test_digest(10);
@@ -1553,7 +1548,7 @@ mod tests {
             assert_eq!(original_mmr_pos, original_size);
 
             let new_mmr_pos = new_mmr.add(&mut hasher, &new_element).await.unwrap();
-            assert_eq!(new_mmr_pos, original_size);
+            assert_eq!(new_mmr_pos, original_size); // New element is added at the end
 
             // Verify the roots still match
             let original_mmr_root = original_mmr.root(&mut hasher);
@@ -1575,126 +1570,14 @@ mod tests {
             assert_eq!(new_mmr.pruned_to_pos(), original_size);
             assert_eq!(new_mmr.oldest_retained_pos(), Some(original_size)); // Element we just added is the oldest retained
 
+            // Proofs generated from the journaled MMR should be the same as the proofs generated from the original MMR
+            let proof = new_mmr.proof(original_size).await.unwrap();
+            let original_proof = original_mmr.proof(original_size).await.unwrap();
+            assert_eq!(proof.digests, original_proof.digests);
+            assert_eq!(proof.size, original_proof.size);
+
             original_mmr.destroy().await.unwrap();
             new_mmr.destroy().await.unwrap();
-        });
-    }
-
-    // Test that a journaled MMR initialized from pinned nodes is equivalent to a journaled MMR
-    // that has the same operations applied to it and is then pruned to the same size.
-    #[test_traced]
-    fn test_journaled_mmr_init_from_pinned_nodes_equivalence() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
-
-            // === REFERENCE: Create normal journaled MMR, do operations, then prune ===
-            let mut reference_mmr = Mmr::init(
-                context.clone(),
-                &mut hasher,
-                Config {
-                    journal_partition: "reference_journal".into(),
-                    metadata_partition: "reference_metadata".into(),
-                    items_per_blob: NZU64!(7),
-                    write_buffer: NZUsize!(1024),
-                    thread_pool: None,
-                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-                },
-            )
-            .await
-            .unwrap();
-
-            // Add initial elements
-            let initial_elements = [0, 1, 2, 3, 4];
-            for &i in &initial_elements {
-                reference_mmr
-                    .add(&mut hasher, &test_digest(i))
-                    .await
-                    .unwrap();
-            }
-            reference_mmr.sync(&mut hasher).await.unwrap();
-            let initial_size = reference_mmr.size();
-            let initial_root = reference_mmr.root(&mut hasher);
-
-            // Prune to current size
-            reference_mmr
-                .prune_to_pos(&mut hasher, initial_size)
-                .await
-                .unwrap();
-
-            // Add more elements after pruning
-            let additional_elements = [10, 11, 12];
-            for &i in &additional_elements {
-                reference_mmr
-                    .add(&mut hasher, &test_digest(i))
-                    .await
-                    .unwrap();
-            }
-            reference_mmr.sync(&mut hasher).await.unwrap();
-            let final_reference_size = reference_mmr.size();
-            let final_reference_root = reference_mmr.root(&mut hasher);
-
-            // === TEST: Create in-memory MMR, do same operations, then init_from_pinned_nodes ===
-
-            // Step 1: Create in-memory MMR with initial operations
-            let mut mem_mmr = MemMmr::new();
-            for &i in &initial_elements {
-                mem_mmr.add(&mut hasher, &test_digest(i));
-            }
-            let mem_size = mem_mmr.size();
-            let mem_root = mem_mmr.root(&mut hasher);
-
-            // Verify in-memory MMR matches initial state
-            assert_eq!(mem_size, initial_size);
-            assert_eq!(mem_root, initial_root);
-
-            // Step 2: Extract pinned nodes from in-memory MMR
-            let pinned_nodes = mem_mmr.node_digests_to_pin(mem_size);
-
-            // Step 3: Create journaled MMR from pinned nodes
-            let mut test_mmr = Mmr::<_, Sha256>::init_from_pinned_nodes(
-                context.clone(),
-                pinned_nodes,
-                mem_size,
-                Config {
-                    journal_partition: "test_journal".into(),
-                    metadata_partition: "test_metadata".into(),
-                    items_per_blob: NZU64!(7),
-                    write_buffer: NZUsize!(1024),
-                    thread_pool: None,
-                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-                },
-            )
-            .await
-            .unwrap();
-
-            // Step 4: Add same additional elements to test MMR
-            for &i in &additional_elements {
-                test_mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
-            }
-            test_mmr.sync(&mut hasher).await.unwrap();
-            let final_test_size = test_mmr.size();
-            let final_test_root = test_mmr.root(&mut hasher);
-
-            // === Verify functional equivalence ===
-            assert_eq!(final_test_size, final_reference_size);
-            assert_eq!(final_test_root, final_reference_root);
-            assert_eq!(test_mmr.pruned_to_pos(), reference_mmr.pruned_to_pos());
-            assert_eq!(
-                test_mmr.oldest_retained_pos(),
-                reference_mmr.oldest_retained_pos(),
-            );
-
-            // Verify both MMRs can generate identical proofs for new elements
-            let new_element_pos = initial_size; // First element added after pruning
-            let reference_proof = reference_mmr.proof(new_element_pos).await.unwrap();
-            let test_proof = test_mmr.proof(new_element_pos).await.unwrap();
-            assert_eq!(test_proof.digests, reference_proof.digests);
-            assert_eq!(test_proof.size, reference_proof.size);
-
-            // Clean up
-            reference_mmr.destroy().await.unwrap();
-            test_mmr.destroy().await.unwrap();
         });
     }
 
@@ -1759,37 +1642,6 @@ mod tests {
             assert_eq!(single_journaled_mmr.root(&mut hasher), single_root);
 
             single_journaled_mmr.destroy().await.unwrap();
-
-            // === TEST 3: Large MMR (100 elements) ===
-            let mut large_mem_mmr = MemMmr::new();
-            for i in 0..1_000 {
-                large_mem_mmr.add(&mut hasher, &test_digest(i));
-            }
-            let large_size = large_mem_mmr.size();
-            let large_root = large_mem_mmr.root(&mut hasher);
-            let large_pinned = large_mem_mmr.node_digests_to_pin(large_size);
-
-            let large_journaled_mmr = Mmr::<_, Sha256>::init_from_pinned_nodes(
-                context.clone(),
-                large_pinned,
-                large_size,
-                Config {
-                    journal_partition: "large_journal".into(),
-                    metadata_partition: "large_metadata".into(),
-                    items_per_blob: NZU64!(7),
-                    write_buffer: NZUsize!(1024),
-                    thread_pool: None,
-                    buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-                },
-            )
-            .await
-            .unwrap();
-
-            assert_eq!(large_journaled_mmr.size(), large_size);
-            assert_eq!(large_journaled_mmr.root(&mut hasher), large_root);
-            assert_eq!(large_journaled_mmr.pruned_to_pos(), large_size);
-
-            large_journaled_mmr.destroy().await.unwrap();
         });
     }
 
