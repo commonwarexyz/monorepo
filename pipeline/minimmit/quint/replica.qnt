@@ -75,7 +75,16 @@ module replica {
         certificates.exists(v => v.kind == NotarizationKind and v.view == view)
     }
 
-    pure def finalized_cert_exist(view: ViewNumber, certificates: Set[Certificate]): bool = or {
+    // Does a set of certificates have a notarization certificate for a view?
+    pure def is_view_notarized_votes(view: ViewNumber, votes: Set[Vote], block_hash: BlockHash): bool = or {
+        view == GENESIS_VIEW,
+        select_votes(view, NotarizeKind, votes)
+            .filter(v => v.block_hash == block_hash)
+            .map(v => v.sig)
+            .size() >= M
+    }
+
+    pure def finalized_cert_exists(view: ViewNumber, certificates: Set[Certificate]): bool = or {
         view == GENESIS_VIEW,
         certificates.exists(v => v.kind == FinalizationKind and v.view == view)
     }
@@ -145,7 +154,7 @@ module replica {
                 block_hash: block_hash,
                 signatures: similar_votes.map(v => v.sig),
                 ghost_sender: id,
-                kind: NotarizationKind
+                kind: if (votes_count >= L) FinalizationKind else NotarizationKind
             })
     }
 
@@ -437,7 +446,7 @@ module replica {
 
             all {
                 store_vote' = store_vote.set(id, new_store),
-                // try to create a notarization certificate
+                // try to create a notarization certificate (M- or L-notarization)
                 val maybe_cert = create_notarization(id, view, block_hash, new_store)
                 val should_send_notarize_vote = self.view == view and is_some(maybe_cert) and not(self.has_notarized()) and not(self.nullified)
                 val new_self = match maybe_cert {
@@ -445,24 +454,27 @@ module replica {
                     | None => self
                 }
 
+                val certificates = store_certificate.get(id)
+
                 val was_finalized = self.last_finalized >= view
                 val now_finalized = is_view_finalized(view, new_store, block_hash)
-                val certificates = store_certificate.get(id)
+                val was_notarized = is_view_notarized(view, certificates)
+                val now_notarized = is_view_notarized_votes(view, new_store, block_hash)
                 all {
-                    val is_new_notarization = or {
-                        not(is_view_notarized(view, certificates)),
+                    val is_new_certificate = or {
+                        not(was_notarized) and now_notarized,
                         not(was_finalized) and now_finalized,
                     }
                     match maybe_cert {
                         | Some(cert) => all {
-                            if (is_new_notarization) all {
+                            if (is_new_certificate) all {
                                 store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
                                 sent_certificate' = sent_certificate.union(Set(cert)),
                             } else all {
                                 store_certificate' = store_certificate,
                                 sent_certificate' = sent_certificate,
                             },
-                            if (should_send_notarize_vote) all {
+                            if (should_send_notarize_vote and cert.kind == NotarizationKind) all {
                                 sent_vote' = sent_vote.union(Set(notarize(view, id, block_hash))),
                             } else all {
                                 sent_vote' = sent_vote,
@@ -483,8 +495,6 @@ module replica {
                             ghost_sent_votes: new_self.ghost_sent_votes.setBy(view, old => old.append(block_hash))
                         }
                     else new_self
-    
-
 
                     if (not(was_finalized) and now_finalized)
                         all {
@@ -556,14 +566,14 @@ module replica {
         val certificates = store_certificate.get(id)
 
         all {
+            not(cert.in(store_certificate.get(id))),
+
             or {
-                cert.kind == FinalizationKind and cert.signatures.size() >= L and not(finalized_cert_exist(cert.view, certificates)),
+                cert.kind == FinalizationKind and cert.signatures.size() >= L and not(finalized_cert_exists(cert.view, certificates)),
                 cert.kind == NotarizationKind and cert.signatures.size() >= M and not(is_view_notarized(cert.view, certificates)),
                 cert.kind == NullificationKind and cert.signatures.size() >= M and not(is_view_nullified(cert.view, certificates))
             },
             
-            // Store the certificate if we have not already had it.
-            not(cert.in(store_certificate.get(id))),
             _process_certificate(id, certificates, cert),
 
             // unchanged
