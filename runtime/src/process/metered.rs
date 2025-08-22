@@ -9,6 +9,8 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Process metrics collector.
 pub struct Metrics {
+    /// Process ID.
+    pub pid: u32,
     /// Resident set size in bytes.
     pub rss: Gauge,
     /// Virtual memory size in bytes.
@@ -22,6 +24,7 @@ impl Metrics {
     /// Initialize process metrics and register them with the given registry.
     pub fn init(registry: &mut Registry) -> Self {
         let metrics = Self {
+            pid: std::process::id(),
             rss: Gauge::default(),
             virtual_memory: Gauge::default(),
 
@@ -46,7 +49,7 @@ impl Metrics {
     /// Update all process metrics.
     fn update(&mut self) {
         // Refresh process information
-        let pid = sysinfo::Pid::from(std::process::id() as usize);
+        let pid = sysinfo::Pid::from_u32(self.pid);
         self.system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid]),
             false,
@@ -88,6 +91,9 @@ mod tests {
         // Update metrics
         metrics.update();
 
+        // Ensure that the process ID is set
+        assert_ne!(metrics.pid, 0);
+
         // Check that RSS is reasonable (> 1MB for a running process)
         let rss = metrics.rss.get();
         assert!(rss > 1_000_000, "RSS should be > 1MB, got: {rss}");
@@ -95,5 +101,20 @@ mod tests {
         // Check that virtual memory is >= RSS
         let virt = metrics.virtual_memory.get();
         assert!(virt >= rss, "Virtual memory should be >= RSS");
+
+        // Allocate some memory
+        let mut vec = vec![0; 10 * 1024 * 1024]; // 10MB
+        vec.push(1);
+
+        // Update metrics
+        metrics.update();
+
+        // Check that the metrics are updated
+        let new_rss = metrics.rss.get();
+        assert!(new_rss > rss, "RSS should be > {rss}");
+
+        // Check that virtual memory is updated
+        let new_virt = metrics.virtual_memory.get();
+        assert!(new_virt > virt, "Virtual memory should be > {virt}");
     }
 }
