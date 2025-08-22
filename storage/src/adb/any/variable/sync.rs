@@ -498,6 +498,37 @@ async fn compute_offset<E: Storage + Metrics, V: Codec>(
     Ok((current_offset as u64) * ITEM_ALIGNMENT)
 }
 
+/// Count the actual number of items in a journal section.
+async fn count_items_in_section<E: Storage + Metrics, V: Codec>(
+    blob: &commonware_runtime::buffer::Append<E::Blob>,
+    codec_config: &V::Cfg,
+    compressed: bool,
+) -> Result<u32, crate::journal::Error> {
+    use crate::journal::variable::Journal;
+
+    let mut current_offset = 0u32;
+    let mut item_count = 0u32;
+
+    // Read through items one by one to count them
+    loop {
+        match Journal::<E, V>::read(compressed, codec_config, blob, current_offset).await {
+            Ok((next_slot, _item_len, _item)) => {
+                current_offset = next_slot;
+                item_count += 1;
+            }
+            Err(crate::journal::Error::Runtime(
+                commonware_runtime::Error::BlobInsufficientLength,
+            )) => {
+                // Reached the end of the section
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(item_count)
+}
+
 /// Remove items before the `lower_bound` location from the first section of the journal, if any.
 /// If the section containing `lower_bound` has elements before `lower_bound`, these are removed.
 /// The remaining elements are then replayed at the beginning of the section.
@@ -675,14 +706,20 @@ where
     // If oldest_retained_loc was before lower_bound, we've now pruned up to lower_bound.
     oldest_retained_loc = lower_bound.max(oldest_retained_loc);
 
-    let last_section_start = journal
+    let last_section = journal
         .blobs
         .last_key_value()
-        .map(|(section, _)| section * items_per_section_val)
+        .map(|(section, _)| *section)
         .unwrap();
-    let last_section_end = last_section_start + items_per_section_val - 1;
-    let next_loc = (last_section_end + 1).min(upper_bound + 1);
-
+    let last_blob = journal.blobs.get(&last_section).unwrap();
+    let items_in_last_section = count_items_in_section::<E, V>(
+        last_blob,
+        &journal.cfg.codec_config,
+        journal.cfg.compression.is_some(),
+    )
+    .await?;
+    let last_section_start = last_section * items_per_section_val;
+    let next_loc = last_section_start + items_in_last_section as u64;
     Ok((next_loc, oldest_retained_loc))
 }
 
