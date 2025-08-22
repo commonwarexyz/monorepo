@@ -21,7 +21,7 @@
 //! This implementation is only available on Linux systems that support io_uring.
 
 use crate::{
-    iouring::{self, should_retry},
+    iouring::{self, probe::CAPABILITIES, should_retry},
     Error,
 };
 use commonware_utils::{from_hex, hex, StableBuf};
@@ -174,6 +174,12 @@ impl Blob {
             io_sender,
         }
     }
+
+    fn resize_sync(&self, len: u64) -> Result<(), Error> {
+        self.file.set_len(len).map_err(|e| {
+            Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), IoError::other(e))
+        })
+    }
 }
 
 impl crate::Blob for Blob {
@@ -280,11 +286,56 @@ impl crate::Blob for Blob {
         Ok(())
     }
 
-    // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        self.file.set_len(len).map_err(|e| {
-            Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), IoError::other(e))
-        })
+        if !CAPABILITIES.ftruncate {
+            return self.resize_sync(len);
+        }
+
+        loop {
+            // Create an operation to do the ftruncate
+            let op = opcode::Ftruncate::new(types::Fd(self.file.as_raw_fd()), len).build();
+
+            // Submit the operation
+            let (sender, receiver) = oneshot::channel();
+            self.io_sender
+                .clone()
+                .send(iouring::Op {
+                    work: op,
+                    sender,
+                    buffer: None,
+                })
+                .await
+                .map_err(|_| {
+                    Error::BlobResizeFailed(
+                        self.partition.clone(),
+                        hex(&self.name),
+                        IoError::other("failed to send work"),
+                    )
+                })?;
+
+            // Wait for the result
+            let (return_value, _) = receiver.await.map_err(|_| {
+                Error::BlobResizeFailed(
+                    self.partition.clone(),
+                    hex(&self.name),
+                    IoError::other("failed to read result"),
+                )
+            })?;
+            if should_retry(return_value) {
+                continue;
+            }
+
+            // A negative return value indicates an error.
+            if return_value < 0 {
+                return Err(Error::BlobResizeFailed(
+                    self.partition.clone(),
+                    hex(&self.name),
+                    IoError::other(format!("error code: {return_value}")),
+                ));
+            }
+
+            return Ok(());
+        }
     }
 
     async fn sync(&self) -> Result<(), Error> {
