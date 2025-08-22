@@ -279,7 +279,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
                         match op {
                             Operation::Delete(key) => {
-                                let result = self.get_loc(&key).await?;
+                                let result = self.get_key_loc(&key).await?;
                                 if let Some(old_loc) = result {
                                     uncommitted_ops.insert(key, (Some(old_loc), None));
                                 } else {
@@ -287,7 +287,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
                                 }
                             }
                             Operation::Update(key, _) => {
-                                let result = self.get_loc(&key).await?;
+                                let result = self.get_key_loc(&key).await?;
                                 if let Some(old_loc) = result {
                                     uncommitted_ops.insert(key, (Some(old_loc), Some(loc)));
                                 } else {
@@ -376,7 +376,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
     /// if loc precedes the oldest retained location. The location is otherwise assumed valid.
-    pub async fn keyless_get(&self, loc: u64) -> Result<Option<V>, Error> {
+    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
         assert!(loc < self.op_count());
         if loc < self.oldest_retained_loc {
             return Err(Error::OperationPruned(loc));
@@ -389,8 +389,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(op.into_value())
     }
 
-    /// Returns the location of the operation that set the key's current value, or None if the key isn't currently assigned any value.
-    pub async fn get_loc(&self, key: &K) -> Result<Option<u64>, Error> {
+    /// Returns the location of the operation that set the key's current value, or None if the key
+    /// isn't currently assigned any value.
+    pub async fn get_key_loc(&self, key: &K) -> Result<Option<u64>, Error> {
         let iter = self.snapshot.get(key);
         for &loc in iter {
             if self.get_from_loc(key, loc).await?.is_some() {
@@ -500,7 +501,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let new_loc = self.op_count();
-        if let Some(old_loc) = self.get_loc(&key).await? {
+        if let Some(old_loc) = self.get_key_loc(&key).await? {
             Self::update_loc(&mut self.snapshot, &key, old_loc, new_loc);
         } else {
             self.snapshot.insert(&key, new_loc);
@@ -516,7 +517,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`.
     pub async fn delete(&mut self, key: K) -> Result<(), Error> {
-        let Some(old_loc) = self.get_loc(&key).await? else {
+        let Some(old_loc) = self.get_key_loc(&key).await? else {
             return Ok(());
         };
 

@@ -265,8 +265,8 @@ impl<
     /// Get the value of the operation with location `loc` in the db. Returns
     /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
-    pub async fn keyless_get(&self, loc: u64) -> Result<Option<V>, Error> {
-        self.any.keyless_get(loc).await
+    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
+        self.any.get_loc(loc).await
     }
 
     /// Get the level of the base MMR into which we are grafting.
@@ -567,7 +567,7 @@ impl<
             !self.status.is_dirty(),
             "must process updates before computing proofs"
         );
-        let op = self.any.get_with_loc(&key).await?;
+        let op = self.any.get_key_loc(&key).await?;
         let Some((value, loc)) = op else {
             return Err(Error::KeyNotFound);
         };
@@ -853,7 +853,7 @@ pub mod test {
             db.update(k, v1).await.unwrap();
             db.commit().await.unwrap();
 
-            let op = db.any.get_with_loc(&k).await.unwrap().unwrap();
+            let op = db.any.get_key_loc(&k).await.unwrap().unwrap();
             let proof = db
                 .operation_inclusion_proof(hasher.inner(), op.1)
                 .await
@@ -920,7 +920,7 @@ pub mod test {
             // Attempt #1 to "fool" the verifier:  change the location to that of an active
             // operation. This should not fool the verifier if we're properly validating the
             // inclusion of the operation itself, and not just the chunk.
-            let (_, active_loc) = db.any.get_with_loc(&info.key).await.unwrap().unwrap();
+            let (_, active_loc) = db.any.get_key_loc(&info.key).await.unwrap().unwrap();
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, info.loc);
             assert_eq!(

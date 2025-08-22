@@ -384,7 +384,7 @@ mod tests {
             for op in &target_db_ops {
                 match op {
                     Fixed::Update(key, _) => {
-                        if let Some((value, loc)) = target_db.get_with_loc(key).await.unwrap() {
+                        if let Some((value, loc)) = target_db.get_key_loc(key).await.unwrap() {
                             expected_kvs.insert(*key, (value, loc));
                             deleted_keys.remove(key);
                         }
@@ -433,12 +433,12 @@ mod tests {
 
             // Verify that the synced database matches the target state
             for (key, &(value, loc)) in &expected_kvs {
-                let synced_opt = got_db.get_with_loc(key).await.unwrap();
+                let synced_opt = got_db.get_key_loc(key).await.unwrap();
                 assert_eq!(synced_opt, Some((value, loc)));
             }
             // Verify that deleted keys are absent
             for key in &deleted_keys {
-                assert!(got_db.get_with_loc(key).await.unwrap().is_none(),);
+                assert!(got_db.get_key_loc(key).await.unwrap().is_none(),);
             }
 
             // Put more key-value pairs into both databases

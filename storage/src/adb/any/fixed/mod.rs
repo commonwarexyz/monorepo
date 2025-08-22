@@ -363,13 +363,13 @@ impl<
 
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        Ok(self.get_with_loc(key).await?.map(|(v, _)| v))
+        Ok(self.get_key_loc(key).await?.map(|(v, _)| v))
     }
 
     /// Get the value of the operation with location `loc` in the db. Returns [Error::OperationPruned]
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
-    pub async fn keyless_get(&self, loc: u64) -> Result<Option<V>, Error> {
+    pub async fn get_loc(&self, loc: u64) -> Result<Option<V>, Error> {
         assert!(loc < self.op_count());
         if loc < self.inactivity_floor_loc {
             return Err(Error::OperationPruned(loc));
@@ -380,7 +380,7 @@ impl<
 
     /// Get the value & location of the active operation for `key` in the db, or None if it has no
     /// value.
-    pub(crate) async fn get_with_loc(&self, key: &K) -> Result<Option<(V, u64)>, Error> {
+    pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, u64)>, Error> {
         for &loc in self.snapshot.get(key) {
             let (k, v) = Self::get_update_op(&self.log, loc).await?;
             if k == *key {
