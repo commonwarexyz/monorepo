@@ -26,13 +26,6 @@ enum FuzzInput {
     Clear,
 }
 
-#[derive(Arbitrary, Debug)]
-enum PredicateType {
-    StartsWith,
-    EndsWith,
-    Contains,
-}
-
 fn fuzz(input: Vec<FuzzInput>) {
     let mut set: PrioritySet<Item, Priority> = PrioritySet::new();
     let mut expected_items: HashSet<Item> = HashSet::new();
