@@ -730,11 +730,20 @@ impl<P: PublicKey> Peer<P> {
 
     /// Set bandwidth limits for the peer.
     ///
-    /// Bandwidth can be specified for the peer's egress (upload) and ingress (download)
-    /// rates in bytes per second. `None` means unlimited bandwidth.
-    fn set_bandwidth(&mut self, egress_bps: Option<usize>, ingress_bps: Option<usize>) {
-        self.egress_bps = egress_bps;
-        self.ingress_bps = ingress_bps;
+    /// Bandwidth is specified for the peer's egress (upload) and ingress (download)
+    /// rates in bytes per second. `usize::MAX` is converted to `None` internally
+    /// for unlimited bandwidth.
+    fn set_bandwidth(&mut self, egress_bps: usize, ingress_bps: usize) {
+        self.egress_bps = if egress_bps == usize::MAX {
+            None
+        } else {
+            Some(egress_bps)
+        };
+        self.ingress_bps = if ingress_bps == usize::MAX {
+            None
+        } else {
+            Some(ingress_bps)
+        };
     }
 }
 

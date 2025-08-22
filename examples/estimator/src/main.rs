@@ -356,7 +356,11 @@ async fn setup_network_identities(
     for (identity, region, _, _) in &identities {
         let config = &distribution[region];
         oracle
-            .set_bandwidth(identity.clone(), config.egress_bps, config.ingress_bps)
+            .set_bandwidth(
+                identity.clone(),
+                config.egress_bps.unwrap_or(usize::MAX),
+                config.ingress_bps.unwrap_or(usize::MAX),
+            )
             .await
             .unwrap();
     }

@@ -47,8 +47,8 @@
 //!     // Set bandwidth limits
 //!     // peer[0]: 10KB/s egress, unlimited ingress
 //!     // peer[1]: unlimited egress, 5KB/s ingress
-//!     oracle.set_bandwidth(peers[0].clone(), Some(10_000), None).await.unwrap();
-//!     oracle.set_bandwidth(peers[1].clone(), None, Some(5_000)).await.unwrap();
+//!     oracle.set_bandwidth(peers[0].clone(), 10_000, usize::MAX).await.unwrap();
+//!     oracle.set_bandwidth(peers[1].clone(), usize::MAX, 5_000).await.unwrap();
 //!
 //!     // Link 2 peers
 //!     oracle.add_link(
@@ -732,11 +732,11 @@ mod tests {
 
         // Set bandwidth limits
         oracle
-            .set_bandwidth(pk1.clone(), sender_bps, None)
+            .set_bandwidth(pk1.clone(), sender_bps.unwrap_or(usize::MAX), usize::MAX)
             .await
             .unwrap();
         oracle
-            .set_bandwidth(pk2.clone(), None, receiver_bps)
+            .set_bandwidth(pk2.clone(), usize::MAX, receiver_bps.unwrap_or(usize::MAX))
             .await
             .unwrap();
 
@@ -895,15 +895,15 @@ mod tests {
             // senders with high egress (2000 B/s each),
             // receiver with limited ingress (1000 B/s)
             oracle
-                .set_bandwidth(sender1.clone(), Some(2000), None)
+                .set_bandwidth(sender1.clone(), 2000, usize::MAX)
                 .await
                 .unwrap();
             oracle
-                .set_bandwidth(sender2.clone(), Some(2000), None)
+                .set_bandwidth(sender2.clone(), 2000, usize::MAX)
                 .await
                 .unwrap();
             oracle
-                .set_bandwidth(receiver.clone(), None, Some(1000))
+                .set_bandwidth(receiver.clone(), usize::MAX, 1000)
                 .await
                 .unwrap();
 

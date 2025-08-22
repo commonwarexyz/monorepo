@@ -17,8 +17,8 @@ pub enum Message<P: PublicKey> {
     },
     SetBandwidth {
         public_key: P,
-        egress_bps: Option<usize>,
-        ingress_bps: Option<usize>,
+        egress_bps: usize,
+        ingress_bps: usize,
         result: oneshot::Sender<Result<(), Error>>,
     },
     AddLink {
@@ -116,13 +116,13 @@ impl<P: PublicKey> Oracle<P> {
 
     /// Set bandwidth limits for a peer.
     ///
-    /// Bandwidth can be specified for the peer's egress (upload) and ingress (download)
-    /// rates in bytes per second. `None` means unlimited bandwidth.
+    /// Bandwidth is specified for the peer's egress (upload) and ingress (download)
+    /// rates in bytes per second. Use `usize::MAX` for unlimited bandwidth.
     pub async fn set_bandwidth(
         &mut self,
         public_key: P,
-        egress_bps: Option<usize>,
-        ingress_bps: Option<usize>,
+        egress_bps: usize,
+        ingress_bps: usize,
     ) -> Result<(), Error> {
         let (sender, receiver) = oneshot::channel();
         self.sender
