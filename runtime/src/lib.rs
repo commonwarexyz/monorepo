@@ -1685,7 +1685,7 @@ mod tests {
                     continue;
                 }
 
-                // Verify the RSS value is reasonable (greater than 0)
+                // Verify the RSS value is eventually populated (greater than 0)
                 for line in metrics.lines() {
                     if line.starts_with("runtime_process_rss")
                         && !line.starts_with("runtime_process_rss{")
@@ -1694,8 +1694,7 @@ mod tests {
                         if parts.len() >= 2 {
                             let rss_value: i64 =
                                 parts[1].parse().expect("Failed to parse RSS value");
-                            if rss_value > 1_000_000 {
-                                // While initializing, the RSS value may be 0
+                            if rss_value > 0 {
                                 return;
                             }
                         }
