@@ -136,19 +136,17 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
         mmr_size: u64,
         config: Config,
     ) -> Result<Self, Error> {
-        // Destroy existing data to ensure clean state
+        // Destroy any existing journal data
+        context.remove(&config.journal_partition, None).await.ok();
+        context.remove(&config.metadata_partition, None).await.ok();
+
+        // Create the journal with the desired size
         let journal_cfg = JConfig {
             partition: config.journal_partition.clone(),
             items_per_blob: config.items_per_blob,
             buffer_pool: config.buffer_pool.clone(),
             write_buffer: config.write_buffer,
         };
-
-        // Destroy any existing journal data
-        context.remove(&config.journal_partition, None).await.ok();
-        context.remove(&config.metadata_partition, None).await.ok();
-
-        // Create the journal with the desired size
         let journal =
             init_journal_at_size(context.with_label("mmr_journal"), journal_cfg, mmr_size).await?;
 
