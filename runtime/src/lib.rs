@@ -1682,7 +1682,6 @@ mod tests {
 
             // Get metrics
             let metrics = context.encode();
-            println!("Metrics: {metrics}");
 
             // Check for RSS metric
             assert!(
@@ -1698,17 +1697,7 @@ mod tests {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 2 {
                         let rss_value: i64 = parts[1].parse().expect("Failed to parse RSS value");
-                        assert!(
-                            rss_value > 0,
-                            "RSS should be greater than 0, got: {}",
-                            rss_value
-                        );
-                        // RSS should be at least 1MB for a running process
-                        assert!(
-                            rss_value > 1_000_000,
-                            "RSS seems unreasonably small: {} bytes",
-                            rss_value
-                        );
+                        assert!(rss_value > 1_000_000, "RSS is too small: {rss_value} bytes");
                         return;
                     }
                 }
