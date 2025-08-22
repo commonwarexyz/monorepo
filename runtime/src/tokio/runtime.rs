@@ -253,6 +253,14 @@ impl crate::Runner for Runner {
             .build()
             .expect("failed to create Tokio runtime");
 
+        // Collect process metrics.
+        //
+        // We prefer to collect process metrics outside of `Context` because
+        // we are using `runtime_registry` rather than the one provided by `Context`.
+        let process = MeteredProcess::init(runtime_registry);
+        runtime.spawn(process.collect(tokio::time::sleep));
+
+        // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
                 let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_storage");
@@ -274,6 +282,7 @@ impl crate::Runner for Runner {
             }
         }
 
+        // Initialize network
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
                 let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_network");
@@ -302,13 +311,6 @@ impl crate::Runner for Runner {
                 );
             }
         }
-
-        // Collect process metrics.
-        //
-        // We prefer to collect process metrics outside of `Context` because
-        // we are using `runtime_registry` rather than the one provided by `Context`.
-        let process = MeteredProcess::init(runtime_registry);
-        runtime.spawn(process.collect(tokio::time::sleep));
 
         // Initialize executor
         let executor = Arc::new(Executor {
