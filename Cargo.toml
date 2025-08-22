@@ -12,6 +12,7 @@ members = [
     "resolver",
     "runtime",
     "storage",
+    "stream",
     "utils",
     "examples/bridge",
     "examples/chat",
