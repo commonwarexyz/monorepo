@@ -189,7 +189,7 @@ impl<E: Spawner, S: Sender, R: Receiver> MuxHandle<E, S, R> {
             SubReceiver {
                 context: self.context.clone(),
                 receiver,
-                control_tx: self.control_tx.clone(),
+                control_tx: Some(self.control_tx.clone()),
                 subchannel,
             },
         ))
@@ -225,7 +225,7 @@ impl<S: Sender> Sender for SubSender<S> {
 pub struct SubReceiver<E: Spawner, R: Receiver> {
     context: E,
     receiver: mpsc::Receiver<Message<R::PublicKey>>,
-    control_tx: mpsc::Sender<Control<R>>,
+    control_tx: Option<mpsc::Sender<Control<R>>>,
     subchannel: Channel,
 }
 
@@ -246,10 +246,15 @@ impl<E: Spawner, R: Receiver> Debug for SubReceiver<E, R> {
 
 impl<E: Spawner, R: Receiver> Drop for SubReceiver<E, R> {
     fn drop(&mut self) {
+        // Take the control channel to avoid cloning.
+        let mut control_tx = self
+            .control_tx
+            .take()
+            .expect("SubReceiver::drop called twice");
+
         // If the control channel is not full, deregister the subchannel immediately.
         let subchannel = self.subchannel;
-        if self
-            .control_tx
+        if control_tx
             .try_send(Control::Deregister { subchannel })
             .is_ok()
         {
@@ -257,12 +262,8 @@ impl<E: Spawner, R: Receiver> Drop for SubReceiver<E, R> {
         }
 
         // Otherwise, spawn a task to deregister the subchannel.
-        let mut control_tx = self.control_tx.clone();
         self.context.spawn_ref()(async move {
-            control_tx
-                .send(Control::Deregister { subchannel })
-                .await
-                .unwrap();
+            let _ = control_tx.send(Control::Deregister { subchannel }).await;
         });
     }
 }
