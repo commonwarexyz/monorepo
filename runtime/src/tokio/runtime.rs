@@ -11,8 +11,9 @@ use crate::{
 };
 use crate::{
     network::metered::Network as MeteredNetwork, signal::Signal,
-    storage::metered::Storage as MeteredStorage, system, telemetry::metrics::task::Label,
-    utils::signal::Stopper, Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
+    storage::metered::Storage as MeteredStorage, system::metered::Metrics as SystemMetrics,
+    telemetry::metrics::task::Label, utils::signal::Stopper, Clock, Error, Handle, SinkOf,
+    StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -306,12 +307,12 @@ impl crate::Runner for Runner {
         }
 
         // Collect system metrics
-        let mut system_metrics = system::metered::Metrics::init(runtime_registry);
-        system_metrics.update();
+        let mut system = SystemMetrics::init(runtime_registry);
+        system.update();
         runtime.spawn(async move {
             loop {
                 tokio::time::sleep(TICK_INTERVAL).await;
-                system_metrics.update();
+                system.update();
             }
         });
 
