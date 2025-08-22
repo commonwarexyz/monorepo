@@ -10,7 +10,7 @@ pub struct Reservation<E: Spawner + Metrics, P: PublicKey> {
     context: E,
 
     /// Metadata about the reservation.
-    metadata: Metadata<P>,
+    metadata: Option<Metadata<P>>,
 
     /// Used to automatically notify the completion of the reservation when it is dropped.
     ///
@@ -23,7 +23,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Reservation<E, P> {
     pub fn new(context: E, metadata: Metadata<P>, releaser: Releaser<E, P>) -> Self {
         Self {
             context,
-            metadata,
+            metadata: Some(metadata),
             releaser: Some(releaser),
         }
     }
@@ -32,7 +32,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Reservation<E, P> {
 impl<E: Spawner + Metrics, P: PublicKey> Reservation<E, P> {
     /// Returns the metadata associated with this reservation.
     pub fn metadata(&self) -> &Metadata<P> {
-        &self.metadata
+        self.metadata.as_ref().unwrap()
     }
 }
 
@@ -42,9 +42,13 @@ impl<E: Spawner + Metrics, P: PublicKey> Drop for Reservation<E, P> {
             .releaser
             .take()
             .expect("Reservation::drop called twice");
+        let metadata = self
+            .metadata
+            .take()
+            .expect("Reservation::drop called twice");
 
         // If the mailbox is not full, release the reservation immediately without spawning a task.
-        if releaser.try_release(self.metadata.clone()) {
+        if releaser.try_release(metadata.clone()) {
             // Sent successfully, nothing to do.
             return;
         };
@@ -52,7 +56,6 @@ impl<E: Spawner + Metrics, P: PublicKey> Drop for Reservation<E, P> {
         // If the mailbox is full, we avoid blocking by spawning a task to handle the release.
         // While it may not be immediately obvious how a deadlock could occur, we take the
         // conservative approach of avoiding it.
-        let metadata = self.metadata.clone();
         self.context.spawn_ref()(async move {
             releaser.release(metadata).await;
         });
