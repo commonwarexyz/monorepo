@@ -5,7 +5,7 @@
 //! pruned.
 
 use crate::{
-    adb::any::fixed::sync::init_journal,
+    adb::any::fixed::sync::{init_journal, init_journal_at_size},
     journal::{
         fixed::{Config as JConfig, Journal},
         Error as JError,
@@ -141,25 +141,13 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H> {
             write_buffer: config.write_buffer,
         };
 
-        // Create journal with proper pruning boundary without dummy data
-        // We use init_journal but then immediately prune everything to avoid dummy data issues
-        let journal = if mmr_size == 0 {
-            // For empty MMR, just create an empty journal
-            Journal::<E, H::Digest>::init(context.with_label("mmr_journal"), journal_cfg).await?
-        } else {
-            // Create journal that appears to have mmr_size elements, then prune everything
-            let mut j = init_journal(
-                context.with_label("mmr_journal"),
-                journal_cfg,
-                mmr_size,
-                mmr_size,
-            )
-            .await?;
-            // The journal now has size mmr_size but with placeholder data
-            // Prune everything to remove the placeholder data and establish proper pruning boundary
-            j.prune(mmr_size).await?;
-            j
-        };
+        // Destroy any existing journal data
+        context.remove(&config.journal_partition, None).await.ok();
+        context.remove(&config.metadata_partition, None).await.ok();
+
+        // Create the journal with the desired size
+        let journal =
+            init_journal_at_size(context.with_label("mmr_journal"), journal_cfg, mmr_size).await?;
 
         // Initialize metadata
         let metadata_cfg = MConfig {
@@ -1592,8 +1580,10 @@ mod tests {
         });
     }
 
+    // Test that a journaled MMR initialized from pinned nodes is equivalent to a journaled MMR
+    // that has the same operations applied to it and is then pruned to the same size.
     #[test_traced]
-    fn test_journaled_mmr_init_from_pinned_nodes_functional_equivalence() {
+    fn test_journaled_mmr_init_from_pinned_nodes_equivalence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
@@ -1626,7 +1616,7 @@ mod tests {
             let initial_size = reference_mmr.size();
             let initial_root = reference_mmr.root(&mut hasher);
 
-            // Prune to current size (everything becomes pinned)
+            // Prune to current size
             reference_mmr
                 .prune_to_pos(&mut hasher, initial_size)
                 .await
@@ -1686,10 +1676,10 @@ mod tests {
             let final_test_size = test_mmr.size();
             let final_test_root = test_mmr.root(&mut hasher);
 
-            // === ASSERTIONS: Verify functional equivalence ===
-            assert_eq!(final_test_size, final_reference_size,);
-            assert_eq!(final_test_root, final_reference_root,);
-            assert_eq!(test_mmr.pruned_to_pos(), reference_mmr.pruned_to_pos(),);
+            // === Verify functional equivalence ===
+            assert_eq!(final_test_size, final_reference_size);
+            assert_eq!(final_test_root, final_reference_root);
+            assert_eq!(test_mmr.pruned_to_pos(), reference_mmr.pruned_to_pos());
             assert_eq!(
                 test_mmr.oldest_retained_pos(),
                 reference_mmr.oldest_retained_pos(),
@@ -1699,8 +1689,8 @@ mod tests {
             let new_element_pos = initial_size; // First element added after pruning
             let reference_proof = reference_mmr.proof(new_element_pos).await.unwrap();
             let test_proof = test_mmr.proof(new_element_pos).await.unwrap();
-            assert_eq!(test_proof.digests, reference_proof.digests,);
-            assert_eq!(test_proof.size, reference_proof.size,);
+            assert_eq!(test_proof.digests, reference_proof.digests);
+            assert_eq!(test_proof.size, reference_proof.size);
 
             // Clean up
             reference_mmr.destroy().await.unwrap();
@@ -1715,7 +1705,7 @@ mod tests {
             let mut hasher = Standard::<Sha256>::new();
 
             // === TEST 1: Empty MMR (size 0) ===
-            let empty_mmr = Mmr::<_, Sha256>::init_from_pinned_nodes(
+            let mut empty_mmr = Mmr::<_, Sha256>::init_from_pinned_nodes(
                 context.clone(),
                 vec![], // No pinned nodes
                 0,      // Size 0
@@ -1736,7 +1726,6 @@ mod tests {
             assert_eq!(empty_mmr.oldest_retained_pos(), None);
 
             // Should be able to add first element at position 0
-            let mut empty_mmr = empty_mmr;
             let pos = empty_mmr.add(&mut hasher, &test_digest(0)).await.unwrap();
             assert_eq!(pos, 0);
             assert_eq!(empty_mmr.size(), 1);
@@ -1773,7 +1762,7 @@ mod tests {
 
             // === TEST 3: Large MMR (100 elements) ===
             let mut large_mem_mmr = MemMmr::new();
-            for i in 0..100 {
+            for i in 0..1_000 {
                 large_mem_mmr.add(&mut hasher, &test_digest(i));
             }
             let large_size = large_mem_mmr.size();

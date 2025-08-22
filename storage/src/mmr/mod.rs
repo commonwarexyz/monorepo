@@ -125,4 +125,6 @@ pub enum Error {
     RootMismatch,
     #[error("invalid proof")]
     InvalidProof,
+    #[error("runtime error: {0}")]
+    Runtime(#[from] commonware_runtime::Error),
 }
