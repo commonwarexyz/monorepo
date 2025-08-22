@@ -11,8 +11,8 @@ use crate::{
 };
 use crate::{
     network::metered::Network as MeteredNetwork, signal::Signal,
-    storage::metered::Storage as MeteredStorage, telemetry::metrics::task::Label,
-    utils::signal::Stopper, Clock, Error, Handle, SinkOf, StreamOf, METRICS_PREFIX,
+    storage::metered::Storage as MeteredStorage, telemetry::metrics::task::Label, tokio::telemetry,
+    utils::signal::Stopper, Clock, Error, Handle, Metrics as _, SinkOf, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -41,7 +41,6 @@ const IOURING_NETWORK_FORCE_POLL: Option<Duration> = Some(Duration::from_millis(
 struct Metrics {
     tasks_spawned: Family<Label, Counter>,
     tasks_running: Family<Label, Gauge>,
-    process_rss_bytes: Gauge,
 }
 
 impl Metrics {
@@ -49,7 +48,6 @@ impl Metrics {
         let metrics = Self {
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
-            process_rss_bytes: Gauge::default(),
         };
         registry.register(
             "tasks_spawned",
@@ -60,11 +58,6 @@ impl Metrics {
             "tasks_running",
             "Number of tasks currently running",
             metrics.tasks_running.clone(),
-        );
-        registry.register(
-            "process_rss_bytes",
-            "Resident set size of the current process in bytes",
-            metrics.process_rss_bytes.clone(),
         );
         metrics
     }
@@ -310,6 +303,12 @@ impl crate::Runner for Runner {
             }
         }
 
+        // Initialize telemetry
+        let label = Label::root();
+        metrics.tasks_spawned.get_or_create(&label).inc();
+        let gauge = metrics.tasks_running.get_or_create(&label).clone();
+        telemetry::run(context.with_label("telemetry"), &mut runtime_registry);
+
         // Initialize executor
         let executor = Arc::new(Executor {
             cfg: self.cfg,
@@ -319,11 +318,6 @@ impl crate::Runner for Runner {
             shutdown: Mutex::new(Stopper::default()),
         });
 
-        // Get metrics
-        let label = Label::root();
-        executor.metrics.tasks_spawned.get_or_create(&label).inc();
-        let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
-
         // Run the future
         let context = Context {
             storage,
@@ -332,10 +326,7 @@ impl crate::Runner for Runner {
             executor: executor.clone(),
             network,
         };
-        
-        // Start RSS tracking
-        super::telemetry::spawn_rss_tracker(context.clone(), Arc::new(executor.metrics.process_rss_bytes.clone()));
-        
+
         let output = executor.runtime.block_on(f(context));
         gauge.dec();
 

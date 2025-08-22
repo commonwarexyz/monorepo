@@ -1678,22 +1678,36 @@ mod tests {
         executor.start(|context| async move {
             // Give RSS updater time to run
             context.sleep(Duration::from_millis(100)).await;
-            
+
             // Get metrics
             let metrics = context.encode();
-            
+            println!("Metrics: {metrics}");
+
             // Check for RSS metric
-            assert!(metrics.contains("runtime_process_rss_bytes"), "RSS metric not found in output");
-            
+            assert!(
+                metrics.contains("runtime_process_rss_bytes"),
+                "RSS metric not found in output"
+            );
+
             // Verify the RSS value is reasonable (greater than 0)
             for line in metrics.lines() {
-                if line.starts_with("runtime_process_rss_bytes") && !line.starts_with("runtime_process_rss_bytes{") {
+                if line.starts_with("runtime_process_rss_bytes")
+                    && !line.starts_with("runtime_process_rss_bytes{")
+                {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 2 {
                         let rss_value: i64 = parts[1].parse().expect("Failed to parse RSS value");
-                        assert!(rss_value > 0, "RSS should be greater than 0, got: {}", rss_value);
+                        assert!(
+                            rss_value > 0,
+                            "RSS should be greater than 0, got: {}",
+                            rss_value
+                        );
                         // RSS should be at least 1MB for a running process
-                        assert!(rss_value > 1_000_000, "RSS seems unreasonably small: {} bytes", rss_value);
+                        assert!(
+                            rss_value > 1_000_000,
+                            "RSS seems unreasonably small: {} bytes",
+                            rss_value
+                        );
                         return;
                     }
                 }

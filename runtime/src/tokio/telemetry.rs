@@ -4,19 +4,21 @@ use super::{
     tracing::{export, Config},
     Context,
 };
-use crate::{Metrics, Spawner};
+use crate::{Clock, Metrics, Spawner};
 use axum::{
     body::Body,
     http::{header, Response, StatusCode},
     routing::get,
     serve, Extension, Router,
 };
-use prometheus_client::metrics::gauge::Gauge;
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use prometheus_client::{metrics::gauge::Gauge, registry::Registry as PrometheusRegistry};
+use std::{net::SocketAddr, time::Duration};
 use sysinfo::{ProcessRefreshKind, System};
 use tokio::net::TcpListener;
 use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
+
+const TICK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Logging configuration.
 pub struct Logging {
@@ -31,24 +33,28 @@ pub struct Logging {
     pub json: bool,
 }
 
-/// Spawn a background task that periodically updates the RSS metric.
-pub fn spawn_rss_tracker(context: Context, rss_gauge: Arc<Gauge>) {
-    // Update RSS immediately
-    update_rss(&rss_gauge);
-    
+/// Spawn a background task that periodically updates runtime metrics.
+pub fn run(context: Context, runtime_registry: &mut PrometheusRegistry) {
+    // Register metrics
+    let rss_gauge = Gauge::default();
+    runtime_registry.register(
+        "rss",
+        "Resident set size of the current process (B)",
+        rss_gauge.clone(),
+    );
+
     // Spawn background updater
-    context
-        .with_label("rss_tracker")
-        .spawn(move |_context| async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(10));
-            loop {
-                interval.tick().await;
-                update_rss(&rss_gauge);
-            }
-        });
+    context.spawn(move |context| async move {
+        loop {
+            update_rss(&rss_gauge);
+            context.sleep(TICK_INTERVAL).await;
+        }
+    });
 }
 
+/// Update the RSS gauge.
 fn update_rss(gauge: &Gauge) {
+    // Select PID
     let pid = sysinfo::Pid::from(std::process::id() as usize);
     let mut system = System::new();
     system.refresh_processes_specifics(
@@ -56,10 +62,10 @@ fn update_rss(gauge: &Gauge) {
         false,
         ProcessRefreshKind::nothing().with_memory(),
     );
-    
+
+    // Update gauge
     if let Some(process) = system.process(pid) {
-        // memory() returns RSS in KB, convert to bytes
-        let rss_bytes = process.memory() * 1024;
+        let rss_bytes = process.memory();
         gauge.set(rss_bytes as i64);
     }
 }
